@@ -1,0 +1,21 @@
+schema = 1
+slug = "develop"
+description = "The complete active downstream patch queue for the develop branch"
+series = [
+  "wayland-initial-window-state",
+  "video-pipeline-cleanup-race",
+  "upstream-test-quarantine",
+]
+
+[tests]
+list = [
+  "focused",
+  "quarantine",
+  "quarantine-cython",
+  "quarantine-no-compat",
+  "wayland",
+  "full",
+  "full-cython",
+  "full-no-compat",
+  "live-wayland-h264-hardware",
+]
