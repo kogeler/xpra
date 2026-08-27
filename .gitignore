@@ -215,3 +215,6 @@ tests/unittests/test-file*
 
 # compiled gettext translation catalogs (built from .po at build time):
 /fs/share/xpra/locales/**/*.mo
+
+# Fork-maintenance runtime, logs, reports, snapshots, and local publication text:
+/.artifacts/
