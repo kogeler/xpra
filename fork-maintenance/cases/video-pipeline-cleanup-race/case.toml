@@ -1,0 +1,21 @@
+schema = 1
+slug = "video-pipeline-cleanup-race"
+title = "Serialize video pipeline cleanup with encoding"
+commit_subject = "Serialize video pipeline cleanup with encoding"
+patch_sha256 = "545fb43f1b79bcec7ec7cfababe0ac30de9b2192157925d99940165345f58973"
+dependencies = []
+paths = [
+  "tests/unittests/unit/server/window/video_compress_test.py",
+  "xpra/server/window/video_compress.py",
+]
+
+[tests]
+list = [
+  "unit.server.window.video_compress_test",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = ["live-wayland-h264-hardware"]
