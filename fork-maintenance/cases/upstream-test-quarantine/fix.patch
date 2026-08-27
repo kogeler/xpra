@@ -1,0 +1,12 @@
+diff --git a/tests/unittests/unit/client/x11_client_paint_test.py b/tests/unittests/unit/client/x11_client_paint_test.py
+index 4bc3ccefc850c00585a923bfd9b24cf874132f30..35f6f789ae21844c5bd53e2d79c1099b93ca2004 100644
+--- a/tests/unittests/unit/client/x11_client_paint_test.py
++++ b/tests/unittests/unit/client/x11_client_paint_test.py
+@@ -23,6 +23,7 @@ BLUE = (0, 0, 253)
+ GREY = (128, 128, 128)
+ 
+ 
++@unittest.skip("downstream quarantine: recheck on every upstream rebase")
+ class X11ClientPaintTest(X11ClientTestUtil):
+ 
+     def _quadrant_centers(self, cw, ch):

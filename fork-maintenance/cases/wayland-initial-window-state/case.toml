@@ -1,0 +1,27 @@
+schema = 1
+slug = "wayland-initial-window-state"
+title = "Select Wayland codecs from current frame state"
+commit_subject = "Select Wayland codecs from current frame state"
+patch_sha256 = "ed85fb181648f305bca07137a4992f28631a685751b2ae32577750ea55026475"
+dependencies = []
+paths = [
+  "tests/unittests/unit/server/window/initial_damage_test.py",
+  "tests/unittests/unit/wayland/window_test.py",
+  "xpra/server/window/video_compress.py",
+  "xpra/wayland/server/models/subsurface_window.py",
+  "xpra/wayland/server/models/window.py",
+  "xpra/wayland/server/subsystem/window.py",
+]
+
+[tests]
+list = [
+  "unit.server.window.initial_damage_test",
+  "unit.wayland.window_test",
+  "wayland",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = ["live-wayland-h264-hardware"]

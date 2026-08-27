@@ -223,3 +223,6 @@ tests/unittests/test-file*
 
 # a place where we can stash local files without polluting:
 /local
+
+# Fork-maintenance runtime, logs, reports, snapshots, and local publication text:
+/.artifacts/
