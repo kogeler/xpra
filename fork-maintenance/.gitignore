@@ -1,0 +1,12 @@
+# Runtime and generated results are never repository content.
+/.artifacts/
+/communications/
+/evidence/
+/results/
+/runs/
+
+# Patch-update transaction files must never be staged after an interrupted run.
+/cases/**/.case.toml.*.new
+/cases/**/.case.toml.*.restore
+/cases/**/.fix.patch.*.new
+/cases/**/.fix.patch.*.restore

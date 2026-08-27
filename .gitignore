@@ -234,3 +234,6 @@ tests/unittests/test-file*
 
 # macos build logs:
 /packaging/MacOS/logs/
+
+# Fork-maintenance runtime, logs, reports, snapshots, and local publication text:
+/.artifacts/
