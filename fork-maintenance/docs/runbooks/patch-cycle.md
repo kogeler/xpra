@@ -11,11 +11,12 @@ make -C fork-maintenance workspace-create \
 # edit only the printed workspace source path
 make -C fork-maintenance workspace-stage WORKSPACE=short-behavior-01
 make -C fork-maintenance workspace-update WORKSPACE=short-behavior-01
+# repeat edit, stage, and update as needed; the exported workspace remains current
 make -C fork-maintenance workspace-remove WORKSPACE=short-behavior-01
 ```
 
 This is the required pre-commit path when fork-control files are uncommitted.
-It freezes verified master and never switches the host branch or applies the
+It freezes fetched fork master and never switches the host branch or applies the
 production patch to host source. See `isolated-workspaces.md` for clean,
 tests-only, path-change, provenance, and cleanup details.
 
@@ -33,8 +34,8 @@ publication rebase procedure.
 
 ## Host-worktree fallback preconditions
 
-Before touching any existing or new patch, refresh the branch base from a clean
-checkout in this exact order:
+For the clean host-worktree fallback, fetch the fork base and prepare the branch
+in this order:
 
 ```bash
 make -C fork-maintenance repo-sync
@@ -45,14 +46,18 @@ make -C fork-maintenance patch-start-check
 make -C fork-maintenance patch-check CASE=short-behavior-name
 ```
 
-If the fork-master gate reports a mismatch, the operator performs the
-documented non-forced sync and `repo-sync` is repeated before `master-update`.
-Resolve every rebase conflict and finish the rebase before
+`repo-sync` fetches both master refs, verifies each against live GitHub state,
+and requires exact fork/canonical equality. If it reports a stale fork, only
+the operator may run the printed non-forced `gh repo sync` command and repeat
+the gate. Resolve every rebase conflict and finish the rebase before
 `patch-start-check`; do not merge an upstream ref into `develop`. Only after
-this sequence may investigation or source editing begin.
+this sequence may host-worktree source editing begin; the default isolated
+cycle above does not require a branch switch or rebase first.
 
 Patch operations refuse `master`, stale or merge-updated `develop`, and a
-temporary branch that does not descend from fully rebased `develop`. They also
+temporary branch that does not descend from fully rebased `develop`. A temporary
+branch is supported only for this exceptional clean host-worktree flow; the
+default isolated lifecycle remains on `develop`. Host patch operations also
 refuse a branch that already has a committed source copy on any path owned by
 the selected case.
 
@@ -62,7 +67,7 @@ the selected case.
 make -C fork-maintenance patch-apply CASE=short-behavior-name
 ```
 
-The command resolves the case against current canonical master, skips an exact
+The command resolves the case against current fork master, skips an exact
 `already-present` patch, and applies an `apply` patch with
 `git apply --index --whitespace=error-all`. The resulting production and test
 files are staged. No commit is created.
@@ -105,6 +110,28 @@ make -C fork-maintenance patch-update \
 
 Do not use this switch to hide an unrelated staged file.
 
+`patch-update` and `workspace-update` first publish ignored
+`case-updates/<slug>.update.owner.json` plus an exact old/new transaction under
+retained `.lifecycle.lock`. Their application/reverse proof uses only the
+transaction's temporary `candidate-lab/source`; it does not add verification
+scratch to a finalized workspace. A workspace update also replaces that
+workspace's selection resolution and metadata in the transaction, so the
+successful workspace remains reusable. If interrupted, use only:
+
+```bash
+make -C fork-maintenance case-recover CASE=short-behavior-name
+```
+
+The recovery target aborts only an incomplete preparation, completes a
+published `transaction.json`, or clears an owner-only boundary after validating
+the current case and any bound workspace. It never guesses from partially
+replaced tracked files. Before recursively deleting a preparation or completed
+transaction it publishes schema-1 `<slug>.update.remove.json`, stages the tree
+at `.<slug>.update.remove`, removes the external update owner after the tree,
+and removes the phase last. Its canonical target array revalidates the exact
+published outputs by path, mode, and SHA-256 even during phase-only retry. An
+unresolved update blocks all later case updates and cycle cleanup.
+
 Before scheduling tests, compare the old and refreshed applied trees. When the
 master is unchanged and the complete difference is limited to comments,
 copyright notices, or documentation, while paths, modes, executable data,
@@ -146,7 +173,7 @@ stack never becomes one atomic case patch.
 Long or acceptance tests do not require applying patches to the host worktree;
 their runners freeze master and apply the selected queue in isolated source.
 
-## Refresh after upstream advances
+## Refresh after fork master advances
 
 With a clean checkout:
 

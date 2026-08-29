@@ -140,6 +140,29 @@ def require_gates(value: object, description: str) -> tuple[str, ...]:
     return tuple(result)
 
 
+def require_paths(value: object, description: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        fail(f"invalid {description}: paths must be a non-empty array")
+    result: list[str] = []
+    for entry in value:
+        if not isinstance(entry, str):
+            fail(f"invalid {description} path: {entry!r}")
+        path = Path(entry)
+        if (
+            not entry
+            or path.is_absolute()
+            or ".." in path.parts
+            or path.as_posix() != entry
+            or entry == "fork-maintenance"
+            or entry.startswith("fork-maintenance/")
+        ):
+            fail(f"invalid {description} path: {entry!r}")
+        if entry in result:
+            fail(f"duplicate {description} path: {entry}")
+        result.append(entry)
+    return tuple(result)
+
+
 def read_case(lab_root: Path, slug: str) -> Case:
     slug = require_slug(slug, "case slug")
     cases_dir = lab_root / "cases"
@@ -160,6 +183,7 @@ def read_case(lab_root: Path, slug: str) -> Case:
         fail(f"invalid case kind for {slug}: {kind!r}")
     tests = require_tests(manifest.get("tests"), f"case {slug}")
     required_gates = require_gates(manifest.get("evidence"), f"case {slug}")
+    declared_paths = require_paths(manifest.get("paths"), f"case {slug}")
     for test in tests:
         if LOCAL_TEST_RE.fullmatch(test):
             if not test.startswith(f"cases/{slug}/tests/"):
@@ -226,8 +250,10 @@ def read_case(lab_root: Path, slug: str) -> Case:
         required_gates=required_gates,
         quarantined_tests=quarantined_tests,
     )
+    paths = tuple(path.as_posix() for path in patch_source_paths(case))
+    if tuple(sorted(declared_paths)) != paths:
+        fail(f"case manifest paths do not match patch for {slug}: {paths}")
     if kind == "test-quarantine":
-        paths = tuple(path.as_posix() for path in patch_source_paths(case))
         expected = tuple(
             sorted(f"tests/unittests/{item.replace('.', '/')}.py" for item in quarantined_tests)
         )
