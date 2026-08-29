@@ -5,7 +5,14 @@ from __future__ import annotations
 import argparse
 import sys
 
-APPLICATIONS = ("zed", "hardware", "vkcube", "gtk")
+from live_config import (
+    LiveConfigError,
+    load_network_profiles,
+    network_profile,
+    network_profile_names,
+)
+
+APPLICATIONS = ("zed", "hardware", "opengl", "vkcube", "gtk")
 LIFECYCLES = ("application-exit", "detach", "transport-loss")
 ENCODINGS = ("rgb", "h264")
 H264_ACCEPTANCE_POLICIES = ("strict", "adaptive-alpha")
@@ -19,8 +26,11 @@ LIVE_ACCEPTANCE_PROFILES = frozenset(
         ("gtk", "detach", "rgb", "strict", "default"),
         ("gtk", "transport-loss", "rgb", "strict", "default"),
         ("hardware", "application-exit", "h264", "adaptive-alpha", "default"),
+        ("opengl", "application-exit", "h264", "adaptive-alpha", "default"),
     }
 )
+DEFAULT_NETWORK_PROFILE = load_network_profiles()[0]
+NETWORK_PROFILES = network_profile_names()
 
 
 class ProfileError(ValueError):
@@ -34,6 +44,7 @@ def validate_profile(
     encoding: str,
     h264_client_policy: str,
     alpha_scenarios: str,
+    network_profile_name: str = DEFAULT_NETWORK_PROFILE,
 ) -> None:
     """Fail closed on unsupported or semantically ambiguous combinations."""
     if application not in APPLICATIONS:
@@ -46,6 +57,10 @@ def validate_profile(
         raise ProfileError(f"unsupported H.264 client policy: {h264_client_policy}")
     if alpha_scenarios not in ALPHA_SCENARIOS:
         raise ProfileError(f"unsupported alpha scenarios: {alpha_scenarios}")
+    try:
+        network_profile(network_profile_name)
+    except LiveConfigError as error:
+        raise ProfileError(str(error)) from error
     profile = (
         application,
         lifecycle,
@@ -77,6 +92,12 @@ def main() -> int:
     parser.add_argument("encoding", choices=ENCODINGS)
     parser.add_argument("h264_client_policy", choices=H264_ACCEPTANCE_POLICIES)
     parser.add_argument("alpha_scenarios", choices=ALPHA_SCENARIOS)
+    parser.add_argument(
+        "network_profile",
+        choices=NETWORK_PROFILES,
+        nargs="?",
+        default=DEFAULT_NETWORK_PROFILE,
+    )
     args = parser.parse_args()
     try:
         validate_profile(
@@ -85,6 +106,7 @@ def main() -> int:
             encoding=args.encoding,
             h264_client_policy=args.h264_client_policy,
             alpha_scenarios=args.alpha_scenarios,
+            network_profile_name=args.network_profile,
         )
     except ProfileError as error:
         print(f"error: {error}", file=sys.stderr)

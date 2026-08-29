@@ -1,0 +1,94 @@
+# Static Xpra CLI blocks used by the live server and client command builders.
+# Values are grouped role -> concern/command/transport -> encoding -> policy;
+# per-run network/quality values live in profiles.yml rather than here.
+# Loader and assembly: infra/live/live_config.py and infra/live/run.py.
+# Generic schema tests: infra/live/test_job.py. Contract and usage:
+# CONTRACT.md and docs/runbooks/live-tests.md.
+schema: 1
+server:
+  base:
+    - "--minimal"
+    - "--backend=wayland"
+    - "--daemon=no"
+    - "--displayfd=1"
+    - "--socket-dir=/tmp/server-runtime/xpra-sockets"
+    - "--socket-dirs=/tmp/server-runtime/xpra-sockets"
+    - "--sessions-dir=/tmp/server-runtime/xpra-sessions"
+  lifecycle:
+    - "--use-display=no"
+    - "--exit-with-client=no"
+    - "--exit-with-children=yes"
+    - "--terminate-children=yes"
+    - "--video-scaling=0"
+    - "--html=off"
+  diagnostics:
+    - "-d"
+    - "wayland,damage,encoding,encoder,argb"
+  commands:
+    version:
+      - "--version"
+    info:
+      - "wayland-0"
+      - "--socket-dir=/tmp/server-runtime/xpra-sockets"
+  transports:
+    rgb:
+      common:
+        - "--video-encoders=none"
+        - "--csc-modules=none"
+      policies:
+        strict:
+          - "--encodings=rgb"
+    h264:
+      common:
+        - "--video=yes"
+        - "--video-encoders=libva"
+        - "--csc-modules=libyuv"
+      policies:
+        strict:
+          - "--encodings=h264"
+        adaptive-alpha:
+          - "--encodings=h264,webp,rgb"
+        fallback-auto:
+          - "--encodings=h264,rgb"
+        fallback-h264:
+          - "--encodings=h264,rgb"
+client:
+  base:
+    - "--minimal"
+    - "--compressors=none"
+    - "--reconnect=no"
+    - "--bandwidth-detection=no"
+  diagnostics:
+    - "-d"
+    - "draw,paint,cairo,window,gtk,alpha,libva"
+  commands:
+    version:
+      - "--version"
+    detach:
+      - "--compressors=none"
+  transports:
+    rgb:
+      common:
+        - "--opengl=no"
+        - "--video-decoders=none"
+        - "--csc-modules=none"
+      policies:
+        strict:
+          - "--encodings=rgb"
+    h264:
+      common:
+        - "--video=yes"
+        - "--opengl=force:native"
+        - "--video-decoders=libva"
+        - "--csc-modules=none"
+      policies:
+        strict:
+          - "--encodings=h264"
+        adaptive-alpha:
+          - "--encodings=h264,webp,rgb"
+          - "--encoding=h264"
+        fallback-auto:
+          - "--encodings=h264,rgb"
+        fallback-h264:
+          - "--encodings=h264,rgb"
+          - "--encoding=h264"

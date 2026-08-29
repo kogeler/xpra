@@ -20,7 +20,9 @@ container recipe, tests, and the disabled canonical workflow it mirrors at
 - `infra/upstream-tests/`: embedded-source container test runner;
 - `infra/live/`: direct-transport and physical-GPU runner;
 - `infra/deb-packages/`: branch-agnostic Ubuntu/Debian package runner;
+- `tools/background_job.py`: common owned process supervisor;
 - `tools/container_payload.py`: common validated Podman tar transport;
+- `tools/podman_policy.py`: common bounded user-namespace policy;
 - `tools/contrib.py`: branch, sync, patch-queue, and manifest safety gates;
 - `docs/runbooks/`: operator workflows;
 - `CONTRACT.md`: machine and process invariants.
@@ -130,26 +132,41 @@ The fixed multi-window hardware gate is `APPLICATION=hardware`,
 title-bound `vkcube` and GTK Xpra window IDs separately. The primary's first
 saved `window.info` is only an initial `BGRX`/`RGBX` snapshot; exact frame-state
 logs prove its dynamic opaque state. Startup layout packets remain reviewed
-input but cannot establish acceptance. With both title-bound windows at their
-stable tiled geometry, the runner binds the active IDR group and an exact input
-interval ending before the auxiliary exits. Only positive H.264 main regions
-plus exact one-pixel lossless RGB24/RGB32 codec edges are production. Every
-observed crop signature must gain one complete required edge set, but an
-unchanged edge need not be resent with every H.264 frame. H.264 must dominate
-that interval and prove stable VA-API encode/decode and hardware presentation.
-Safe startup and post-exit resize packets remain validated but do not dilute or
-satisfy the production gate. The deterministic native-Wayland GTK auxiliary
-must expose transparent and opaque pixels in exact source screenshots, remain
-`BGRA`/`RGBA`, and use only positive WebP or alpha-bearing RGB32 packets with
-exact contained geometry; H.264, RGB24, and non-alpha RGB32 fail acceptance.
-Its client captures prove visible composition and input response rather than
-preservation of source alpha.
+input but cannot establish acceptance. With both title-bound windows stable,
+the runner binds the active IDR group to its exact saved source geometry and an
+exact input interval ending before the auxiliary exits. Only positive H.264
+main regions plus exact one-pixel lossless RGB24/RGB32 codec edges are
+production. Every observed crop signature must gain one complete required edge
+set, but an unchanged edge need not be resent with every H.264 frame. H.264
+must dominate that interval and prove stable VA-API encode/decode and hardware
+presentation. Safe startup and post-exit resize packets remain validated but
+do not dilute or satisfy the production gate. Every collected source screenshot
+for the deterministic native-Wayland GTK auxiliary's exact window must expose
+transparent and opaque pixels. The window must remain `BGRA`/`RGBA` and use
+only positive WebP or alpha-bearing RGB32 packets with exact contained
+geometry; H.264, RGB24, and non-alpha RGB32 fail acceptance. Its client
+captures prove visible composition and input response rather than preservation
+of source alpha.
+
+The fixed `APPLICATION=opengl` multi-window gate reuses this complete H.264,
+auxiliary, input, lifecycle, and cleanup contract. Its primary is instead the
+native-Wayland `glmark2-wayland` synthetic OpenGL `jellyfish` benchmark with a
+no-alpha EGL visual. Its fixed source viewport may be smaller than the tiled
+client backing; exact logged placement binds the source crop used by the pixel
+gate. The server application must expose a live OpenGL context, selected
+render-node descriptor, AMD Mesa/Radeon mapping, non-software renderer metadata,
+and changing nonuniform forwarded frames. The Vulkan and OpenGL primary gates
+are independent positive proofs.
 
 The exact public live acceptance set is Zed RGB, adaptive-alpha Zed H.264, RGB
-detach, RGB transport-loss fault injection, and this hardware profile. Their
-fixed Make wrappers require a nonempty reviewed case or stack. Clean-source and
-picture-fallback diagnostics cannot publish acceptance; every public target is
-a positive Xpra behavior proof rather than an expected-failure result.
+detach, RGB transport-loss fault injection, multi-window Vulkan hardware, and
+multi-window OpenGL hardware. Their fixed Make wrappers require a nonempty
+reviewed case or stack. `profiles.yml` alone supplies the selectable client
+network/quality overlay and its default; `live-cli.yml` alone supplies static
+server/client Xpra arguments. Do not duplicate their concrete values in Python,
+Make, or unit-test assertions. Clean-source and picture-fallback diagnostics
+cannot publish acceptance; every public target is a positive Xpra behavior
+proof rather than an expected-failure result.
 
 DEB builds are a separate branch-agnostic source path. They use `HEAD` and
 enumerate refs whose final component is `master`, require one uniquely latest
@@ -206,6 +223,12 @@ DEB removal finalizes an immutable status and matching log for both successful
 and failed builds; only a validated successful build also retains its output
 tar. Test, standalone-image, live, and DEB remove transactions remain with
 those collected results until cycle cleanup.
+
+Every explicit allocating rootless namespace is bounded: `keep-id`, `nomap`,
+and `auto` require a positive `size`, the reviewed live/upstream-test span is
+2048 IDs, and `--userns=host` is forbidden. Do not alter host subordinate-ID
+ranges to work around exhaustion. Common command validation must reject an
+unbounded namespace before Podman runs.
 
 Immutable runner-record publication requires filesystem `O_TMPFILE` plus
 `linkat(AT_EMPTY_PATH)` and has no named temporary fallback. The live analysis
