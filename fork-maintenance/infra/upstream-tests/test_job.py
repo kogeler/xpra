@@ -757,7 +757,9 @@ class BackgroundContainerTest(unittest.TestCase):
         self.assertIn(job.CONTAINER_NOTIFY_FIFO, create_argv)
         self.assertTrue(prelaunch_seen_before_create)
         self.assertEqual(calls[-1], ["podman", "start", created])
-        self.assertEqual(inherited, [(42, 43), (42, 43)])
+        # The starter keeps the cache lock through immutable-ID handoff, but
+        # Podman's long-lived networking helper must not inherit and lease it.
+        self.assertEqual(inherited, [(42,), (42,)])
         self.assertFalse(any("kill" in argv for argv in calls))
         send.assert_called_once_with(
             created,

@@ -351,7 +351,11 @@ containing only comments, copyright notices, or documentation, with no path,
 mode, executable data, configuration, test assertion, or runner behavior
 change. Resolve the refreshed queue, run whitespace and fork-control checks,
 and state the proof in the handoff; do not launch focused, native, full, or live
-jobs. Any uncertainty or semantic change uses the normal ladder.
+jobs. This exception never applies after `develop-rebase`: every explicit
+upstream rebase requires the clean quarantine reassessment, all fork-control,
+focused, native, and three full upstream legs, plus all five positive live
+profiles, even when every retained patch applies without textual changes. Any
+uncertainty or semantic change uses the normal ladder.
 
 Do not start or repeat an expensive downstream test when the observed failure
 occurred in a pre-test guard and the change only removes or narrows that guard.
@@ -420,8 +424,9 @@ interface for these marker-backed states.
 `live-start` holds the live lifecycle lock from before input freeze through
 durable main-owner publication. Upstream `test-start` holds both lifecycle and
 image-cache locks through create, start, and payload delivery. The create/start
-children inherit both descriptors; selection freezing and payload streaming
-inherit the lifecycle descriptor.
+children inherit only the lifecycle descriptor; the Python starter itself holds
+the image-cache lock through immutable-ID handoff and payload delivery so
+Podman's long-lived networking helper cannot retain that cache lease.
 
 Upstream image-cache removal refuses any matching unresolved image-build or
 test prelaunch/owner. Cleanup may accept an older valid source label only while

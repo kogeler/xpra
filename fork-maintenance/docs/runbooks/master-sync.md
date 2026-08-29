@@ -88,7 +88,10 @@ make -C fork-maintenance patch-start-check
 ```
 
 Resolve every rebase conflict, reassess the quarantine case, resolve the active
-queue, and run the required validation ladder before publishing the rewritten
-`develop` with an exact-SHA force-with-lease. If the operator does not choose
-this refresh, current `develop` continues to be tested and published against
-its existing embedded source regardless of later master movement.
+queue, and run the complete post-rebase ladder before publishing the rewritten
+`develop` with an exact-SHA force-with-lease. The ladder is mandatory even when
+the queue applies unchanged: offline fork checks, clean quarantine reassessment,
+tests-only controls, patched focused/native gates, all three full author-test
+legs, and all five fixed positive live profiles. If the operator does not
+choose this refresh, current `develop` continues to be tested and published
+against its existing embedded source regardless of later master movement.
