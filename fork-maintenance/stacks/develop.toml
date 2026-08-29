@@ -1,6 +1,6 @@
 schema = 1
 slug = "develop"
-description = "The complete active downstream patch queue for the develop branch"
+description = "The complete active downstream patch queue"
 series = [
   "wayland-initial-window-state",
   "video-pipeline-cleanup-race",

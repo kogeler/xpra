@@ -13,10 +13,17 @@ The generated source lives below:
 .artifacts/fork-maintenance/upstream-tests/workspaces/<name>/source/
 ```
 
-It is a private detached copy of the exact live, verified
-`upstream/master` commit. Its local `origin` remote is removed immediately.
+It is a private detached copy of the exact equal, live-verified
+`origin/master` and `upstream/master` commit. Its local `origin` remote is
+removed immediately.
 The workspace metadata binds the host branch and HEAD, master commit and tree,
 selection and patch digests, resolution, and patch mode.
+All workspace operations and fingerprint publication are serialized by retained
+`upstream-tests/workspaces/.lifecycle.lock`.
+
+This lifecycle is supported only while the host remains on `develop`. Temporary
+branches belong only to the exceptional clean host-worktree flow in
+`patch-cycle.md`; they are not an isolated-workspace alternative.
 
 ## Start boundary
 
@@ -26,11 +33,14 @@ Remain on `develop` and run:
 make -C fork-maintenance isolated-start-check
 ```
 
-The gate fetches only the two cached master refs and verifies them against live
-GitHub state. It permits dirty files only below the fork control boundary:
+The gate fetches `origin/master` and `upstream/master`, verifies both cached
+refs against live GitHub state, and requires exact fork/canonical equality. It
+permits dirty files only below the fork control boundary:
 
 - `AGENTS.md`;
 - `.gitignore`;
+- `.github/workflows/`;
+- `.github/upstream-workflows/`;
 - `fork-maintenance/`.
 
 Any host Xpra source or test change fails the gate. The command records and
@@ -79,6 +89,27 @@ make -C fork-maintenance workspace-status WORKSPACE=wayland-audit-01
 make -C fork-maintenance workspace-diff WORKSPACE=wayland-audit-01
 ```
 
+If creation, direct removal, or a cleanup fingerprint audit was interrupted,
+inspect its marker-backed state and recover only that workspace identity before
+retrying:
+
+```bash
+make -C fork-maintenance workspace-recover WORKSPACE=wayland-audit-01
+```
+
+Recovery preserves an already published valid workspace and resolves only its
+exact create marker/partial, removal transaction, or fingerprint transaction.
+Direct removal uses external
+`upstream-tests/workspaces/.<name>.remove.owner.json` and atomically staged
+`.<name>.remove`. Fingerprinting publishes external schema-2
+`workspace-fingerprints/<name>.fingerprint.owner.json` before creating
+`<name>.fingerprint`; recursive cleanup then publishes
+`<name>.fingerprint.remove.json` and stages at
+`.<name>.fingerprint.remove`. After either rename, recovery validates the bound
+device/inode rather than re-hashing a partially deleted tree. The fingerprint
+phase binds the owner operation ID and digest; it remains after owner removal
+and is itself deleted last. An unowned or ambiguous partial is refused.
+
 ## Refresh one case
 
 Edit only files below the printed workspace `source` path. Stage the complete
@@ -112,10 +143,41 @@ make -C fork-maintenance workspace-update WORKSPACE=wayland-audit-01
 reverse application on the recorded master commit. It atomically derives the
 case patch, digest, and path list. The only host files it may change are that
 case's `fix.patch` and `case.toml`; host source and index stay untouched.
+Apply/reverse verification runs in the recoverable
+`case-updates/<slug>.update/candidate-lab/source` preparation, not in the
+finalized workspace. That candidate lab is removed before publication of the
+old/new transaction marker. The transaction also replaces the workspace's
+`selection-resolution.json` and `workspace.json`, leaving a successful
+workspace current and reusable for another edit/stage/export iteration.
+
+Before replacing either tracked case file, the command publishes
+`.artifacts/fork-maintenance/case-updates/<slug>.update.owner.json` and prepares
+the matching `<slug>.update/` old/new payload transaction under retained
+`case-updates/.lifecycle.lock`. Workspace update holds its lifecycle lock first,
+then the case-update lock. Every export binds the case patch/manifest and
+workspace provenance in that same all-new transaction; draft promotion also
+moves the workspace from clean to patched mode. If interrupted, do not rerun
+export or edit this state:
+
+```bash
+make -C fork-maintenance case-recover CASE=wayland-initial-window-state
+```
+
+Recovery discards only a preparation with no published `transaction.json`,
+replays a complete transaction to its recorded new state, or clears an
+owner-only boundary after validating the published case and bound workspace.
+Before deleting a preparation or completed transaction, it publishes schema-1
+`case-updates/<slug>.update.remove.json` with disposition `abort` or `complete`,
+renames the transaction to `case-updates/.<slug>.update.remove`, removes the
+update owner after the tree, and removes the phase marker last. Its canonical
+target array revalidates the published patch, manifest, workspace resolution,
+and workspace metadata by path, mode, and SHA-256 even after partial staged-tree
+deletion or during a phase-only retry. Any unresolved update blocks another
+case update and the cycle-clean planner.
 
 ## Build and test
 
-Classify the exported diff before starting a job. If the verified master is
+Classify the exported diff before starting a job. If the verified fork master is
 unchanged and an exact old/new applied-tree comparison contains only comments,
 copyright notices, or documentation—with identical paths, modes, executable
 data, configuration, test assertions, and runner behavior—this is a
@@ -133,8 +195,9 @@ make -C fork-maintenance test-start \
 make -C fork-maintenance test-wait RUN=wayland-master-regression-01
 ```
 
-Then run the case or stack with `PATCH_MODE=patched`. Live clean controls omit
-the selection; patched live runs name the case or stack. All runners use
+Then run the case or stack with `PATCH_MODE=patched`. Every live acceptance run
+also names a nonempty reviewed case or stack; clean-source comparison remains
+an isolated/unit diagnostic and cannot publish a live `PASS`. All runners use
 generated source copies and never package the host worktree.
 
 ## Exact cleanup
@@ -146,11 +209,18 @@ directory:
 make -C fork-maintenance workspace-remove WORKSPACE=wayland-audit-01
 ```
 
-Removal is not reversible, but it affects runtime output only. The maintained
-case patch and every host source file remain untouched.
+Removal is not reversible, but it affects runtime output only. Before touching
+the directory, `workspace-remove` publishes its exact external owner and binds
+the complete fingerprint, device, and inode. It then uses a no-replace rename to
+the hidden removal staging and removes that owner last. Reinvoke
+`workspace-remove`, or use `workspace-recover`, to complete an interrupted
+transaction. The maintained case patch and every host source file remain
+untouched.
 
 When several workspaces and named runs belong to one completed cycle, prefer
 the two-phase `cycle-clean-plan` / `cycle-clean` flow in `cycle-cleanup.md`.
 Unlike direct workspace removal, its planner proves that each staged workspace
 tree is exactly represented by the current patch queue and binds every target
-to one reviewed confirmation digest.
+to one reviewed confirmation digest. The planner never performs staging
+recovery; any case/workspace marker or partial must first go through its public
+exact recovery target.

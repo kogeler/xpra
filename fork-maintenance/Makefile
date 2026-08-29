@@ -13,6 +13,7 @@ LIVE_PYTHON := $(LIVE_VENV)/bin/python
 LIVE_JOB_BOOTSTRAP := $(PYTHON) $(AUTOMATION_ROOT)/infra/live/job.py
 LIVE_JOB := $(LIVE_PYTHON) $(AUTOMATION_ROOT)/infra/live/job.py
 UPSTREAM_TESTS := $(AUTOMATION_ROOT)/infra/upstream-tests
+DEB_PACKAGES := $(AUTOMATION_ROOT)/infra/deb-packages
 RUFF ?= ruff
 
 CASE ?=
@@ -56,13 +57,14 @@ AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_zed.sh
 
 .PHONY: help check lint contributor-tests clean artifact-boundary doctor \
 	live-venv live-venv-check list repo-status repo-sync master-update develop-rebase \
-	patch-start-check isolated-start-check develop-check ci-layout-check ci-prepare ci-upstream-tests \
-	case-new case-name-check stack-name-check selector-check workspace-selector-check optional-selector-check \
+	patch-start-check isolated-start-check develop-check ci-layout-check ci-prepare ci-master-sync ci-upstream-tests ci-deb-release \
+	case-new case-recover case-name-check stack-name-check selector-check workspace-selector-check optional-selector-check \
 	patch-check patch-apply patch-unapply patch-update stack-check stack-apply stack-unapply \
 	workspace-name-check workspace-create workspace-status workspace-diff workspace-stage \
-	workspace-update workspace-remove \
+	workspace-update workspace-remove workspace-recover \
 	cycle-name-check cycle-clean-plan cycle-clean \
 	run-name-check image-run-name-check test-target-check live-options-check \
+	deb-policy-check \
 	test-image test-image-start test-image-status test-image-logs test-image-wait \
 	test-image-collect test-image-remove test-image-abort test-image-cache-remove test-versions \
 	test-start test-status test-logs test-wait test-collect test-remove test-abort \
@@ -70,39 +72,49 @@ AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_zed.sh
 	test-quarantine-no-compat test-wayland test-libyuv \
 	test-full test-full-cython test-full-no-compat \
 	live-start live-status live-logs live-wait live-collect live-remove live-abort \
-	live-rgb live-h264 live-xpra-detach live-xpra-transport-loss live-xpra-hardware
+	live-rgb live-h264 live-xpra-detach live-xpra-transport-loss live-xpra-hardware \
+	deb-start deb-status deb-logs deb-wait deb-collect deb-remove deb-abort
 
 help:
 	@printf '%s\n' \
 		'make -C fork-maintenance check' \
 		'    Offline static and unit checks for the in-repository automation' \
 		'make -C fork-maintenance repo-sync' \
-		'    Fetch and compare live upstream/master and origin/master' \
+		'    Fetch and verify equal live fork/canonical master refs' \
 		'make -C fork-maintenance master-update' \
-		'    Fast-forward local master after the read-only fork-master gate passes' \
+		'    Fast-forward local master to fetched origin/master' \
 		'make -C fork-maintenance develop-rebase' \
-		'    Rebase clean develop onto verified local master; never merge upstream' \
+		'    Rebase clean develop onto the verified equal local master; never merge' \
 		'make -C fork-maintenance patch-start-check' \
-		'    Require live master equality and a completed linear develop rebase' \
+		'    Require equal fetched master refs and a completed linear develop rebase' \
 		'make -C fork-maintenance isolated-start-check' \
-		'    Freeze live master for isolated work without switching or changing develop source' \
+		'    Freeze equal live fork/canonical master without changing develop source' \
+		'make -C fork-maintenance case-new CASE=short-behavior-name' \
+		'make -C fork-maintenance case-recover CASE=short-behavior-name' \
+		'    Create a draft case or recover exact interrupted create, update, or update-removal state' \
 		'make -C fork-maintenance workspace-create CASE=name WORKSPACE=unique-name' \
 		'    Export master and apply the selected case, or start a clean draft, below ignored .artifacts/' \
 		'make -C fork-maintenance workspace-{status,diff,stage,update,remove} WORKSPACE=name' \
 		'    Inspect, refresh, or remove the exact isolated workspace' \
+		'make -C fork-maintenance workspace-recover WORKSPACE=name' \
+		'    Recover exact marker-backed interrupted create, direct removal, or fingerprint cleanup state' \
 		'make -C fork-maintenance cycle-clean-plan CYCLE=cycle-name' \
 		'make -C fork-maintenance cycle-clean CYCLE=cycle-name CONFIRM=printed-sha256' \
 		'    Review, then remove exact finalized cycle results and workspaces' \
 		'make -C fork-maintenance develop-check' \
 		'    Verify clean linear develop, current master base, queue, and ignore boundary' \
 		'make -C fork-maintenance ci-layout-check' \
-		'    Verify byte-identical disabled upstream workflows and the one thin fork workflow' \
+		'    Verify byte-identical disabled upstream workflows and all thin fork workflows' \
+		'make -C fork-maintenance ci-master-sync' \
+		'    Hosted-only non-forced fast-forward of fork master from upstream master' \
 		'make -C fork-maintenance ci-upstream-tests' \
 		'    With XPRA_CI_TARGET=full|full-cython|full-no-compat, apply stacks/develop' \
 		'    and run that one Ubuntu 26.04 unit-test leg' \
+		'make -C fork-maintenance ci-deb-release' \
+		'    Hosted manual workflow: build patched Ubuntu 26.04 and Debian 13 DEB tars and publish a release' \
 		'make -C fork-maintenance patch-check CASE=name' \
 		'make -C fork-maintenance stack-check STACK=develop' \
-		'    Resolve one patch or the active queue against current upstream master' \
+		'    Resolve one patch or the active queue against current fork master' \
 		'make -C fork-maintenance patch-apply CASE=name' \
 		'make -C fork-maintenance patch-update CASE=name' \
 		'make -C fork-maintenance patch-unapply CASE=name' \
@@ -114,13 +126,17 @@ help:
 		'make -C fork-maintenance test-wait RUN=unique-name' \
 		'    Run a durable frozen-master container test job' \
 		'make -C fork-maintenance test-abort RUN=unique-name' \
-		'    Force-stop and remove only that owned unfinished test job' \
+		'    Discard only that owned uncollected running/lost or stale completed test job' \
 		'make -C fork-maintenance test-image-abort IMAGE_RUN=unique-name' \
-		'    Stop an unfinished owned image build; IMAGE_TAG_SUFFIX isolates smoke builds' \
-		'make -C fork-maintenance live-start STACK=develop ENCODING=h264 RUN=unique-name' \
+		'    Discard an owned uncollected running/lost or stale completed image build' \
+		'    IMAGE_TAG_SUFFIX isolates smoke builds' \
+		'make -C fork-maintenance live-h264 STACK=develop RUN=unique-name' \
 		'make -C fork-maintenance live-wait RUN=unique-name' \
 		'make -C fork-maintenance live-abort RUN=unique-name' \
-		'    Run or abort a durable physical-GPU profile; outputs stay below .artifacts/'
+		'    Run or abort a durable physical-GPU profile; outputs stay below .artifacts/' \
+		'make -C fork-maintenance deb-start DISTRO=ubuntu-26.04 RUN=unique-name' \
+		'make -C fork-maintenance deb-{status,logs,wait,collect,remove,abort} RUN=unique-name' \
+		'    Build one patched DEB tar as an owned mount-free background job'
 
 check: artifact-boundary ci-layout-check
 	@$(PYTHON) -m py_compile $(AUTOMATION_PYTHON)
@@ -134,6 +150,8 @@ check: artifact-boundary ci-layout-check
 	@$(CONTRIB) case-list >/dev/null
 	@$(PYTHON) tools/test_contrib.py
 	@$(PYTHON) tools/test_background_job.py
+	@PYTHONPATH="$(AUTOMATION_ROOT)/tools" $(PYTHON) tools/test_container_payload.py
+	@$(MAKE) --no-print-directory -C "$(DEB_PACKAGES)" check
 	@$(PYTHON) -m unittest discover -s infra/live -p 'test_job.py'
 	@$(PYTHON) -m unittest discover -s infra/upstream-tests -p 'test_*.py'
 	@command -v "$(RUFF)" >/dev/null 2>&1 || { printf 'ruff is required for check\n' >&2; exit 2; }
@@ -191,14 +209,23 @@ ci-layout-check:
 ci-prepare:
 	@$(CONTRIB) ci-prepare
 
-ci-upstream-tests: ci-prepare
-	@source_commit="$$(git -C "$(REPOSITORY_ROOT)" merge-base \
-		refs/remotes/origin/master HEAD)"; \
+ci-master-sync:
+	@$(CONTRIB) ci-master-sync
+
+ci-upstream-tests:
+	@preflight="$$( $(CONTRIB) ci-prepare )"; \
+		printf '%s\n' "$$preflight"; \
+		source_commit="$$(sed -n 's/^source_commit=//p' <<<"$$preflight")"; \
 		[[ "$$source_commit" =~ ^[0-9a-f]{40}$$ ]]; \
 		$(MAKE) --no-print-directory -C "$(UPSTREAM_TESTS)" ci \
 			SELECTION=stacks/develop PATCH_MODE=patched \
 			SOURCE_REMOTE=origin SOURCE_COMMIT="$$source_commit" \
 			VERIFY_LIVE_SOURCE=0
+
+ci-deb-release:
+	@$(CONTRIB) ci-deb-prepare
+	@$(MAKE) --no-print-directory -C "$(DEB_PACKAGES)" ci-release \
+		SELECTION=stacks/develop
 
 develop-check:
 	@$(CONTRIB) develop-check
@@ -243,6 +270,9 @@ optional-selector-check:
 case-new: case-name-check
 	@$(CONTRIB) case-new "$${XPRA_LAB_CASE}"
 
+case-recover: case-name-check
+	@$(CONTRIB) case-recover "$${XPRA_LAB_CASE}"
+
 patch-check patch-apply patch-unapply: case-name-check
 	@$(CONTRIB) $@ "$${XPRA_LAB_CASE}"
 
@@ -267,7 +297,7 @@ workspace-create: workspace-selector-check workspace-name-check
 	@$(CONTRIB) workspace-create "$(WORKSPACE)" "$${XPRA_LAB_SELECTOR}" \
 		--patch-mode "$(PATCH_MODE)"
 
-workspace-status workspace-diff workspace-remove: workspace-name-check
+workspace-status workspace-diff workspace-remove workspace-recover: workspace-name-check
 	@$(CONTRIB) $@ "$(WORKSPACE)"
 
 workspace-stage workspace-update: workspace-name-check
@@ -350,14 +380,14 @@ test-quarantine-no-compat test-wayland test-libyuv test-full test-full-cython \
 test-full-no-compat:
 	@$(MAKE) --no-print-directory test-start TARGET="$(patsubst test-%,%,$@)"
 
-live-start: optional-selector-check run-name-check live-options-check
+live-start: selector-check run-name-check live-options-check
 	@set -- $(LIVE_JOB) start "$${XPRA_LAB_RUN}" \
 		--application "$${XPRA_LAB_APPLICATION}" \
 		--encoding "$${XPRA_LAB_ENCODING}" \
 		--h264-client-policy "$${XPRA_LAB_H264_CLIENT_POLICY}" \
 		--lifecycle "$${XPRA_LAB_LIFECYCLE}" \
-		--alpha-scenarios "$${XPRA_LAB_ALPHA_SCENARIOS}"; \
-	if [[ -n "$${XPRA_LAB_SELECTOR}" ]]; then set -- "$$@" --selection "$${XPRA_LAB_SELECTOR}"; fi; \
+		--alpha-scenarios "$${XPRA_LAB_ALPHA_SCENARIOS}" \
+		--selection "$${XPRA_LAB_SELECTOR}"; \
 	if [[ -n "$${XPRA_LAB_RENDER_NODE}" ]]; then set -- "$$@" --render-node "$${XPRA_LAB_RENDER_NODE}"; fi; \
 	if [[ -n "$${XPRA_LAB_ZED_DIRECTORY}" ]]; then set -- "$$@" --zed-directory "$${XPRA_LAB_ZED_DIRECTORY}"; fi; \
 	"$$@"
@@ -365,8 +395,15 @@ live-start: optional-selector-check run-name-check live-options-check
 live-status live-logs live-wait live-collect live-remove live-abort: run-name-check
 	@$(LIVE_JOB) $(patsubst live-%,%,$@) "$${XPRA_LAB_RUN}"
 
-live-rgb live-h264:
-	@$(MAKE) --no-print-directory live-start ENCODING="$(patsubst live-%,%,$@)"
+live-rgb:
+	@$(MAKE) --no-print-directory live-start \
+		APPLICATION=zed LIFECYCLE=application-exit ENCODING=rgb \
+		H264_CLIENT_POLICY=strict ALPHA_SCENARIOS=default
+
+live-h264:
+	@$(MAKE) --no-print-directory live-start \
+		APPLICATION=zed LIFECYCLE=application-exit ENCODING=h264 \
+		H264_CLIENT_POLICY=adaptive-alpha ALPHA_SCENARIOS=default
 
 live-xpra-detach:
 	@$(MAKE) --no-print-directory live-start \
@@ -381,4 +418,19 @@ live-xpra-transport-loss:
 live-xpra-hardware:
 	@$(MAKE) --no-print-directory live-start \
 		APPLICATION=hardware LIFECYCLE=application-exit ENCODING=h264 \
-		H264_CLIENT_POLICY=strict ALPHA_SCENARIOS=default
+		H264_CLIENT_POLICY=adaptive-alpha ALPHA_SCENARIOS=default
+
+deb-policy-check:
+	@test -z "$(CASE)" && test "$(STACK)" = develop || { \
+		printf '%s\n' 'DEB packages must apply the complete stacks/develop queue' >&2; \
+		exit 2; \
+	}
+
+deb-start: deb-policy-check run-name-check
+	@$(MAKE) --no-print-directory -C "$(DEB_PACKAGES)" start \
+		RUN="$${XPRA_LAB_RUN}" DISTRO="$(DISTRO)" \
+		SELECTION=stacks/develop
+
+deb-status deb-logs deb-wait deb-collect deb-remove deb-abort: run-name-check
+	@$(MAKE) --no-print-directory -C "$(DEB_PACKAGES)" \
+		$(patsubst deb-%,%,$@) RUN="$${XPRA_LAB_RUN}"

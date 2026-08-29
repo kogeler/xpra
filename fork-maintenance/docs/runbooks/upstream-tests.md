@@ -2,16 +2,50 @@
 
 ## Frozen source model
 
-Every local acceptance job archives the verified live `upstream/master`
+Every local acceptance job archives the exact equal live fork/canonical master
 commit, resolves the selected case or stack, and applies only
-forward-applicable patches inside an isolated container source tree. Hosted CI
-uses the same runner, derives the canonical base already embedded in pushed
-`develop` as its merge base with checkout `origin/master`, and does not follow a
-later fork or upstream update. It performs no fetch, sync, branch switch, merge,
-or rebase after `actions/checkout`. Neither path packages `develop`, `.git`,
-ignored files, credentials, or the host working-tree diff.
+forward-applicable patches inside an isolated container source tree. Hosted
+develop test CI uses the same runner and derives the fork base already embedded
+in pushed `develop` as its merge base with checkout `origin/master`; it does not
+follow a later fork update. It performs no fetch, sync, branch switch, merge, or
+rebase after `actions/checkout`. Local jobs fetch and require equal live fork
+and canonical master refs. Neither path packages `develop`, `.git`, ignored
+files, credentials, or the host working-tree diff.
 
-Verify the content-addressed Ubuntu 26.04 image first:
+The source bundle, minimal selection snapshot, and every Podman image build
+context cross stdin through the common validated tar helper. The test source
+and queue are never bind-mounted, and the runner never uses `podman cp` or an
+artifact bind to retrieve results. The one named ccache volume is cache-only.
+Test containers return only their normal log; the entrypoint prints the exact
+selection-resolution digest into that log for collection and validation.
+Each exact source bundle has a retained mode-`0600` `.bundle.lock`. Publication
+holds its kernel lock across the bundle child, validates the bundle before an
+atomic no-replace rename, and may recover only its deterministic
+`.bundle.partial` on the next snapshot attempt. Cycle cleanup retains the lock
+and refuses any remaining partial.
+
+Before a detached test calls `podman create`, it publishes an inspectable
+`runs/<RUN>.prelaunch.json` binding the starter PID/start ticks, run UUID,
+expected full labels, immutable image ID, and payload path. The final
+`<RUN>.owner` is published only after the returned container ID and labels have
+been verified. The already frozen source bundle and a selection snapshot below
+`<RUN>.payload/` are then streamed to that exact container. The prelaunch stays
+published through container start, tar delivery, and the ready-byte handshake;
+the retained lifecycle lock descriptor is inherited by selection freezing,
+`podman create`, `podman start`, and the payload-streaming child. The image-cache
+lock is held across the same immutable-ID use handoff. A crash therefore leaves
+either the normal owner or an exact prelaunch owner that `test-status` can
+inspect and `test-abort` can recover after the recorded starter is no longer
+active.
+
+For detached jobs, the entry process waits on the image's pre-created validated
+payload-ready FIFO. The extraction helper writes one ready byte only after the
+streamed source and selection snapshot are complete. The sender retries a
+non-blocking FIFO open for a bounded interval while the reader attaches;
+execution then replaces the waiter directly. Do not replace this handshake with
+process signals.
+
+Verify the input-keyed, label-verified Ubuntu 26.04 image first:
 
 ```bash
 make -C fork-maintenance test-image
@@ -19,7 +53,35 @@ make -C fork-maintenance test-image
 
 If it is absent, follow the durable image-build sequence in
 [`bootstrap.md`](bootstrap.md). Do not let an ordinary test target silently
-pull or rebuild its environment.
+pull or rebuild its environment. Test jobs inspect that cache entry and create
+their container from the returned immutable image ID, never from the mutable tag
+alone. Retained `image-builds/.image-cache.lock` serializes cache creation,
+immutable-ID inspection/use handoff, and explicit removal. Podman build and
+container-start children inherit the open lock, so a mutable tag cannot change
+between validation and use.
+
+`test-image-cache-remove` takes that same lock and refuses deletion while any
+matching image-build or test prelaunch/owner still leases the image. Cleanup may
+accept an older valid source label only because removal does not make new
+acceptance evidence; the complete owner-label set and image/input/workflow
+identity must still match exactly.
+
+A named standalone build publishes
+`image-builds/.<IMAGE_RUN>.image-prelaunch.json` before creating and populating
+`image-builds/<IMAGE_RUN>/`; its final background owner uses schema 3 and is
+released only after durable publication. `test-image-status` and
+`test-image-abort` understand the prelaunch boundary. The shared lifecycle lock
+prevents abort racing an active start, while a marker left after the starter is
+gone authorizes removal of only that exact context. Normal image remove/abort
+deletes the marker. Hosted foreground image creation instead streams build
+inputs directly and creates no `.ci-image.*` host context.
+
+Hosted foreground tests freeze their selection into deterministic
+`.foreground-payload` staging after publishing
+`.foreground-payload.owner.json`, all under retained
+`.foreground-payload.lock`. The same foreground operation validates and
+recovers only that exact marker-backed partial before reuse. A remaining marker
+or staging tree blocks cycle cleanup.
 
 ## Resolve before spending test time
 
@@ -34,7 +96,7 @@ ambiguous patch stops the ladder.
 ## Do not spend test resources on non-semantic refreshes
 
 Before `test-start`, compare the exact old and new applied trees. Do not start
-container tests when the verified master is unchanged and the only differences
+container tests when the verified fork master is unchanged and the only differences
 are comments, copyright notices, or documentation, with identical paths,
 modes, executable data, configuration, test assertions, source
 selection/application, build commands, and runner behavior. Refresh derived
@@ -178,26 +240,41 @@ make -C fork-maintenance test-logs RUN=name
 make -C fork-maintenance test-wait RUN=name
 make -C fork-maintenance test-collect RUN=name
 make -C fork-maintenance test-remove RUN=name
-make -C fork-maintenance test-abort RUN=unfinished-name
-make -C fork-maintenance test-image-abort IMAGE_RUN=unfinished-image-name
+make -C fork-maintenance test-abort RUN=running-or-lost-name
+make -C fork-maintenance test-image-abort IMAGE_RUN=running-or-lost-image-name
 ```
 
 `wait` supervises completion and collects a no-clobber local result. Use
 `collect` for an already-finished container or owned process. Review before
 `remove`; removal targets only the exact owned container/process/context and
-retains the ignored result files. Never reuse a run name or copy its result
-into Git.
+retains the ignored result files. Before its first destructive step, test or
+image removal publishes `logs/<name>.remove.json`, binding the old owner plus
+log/status digests. An interrupted remove is retried through the same target;
+the transaction remains beside the log/status until cycle cleanup. Never reuse
+a run name or copy its result into Git.
 
-An abort target is only for an unfinished job with no collected output. It
-checks the owner record and either the PID/start-time/process-group identity or
-the immutable container ID and labels, then force-removes only that exact
-runtime state. Use Make lifecycle targets exclusively; never signal a job or
-run destructive Podman commands directly.
+One retained `upstream-tests/logs/.lifecycle.lock` serializes terminal
+collect/abort transitions for the subsystem; it is a crash-releasing kernel
+lock, not a per-`RUN` artifact. An abort target accepts a running or lost job
+with no collected output. `lost` means no valid completion and no remaining
+exact owned runtime; for a process job, a dead leader with a live owned process
+group still counts as running. In that orphaned-group path, each live member
+must expose exactly the private 256-bit token recorded in the process owner and
+completion; otherwise ownership fails closed and state is preserved. A legacy
+tokenless orphan is not signalable. Abort may also exact-discard a completed
+uncollected job only when the recorded runner digest is stale; a current
+completed job must be collected, and collected evidence can only use its remove
+target. An active test prelaunch starter is refused, while its inactive exact
+prelaunch/container/payload state is recoverable. Abort checks the owner record
+and either the PID/start-time/process-group identity or the immutable container
+ID and full labels, then force-removes only that exact runtime state. Use Make
+lifecycle targets exclusively; never signal a job or run destructive Podman
+commands directly.
 
 Prefix every `RUN` and `IMAGE_RUN` with the current cycle identity. Once the
 complete cycle is finalized, reviewed, and individually removed, follow
 `cycle-cleanup.md` to plan and digest-confirm deletion of retained results.
 
-Hosted CI is limited to the three upstream unit-test legs. It never runs a
-`live-*` target; physical display, render-node, and hardware-encoder gates stay
-in the local live runbook.
+Hosted develop test CI is limited to the three upstream unit-test legs. It never
+runs a `live-*` target; physical display, render-node, and hardware-encoder gates
+stay in the local live runbook.

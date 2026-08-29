@@ -1,0 +1,26 @@
+name: Sync master
+
+on:
+  schedule:
+    - cron: "37 */12 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  sync-master:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out develop automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: develop
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Fast-forward fork master
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: make -C fork-maintenance ci-master-sync
