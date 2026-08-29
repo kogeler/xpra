@@ -18,17 +18,18 @@ make -C fork-maintenance workspace-remove WORKSPACE=short-behavior-01
 This is the required pre-commit path when fork-control files are uncommitted.
 It freezes the source merge base already embedded in current `develop`, without
 fetching or testing master freshness, and never switches the host branch or
-applies the production patch to host source. See `isolated-workspaces.md` for clean,
-tests-only, path-change, provenance, and cleanup details.
+applies the production patch to host source. See
+[`isolated-workspaces.md`](isolated-workspaces.md) for clean, tests-only,
+path-change, provenance, and cleanup details.
 
 For a complete cycle containing multiple named workspaces and runs, give every
 identity one common prefix and finish with the digest-confirmed cleanup flow in
-`cycle-cleanup.md`.
+[`cycle-cleanup.md`](cycle-cleanup.md).
 
 A new draft starts with `workspace-create ... PATCH_MODE=clean`; its first
 `workspace-update` derives the patch, digest, and owned paths. The quarantine
 duty case follows the separate admission and rebase rules in
-`test-quarantine.md`.
+[`test-quarantine.md`](test-quarantine.md).
 
 The remainder of this runbook is the clean host-worktree fallback used only
 when the operator deliberately begins a new upstream adaptation cycle.
@@ -202,15 +203,16 @@ make -C fork-maintenance stack-check STACK=develop
 ```
 
 Before applying the duty quarantine or accepting any patched full run, execute
-all three clean `quarantine*` gates from `test-quarantine.md`. Remove or narrow
-every entry that is green on the new source; forward applicability alone is
-never evidence that a quarantine remains necessary.
+all three clean `quarantine*` gates from
+[`test-quarantine.md`](test-quarantine.md). Remove or narrow every entry that is
+green on the new source; forward applicability alone is never evidence that a
+quarantine remains necessary.
 
 An upstream rebase always invalidates the previous functional acceptance,
 including when every patch still applies byte-for-byte. Run the complete
 offline fork-control suite, every production case in `tests-only` mode, every
 patched focused and native gate, all three complete upstream workflow legs, and
-all five fixed positive live profiles. A new author-test failure may enter the
+all six fixed positive live profiles. A new author-test failure may enter the
 single quarantine only after the same module fails on this exact clean source;
 then rerun the quarantine gates and complete patched matrix.
 

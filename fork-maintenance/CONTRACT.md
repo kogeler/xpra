@@ -364,7 +364,7 @@ commit, use this clean sequence:
    every production case, then review whether upstream replaced or narrowed any
    patch behavior;
 9. run every patched focused and native gate, all three complete upstream test
-   legs (`full`, `full-cython`, and `full-no-compat`), and all five fixed positive
+   legs (`full`, `full-cython`, and `full-no-compat`), and all six fixed positive
    live profiles, even if the patches applied without textual changes;
 10. reproduce any newly failing author test on this exact clean master before
     adding it to the single duty quarantine, then rerun its clean quarantine
@@ -407,7 +407,8 @@ binds:
 - base-aware resolution and its digest;
 - runner/build-input digests;
 - image identity and toolchain versions;
-- exact target or live profile;
+- exact target or live acceptance profile, selected client network profile,
+  and frozen live CLI configuration;
 - final process/container state and complete log digest.
 
 Build contexts contain a credential-free source archive plus the selected
@@ -473,6 +474,31 @@ directories, abort publishes schema-1 `kind=live-input-freeze-abort` at
 `live-results/.<RUN>.freeze-abort-{staging,result}`, and deletes the transaction
 only after both exact directories are gone. An interrupted transaction is
 continued only by the same `live-abort` target.
+
+The two tracked YAML files at the maintenance root are the sole value authority
+for live Xpra command options. `profiles.yml` declares the named client-side
+quality/network profiles and its `default_profile`; `live-cli.yml` declares
+static blocks grouped by server/client role, command concern, transport,
+encoding, and policy. The common client `bandwidth-detection=no` setting belongs
+to the static client base, while minimum quality/speed, auto-refresh delay,
+refresh rate, and bandwidth limit come only from the selected network profile.
+Those profile values are never passed to the server.
+
+`infra/live/live_config.py` parses a deliberately small deterministic YAML
+subset with the standard library and rejects malformed, ambiguous, unsafe, or
+out-of-range data. Python and Make may derive values from that loader but may
+not maintain duplicate option tables or defaults. Unit tests validate the
+schema, fail-closed behavior, and loader-to-runner data flow generically; they
+must not copy concrete profile names, arguments, or values into assertions.
+Both YAML files and the loader are part of the frozen harness digest. The main
+owner and final report bind the selected network-profile name.
+
+Every public live wrapper accepts `NETWORK_PROFILE=<name>`. Omitting it uses
+the `default_profile` declared only in `profiles.yml`. The normal required
+six-gate acceptance ladder runs once with that default. Other tracked
+network profiles exercise the same positive gates on operator request; they do
+not create additional mandatory gates or weaken any rendering, codec,
+lifecycle, or cleanup assertion.
 
 DEB source selection is branch-agnostic. It uses the current `HEAD` and all
 local or remote-tracking refs whose final component is exactly `master`, then
@@ -550,6 +576,17 @@ publishes with an atomic no-replace rename rather than random staging.
 When reverse process output has no caller-owned deterministic partial path, the
 common exchange helper stages it in an anonymous `O_TMPFILE`, fsyncs it, and
 links it into place without replacement; there is no named generic fallback.
+
+Rootless container creation uses bounded subordinate-ID allocations. Every
+explicit `keep-id`, `nomap`, or `auto` user namespace must declare a positive
+`size`; `--userns=host` is forbidden. The reviewed allocation is `size=2048`:
+it contains the live UID/GID 1001 and upstream-test UID/GID 1000 while retaining
+1046 or 1047 mapped IDs above the runtime identity. The live Ubuntu 26.04
+server, Debian 13 client, and Ubuntu 26.04 upstream-test images must create,
+run, and write their owned paths with that span. No runner may compensate by
+enlarging `/etc/subuid` or `/etc/subgid` or by consuming the host namespace.
+This bound leaves the remaining subordinate-ID range available to an
+independent bounded rootless container while a live server/client pair exists.
 
 ## GitHub CI contract
 
@@ -706,7 +743,7 @@ uncertain, the exception does not apply and the normal ladder is required. A
 `develop-rebase` necessarily changes the embedded source and therefore never
 qualifies: its acceptance always includes the complete fork-control suite,
 clean quarantine reassessment, production tests-only controls, patched focused
-and native gates, all three author-test legs, and all five fixed positive live
+and native gates, all three author-test legs, and all six fixed positive live
 profiles.
 
 Ordinary acceptance is green. A pre-existing failure outside the selected
@@ -727,27 +764,40 @@ or execution path restores the normal validation ladder.
 
 The live runner keeps direct Xpra boundaries distinct from SSH orchestration.
 Its exact positive set is Zed RGB, adaptive-alpha Zed H.264, RGB detach, RGB
-direct-TCP transport-loss fault injection, and multi-window Vulkan/input
-hardware H.264. Each fixed Make wrapper binds every profile dimension and every
-named job requires a nonempty reviewed case or stack selection. Foreground,
-clean-source, and picture-fallback probes are diagnostic and cannot publish
-acceptance. A positive fault-injection profile first proves rendering and input,
-then proves the intended disconnect and survival behavior.
+direct-TCP transport-loss fault injection, multi-window Vulkan/input hardware
+H.264, and multi-window native-Wayland OpenGL/input hardware H.264. Each fixed
+Make wrapper binds every profile dimension and every named job requires a
+nonempty reviewed case or stack selection. Foreground, clean-source, and
+picture-fallback probes are diagnostic and cannot publish acceptance. A
+positive fault-injection profile first proves rendering and input, then proves
+the intended disconnect and survival behavior.
 
-The named hardware-H.264 gate is the fixed application-exit profile
-`APPLICATION=hardware`, `ENCODING=h264`,
-`H264_CLIENT_POLICY=adaptive-alpha`, and `ALPHA_SCENARIOS=default`. It resolves
-the primary `vkcube` and auxiliary GTK Xpra window IDs independently from their
-exact titles; registration order is never authority. The primary's first saved
+H.264 acceptance deliberately assigns different CSC roles to the endpoints.
+The server enables `libyuv` to convert Wayland `BGRX`/`RGBX` source buffers to
+the `NV12` input required by the libva encoder. The client disables software
+CSC with `--csc-modules=none`: its libva decoder returns `NV12`, and the forced
+native OpenGL backing must consume those planes through its GPU shader before
+presentation. Enabling client-side `libyuv` is diagnostic only. It may broaden
+advertised conversion modes or provide a CPU `NV12`-to-RGB fallback, but cannot
+restore alpha already discarded by H.264, repair server codec cleanup, or
+satisfy the direct hardware-presentation gate. CSC-module selection is also
+independent of the codec allowlist; it must not be treated as codec discovery.
+
+The two named multi-window hardware-H.264 gates are the fixed application-exit
+profiles `APPLICATION=hardware` and `APPLICATION=opengl`, both with
+`ENCODING=h264`, `H264_CLIENT_POLICY=adaptive-alpha`, and
+`ALPHA_SCENARIOS=default`. Each resolves its primary and the common auxiliary
+GTK Xpra window independently from their exact titles; registration order is
+never authority. The primary's first saved
 `window.info` is only an initial `BGRX`/`RGBX` snapshot. Every exact-window
 frame-state record must remain opaque, and its complete saved packet history
 must have positive contiguous sequence numbers in recorded order. The rounded
 damage-time directory is storage only: one millisecond may contain multiple
 damage groups, which are reconstructed by each exact descending `flush`
 countdown. Startup layout/picture groups remain structurally validated but are
-not production evidence. Once both title-bound windows have stable tiled
-geometry, the runner records a baseline against the active exact IDR group and
-an end sequence before auxiliary exit. Each group in that interval has
+not production evidence. Once both title-bound windows are stable, the runner
+records a baseline against the active exact IDR group and its saved source
+geometry, then an end sequence before auxiliary exit. Each group in that interval has
 contiguous sequences, one terminal positive H.264 main region, and only the
 exact positive one-pixel right or bottom lossless RGB24/RGB32 edges allowed by
 its crop. Every observed `(window-size, main-region-size)` crop signature must
@@ -762,21 +812,36 @@ second, cover at least 99% of each production window, and account for at least
 exact VA-API encode/decode, client-packet, hardware-presentation, and pixel
 chain; safe warmup and post-auxiliary resize packets are not production
 evidence. The complete H.264 context suffix remains VA-bound through final
-quiescence. The client decode count equals its transmitted H.264 packet count;
-the server count may exceed it only by one completed terminal encode that was
-not transmitted during ordered shutdown, and that exception is recorded.
+quiescence. Normally the client decode count equals its transmitted H.264
+packet count. Ordered shutdown may leave exactly one received post-stimulus
+terminal packet incomplete on the client, or one completed terminal server
+encode untransmitted; either exception requires an otherwise exact complete
+packet sequence and is recorded. Larger or in-production differences fail.
 
 The auxiliary fixture must require an RGBA visual and expose a deterministic
 transparent border around its opaque input control. Its exact window must
 report `BGRA` or `RGBA`, expose both transparent and fully opaque pixels in
-every exact saved server-side source screenshot, and produce a nonempty set
-containing only positive WebP or RGB32 packets with contained geometry and
-exact group metadata. Client captures prove visible composition and input
-response; an X11 compositor is not required to preserve the source alpha
-channel in those captures. An RGB32 packet is accepted only with `BGRA` or
-`RGBA` `rgb_format`. H.264, RGB24, non-alpha RGB32, or an opaque auxiliary
-source format fails the auxiliary contract. A software H.264 encoder or
-decoder or software presentation renderer fails the complete gate.
+every collected server-side source screenshot scoped to that window, and
+produce a nonempty set containing only positive WebP or RGB32 packets with
+contained geometry and exact group metadata. These GLib-idle screenshots are
+window-level alpha samples, not packet-correlated evidence; ordered saved-packet
+and frame-state log records provide the packet-to-state binding. Client
+captures prove visible composition and input response; an X11 compositor is
+not required to preserve the source alpha channel in those captures. An RGB32
+packet is accepted only with `BGRA` or `RGBA` `rgb_format`. H.264, RGB24,
+non-alpha RGB32, or an opaque auxiliary source format fails the auxiliary
+contract. A software H.264 encoder or decoder or software presentation renderer
+fails the complete gate. The Vulkan profile additionally requires live
+`vkcube` RADV/render-node use. The OpenGL profile instead requires the
+native-Wayland `glmark2-wayland` synthetic OpenGL `jellyfish` benchmark with a
+no-alpha EGL visual, immutable
+vendor/renderer/version metadata from its quiesced output, an AMD Mesa/Radeon
+non-software renderer and driver mapping, the selected render node, and
+changing nonuniform forwarded frames. When its fixed source viewport is smaller
+than the tiled client backing, the exact logged OpenGL viewport binds the
+north-west source crop used for source-to-client pixel and channel-order proof.
+Both profiles then use the same VA-API encode/decode and client hardware-OpenGL
+presentation boundary.
 
 The adaptive-alpha Zed H.264 profile applies the same positive principle to one
 dynamic window. Exact saved-packet records bind H.264 to opaque frame state and

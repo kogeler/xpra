@@ -14,8 +14,9 @@ inherit that lock. If creation was interrupted, the next `live-venv` validates
 `.environment.partial.owner.json` and recovers only the deterministic
 `.environment.partial`. A markerless or ambiguous partial fails closed.
 
-Verify Podman, the private process-supervisor state, render-node access,
-application inputs, repository identity, and current patch resolution:
+Verify Podman and the private process-supervisor state, inspect the default
+render-node and Zed-path availability, and prove repository identity plus
+current patch resolution:
 
 ```bash
 make -C fork-maintenance doctor
@@ -24,6 +25,21 @@ make -C fork-maintenance workspace-create \
   STACK=develop WORKSPACE=live-preflight-01 PATCH_MODE=patched
 make -C fork-maintenance workspace-remove WORKSPACE=live-preflight-01
 ```
+
+`doctor` reports optional hardware/input-path availability; it does not turn
+those paths into global prerequisites for unrelated profiles. The selected live
+run itself fails closed unless its render node is a readable/writable character
+device and, for Zed, its chosen application input can be frozen and executed.
+
+Both live containers run as UID/GID 1001 in
+`--userns=keep-id:uid=1001,gid=1001,size=2048`. The explicit bound was verified
+against the real Ubuntu 26.04 server and Debian 13 client images, including
+writes to `/artifacts`, `/home/lab`, and `/run/user/1001`. It prevents an idle
+or running lab pair from reserving the user's complete subordinate-ID range.
+Never replace it with `--userns=host`, omit `size`, or enlarge the host
+`/etc/subuid` or `/etc/subgid` allocation. A coexistence audit keeps both lab
+containers alive while a separately owned `--userns=auto:size=2048` container
+is created and run, then removes only those explicitly labelled test objects.
 
 The runner freezes the unique source merge base already embedded in current
 `develop` and applies the selected case or stack in its build context; the
@@ -45,6 +61,44 @@ owner is launched from its frozen harness.
 The retained `jobs/live/.lifecycle.lock` is acquired before this freeze starts
 and held until the durable main owner is published. Status, abort, or removal
 therefore cannot interleave with the freeze-to-main ownership handoff.
+
+## Tracked client profiles and static CLI blocks
+
+[`profiles.yml`](../../profiles.yml) is the sole source of client-side network
+and quality profile names, values, and the default. Omitting `NETWORK_PROFILE`
+uses its declared `default_profile`. List the names without parsing the file in
+shell code:
+
+```bash
+make -C fork-maintenance live-profile-list
+```
+
+Pass any name returned above to any of the six public live wrappers:
+
+```bash
+make -C fork-maintenance live-h264 \
+  STACK=develop NETWORK_PROFILE=<listed-name> RUN=develop-h264-profile-01
+```
+
+The selected profile supplies only the Xpra client minimum quality, minimum
+speed, auto-refresh delay, refresh rate, and bandwidth limit. These controls
+are not server options and are never added to the server command. The common
+client bandwidth-detection setting is intentionally static rather than
+repeated in every profile.
+
+[`live-cli.yml`](../../live-cli.yml) is the sole source of all other static
+Xpra arguments. It groups them by server/client role, then by base, lifecycle,
+diagnostics, subcommand, or transport, with encoding and policy below each
+transport. The runner adds only genuinely dynamic values such as endpoint,
+session name, child command, display, and selected device. Do not duplicate a
+tracked YAML value in Python, Make, or a unit-test assertion.
+
+The standard acceptance ladder runs each public wrapper once with the YAML
+default. Selecting the other profiles is optional coverage, not a larger
+mandatory release matrix. It changes only client tuning: all codec, hardware,
+pixel, input, lifecycle, and cleanup gates remain identical and must still pass.
+The strict loader, both YAML files, and the selected profile name are frozen and
+hash-bound before the worker starts.
 
 The main worker reads only those run-owned inputs, so later source, harness,
 queue, or application-directory edits cannot change the run. Image cache tags
@@ -76,7 +130,7 @@ old/new applied-tree comparison that paths, modes, executable data,
 configuration, test assertions, runner behavior, and live assertions are
 unchanged, then run only resolution, whitespace, and fork-control checks and
 record the proof. This exception cannot cross `develop-rebase`; every upstream
-rebase requires all five fixed positive live profiles. Any semantic difference
+rebase requires all six fixed positive live profiles. Any semantic difference
 on an unchanged base also requires the declared live gates.
 
 Every named live acceptance run requires one nonempty reviewed `CASE` or
@@ -84,9 +138,11 @@ Every named live acceptance run requires one nonempty reviewed `CASE` or
 use the isolated/unit diagnostic paths; it cannot publish a live `PASS`.
 
 The complete public positive set is exactly `live-rgb`, `live-h264`,
-`live-xpra-detach`, `live-xpra-transport-loss`, and `live-xpra-hardware`.
-Fail-closed unit fixtures prove that invalid evidence is rejected; every named
-live target itself must prove its intended Xpra behavior and finish positive.
+`live-xpra-detach`, `live-xpra-transport-loss`, `live-xpra-hardware`, and
+`live-xpra-opengl-hardware`. Fail-closed unit fixtures prove that invalid
+evidence is rejected; every named live target itself must prove its intended
+Xpra behavior and finish positive. Their acceptance dimensions are fixed;
+`NETWORK_PROFILE` is the orthogonal client-only tuning overlay described above.
 
 ## RGB control
 
@@ -124,6 +180,21 @@ state, so its presence alone is not alpha evidence. An odd dimension may
 produce only the exact positive one-pixel, non-alpha lossless RGB edge tied to
 its H.264 damage group. Full-window, interior, larger, or unbound RGB fallback
 fails.
+
+The H.264 profiles intentionally use asymmetric CSC configuration:
+
+- the server uses `--csc-modules=libyuv` to convert Wayland `BGRX`/`RGBX` to
+  the `NV12` input accepted by its libva encoder;
+- the client uses `--csc-modules=none`, because its libva decoder already
+  returns `NV12` and the forced native OpenGL backing must render those planes
+  directly with its GPU shader.
+
+Do not enable client-side libyuv to make an acceptance profile easier to pass.
+That diagnostic variant can add a CPU `NV12`-to-RGB fallback or broaden the
+per-window CSC modes, masking the direct decode-to-OpenGL boundary. It cannot
+recover transparency lost through H.264 and cannot affect the server cleanup
+race. The `--encodings` allowlist is a separate control: selecting a CSC module
+does not discover or enable a codec.
 
 `RGBA`/`BGRA` frames must use an alpha-capable picture encoding and must never
 pass silently through H.264. The runner waits for initial picture activity,
@@ -169,33 +240,43 @@ make -C fork-maintenance live-wait RUN=xpra-transport-loss-01
 make -C fork-maintenance live-remove RUN=xpra-transport-loss-01
 ```
 
-Run the fixed multi-window hardware acceptance profile with adaptive alpha:
+Run both fixed multi-window hardware acceptance profiles with adaptive alpha:
 
 ```bash
 make -C fork-maintenance live-xpra-hardware \
   STACK=develop RUN=xpra-hardware-01
 make -C fork-maintenance live-wait RUN=xpra-hardware-01
 make -C fork-maintenance live-remove RUN=xpra-hardware-01
+
+make -C fork-maintenance live-xpra-opengl-hardware \
+  STACK=develop RUN=xpra-opengl-hardware-01
+make -C fork-maintenance live-wait RUN=xpra-opengl-hardware-01
+make -C fork-maintenance live-remove RUN=xpra-opengl-hardware-01
 ```
 
-This target fixes `APPLICATION=hardware`, `ENCODING=h264`,
-`H264_CLIENT_POLICY=adaptive-alpha`, `ALPHA_SCENARIOS=default`, and the
-application-exit lifecycle. Both endpoints advertise only the reviewed
-H.264/WebP/RGB set while preferring H.264. The runner resolves the primary
-`vkcube` and auxiliary GTK Xpra window IDs independently from their exact
-titles; window registration order is not evidence.
+The targets fix `APPLICATION=hardware` and `APPLICATION=opengl` respectively;
+both also fix `ENCODING=h264`, `H264_CLIENT_POLICY=adaptive-alpha`,
+`ALPHA_SCENARIOS=default`, and the application-exit lifecycle. Both endpoints
+advertise only the reviewed H.264/WebP/RGB set while preferring H.264. Each run
+resolves its primary and auxiliary GTK Xpra window IDs independently from their
+exact titles; window registration order is not evidence.
 
-The `vkcube` primary's first saved `window.info` is explicitly an initial
+The declarative manifest gates `live-wayland-h264-hardware` and
+`live-wayland-opengl-h264-hardware` map to these two Make wrappers respectively.
+The manifest strings are evidence requirements, not additional executable
+targets.
+
+Each opaque primary's first saved `window.info` is explicitly an initial
 snapshot and must report `BGRX` or `RGBX`; it is not final/per-frame evidence.
 Every exact-window `video` frame-state record must remain `BGRX`/`RGBX` with
 `want-alpha=False`. The saved packet history must have positive contiguous
 sequence numbers in recorded order. Rounded damage-time directories are
 storage buckets, not group identity: several real damage groups may share one
 millisecond bucket. The descending `flush` countdown reconstructs each exact
-group, while bucket-local indexes remain contiguous. Startup layout and
-picture groups are structurally validated but cannot satisfy the gate. After
-both title-bound windows reach stable tiled geometry, the runner records a
-baseline tied to the active exact IDR group. It closes the primary interval
+group, while bucket-local indexes remain contiguous. Startup layout and picture
+groups are structurally validated but cannot satisfy the gate. After both
+title-bound windows are stable, the runner records a baseline tied to the active
+exact IDR group and its saved source geometry. It closes the primary interval
 only after the thresholds below pass and before sending Escape to the
 auxiliary window. A production group contains exactly one terminal positive
 H.264 main region, optionally preceded by the unique exact one-pixel right
@@ -212,24 +293,45 @@ or post-auxiliary resize WebP/RGB packets do not count for or against these
 thresholds, but remain structurally validated. The complete H.264 context
 suffix through final quiescence must satisfy the exact VA-API encoder,
 saved-packet, client libva decoder, hardware OpenGL presentation,
-source-to-client pixel, and Vulkan-motion checks. Client decoded frames equal
-transmitted H.264 packets. At ordered shutdown the server may have exactly one
-additional completed, untransmitted terminal encode; larger or client-side
-count differences fail.
+source-to-client pixel, and primary-motion checks. Normally client decoded
+frames equal transmitted H.264 packets. Ordered shutdown may leave exactly one
+received post-stimulus terminal packet incomplete on the client, or one
+additional completed server encode untransmitted. Both exceptions require an
+otherwise exact complete packet sequence; larger or in-production differences
+fail.
+
+The Vulkan profile runs `vkcube` through native Wayland and requires its live
+process to hold the selected render node, map RADV, and produce changing
+nonuniform forwarded frames. The OpenGL profile uses the same launcher and
+evidence path but selects the native-Wayland `glmark2-wayland` synthetic OpenGL
+`jellyfish` benchmark with an explicit no-alpha EGL visual. Its fixed 640x480
+source may occupy a larger tiled client backing; the exact logged OpenGL
+viewport binds the north-west source crop used by the pixel comparison. After
+quiescence its stdout must contain one exact vendor, renderer, and version
+identity from the live GL context; the process must hold the selected render node, map the AMD
+Mesa/Radeon driver, reject `llvmpipe`, `softpipe`, `swrast`, and other software
+renderers, and produce changing nonuniform forwarded frames. This is
+server-application rendering evidence. Both profiles independently prove the
+client's hardware OpenGL presentation of libva-decoded H.264, so neither
+server-side graphics API substitutes for that client boundary.
 
 The auxiliary fixture runs through native Wayland, requires an RGBA visual,
 and paints a deterministic transparent border around its opaque interactive
 button before publishing main-loop readiness. Its initial `window.info` and
 every exact-window frame-state record must report `BGRA` or `RGBA` with
-`want-alpha=True`. Every saved server-side source screenshot must contain both
-nonopaque and fully opaque pixels. Its before/after client captures instead
-prove visible composition and input response; X11 composition may make their
-alpha channel opaque. It must produce a nonempty set containing only positive
-WebP or RGB32 packets, each with valid contained geometry and window size.
-Every RGB32 packet must identify `BGRA` or `RGBA`; H.264, RGB24, non-alpha
-RGB32, an opaque source format, or an unreviewed codec fails. Its visible
-pointer response and Escape handling remain mandatory, as do ordered
-application/server/client exit and exact owned-object cleanup.
+`want-alpha=True`. Every collected server-side source screenshot scoped to
+that window must contain both nonopaque and fully opaque pixels. Xpra writes
+these screenshots from a GLib idle callback against the then-current window;
+they are window-level alpha samples and are not associated with an individual
+saved packet. The ordered saved-packet and frame-state log records provide that
+separate packet-to-state proof. Its before/after client captures instead prove
+visible composition and input response; X11 composition may make their alpha
+channel opaque. It must produce a nonempty set containing only positive WebP or
+RGB32 packets, each with valid contained geometry and window size. Every RGB32
+packet must identify `BGRA` or `RGBA`; H.264, RGB24, non-alpha RGB32, an opaque
+source format, or an unreviewed codec fails. Its visible pointer response and
+Escape handling remain mandatory, as do ordered application/server/client exit
+and exact owned-object cleanup.
 
 Do not weaken either per-window contract, substitute a picture-fallback
 diagnostic, or encode a known failure as expected success. Every retry uses a
@@ -295,4 +397,4 @@ otherwise finalized live result.
 
 Prefix every live `RUN` with the current cycle identity. After all profiles are
 collected, reviewed, and individually removed, use the final two-phase cleanup
-in `cycle-cleanup.md` to delete the retained cycle results.
+in [`cycle-cleanup.md`](cycle-cleanup.md) to delete the retained cycle results.

@@ -29,15 +29,19 @@ TOOLS_ROOT = Path(__file__).resolve().parents[2] / "tools"
 sys.path.insert(0, str(TOOLS_ROOT))
 
 import container_payload
+import live_config
 import PIL
+import podman_policy
 from PIL import Image, ImageChops, ImageStat
 from profiles import (
     ALPHA_SCENARIOS,
     APPLICATIONS,
+    DEFAULT_NETWORK_PROFILE,
     H264_ACCEPTANCE_POLICIES,
     H264_CLIENT_POLICIES,
     H264_FALLBACK_POLICIES,
     LIFECYCLES,
+    NETWORK_PROFILES,
     ProfileError,
     scenario_specs,
     validate_profile,
@@ -51,6 +55,10 @@ SOURCE_REPOSITORY = MAIN_REPOSITORY_ROOT
 SELECTION_TOOL = INFRA_ROOT.parent / "upstream-tests" / "selection.py"
 BACKGROUND_SUPERVISOR = LAB_ROOT / "tools" / "background_job.py"
 PAYLOAD_HELPER = LAB_ROOT / "tools" / "container_payload.py"
+PODMAN_POLICY = LAB_ROOT / "tools" / "podman_policy.py"
+LIVE_CONFIG_MODULE = INFRA_ROOT / "live_config.py"
+NETWORK_PROFILES_CONFIG = LAB_ROOT / "profiles.yml"
+LIVE_CLI_CONFIG = LAB_ROOT / "live-cli.yml"
 DEFAULT_STATE_ROOT = MAIN_REPOSITORY_ROOT / ".artifacts" / "fork-maintenance"
 DEFAULT_ZED_DIRECTORY = Path.home() / ".local" / "zed.app"
 DEFAULT_RENDER_NODE = Path("/dev/dri/renderD128")
@@ -72,6 +80,7 @@ HARNESS_INPUTS = (
     INFRA_ROOT / "Containerfile",
     INFRA_ROOT / "interaction_fixture.py",
     INFRA_ROOT / "job.py",
+    LIVE_CONFIG_MODULE,
     INFRA_ROOT / "profiles.py",
     INFRA_ROOT / "requirements.txt",
     INFRA_ROOT / "run.py",
@@ -81,6 +90,9 @@ HARNESS_INPUTS = (
     SELECTION_TOOL,
     BACKGROUND_SUPERVISOR,
     PAYLOAD_HELPER,
+    PODMAN_POLICY,
+    NETWORK_PROFILES_CONFIG,
+    LIVE_CLI_CONFIG,
 )
 BUILD_CONTEXT_INPUTS = (
     INFRA_ROOT / ".containerignore",
@@ -91,8 +103,8 @@ BUILD_CONTEXT_INPUTS = (
     PAYLOAD_HELPER,
 )
 CONTAINER_PAYLOAD = "/opt/xpra-lab/container_payload.py"
-LIVE_CONTAINER_UID = "1001"
-LIVE_CONTAINER_GID = "1001"
+LIVE_CONTAINER_UID = 1001
+LIVE_CONTAINER_GID = 1001
 FRAME_LOG_CHUNK_BYTES = 256 * 1024
 FRAME_LOG_SCAN_BYTES = 64 * 1024 * 1024
 FRAME_LOG_TOTAL_BYTES = 8 * 1024 * 1024
@@ -231,6 +243,7 @@ SERVER_ARTIFACT_PATTERNS = (
     re.compile(r"screen-updates"),
     re.compile(r"zed\..+"),
     re.compile(r"vkcube\.(?:exit|pid|stderr|stdout)"),
+    re.compile(r"opengl\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"interaction\.(?:exit|pid|stderr|stdout)"),
 )
 CLIENT_ARTIFACT_PATTERNS = (
@@ -243,8 +256,46 @@ CLIENT_ARTIFACT_PATTERNS = (
 )
 
 
+@dataclass(frozen=True)
+class HardwareFixtureSpec:
+    """Bind one primary graphics API to the shared multi-window fixture."""
+
+    api: str
+    command: str
+    primary_name: str
+    title_patterns: tuple[str, ...]
+
+    @property
+    def pid_file(self) -> str:
+        return f"{self.primary_name}.pid"
+
+
+HARDWARE_FIXTURES = {
+    "hardware": HardwareFixtureSpec(
+        api="vulkan",
+        command="/opt/xpra-lab/start_hardware_fixture.sh",
+        primary_name="vkcube",
+        title_patterns=("vkcube",),
+    ),
+    "opengl": HardwareFixtureSpec(
+        api="opengl",
+        command="/opt/xpra-lab/start_hardware_fixture.sh opengl",
+        primary_name="opengl",
+        title_patterns=("glmark2",),
+    ),
+}
+MULTIWINDOW_HARDWARE_APPLICATIONS = frozenset(HARDWARE_FIXTURES)
+
+
 class LabFailure(RuntimeError):
     """Raised when a required diagnostic boundary is unavailable."""
+
+
+def hardware_fixture_spec(application: str) -> HardwareFixtureSpec:
+    try:
+        return HARDWARE_FIXTURES[application]
+    except KeyError as error:
+        raise LabFailure(f"application is not a multi-window hardware fixture: {application}") from error
 
 
 def ensure_private_directory(path: Path, *, create: bool = False) -> None:
@@ -356,51 +407,43 @@ def transport_encoding_options(
     if encoding == "rgb":
         if h264_client_policy != "strict":
             raise LabFailure("non-strict H.264 policies require the H.264 live profile")
-        if client:
-            return [
-                "--encodings=rgb",
-                "--opengl=no",
-                "--video-decoders=none",
-                "--csc-modules=none",
-            ]
-        return ["--encodings=rgb", "--video-encoders=none", "--csc-modules=none"]
-    if encoding != "h264":
+    elif encoding != "h264":
         raise LabFailure(f"unsupported live encoding: {encoding}")
-    encodings = {
-        "strict": "h264",
-        "adaptive-alpha": "h264,webp,rgb",
-        "fallback-auto": "h264,rgb",
-        "fallback-h264": "h264,rgb",
-    }[h264_client_policy]
-    if client:
-        options = [
-            "--video=yes",
-            f"--encodings={encodings}",
-            "--opengl=force:native",
-            "--video-decoders=libva",
-            "--csc-modules=none",
-        ]
-        if h264_client_policy in {"adaptive-alpha", "fallback-h264"}:
-            options.append("--encoding=h264")
-        return options
-    return [
-        "--video=yes",
-        f"--encodings={encodings}",
-        "--video-encoders=libva",
-        "--csc-modules=libyuv",
-    ]
+    role = "client" if client else "server"
+    try:
+        return list(live_config.transport_options(role, encoding, h264_client_policy))
+    except live_config.LiveConfigError as error:
+        raise LabFailure(str(error)) from error
 
 
-def server_debug_categories(application: str, h264_client_policy: str) -> str:
-    """Return the bounded server debug set required by one live application."""
-    del application, h264_client_policy
-    return "wayland,damage,encoding,encoder,argb"
+def static_cli_options(role: str, block: str) -> list[str]:
+    """Load one tracked static Xpra option block for command assembly."""
+    try:
+        return list(live_config.static_cli_options(role, block))
+    except live_config.LiveConfigError as error:
+        raise LabFailure(str(error)) from error
+
+
+def command_cli_options(role: str, command: str) -> list[str]:
+    """Load one tracked static Xpra subcommand option block."""
+    try:
+        return list(live_config.command_cli_options(role, command))
+    except live_config.LiveConfigError as error:
+        raise LabFailure(str(error)) from error
+
+
+def client_network_options(profile_name: str) -> list[str]:
+    """Render one tracked client-only network and quality profile."""
+    try:
+        return list(live_config.network_profile(profile_name).client_options())
+    except live_config.LiveConfigError as error:
+        raise LabFailure(str(error)) from error
 
 
 def live_user_options() -> list[str]:
     return [
         "--userns",
-        f"keep-id:uid={LIVE_CONTAINER_UID},gid={LIVE_CONTAINER_GID}",
+        podman_policy.keep_id_userns(LIVE_CONTAINER_UID, LIVE_CONTAINER_GID),
         "--user",
         f"{LIVE_CONTAINER_UID}:{LIVE_CONTAINER_GID}",
     ]
@@ -473,6 +516,10 @@ def run(
     timeout: float | None = None,
     announce: bool = True,
 ) -> subprocess.CompletedProcess[str]:
+    try:
+        podman_policy.validate_podman_argv(command)
+    except podman_policy.PodmanPolicyError as error:
+        raise LabFailure(str(error)) from error
     if announce:
         print(f"+ {format_command(command)}", flush=True)
     result = subprocess.run(
@@ -1216,6 +1263,9 @@ def fail_with_exited_server_artifacts(
         "interaction.exit",
         "vkcube.stderr",
         "vkcube.exit",
+        "opengl.stderr",
+        "opengl.stdout",
+        "opengl.exit",
     ):
         path = directory / name
         if not path.is_file():
@@ -1284,12 +1334,15 @@ def wait_for_hardware_fixture(
     server: str,
     server_pid: int,
     directory: Path,
+    application: str,
 ) -> None:
-    """Require both hardware children and the GTK main-loop readiness marker."""
+    """Require the selected graphics child and shared GTK auxiliary readiness."""
+    fixture = hardware_fixture_spec(application)
     probe = r"""
 import os
 import re
 import stat
+import sys
 from pathlib import Path
 
 def child_state(name):
@@ -1309,17 +1362,22 @@ def child_state(name):
         return False
     return True
 
-states = tuple(child_state(name) for name in ('interaction', 'vkcube'))
+primary_name = sys.argv[1]
+states = tuple(child_state(name) for name in ('interaction', primary_name))
 if False in states:
     raise SystemExit(76)
-marker = Path('/tmp/xpra-hardware-interaction-ready')
-try:
-    marker_details = marker.lstat()
-except FileNotFoundError:
-    marker_details = None
-if marker_details is not None and not stat.S_ISREG(marker_details.st_mode):
-    raise SystemExit(76)
-if all(state is True for state in states) and marker_details is not None:
+markers = [Path('/tmp/xpra-hardware-interaction-ready')]
+marker_states = []
+for marker in markers:
+    try:
+        marker_details = marker.lstat()
+    except FileNotFoundError:
+        marker_states.append(False)
+        continue
+    if not stat.S_ISREG(marker_details.st_mode):
+        raise SystemExit(76)
+    marker_states.append(True)
+if all(state is True for state in states) and all(marker_states):
     raise SystemExit(0)
 raise SystemExit(75)
 """
@@ -1335,23 +1393,28 @@ raise SystemExit(75)
             announce=False,
         )
         wait_for(
-            "Xpra server exit after hardware fixture readiness failure",
+            f"Xpra server exit after {fixture.api} fixture readiness failure",
             lambda: not container_process_exists(server, server_pid),
             timeout=15,
         )
-        server_exited("hardware fixture child exited before GTK readiness")
+        server_exited(f"{fixture.api} fixture child exited before GTK readiness")
 
     def ready() -> bool:
         if not container_process_exists(server, server_pid):
-            server_exited("Xpra server exited before hardware fixture readiness")
+            server_exited(f"Xpra server exited before {fixture.api} fixture readiness")
         result = podman_exec(
             server,
-            ["python3", "-c", probe],
+            [
+                "python3",
+                "-c",
+                probe,
+                fixture.primary_name,
+            ],
             check=False,
             announce=False,
         )
         if not container_process_exists(server, server_pid):
-            server_exited("Xpra server exited before hardware fixture readiness")
+            server_exited(f"Xpra server exited before {fixture.api} fixture readiness")
         if result.returncode == 0:
             return True
         if result.returncode == 75:
@@ -1360,9 +1423,9 @@ raise SystemExit(75)
             stop_failed_fixture()
         detail = result.stderr.strip()
         suffix = f": {detail[-2000:]}" if detail else ""
-        raise LabFailure(f"hardware fixture readiness probe failed{suffix}")
+        raise LabFailure(f"{fixture.api} fixture readiness probe failed{suffix}")
 
-    wait_for("hardware fixture GTK and Vulkan readiness", ready)
+    wait_for(f"hardware fixture GTK and {fixture.api} readiness", ready)
 
 
 def sha256_file(path: Path) -> str:
@@ -2707,6 +2770,61 @@ def add_background_comparison(
     evidence["image"]["reference_background_rgb"] = list(background_rgb)
 
 
+def crop_client_source_viewport(
+    directory: Path,
+    input_stem: str,
+    output_stem: str,
+    source_size: tuple[int, int],
+) -> dict[str, Any]:
+    """Crop the exact north-west Xpra source viewport from a larger backing."""
+    source_width, source_height = source_size
+    with Image.open(directory / f"{input_stem}.rgba.png") as source:
+        backing = source.convert("RGBA")
+    if (
+        source_width <= 0
+        or source_height <= 0
+        or source_width > backing.width
+        or source_height > backing.height
+    ):
+        raise LabFailure(
+            f"source viewport {source_size!r} does not fit backing {backing.size!r}"
+        )
+    crop = backing.crop((0, 0, source_width, source_height))
+    crop.save(directory / f"{output_stem}.rgba.png", format="PNG")
+    crop.convert("RGB").save(directory / f"{output_stem}.rgb.png", format="PNG")
+    save_alpha_visualization(crop, directory / f"{output_stem}.alpha.png")
+    return {
+        "image": analyze_image(crop),
+        "viewport": {
+            "backing_size": [backing.width, backing.height],
+            "origin": [0, 0],
+            "source_size": [source_width, source_height],
+        },
+    }
+
+
+def client_source_viewport_logged(
+    directory: Path,
+    source_size: tuple[int, int],
+    backing_size: tuple[int, int],
+) -> bool:
+    """Require the GL log to bind the source crop to the controlled backing."""
+    source_width, source_height = source_size
+    backing_width, backing_height = backing_size
+    if source_width > backing_width or source_height > backing_height:
+        return False
+    expected = (
+        f"viewport: (0, {backing_height - source_height}, "
+        f"{source_width}, {source_height}) for backing size="
+        f"({backing_width}, {backing_height})"
+    )
+    path = directory / "client.stdout"
+    return path.is_file() and expected in path.read_text(
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
 def read_os_release(container: str) -> dict[str, str]:
     result = podman_exec(
         container,
@@ -2760,7 +2878,7 @@ for descriptor in "/proc/$pid/fd/"*; do
     esac
 done
 printf '%s\n' '[gpu-mappings]'
-grep -E 'libvulkan_radeon|radeonsi_dri|swrast_dri|libgallium|libva\.so' "/proc/$pid/maps" 2>/dev/null || true
+grep -E 'libvulkan_radeon|libEGL_mesa|libGLX_mesa|radeonsi_dri|swrast_dri|libgallium|libva\.so' "/proc/$pid/maps" 2>/dev/null || true
 """
     result = podman_exec(
         container,
@@ -3351,11 +3469,11 @@ def adaptive_h264_frame_readiness_valid(
     updates: dict[str, Any] | None,
 ) -> bool:
     """Validate safe saved packets for the first decoded adaptive H.264 frame."""
-    if application not in {"hardware", "zed"}:
+    if application not in MULTIWINDOW_HARDWARE_APPLICATIONS | {"zed"}:
         return False
     allowed_initial_formats = (
         {"BGRX", "RGBX"}
-        if application == "hardware"
+        if application in MULTIWINDOW_HARDWARE_APPLICATIONS
         else {"BGRA", "BGRX", "RGBA", "RGBX"}
     )
     if (
@@ -3948,19 +4066,27 @@ def begin_hardware_h264_stimulus(
     server: str,
     directory: Path,
     xpra_wid: int,
-    geometry: dict[str, int],
 ) -> dict[str, Any]:
     """Bind the already-running stable primary stream before auxiliary input."""
-    window_size = (geometry["width"], geometry["height"])
     interval: dict[str, Any] | None = None
 
     def stable_phase_ready() -> bool:
         nonlocal interval
         updates = synchronize_saved_updates(server, directory, xpra_wid)
+        packets = updates.get("updates")
+        if (
+            not isinstance(packets, list)
+            or not packets
+            or not isinstance(packets[-1], dict)
+        ):
+            return False
+        window_size = _packet_window_size(packets[-1])
+        if window_size is None:
+            return False
         first_sequence = hardware_h264_phase_start_sequence(updates, window_size)
         sequences = [
             _exact_int(packet.get("sequence"), positive=True)
-            for packet in updates.get("updates", [])
+            for packet in packets
             if isinstance(packet, dict)
         ]
         if (
@@ -4045,7 +4171,7 @@ def h264_production_metrics(
     updates: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Measure dominant H.264 regions over one validated adaptive sequence."""
-    if application == "hardware":
+    if application in MULTIWINDOW_HARDWARE_APPLICATIONS:
         exact_updates = hardware_h264_stimulus_updates(updates)
     elif application == "zed":
         exact_updates = zed_h264_stimulus_updates(updates)
@@ -4053,7 +4179,7 @@ def h264_production_metrics(
         exact_updates = updates
     production = (
         hardware_h264_production_updates(exact_updates)
-        if application == "hardware"
+        if application in MULTIWINDOW_HARDWARE_APPLICATIONS
         else adaptive_h264_production_updates(exact_updates)
     )
     if production is None or not isinstance(exact_updates, dict):
@@ -4200,7 +4326,7 @@ def primary_h264_packet_contract_name(
     application: str,
     h264_client_policy: str,
 ) -> str:
-    if application == "hardware":
+    if application in MULTIWINDOW_HARDWARE_APPLICATIONS:
         return "alpha_safe_warmup_then_h264_with_only_lossless_rgb_edges"
     if h264_client_policy == "adaptive-alpha":
         return "adaptive_alpha_groups_with_dominant_h264_and_only_lossless_rgb_edges"
@@ -4898,6 +5024,7 @@ def match_h264_production_stream(
     *,
     allow_alpha_gaps: bool = False,
     allow_lossless_rgb_edges: bool = False,
+    allow_terminal_client_frame: bool = False,
     allow_terminal_server_frame: bool = False,
     allow_window_resize_gaps: bool = False,
 ) -> dict[str, Any]:
@@ -4952,12 +5079,18 @@ def match_h264_production_stream(
                 expected_frames,
                 expected_frames + 1,
             }
+        client_frames_match = client_frames == expected_frames
+        if allow_terminal_client_frame:
+            client_frames_match = client_frames in {
+                expected_frames - 1,
+                expected_frames,
+            }
         group_complete = bool(
             all(candidate["structurally_complete"] for candidate in grouped_candidates)
             and server_matches
             and client_matches
             and server_frames_match
-            and client_frames == expected_frames
+            and client_frames_match
         )
         for candidate in grouped_candidates:
             candidate["client_contexts"] = client_matches
@@ -4969,6 +5102,10 @@ def match_h264_production_stream(
             candidate["terminal_server_frame_untransmitted"] = bool(
                 allow_terminal_server_frame
                 and server_frames == expected_frames + 1
+            )
+            candidate["terminal_client_frame_inflight"] = bool(
+                allow_terminal_client_frame
+                and client_frames == expected_frames - 1
             )
     complete = [candidate for candidate in candidates if candidate["complete"]]
     selected = max(
@@ -5013,6 +5150,54 @@ def match_h264_production_stream(
         "selftest_contexts": selftest_contexts,
         "unmatched_contexts": unmatched_contexts,
     }
+
+
+def terminal_client_h264_frame_inflight(
+    directory: Path,
+    updates: dict[str, Any],
+) -> bool:
+    """Prove one received post-phase terminal frame may die with the client."""
+    packets = updates.get("updates")
+    interval = updates.get("h264_stimulus")
+    window_id = _exact_int(updates.get("window_id"), positive=True)
+    last_phase_sequence = (
+        _exact_int(interval.get("last_sequence"), positive=True)
+        if isinstance(interval, dict)
+        else None
+    )
+    if (
+        not isinstance(packets, list)
+        or not packets
+        or not all(isinstance(packet, dict) for packet in packets)
+        or window_id is None
+        or last_phase_sequence is None
+    ):
+        return False
+    saved = [
+        (int(packet["sequence"]), str(packet.get("encoding")))
+        for packet in packets
+        if _exact_int(packet.get("sequence"), positive=True) is not None
+    ]
+    terminal = packets[-1]
+    terminal_sequence = _exact_int(terminal.get("sequence"), positive=True)
+    if (
+        len(saved) != len(packets)
+        or terminal.get("encoding") != "h264"
+        or terminal_sequence is None
+        or terminal_sequence <= last_phase_sequence
+        or _exact_int(terminal.get("payload_bytes"), positive=True) is None
+    ):
+        return False
+    log_path = directory / "client.stdout"
+    if not log_path.is_file():
+        return False
+    client_log = log_path.read_text(encoding="utf-8", errors="replace")
+    received = [
+        (int(match.group("sequence")), match.group("encoding"))
+        for match in H264_PROCESS_DRAW_RE.finditer(client_log)
+        if int(match.group("window_id")) == window_id
+    ]
+    return received == saved
 
 
 def _typedict_literal(value: str) -> dict[str, Any]:
@@ -5073,7 +5258,17 @@ def h264_client_packet_chain(
             "window_id": window_id,
         }
     process_match = process_matches[0]
-    next_process = H264_PROCESS_DRAW_RE.search(client_log, process_match.end())
+    next_process = next(
+        (
+            match
+            for match in H264_PROCESS_DRAW_RE.finditer(
+                client_log,
+                process_match.end(),
+            )
+            if int(match.group("window_id")) == window_id
+        ),
+        None,
+    )
     draw_matches = [
         match
         for match in H264_DRAW_REGION_RE.finditer(
@@ -5181,11 +5376,21 @@ def h264_client_packet_chain(
     present_position = (
         ack_match.end() + present_match.start() if ack_match and present_match else -1
     )
-    next_ack = H264_ACK_RE.search(client_log, ack_match.end()) if ack_match else None
+    next_ack = (
+        next(
+            (
+                match
+                for match in H264_ACK_RE.finditer(client_log, ack_match.end())
+                if int(match.group("window_id")) == window_id
+            ),
+            None,
+        )
+        if ack_match
+        else None
+    )
     unambiguous_presentation = bool(
         present_position >= 0
         and (next_ack is None or present_position < next_ack.start())
-        and (next_process is None or present_position < next_process.start())
     )
     presentation_end = (
         ack_match.end() + present_match.end() if ack_match and present_match else 0
@@ -5235,7 +5440,7 @@ def h264_client_packet_chain(
         "nv12_painted": bool(paint_match),
         "payload_bytes": payload_bytes,
         "payload_sha256": saved.get("payload_sha256", ""),
-        "presented_before_later_work": presentation_complete,
+        "presented_before_later_ack": presentation_complete,
         "process_draw_matches_saved_packet": packet_fields_match,
         "sequence": sequence,
         "size": [width, height],
@@ -5260,6 +5465,10 @@ def h264_hardware_evidence(
         client_trace,
         allow_alpha_gaps=allow_alpha_gaps,
         allow_lossless_rgb_edges=allow_lossless_rgb_edges,
+        allow_terminal_client_frame=(
+            allow_terminal_server_frame
+            and terminal_client_h264_frame_inflight(directory, updates)
+        ),
         allow_terminal_server_frame=allow_terminal_server_frame,
         allow_window_resize_gaps=allow_window_resize_gaps,
     )
@@ -5310,8 +5519,9 @@ def h264_hardware_evidence(
 def application_contract(application: str) -> tuple[str, tuple[str, ...], str]:
     if application == "zed":
         return "/opt/xpra-lab/start_zed.sh", ("empty project", "zed"), "zed.pid"
-    if application == "hardware":
-        return "/opt/xpra-lab/start_hardware_fixture.sh", ("vkcube",), "vkcube.pid"
+    if application in MULTIWINDOW_HARDWARE_APPLICATIONS:
+        fixture = hardware_fixture_spec(application)
+        return fixture.command, fixture.title_patterns, fixture.pid_file
     if application == "vkcube":
         return (
             "vkcube --wsi wayland --width 640 --height 480 --suppress_popups",
@@ -6178,13 +6388,45 @@ def exercise_zed_h264_stability(
     }
 
 
-def capture_vulkan_motion(
+def load_opengl_evidence(path: Path) -> dict[str, Any]:
+    """Parse immutable renderer metadata from quiesced ``glmark2-wayland`` output."""
+    ensure_private_regular_file(path)
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise LabFailure("OpenGL fixture renderer evidence is invalid") from error
+    if not raw or len(raw) > 8 * 1024 * 1024 or b"\0" in raw:
+        raise LabFailure("OpenGL fixture renderer evidence has an invalid size")
+    try:
+        output = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise LabFailure("OpenGL fixture renderer evidence is not UTF-8") from error
+    payload = {"api": "OpenGL", "source": "glmark2-wayland"}
+    for key, label in (
+        ("renderer", "GL_RENDERER"),
+        ("vendor", "GL_VENDOR"),
+        ("version", "GL_VERSION"),
+    ):
+        values = {
+            match.strip()
+            for match in re.findall(rf"^\s*{label}:\s*(.+?)\s*$", output, re.MULTILINE)
+        }
+        if len(values) != 1:
+            raise LabFailure(f"OpenGL fixture renderer evidence has an invalid {key}")
+        value = values.pop()
+        if not value or len(value) > 512 or any(ord(character) < 32 for character in value):
+            raise LabFailure(f"OpenGL fixture renderer evidence has an invalid {key}")
+        payload[key] = value
+    return payload
+
+
+def capture_graphics_motion(
     container: str,
     window_id: str,
     directory: Path,
     initial: dict[str, Any],
 ) -> dict[str, Any]:
-    """Prove that the forwarded Vulkan window contains changing real frames."""
+    """Prove that the forwarded primary graphics window contains changing frames."""
     later: dict[str, Any] | None = None
 
     def changed() -> bool:
@@ -6204,7 +6446,7 @@ def capture_vulkan_motion(
         )
 
     time.sleep(0.5)
-    wait_for("changing nonuniform Vulkan frames", changed, timeout=15)
+    wait_for("changing nonuniform primary graphics frames", changed, timeout=15)
     assert later is not None
     return {
         "changed": True,
@@ -6355,7 +6597,7 @@ def saved_source_alpha_evidence(
     directory: Path,
     updates: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Measure alpha directly in the exact server-side source screenshots."""
+    """Measure alpha in collected screenshots scoped to one exact source window."""
     if not isinstance(updates, dict):
         raise LabFailure("interaction source updates are unavailable")
     window_id = _exact_int(updates.get("window_id"), positive=True)
@@ -6781,16 +7023,60 @@ def application_boundary_checks(
 ) -> dict[str, bool]:
     """Return checks observable for the selected tracked application."""
     render_node_open = str(render_node) in application_gpu["render_nodes"]
+    if application in MULTIWINDOW_HARDWARE_APPLICATIONS:
+        fixture = hardware_fixture_spec(application)
+        checks = {
+            "process_alive_at_capture": bool(application_activity.get("process_alive")),
+            "render_node_open": render_node_open,
+            "graphics_frames_changed": bool(
+                application_activity.get("graphics_motion", {}).get("changed")
+            ),
+        }
+        if fixture.api == "vulkan":
+            checks["radv_mapped"] = any(
+                "libvulkan_radeon" in mapping
+                for mapping in application_gpu["gpu_mappings"]
+            )
+            return checks
+        opengl = application_activity.get("opengl")
+        evidence = opengl if isinstance(opengl, dict) else {}
+        renderer = str(evidence.get("renderer", ""))
+        vendor = str(evidence.get("vendor", ""))
+        renderer_lower = renderer.casefold()
+        software = any(
+            token in renderer_lower
+            for token in ("llvmpipe", "softpipe", "swrast", "software rasterizer")
+        )
+        checks.update(
+            {
+                "opengl_context_reported": bool(
+                    renderer
+                    and evidence.get("api") == "OpenGL"
+                    and evidence.get("source") == "glmark2-wayland"
+                    and evidence.get("version")
+                ),
+                "opengl_hardware_renderer": bool(
+                    not software
+                    and ("amd" in renderer_lower or "radeonsi" in renderer_lower)
+                    and "amd" in vendor.casefold()
+                ),
+                "opengl_driver_mapped": any(
+                    "radeonsi_dri" in mapping or "libgallium" in mapping
+                    for mapping in application_gpu["gpu_mappings"]
+                ),
+            }
+        )
+        return checks
     radv_mapped = any(
         "libvulkan_radeon" in mapping for mapping in application_gpu["gpu_mappings"]
     )
-    if application in {"hardware", "vkcube"}:
+    if application == "vkcube":
         return {
             "process_alive_at_capture": bool(application_activity.get("process_alive")),
             "render_node_open": render_node_open,
             "radv_mapped": radv_mapped,
-            "vulkan_frames_changed": bool(
-                application_activity.get("vulkan_motion", {}).get("changed")
+            "graphics_frames_changed": bool(
+                application_activity.get("graphics_motion", {}).get("changed")
             ),
         }
     if application != "zed":
@@ -6939,14 +7225,14 @@ def classify_boundaries(
             encoding_checks.update(
                 h264_dominance_checks(primary_metrics)
             )
-            if args.application == "hardware":
+            if args.application in MULTIWINDOW_HARDWARE_APPLICATIONS:
                 encoding_checks.update(
                     matched_h264_stream_stability_checks(
                         production,
                         primary_metrics,
                     )
                 )
-        if args.application == "hardware":
+        if args.application in MULTIWINDOW_HARDWARE_APPLICATIONS:
             encoding_checks["interaction_window_alpha_capable_packets"] = (
                 only_positive_alpha_capable_packets(interaction_updates)
             )
@@ -6986,7 +7272,7 @@ def classify_boundaries(
         }
         presentation_checks = {
             "packet_chain_presented": bool(packet_chain.get("complete")),
-            "opengl_presented": bool(packet_chain.get("presented_before_later_work")),
+            "opengl_presented": bool(packet_chain.get("presented_before_later_ack")),
             "hardware_opengl_renderer": bool(renderer) and not software_renderer,
             "hardware_desktop_renderer": bool(client_desktop.get("hardware_renderer")),
             "client_render_node_open": str(args.render_node)
@@ -7022,6 +7308,10 @@ def classify_boundaries(
         final_checks["window_central_alpha_opaque"] = (
             direct_image["central_opaque_ratio"] >= 0.99
         )
+    if args.application in MULTIWINDOW_HARDWARE_APPLICATIONS:
+        final_checks["source_viewport_placement_logged"] = bool(
+            pixel_evidence.get("source_viewport_placement_logged")
+        )
     lifecycle_checks = lifecycle_boundary_checks(args.lifecycle, lifecycle)
     if args.application == "zed":
         interaction_checks = {
@@ -7030,12 +7320,12 @@ def classify_boundaries(
             ),
             "pointer_changed_pixels": bool(interaction.get("pixels_changed")),
         }
-    elif args.application in {"hardware", "gtk"}:
+    elif args.application in MULTIWINDOW_HARDWARE_APPLICATIONS | {"gtk"}:
         interaction_checks = {
             "pointer_marker_present": bool(interaction.get("pointer_marker_present")),
             "pointer_changed_pixels": bool(interaction.get("pointer_changed_pixels")),
         }
-        if args.application == "hardware":
+        if args.application in MULTIWINDOW_HARDWARE_APPLICATIONS:
             interaction_checks.update(interaction_alpha_content_checks(interaction))
         if args.lifecycle == "application-exit":
             interaction_checks["keyboard_escape_received"] = bool(
@@ -7326,18 +7616,25 @@ def run_scenario(
             podman_exec(container, ["test", "-w", "/artifacts"])
 
         versions = {
-            "server": podman_exec(server, ["xpra", "--version"]).stdout.strip(),
-            "client": podman_exec(client, ["xpra", "--version"]).stdout.strip(),
+            "server": podman_exec(
+                server,
+                ["xpra", *command_cli_options("server", "version")],
+            ).stdout.strip(),
+            "client": podman_exec(
+                client,
+                ["xpra", *command_cli_options("client", "version")],
+            ).stdout.strip(),
         }
         operating_systems = {
             "server": read_os_release(server),
             "client": read_os_release(client),
         }
-        write_command_output(
-            server,
-            ["vulkaninfo", "--summary"],
-            directory / "server-vulkaninfo.txt",
-        )
+        if args.application in {"zed", "hardware", "vkcube"}:
+            write_command_output(
+                server,
+                ["vulkaninfo", "--summary"],
+                directory / "server-vulkaninfo.txt",
+            )
         server_vainfo: subprocess.CompletedProcess[str] | None = None
         if args.encoding == "h264":
             server_vainfo = write_command_output(
@@ -7383,29 +7680,16 @@ def run_scenario(
             "xpra",
             "seamless",
             SERVER_DISPLAY,
-            "--minimal",
-            "--backend=wayland",
-            "--daemon=no",
-            "--displayfd=1",
+            *static_cli_options("server", "base"),
             f"--bind-tcp=0.0.0.0:{SERVER_PORT},auth=none",
-            "--socket-dir=/tmp/server-runtime/xpra-sockets",
-            "--socket-dirs=/tmp/server-runtime/xpra-sockets",
-            "--sessions-dir=/tmp/server-runtime/xpra-sessions",
             (
                 f"--session-name={args.application}-{args.encoding}-"
                 f"{args.h264_client_policy}-lab"
             ),
-            "--use-display=no",
-            "--exit-with-client=no",
-            "--exit-with-children=yes",
-            "--terminate-children=yes",
+            *static_cli_options("server", "lifecycle"),
             f"--start-child={child_command}",
-            "--video-scaling=0",
-            "--auto-refresh-delay=0",
-            "--html=off",
             *encoding_options,
-            "-d",
-            server_debug_categories(args.application, args.h264_client_policy),
+            *static_cli_options("server", "diagnostics"),
         ]
         server_environment = [
             "XPRA_SCREEN_UPDATES_DIRECTORY=/artifacts/screen-updates",
@@ -7449,8 +7733,13 @@ def run_scenario(
             SERVER_PORT,
             directory / "server.stderr",
         )
-        if args.application == "hardware":
-            wait_for_hardware_fixture(server, server_pid, directory)
+        if args.application in MULTIWINDOW_HARDWARE_APPLICATIONS:
+            wait_for_hardware_fixture(
+                server,
+                server_pid,
+                directory,
+                args.application,
+            )
 
         client_encoding_options = transport_encoding_options(
             args.encoding,
@@ -7493,14 +7782,10 @@ def run_scenario(
             "xpra",
             "attach",
             f"tcp://{client_endpoint}",
-            "--minimal",
-            "--compressors=none",
-            "--quality=100",
-            "--speed=100",
-            "--reconnect=no",
+            *static_cli_options("client", "base"),
+            *client_network_options(args.network_profile),
             *client_encoding_options,
-            "-d",
-            "draw,paint,cairo,window,gtk,alpha,libva",
+            *static_cli_options("client", "diagnostics"),
         ]
         client_environment = [f"DISPLAY={CLIENT_DISPLAY}"]
         if scenario.disable_alpha:
@@ -7561,8 +7846,7 @@ def run_scenario(
             [
                 "xpra",
                 "info",
-                "wayland-0",
-                "--socket-dir=/tmp/server-runtime/xpra-sockets",
+                *command_cli_options("server", "info"),
             ],
             directory / "server-info.txt",
             check=False,
@@ -7725,21 +8009,23 @@ def run_scenario(
                     directory,
                     interaction,
                 )
-        elif args.application in {"hardware", "vkcube"}:
-            application_activity["vulkan_motion"] = capture_vulkan_motion(
+        elif args.application in MULTIWINDOW_HARDWARE_APPLICATIONS | {"vkcube"}:
+            application_activity["graphics_motion"] = capture_graphics_motion(
                 client, window_id, directory, direct
             )
-            if args.application == "hardware" and args.encoding == "h264":
+            if (
+                args.application in MULTIWINDOW_HARDWARE_APPLICATIONS
+                and args.encoding == "h264"
+            ):
                 hardware_h264_interval = begin_hardware_h264_stimulus(
                     server,
                     directory,
                     xpra_wid,
-                    geometry,
                 )
 
         interaction_window: tuple[str, str] | None = None
         interaction_xpra_wid: int | None = None
-        if args.application == "hardware":
+        if args.application in MULTIWINDOW_HARDWARE_APPLICATIONS:
 
             def interaction_window_ready() -> bool:
                 nonlocal interaction_window
@@ -7756,8 +8042,7 @@ def run_scenario(
                 [
                     "xpra",
                     "info",
-                    "wayland-0",
-                    "--socket-dir=/tmp/server-runtime/xpra-sockets",
+                    *command_cli_options("server", "info"),
                 ],
                 directory / "server-info-interaction.txt",
                 check=False,
@@ -7818,7 +8103,7 @@ def run_scenario(
 
         lifecycle: dict[str, Any] = {"mode": args.lifecycle}
         if args.lifecycle == "application-exit":
-            if args.application in {"hardware", "vkcube"}:
+            if args.application in MULTIWINDOW_HARDWARE_APPLICATIONS | {"vkcube"}:
                 podman_exec(
                     client,
                     [
@@ -7858,7 +8143,7 @@ def run_scenario(
                     "xpra",
                     "detach",
                     f"tcp://xpra-server:{SERVER_PORT}",
-                    "--compressors=none",
+                    *command_cli_options("client", "detach"),
                 ],
                 check=False,
             )
@@ -7935,6 +8220,10 @@ def run_scenario(
         collected_containers.add(server)
         pull_all_container_artifacts(client, directory, "client")
         collected_containers.add(client)
+        if args.application == "opengl":
+            application_activity["opengl"] = load_opengl_evidence(
+                directory / "opengl.stdout"
+            )
         updates = parse_saved_updates(directory, xpra_wid)
         updates["initial_pixel_format"] = saved_window_initial_pixel_format(
             directory, xpra_wid
@@ -7948,7 +8237,10 @@ def run_scenario(
                 "last_sequence": stimulus.get("last_sequence"),
                 "window_size": stimulus.get("window_size"),
             }
-        elif args.application == "hardware" and args.encoding == "h264":
+        elif (
+            args.application in MULTIWINDOW_HARDWARE_APPLICATIONS
+            and args.encoding == "h264"
+        ):
             stimulus = interaction.get("h264_stimulus")
             if not isinstance(stimulus, dict):
                 raise LabFailure("hardware H.264 stimulus evidence is unavailable")
@@ -7974,13 +8266,80 @@ def run_scenario(
                 interaction_updates,
             )
         log_evidence = inspect_logs(directory)
+        direct_evidence = direct
+        focused_evidence = focused_screen
+        direct_rgb_path = directory / "window-direct.rgb.png"
+        focused_rgb_path = directory / "window-focused-screen.rgb.png"
+        source_viewport: dict[str, Any] | None = None
+        if args.application in MULTIWINDOW_HARDWARE_APPLICATIONS:
+            stimulus = updates.get("h264_stimulus")
+            window_size_value = (
+                stimulus.get("window_size") if isinstance(stimulus, dict) else None
+            )
+            if (
+                not isinstance(window_size_value, list)
+                or len(window_size_value) != 2
+            ):
+                raise LabFailure("hardware source viewport size is unavailable")
+            source_width = _exact_int(window_size_value[0], positive=True)
+            source_height = _exact_int(window_size_value[1], positive=True)
+            if source_width is None or source_height is None:
+                raise LabFailure("hardware source viewport size is invalid")
+            source_size = (source_width, source_height)
+            direct_evidence = crop_client_source_viewport(
+                directory,
+                "window-direct",
+                "window-direct-source-viewport",
+                source_size,
+            )
+            direct_evidence["xwd"] = {
+                **direct["xwd"],
+                "source_viewport": direct_evidence["viewport"],
+            }
+            focused_evidence = crop_client_source_viewport(
+                directory,
+                "window-focused-screen",
+                "window-focused-source-viewport",
+                source_size,
+            )
+            focused_evidence["xwd"] = {
+                **focused_screen["xwd"],
+                "source_viewport": focused_evidence["viewport"],
+            }
+            add_background_comparison(
+                focused_evidence,
+                directory / "window-focused-source-viewport.rgba.png",
+                background_rgb,
+            )
+            backing_size = tuple(
+                int(value)
+                for value in direct_evidence["viewport"]["backing_size"]
+            )
+            source_viewport = {
+                "direct": direct_evidence,
+                "focused_screen": focused_evidence,
+                "placement_logged": bool(
+                    backing_size == source_size
+                    or client_source_viewport_logged(
+                        directory,
+                        source_size,
+                        backing_size,
+                    )
+                ),
+            }
+            direct_rgb_path = directory / "window-direct-source-viewport.rgb.png"
+            focused_rgb_path = directory / "window-focused-source-viewport.rgb.png"
         pixel_evidence, source_image = pixel_pipeline_evidence(
             directory,
             updates["screenshots"],
-            directory / "window-direct.rgb.png",
-            directory / "window-focused-screen.rgb.png",
+            direct_rgb_path,
+            focused_rgb_path,
             pixel_error_limit(args.application, args.encoding),
         )
+        if source_viewport is not None:
+            pixel_evidence["source_viewport_placement_logged"] = source_viewport[
+                "placement_logged"
+            ]
         hardware: dict[str, Any] = {
             "application": application_gpu,
             "render_node": str(args.render_node),
@@ -7995,7 +8354,7 @@ def run_scenario(
             allow_alpha_gaps = False
             allow_lossless_rgb_edges = args.h264_client_policy == "adaptive-alpha"
             if args.h264_client_policy == "adaptive-alpha":
-                if args.application == "hardware":
+                if args.application in MULTIWINDOW_HARDWARE_APPLICATIONS:
                     h264_production_updates = hardware_h264_context_updates(
                         updates
                     ) or {
@@ -8017,8 +8376,12 @@ def run_scenario(
                 h264_production_updates,
                 allow_alpha_gaps=allow_alpha_gaps,
                 allow_lossless_rgb_edges=allow_lossless_rgb_edges,
-                allow_terminal_server_frame=args.application == "hardware",
-                allow_window_resize_gaps=args.application == "hardware",
+                allow_terminal_server_frame=(
+                    args.application in MULTIWINDOW_HARDWARE_APPLICATIONS
+                ),
+                allow_window_resize_gaps=(
+                    args.application in MULTIWINDOW_HARDWARE_APPLICATIONS
+                ),
             )
             hardware["h264_encode"] = h264_hardware["server"]
             hardware["h264_decode"] = h264_hardware["client"]
@@ -8030,8 +8393,8 @@ def run_scenario(
             application_gpu=application_gpu,
             log_evidence=log_evidence,
             updates=updates,
-            direct=direct,
-            composited=focused_screen["image"],
+            direct=direct_evidence,
+            composited=focused_evidence["image"],
             source_image=source_image,
             codec_hardware=hardware,
             interaction=interaction,
@@ -8047,6 +8410,7 @@ def run_scenario(
             "client": {
                 "alpha_disabled": scenario.disable_alpha,
                 "compositor": compositor,
+                "network_options": client_network_options(args.network_profile),
                 "os_release": operating_systems["client"],
                 "version": versions["client"],
             },
@@ -8061,11 +8425,13 @@ def run_scenario(
                 "pixel_pipeline": pixel_evidence,
                 "root_after": root_after,
                 "source": source_image,
+                "source_viewport": source_viewport,
             },
             "lifecycle": lifecycle,
             "lifecycle_profile": args.lifecycle,
             "logs": log_evidence,
             "name": scenario.name,
+            "network_profile": args.network_profile,
             "result": "completed",
             "server": {
                 "os_release": operating_systems["server"],
@@ -8247,6 +8613,12 @@ def main() -> int:
         help="run the reviewed positive alpha scenario",
     )
     parser.add_argument(
+        "--network-profile",
+        choices=NETWORK_PROFILES,
+        default=DEFAULT_NETWORK_PROFILE,
+        help="tracked client-side network and quality profile",
+    )
+    parser.add_argument(
         "--zed-directory",
         type=Path,
         default=DEFAULT_ZED_DIRECTORY,
@@ -8296,6 +8668,7 @@ def main() -> int:
             encoding=args.encoding,
             h264_client_policy=args.h264_client_policy,
             alpha_scenarios=args.alpha_scenarios,
+            network_profile_name=args.network_profile,
         )
     except ProfileError as error:
         raise LabFailure(str(error)) from error
@@ -8304,6 +8677,12 @@ def main() -> int:
     if args.source_variant is not None:
         raise LabFailure("live acceptance does not support clean source variants")
     transport_encoding_options(args.encoding, args.h264_client_policy, client=True)
+    static_cli_options("server", "base")
+    static_cli_options("server", "lifecycle")
+    static_cli_options("server", "diagnostics")
+    static_cli_options("client", "base")
+    static_cli_options("client", "diagnostics")
+    client_network_options(args.network_profile)
     if args.run_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.run_id):
         raise LabFailure(f"invalid run ID: {args.run_id!r}")
     bound_values = (
@@ -8479,6 +8858,7 @@ def main() -> int:
         "encoding": args.encoding,
         "h264_client_policy": args.h264_client_policy,
         "lifecycle_profile": args.lifecycle,
+        "network_profile": args.network_profile,
         "invocation": {
             "alpha_scenarios": args.alpha_scenarios,
             "application": args.application,
@@ -8487,6 +8867,7 @@ def main() -> int:
             "job_id": os.environ.get("XPRA_LAB_JOB_ID"),
             "lifecycle": args.lifecycle,
             "libva_driver": args.libva_driver,
+            "network_profile": args.network_profile,
             "render_node": str(args.render_node),
             "run_id": result_name,
             "selection": server_selection.name,

@@ -22,7 +22,8 @@ All workspace operations and fingerprint publication are serialized by retained
 
 This lifecycle is supported only while the host remains on `develop`. Temporary
 branches belong only to the exceptional clean host-worktree flow in
-`patch-cycle.md`; they are not an isolated-workspace alternative.
+[`patch-cycle.md`](patch-cycle.md); they are not an isolated-workspace
+alternative.
 
 ## Start boundary
 
@@ -220,9 +221,9 @@ transaction. The maintained case patch and every host source file remain
 untouched.
 
 When several workspaces and named runs belong to one completed cycle, prefer
-the two-phase `cycle-clean-plan` / `cycle-clean` flow in `cycle-cleanup.md`.
-Unlike direct workspace removal, its planner proves that each staged workspace
-tree is exactly represented by the current patch queue and binds every target
-to one reviewed confirmation digest. The planner never performs staging
-recovery; any case/workspace marker or partial must first go through its public
-exact recovery target.
+the two-phase `cycle-clean-plan` / `cycle-clean` flow in
+[`cycle-cleanup.md`](cycle-cleanup.md). Unlike direct workspace removal, its
+planner proves that each staged workspace tree is exactly represented by the
+current patch queue and binds every target to one reviewed confirmation digest.
+The planner never performs staging recovery; any case/workspace marker or
+partial must first go through its public exact recovery target.

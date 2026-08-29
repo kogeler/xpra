@@ -28,7 +28,11 @@ fork-maintenance/
 ├── infra/upstream-tests/   embedded-source Ubuntu test runner
 ├── infra/live/             direct Xpra and physical-GPU runner
 ├── infra/deb-packages/     mount-free Ubuntu/Debian package builder
+├── profiles.yml            client-only live network/quality profiles
+├── live-cli.yml            static server/client Xpra CLI blocks
+├── tools/background_job.py  common owned process supervisor
 ├── tools/container_payload.py  common validated Podman tar transport
+├── tools/podman_policy.py  bounded rootless user-namespace policy
 ├── tools/contrib.py        sync, branch, patch, and manifest gates
 ├── docs/runbooks/          operator workflows
 ├── AGENTS.md               scoped agent rules
@@ -157,22 +161,34 @@ make -C fork-maintenance test-wait RUN=develop-focused-01
 make -C fork-maintenance live-xpra-hardware \
   STACK=develop RUN=develop-hardware-01
 make -C fork-maintenance live-wait RUN=develop-hardware-01
+
+make -C fork-maintenance live-xpra-opengl-hardware \
+  STACK=develop RUN=develop-opengl-hardware-01
+make -C fork-maintenance live-wait RUN=develop-opengl-hardware-01
 ```
 
-The five public live wrappers are positive acceptance gates: Zed RGB,
+The six public live wrappers are positive acceptance gates: Zed RGB,
 adaptive-alpha Zed H.264, RGB detach, RGB transport-loss fault injection, and
-multi-window hardware H.264. They fix every profile dimension and require a
-nonempty reviewed selection; clean-source and picture-fallback diagnostics
-cannot publish `PASS`.
+the separate multi-window Vulkan and native-Wayland OpenGL hardware-H.264
+profiles. They fix every acceptance dimension and require a nonempty reviewed
+selection; clean-source and picture-fallback diagnostics cannot publish `PASS`.
+Their client-only network/quality overlay comes from
+[`profiles.yml`](profiles.yml), whose declared default is used unless
+`NETWORK_PROFILE=<name>` is supplied. All other static Xpra arguments come from
+[`live-cli.yml`](live-cli.yml); both files are frozen with each RUN and are the
+sole value authority rather than duplicated Python or Make tables.
 
-The hardware target resolves both windows by title. The primary's initial
+Both hardware targets resolve their two windows by title. The primary's initial
 `BGRX`/`RGBX` snapshot and dynamic opaque frame-state history lead to stable,
 predominant H.264 main regions plus complete per-crop coverage by only exact
 one-pixel lossless RGB codec edges, all through the VA-API and
 hardware-presentation chain. Its deterministic transparent native-Wayland GTK
 auxiliary must prove transparent and opaque pixels and emit only positive WebP
 or alpha-bearing RGB32 packets. See the live runbook for the exact grouping,
-thresholds, and evidence contract.
+thresholds, and evidence contract. The Vulkan primary proves RADV `vkcube`;
+the OpenGL primary proves a hardware-rendered changing native-Wayland
+`glmark2-wayland` `jellyfish` benchmark with a no-alpha EGL visual and exact
+source-viewport placement inside the client backing.
 
 Use the separate status, logs, collect, and exact cleanup targets documented in
 the runbooks. Abort a running or lost uncollected test only with
@@ -211,7 +227,7 @@ must be removed or narrowed in the quarantine case.
 Every explicit upstream rebase then requires the complete current validation,
 even if every patch applied without a textual refresh: offline fork-control
 tests, tests-only controls for both production cases, patched focused and native
-gates, all three complete upstream workflow legs, and all five fixed positive
+gates, all three complete upstream workflow legs, and all six fixed positive
 live profiles. A new upstream-suite failure enters the single quarantine only
 after the exact module reproduces on the clean rebased source in the same mode;
 the clean quarantine gates and patched matrix are rerun after that change.
@@ -256,7 +272,7 @@ make -C fork-maintenance deb-remove RUN=packages-ubuntu-01
 
 Use `DISTRO=debian-13` and a different `RUN` for Debian. These amd64 builds need
 an x86-64 Podman host, network access, and sufficient disk space; packages are
-build unsigned with `dpkg-buildpackage -us -uc`. Automatic dbgsym generation is
+built unsigned with `dpkg-buildpackage -us -uc`. Automatic dbgsym generation is
 disabled and debug-symbol packages are rejected before a tar can be accepted.
 The manual-only `deb-packages.yml` workflow builds both validated tars from one
 frozen selection snapshot, stages and verifies a draft with

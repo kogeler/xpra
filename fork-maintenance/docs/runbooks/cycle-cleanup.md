@@ -163,12 +163,13 @@ Ordinary cycle cleanup deliberately keeps:
   and DEB terminal plus per-image-key locks;
 - input-keyed build contexts and label-verified Podman images;
 - the upstream-test ccache volume;
-- hash-locked live and local tooling virtual environments.
+- the hash-locked live environment and any local tooling virtual environment.
 
-These are shared caches, not cycle-owned results. The current upstream test
-image and ccache have their own explicit, label-verified removal targets where
-documented. Removing live caches or virtual environments is an owner-reviewed
-disk-maintenance action, not part of patch finalization.
+These are shared caches, not cycle-owned results. The current upstream-test
+image has its own explicit, label-verified removal target. Persistent ccache
+has no ordinary automatic removal target. Removing ccache, live caches, or
+virtual environments is an owner-reviewed disk-maintenance action, not part of
+patch finalization.
 
 The owned `cycle-cleanups/` directory is retained as transaction
 infrastructure. A successful cleanup leaves it empty; a marker or exact hidden

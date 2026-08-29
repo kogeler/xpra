@@ -76,7 +76,8 @@ create a tracked report or history directory for the investigation.
 
 An upstream-only failing test is the exception to behavior-based case
 creation: update the single `upstream-test-quarantine` duty case under the
-rules in `test-quarantine.md`; do not create a production case for it.
+rules in [`test-quarantine.md`](test-quarantine.md); do not create a production
+case for it.
 
 ## Reassess an existing patch
 
