@@ -26,6 +26,7 @@ SOURCE_MIRROR = Path("/work/source.git")
 SOURCE = Path("/work/xpra")
 OUTPUT = Path("/work/output")
 BUILD_DEPENDENCIES = Path("/work/build-dependencies")
+PACKAGE_OUTPUT = Path("/work")
 DISTROS = {
     "ubuntu-26.04": {"id": "ubuntu", "version": "26.04", "codename": "resolute"},
     "debian-13": {"id": "debian", "version": "13", "codename": "trixie"},
@@ -452,7 +453,7 @@ def build_packages(source_commit: str) -> tuple[Path, ...]:
     environment.update(
         {
             "BUILD_TYPE": "DEB",
-            "DEB_BUILD_OPTIONS": f"parallel={os.cpu_count() or 1}",
+            "DEB_BUILD_OPTIONS": f"parallel={os.cpu_count() or 1} noautodbgsym",
             "DPKG_DEB_COMPRESSOR_LEVEL": "6",
             "DPKG_DEB_COMPRESSOR_TYPE": "xz",
             "SOURCE_DATE_EPOCH": epoch,
@@ -463,9 +464,17 @@ def build_packages(source_commit: str) -> tuple[Path, ...]:
         cwd=SOURCE,
         env=environment,
     )
-    packages = tuple(sorted(Path("/work").glob("*.deb")))
+    packages = tuple(sorted(PACKAGE_OUTPUT.glob("*.deb")))
     if not packages:
         raise BuildFailure("dpkg-buildpackage produced no DEB packages")
+    debug_packages = tuple(
+        package.name for package in packages if "-dbgsym_" in package.name
+    )
+    if debug_packages:
+        raise BuildFailure(
+            "dpkg-buildpackage produced forbidden dbgsym packages despite "
+            f"DEB_BUILD_OPTIONS=noautodbgsym: {', '.join(debug_packages)}"
+        )
     return packages
 
 
@@ -504,6 +513,10 @@ def emit_output(
             ).stdout.strip()
             for field in ("Package", "Version", "Architecture")
         }
+        if fields["package"].endswith("-dbgsym") or "-dbgsym_" in destination.name:
+            raise BuildFailure(
+                f"debug-symbol DEB packages are forbidden: {destination.name}"
+            )
         if (
             not fields["package"].startswith("xpra")
             or fields["version"] != debian_version

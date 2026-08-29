@@ -162,6 +162,8 @@ def synthetic_deb(
 def package_manifest(
     args: argparse.Namespace,
     package: Path,
+    *,
+    package_field: str = "xpra",
 ) -> dict[str, object]:
     digest = job.sha256_file(package)
     return {
@@ -177,7 +179,7 @@ def package_manifest(
             {
                 "architecture": "amd64",
                 "name": package.name,
-                "package": "xpra",
+                "package": package_field,
                 "sha256": digest,
                 "size": package.stat().st_size,
                 "version": "6.6-r42479-1",
@@ -202,12 +204,21 @@ def write_package_tar(
     args: argparse.Namespace,
     *,
     package_name: str = "xpra_6.6-r42479-1_amd64.deb",
+    package_field: str = "xpra",
 ) -> Path:
     package = root / package_name
-    package.write_bytes(synthetic_deb())
+    package.write_bytes(
+        synthetic_deb(
+            control=(
+                f"Package: {package_field}\n"
+                "Version: 6.6-r42479-1\n"
+                "Architecture: amd64\n"
+            ).encode()
+        )
+    )
     manifest = root / "manifest.json"
     manifest.write_text(
-        json.dumps(package_manifest(args, package)),
+        json.dumps(package_manifest(args, package, package_field=package_field)),
         encoding="utf-8",
     )
     checksums = root / "SHA256SUMS"
@@ -688,6 +699,26 @@ class DebianArchiveTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(job.JobError, "control metadata does not match"):
                 job.validate_package_tar(archive, args)
+
+    def test_rejects_dbgsym_packages_by_filename_and_control_metadata(self) -> None:
+        for label, package_name in (
+            (
+                "canonical",
+                "xpra-codecs-dbgsym_6.6-r42479-1_amd64.deb",
+            ),
+            ("renamed", "xpra_6.6-r42479-1_amd64.deb"),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                args = build_args(root)
+                archive = write_package_tar(
+                    root,
+                    args,
+                    package_name=package_name,
+                    package_field="xpra-codecs-dbgsym",
+                )
+                with self.assertRaisesRegex(job.JobError, "debug-symbol DEB"):
+                    job.validate_package_tar(archive, args)
 
 
 class ContainerBoundaryTests(unittest.TestCase):
@@ -2666,6 +2697,7 @@ class ReleaseTests(unittest.TestCase):
         github_sha: str = "1" * 40,
         release_id: int = 42,
         draft: bool = True,
+        published_at: str | None = None,
     ) -> dict[str, object]:
         return {
             "assets": [
@@ -2680,10 +2712,55 @@ class ReleaseTests(unittest.TestCase):
             "draft": draft,
             "id": release_id,
             "name": "Test",
-            "prerelease": True,
+            "prerelease": False,
+            "published_at": published_at,
             "tag_name": tag,
             "target_commitish": github_sha,
         }
+
+    def owned_published_release(
+        self,
+        root: Path,
+        *,
+        index: int,
+        published_at: str,
+        version: str | None = None,
+    ) -> dict[str, object]:
+        directory = root / f"release-{index}"
+        directory.mkdir()
+        _notes, assets = self.release_files(directory)
+        github_sha = f"{index:040x}"
+        release_version = version or f"6.6-r{42478 + index}-1"
+        transaction = job.release_transaction_record(
+            run_id=str(10000 + index),
+            attempt="1",
+            github_sha=github_sha,
+            version=release_version,
+            assets=job.release_asset_metadata(assets),
+        )
+        notes = directory / "release-notes.md"
+        notes.write_text(
+            job.release_notes_body(
+                github_sha=github_sha,
+                source="f" * 40,
+                selection=job.ACTIVE_SELECTION,
+                revision=42478 + index,
+                transaction=transaction,
+            ),
+            encoding="utf-8",
+        )
+        notes.chmod(0o600)
+        release = self.remote_release(
+            notes=notes,
+            assets=assets,
+            tag=job.release_transaction_tag(transaction),
+            github_sha=github_sha,
+            release_id=index,
+            draft=False,
+            published_at=published_at,
+        )
+        release["name"] = release_version
+        return release
 
     def recovery_draft(
         self,
@@ -2723,7 +2800,7 @@ class ReleaseTests(unittest.TestCase):
             tag=tag,
             github_sha=github_sha,
         )
-        release["name"] = f"Kogeler Xpra DEB {version}"
+        release["name"] = version
         return release, transaction, assets
 
     def test_authenticated_release_listing_paginates_and_includes_drafts(self) -> None:
@@ -2773,12 +2850,15 @@ class ReleaseTests(unittest.TestCase):
         ):
             job.authenticated_releases()
 
-        duplicate_tag = (
+        duplicate_tag = [
             {"draft": True, "id": 42, "tag_name": "same"},
             {"draft": True, "id": 43, "tag_name": "same"},
-        )
-        with self.assertRaisesRegex(job.JobError, "tag is ambiguous"):
-            job.listed_release_by_tag("same", duplicate_tag)
+        ]
+        with (
+            patch.object(job, "gh_json_list", return_value=duplicate_tag),
+            self.assertRaisesRegex(job.JobError, "duplicate tag identity"),
+        ):
+            job.authenticated_releases()
 
     def test_authenticated_release_listing_rejects_oversized_page(self) -> None:
         oversized = [
@@ -2790,6 +2870,164 @@ class ReleaseTests(unittest.TestCase):
             self.assertRaisesRegex(job.JobError, "requested page size"),
         ):
             job.authenticated_releases()
+
+    def test_remote_release_requires_a_normal_release_and_exact_title(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            notes, assets = self.release_files(Path(raw))
+            release = self.remote_release(notes=notes, assets=assets)
+            for field, value in (
+                ("prerelease", True),
+                ("name", "Kogeler Xpra DEB 6.6-r42479-1"),
+            ):
+                with self.subTest(field=field):
+                    changed = dict(release)
+                    changed[field] = value
+                    with self.assertRaisesRegex(job.JobError, "metadata does not match"):
+                        job.validate_remote_release(
+                            changed,
+                            tag="test-tag",
+                            title="Test",
+                            notes_body=notes.read_text(encoding="utf-8"),
+                            github_sha="1" * 40,
+                            asset_metadata=job.release_asset_metadata(assets),
+                            draft=True,
+                        )
+
+    def test_retention_keeps_three_newest_owned_releases_only(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            owned = [
+                self.owned_published_release(
+                    root,
+                    index=index,
+                    published_at=f"2026-08-{20 + index:02d}T12:00:00Z",
+                )
+                for index in range(1, 6)
+            ]
+            foreign = {
+                "body": "manual release",
+                "draft": False,
+                "id": 900,
+                "tag_name": "manual-v1",
+            }
+            draft = copy.deepcopy(owned[0])
+            draft.update(id=901, draft=True, tag_name="owned-draft")
+            remote = {int(release["id"]): release for release in owned}
+            tags = {
+                str(release["tag_name"]): str(release["target_commitish"])
+                for release in owned
+                if release["id"] != 1
+            }
+            commands: list[list[str]] = []
+
+            def listing() -> tuple[dict[str, object], ...]:
+                return (*reversed(tuple(remote.values())), foreign, draft)
+
+            def optional(arguments: list[str], _label: str):
+                release_id = int(arguments[-1].rsplit("/", 1)[-1])
+                return remote.get(release_id)
+
+            def tag_target(tag: str) -> str | None:
+                return tags.get(tag)
+
+            def command_mock(argv: list[str], **_kwargs: object):
+                commands.append(argv)
+                target = argv[-1]
+                if "/git/refs/tags/" in target:
+                    tags.pop(target.rsplit("/", 1)[-1], None)
+                elif "/releases/" in target:
+                    remote.pop(int(target.rsplit("/", 1)[-1]), None)
+                else:
+                    raise AssertionError(argv)
+                return completed(argv)
+
+            with (
+                patch.object(job, "authenticated_releases", side_effect=listing),
+                patch.object(job, "gh_optional_json", side_effect=optional),
+                patch.object(job, "tag_commit", side_effect=tag_target),
+                patch.object(job, "command", side_effect=command_mock),
+            ):
+                removed = job.enforce_release_retention(
+                    current_tag=str(owned[-1]["tag_name"])
+                )
+
+            self.assertEqual(
+                set(removed),
+                {str(owned[0]["tag_name"]), str(owned[1]["tag_name"])},
+            )
+            self.assertEqual(set(remote), {3, 4, 5})
+            self.assertNotIn(str(owned[1]["tag_name"]), tags)
+            self.assertIn(900, {foreign["id"]})
+            self.assertEqual(draft["draft"], True)
+            for release_id in (1, 2):
+                tag = str(owned[release_id - 1]["tag_name"])
+                release_delete = commands.index(
+                    [
+                        "gh",
+                        "api",
+                        "--method",
+                        "DELETE",
+                        f"repos/{job.RELEASE_REPOSITORY}/releases/{release_id}",
+                    ]
+                )
+                if release_id == 2:
+                    tag_delete = commands.index(
+                        [
+                            "gh",
+                            "api",
+                            "--method",
+                            "DELETE",
+                            f"repos/{job.RELEASE_REPOSITORY}/git/refs/tags/{tag}",
+                        ]
+                    )
+                    self.assertLess(tag_delete, release_delete)
+
+    def test_retention_fails_closed_before_deleting_changed_owned_release(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            owned = [
+                self.owned_published_release(
+                    root,
+                    index=index,
+                    published_at=f"2026-08-{20 + index:02d}T12:00:00Z",
+                )
+                for index in range(1, 5)
+            ]
+            owned[0]["name"] = "tampered"
+            with (
+                patch.object(job, "authenticated_releases", return_value=tuple(owned)),
+                patch.object(job, "command") as command_mock,
+                self.assertRaisesRegex(job.JobError, "metadata does not match"),
+            ):
+                job.enforce_release_retention(
+                    current_tag=str(owned[-1]["tag_name"])
+                )
+            command_mock.assert_not_called()
+
+    def test_retention_refuses_to_delete_a_current_release_outside_newest_three(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            owned = [
+                self.owned_published_release(
+                    root,
+                    index=index,
+                    published_at=f"2026-08-{20 + index:02d}T12:00:00Z",
+                )
+                for index in range(1, 5)
+            ]
+            with (
+                patch.object(job, "authenticated_releases", return_value=tuple(owned)),
+                patch.object(job, "tag_commit") as tag_commit,
+                patch.object(job, "command") as command_mock,
+                self.assertRaisesRegex(job.JobError, "not among the newest three"),
+            ):
+                job.enforce_release_retention(
+                    current_tag=str(owned[0]["tag_name"])
+                )
+            tag_commit.assert_not_called()
+            command_mock.assert_not_called()
 
     def test_rollback_keeps_release_authority_until_exact_tag_is_gone(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -2934,16 +3172,28 @@ class ReleaseTests(unittest.TestCase):
                 commands,
             )
 
-    def test_recovery_never_mutates_published_or_tag_only_attempts(self) -> None:
+    def test_recovery_never_mutates_successful_published_or_tag_only_attempts(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw:
             release, transaction, _assets = self.recovery_draft(Path(raw))
             release["draft"] = False
+            action_run = {
+                "conclusion": "success",
+                "event": "workflow_dispatch",
+                "head_sha": "1" * 40,
+                "id": 12345,
+                "path": job.RELEASE_WORKFLOW,
+                "repository": {"full_name": job.RELEASE_REPOSITORY},
+                "run_attempt": 1,
+                "status": "completed",
+            }
             with (
                 patch.object(job, "authenticated_releases", return_value=(release,)),
                 patch.object(job, "tag_commit", return_value="1" * 40),
-                patch.object(job, "gh_json") as gh_json,
+                patch.object(job, "gh_json", return_value=action_run) as gh_json,
                 patch.object(job, "command") as command_mock,
-                self.assertRaisesRegex(job.JobError, "already published"),
+                self.assertRaisesRegex(job.JobError, "not an exact failed workflow"),
             ):
                 job.reconcile_prior_release_attempts(
                     run_id="12345",
@@ -2955,7 +3205,7 @@ class ReleaseTests(unittest.TestCase):
                     revision=42479,
                     asset_metadata=transaction["assets"],
                 )
-            gh_json.assert_not_called()
+            gh_json.assert_called_once()
             command_mock.assert_not_called()
 
             with (
@@ -2973,6 +3223,54 @@ class ReleaseTests(unittest.TestCase):
                     revision=42479,
                     asset_metadata=transaction["assets"],
                 )
+
+    def test_prior_failed_published_attempt_resumes_retention_without_duplicate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            release, transaction, _assets = self.recovery_draft(
+                Path(raw),
+                partial_assets=False,
+            )
+            release["draft"] = False
+            release["published_at"] = "2026-08-29T12:00:00Z"
+            action_run = {
+                "conclusion": "cancelled",
+                "event": "workflow_dispatch",
+                "head_sha": "1" * 40,
+                "id": 12345,
+                "path": job.RELEASE_WORKFLOW,
+                "repository": {"full_name": job.RELEASE_REPOSITORY},
+                "run_attempt": 1,
+                "status": "completed",
+            }
+            with (
+                patch.object(job, "authenticated_releases", return_value=(release,)),
+                patch.object(job, "tag_commit", return_value="1" * 40),
+                patch.object(job, "gh_json", return_value=action_run),
+                patch.object(
+                    job,
+                    "enforce_release_retention",
+                    return_value=(),
+                ) as retention,
+                patch.object(job, "command") as command_mock,
+            ):
+                recovered = job.reconcile_prior_release_attempts(
+                    run_id="12345",
+                    attempt="2",
+                    github_sha="1" * 40,
+                    version="6.6-r42479-1",
+                    source="2" * 40,
+                    selection=job.ACTIVE_SELECTION,
+                    revision=42479,
+                    asset_metadata=transaction["assets"],
+                )
+            self.assertEqual(
+                recovered,
+                "kogeler-deb-6.6-r42479-1-run12345-attempt1",
+            )
+            retention.assert_called_once_with(current_tag=recovered)
+            command_mock.assert_not_called()
 
     def test_recovery_rejects_wrong_workflow_attempt_before_deletion(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -3382,6 +3680,11 @@ class ReleaseTests(unittest.TestCase):
                     side_effect=(created, draft, published),
                 ) as gh_json,
                 patch.object(job, "tag_commit", return_value=github_sha),
+                patch.object(
+                    job,
+                    "enforce_release_retention",
+                    return_value=("expired-tag",),
+                ) as retention,
             ):
                 job.publish_release(
                     directory=root,
@@ -3405,8 +3708,14 @@ class ReleaseTests(unittest.TestCase):
                     "repos/kogeler/xpra/releases/42",
                     "-F",
                     "draft=false",
+                    "-F",
+                    "prerelease=false",
                 ],
             )
+            create_arguments = gh_json.call_args_list[0].args[0]
+            self.assertIn("name=Test", create_arguments)
+            self.assertIn("prerelease=false", create_arguments)
+            self.assertNotIn("prerelease=true", create_arguments)
             self.assertFalse(
                 any(argv[:3] == ["gh", "release", "edit"] for argv in commands)
             )
@@ -3447,7 +3756,63 @@ class ReleaseTests(unittest.TestCase):
                 (root / "publication.json").read_text(encoding="utf-8")
             )
             self.assertEqual(publication["release_id"], 42)
-            self.assertEqual(publication["stage"], "published")
+            self.assertEqual(publication["stage"], "retention-complete")
+            self.assertEqual(publication["retention_removed_tags"], ["expired-tag"])
+            retention.assert_called_once_with(current_tag=tag)
+
+    def test_retention_failure_rolls_back_the_newly_published_release(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            notes, assets = self.release_files(root)
+            tag = "test-tag"
+            github_sha = "1" * 40
+            created = self.remote_release(notes=notes, assets=[])
+            draft = self.remote_release(notes=notes, assets=assets)
+            published = self.remote_release(notes=notes, assets=assets, draft=False)
+
+            with (
+                patch.object(job, "require_gh_release_cli"),
+                patch.object(job, "listed_release_by_tag", return_value=None),
+                patch.object(job, "require_gh_absent"),
+                patch.object(job, "command", return_value=completed([])),
+                patch.object(
+                    job,
+                    "gh_json",
+                    side_effect=(created, draft, published),
+                ),
+                patch.object(job, "tag_commit", return_value=github_sha),
+                patch.object(
+                    job,
+                    "enforce_release_retention",
+                    side_effect=job.JobError("synthetic retention failure"),
+                ),
+                patch.object(job, "rollback_release", return_value=([], 42)) as rollback,
+                self.assertRaisesRegex(job.JobError, "synthetic retention failure"),
+            ):
+                job.publish_release(
+                    directory=root,
+                    tag=tag,
+                    title="Test",
+                    notes=notes,
+                    github_sha=github_sha,
+                    assets=assets,
+                )
+
+            rollback.assert_called_once_with(
+                tag=tag,
+                title="Test",
+                notes_body=notes.read_text(encoding="utf-8"),
+                github_sha=github_sha,
+                asset_metadata=job.release_asset_metadata(assets),
+                release_id=42,
+                create_attempted=True,
+                publish_attempted=True,
+            )
+            publication = json.loads(
+                (root / "publication.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(publication["stage"], "rolled-back")
+            self.assertEqual(publication["cleanup_errors"], [])
 
     def test_malformed_create_response_is_recovered_and_journaled_by_immutable_id(
         self,
@@ -3651,7 +4016,11 @@ class ReleaseTests(unittest.TestCase):
                     "checkout_source_check",
                     return_value=checkout_state,
                 ),
-                patch.object(job, "reconcile_prior_release_attempts") as reconcile,
+                patch.object(
+                    job,
+                    "reconcile_prior_release_attempts",
+                    return_value=None,
+                ) as reconcile,
                 patch.object(job, "publish_release") as publish,
             ):
                 self.assertEqual(job.ci_release(args), 0)
@@ -3668,6 +4037,14 @@ class ReleaseTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(publish.call_args.kwargs["github_sha"], checkout)
+            self.assertEqual(
+                publish.call_args.kwargs["title"],
+                "6.6-r42479-1",
+            )
+            self.assertEqual(
+                publish.call_args.kwargs["tag"],
+                "kogeler-deb-6.6-r42479-1-run12345-attempt2",
+            )
             reconcile.assert_called_once_with(
                 run_id="12345",
                 attempt="2",

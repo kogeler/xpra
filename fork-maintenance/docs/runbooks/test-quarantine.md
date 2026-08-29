@@ -17,8 +17,10 @@ entry maps exactly to one changed `tests/unittests/<module>.py` path.
 
 Before adding a module:
 
-1. freeze and record current fork master with `isolated-start-check`;
-2. reproduce the module failure on clean master in every affected matrix leg;
+1. freeze and record the source embedded in current `develop` with
+   `isolated-start-check`;
+2. reproduce the module failure on that clean source in every affected matrix
+   leg;
 3. confirm that build/setup completed and that the failure belongs to the
    named module;
 4. compare the exact canonical Actions run when available;
@@ -42,10 +44,12 @@ Update `[quarantine].modules`, `tests.list`, and the case README before export.
 `patch_sha256` and `paths` remain automation-derived. Review that each changed
 file is the exact module named by the manifest.
 
-## Mandatory rebase reassessment
+## Mandatory reassessment after an explicit upstream refresh
 
-After every fork-master rebase and before applying the quarantine patch, run all
-three gates against clean production and clean tests:
+After every operator-selected upstream rebase and before applying the
+quarantine patch to the new base, run all three gates against clean production
+and clean tests. Merely observing that a master ref advanced does not trigger a
+rebase or block testing the existing `develop` queue.
 
 ```bash
 make -C fork-maintenance test-start \
