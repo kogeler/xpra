@@ -1,8 +1,10 @@
 # Patch stacks
 
 `develop.toml` is the complete downstream queue in application order. It
-contains only the two active cases and declares their combined focused, native,
-full, and physical-GPU gates.
+contains the two production cases plus the single test-quarantine duty case and
+declares their combined focused, quarantine, native, full, and physical-GPU
+gates. `develop` is the stable queue slug, not a Git-branch requirement for
+branch-agnostic consumers.
 
 Add another stack only when a durable integration scenario requires a strict
 subset or a different dependency-safe composition. A stack never replaces an

@@ -9,7 +9,7 @@ exec env \
     XDG_CACHE_HOME=/tmp/zed-cache \
     XDG_CONFIG_HOME=/tmp/zed-config \
     WAYLAND_DEBUG=1 \
-    /opt/zed.app/libexec/zed-editor \
+    /home/lab/live-input/zed.app/libexec/zed-editor \
         --user-data-dir=/tmp/zed-data \
         > /artifacts/zed.stdout \
         2> /artifacts/zed.stderr
