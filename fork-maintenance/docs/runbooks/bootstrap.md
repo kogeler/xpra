@@ -9,6 +9,13 @@ runner prerequisite. The lifecycle creates no systemd unit and never invokes
 `systemctl`; the upstream-compatible image's `libsystemd-dev` package is only a
 source-build dependency.
 
+Rootless Podman needs one subordinate UID and GID range that can supply at
+least the reviewed 2048-ID allocation. The runners bound every allocating
+`keep-id`, `nomap`, or `auto` namespace with an explicit `size`; they never use
+`--userns=host` and never edit `/etc/subuid` or `/etc/subgid`. On the reference
+host, one standard 65536-ID range is sufficient for the bounded live and
+independent-container coexistence gate.
+
 The private artifacts filesystem must support Linux anonymous temporary files
 and `linkat(AT_EMPTY_PATH)`. Immutable background owner, completion, and status
 records are fsynced and linked into place without a named temporary file; the
@@ -156,7 +163,8 @@ make -C fork-maintenance stack-check STACK=develop
 
 When published fork-only commits were replayed, the operator later publishes
 the reviewed branch with the exact-SHA `--force-with-lease` procedure in
-`publish-develop.md`. Neither this automation nor an agent pushes the rewrite.
+[`publish-develop.md`](publish-develop.md). Neither this automation nor an
+agent pushes the rewrite.
 
 When fork-control files are still uncommitted, do not switch or rebase the
 dirty checkout. Use `isolated-start-check` and the named workspace flow against
@@ -166,8 +174,8 @@ editing, committing, or publishing the unchanged current base.
 
 After each explicitly selected rebase, reassess the single test-quarantine case
 on the new clean source in all three matrix modes before applying it. Follow
-`test-quarantine.md`; a newly green module must leave the quarantine in the
-same reviewed cycle.
+[`test-quarantine.md`](test-quarantine.md); a newly green module must leave the
+quarantine in the same reviewed cycle.
 
 ## Runtime root
 

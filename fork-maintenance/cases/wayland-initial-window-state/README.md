@@ -18,6 +18,13 @@ for both opaque and alpha-bearing buffers. Popup damage is emitted only after
 the image and its pixel format are published, so a buffer-format transition
 cannot encode the new frame using the previous frame's alpha state.
 
+The required live gate keeps endpoint CSC roles asymmetric. Server-side
+libyuv converts opaque Wayland buffers to the `NV12` required by libva encode;
+the client deliberately disables software CSC so libva-decoded `NV12` reaches
+the forced native OpenGL shader directly. Client-side libyuv may be useful for
+diagnosis, but it cannot restore alpha lost in H.264 and must not hide the
+per-window CSC-capability boundary this patch protects.
+
 ## Patch ownership
 
 `fix.patch` owns the Wayland model/subsystem paths, the video-source selection
@@ -33,16 +40,22 @@ its manifest metadata. The clean host-worktree fallback may use `patch-update`.
 
 Run the focused Wayland and initial-damage modules, the native Wayland gate,
 and all three upstream unit-test legs. The complete `develop` stack also
-requires the fixed adaptive-alpha/default hardware-H.264 live profile. Its
-exact title-bound `vkcube` window has an initial `BGRX`/`RGBX` snapshot and
-dynamic opaque frame-state proof. Startup layout and picture packets remain
-validated but are not acceptance evidence. With both title-bound windows at
-stable tiled geometry, an exact interval tied to the active IDR group must show
+requires both fixed adaptive-alpha/default hardware-H.264 live profiles. Their
+exact title-bound opaque primary is `vkcube` for one run and the native-Wayland
+`glmark2-wayland` `jellyfish` benchmark for the other. Each has an initial
+`BGRX`/`RGBX` snapshot and dynamic opaque frame-state proof. The fixed OpenGL
+source viewport is bound to its exact logged placement inside the client
+backing. Startup layout and picture packets remain validated but are not
+acceptance evidence. With both title-bound windows stable, an exact interval
+tied to the active IDR group and saved source geometry must show
 dominant H.264 main regions and complete per-crop coverage by only exact
 one-pixel lossless RGB codec edges through the VA-API and hardware-presentation
-chain. Its separately title-bound native-Wayland GTK window uses a required
-RGBA visual and deterministic transparent border; every saved source
-screenshot must prove transparent and opaque pixels, and its packets may
-contain only positive WebP or alpha-bearing RGB32, with no H.264 or RGB24.
-Visible pixels, real input, ordered application exit, and owned cleanup remain
-mandatory. A fallback diagnostic is not this gate.
+chain. The Vulkan run additionally proves RADV; the OpenGL run proves a live
+non-software AMD Mesa context, render-node use, and changing frames. Their
+common native-Wayland GTK auxiliary uses a required RGBA visual and
+deterministic transparent border; every collected source screenshot scoped to
+that exact window must prove transparent and opaque pixels. Those asynchronous
+window samples are independent of the packet-to-frame-state binding. Its
+packets may contain only positive WebP or alpha-bearing RGB32, with no H.264 or
+RGB24. Visible pixels, real input, ordered application exit, and owned cleanup
+remain mandatory. A fallback diagnostic is not either gate.

@@ -26,6 +26,7 @@ from typing import Any, NoReturn
 
 import background_job
 import container_payload
+import podman_policy
 import tomllib
 
 AUTOMATION_ROOT = Path(__file__).resolve().parent.parent
@@ -85,6 +86,7 @@ SUPPORTED_GATES = frozenset(
         "full-no-compat",
         "live-rgb",
         "live-wayland-h264-hardware",
+        "live-wayland-opengl-h264-hardware",
     }
 )
 CASE_KINDS = frozenset({"production", "test-quarantine"})
@@ -273,6 +275,10 @@ def run(
     check: bool = True,
     text: bool = True,
 ) -> subprocess.CompletedProcess[Any]:
+    try:
+        podman_policy.validate_podman_argv(command)
+    except podman_policy.PodmanPolicyError as error:
+        fail(str(error))
     result = subprocess.run(
         list(command),
         cwd=cwd,
@@ -4698,8 +4704,10 @@ def validate_live_status(
         "image_provenance",
         "job_id",
         "lifecycle",
+        "network_profile",
         "render_node",
         "result",
+        "reviewed_selection",
         "run_id",
         "selection",
         "selection_provenance",

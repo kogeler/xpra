@@ -3132,8 +3132,10 @@ class CycleCleanupTest(unittest.TestCase):
                             "image_provenance",
                             "job_id",
                             "lifecycle",
+                            "network_profile",
                             "render_node",
                             "result",
+                            "reviewed_selection",
                             "run_id",
                             "selection",
                             "selection_provenance",
@@ -3374,6 +3376,18 @@ class CycleCleanupTest(unittest.TestCase):
             {target.path for target in plan.targets},
             {status_path, log, remove, result},
         )
+
+    def test_cleanup_requires_the_reviewed_live_selection_check(self) -> None:
+        status_path, _log, _result = self.collected_live_result("audit-live-01")
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        status["report_checks"].pop("reviewed_selection")
+        status_path.write_text(json.dumps(status) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(contrib.ContribError, "validation state"):
+            contrib.build_cleanup_plan(
+                self.repo,
+                "audit",
+                inspect_runtime=False,
+            )
 
     def test_cleanup_rejects_a_noncurrent_live_status_schema(self) -> None:
         status_path, _log, _result = self.collected_live_result("audit-live-01")

@@ -176,6 +176,7 @@ class LiveJobTest(unittest.TestCase):
             "input_provenance": provenance,
             "job_id": JOB_ID,
             "lifecycle": "application-exit",
+            "network_profile": job.DEFAULT_NETWORK_PROFILE,
             "owner": job.OWNER,
             "process": {
                 "completion": str(job.completion_path(run)),
@@ -247,8 +248,16 @@ class LiveJobTest(unittest.TestCase):
         scenario = {
             "artifact_collection_passed": True,
             "artifact_sha256": {"evidence.txt": job.sha256_file(artifact)},
+            "client": {
+                "network_options": list(
+                    live_run.live_config.network_profile(
+                        str(record["network_profile"])
+                    ).client_options()
+                )
+            },
             "cleanup": {"passed": True},
             "name": "default-alpha",
+            "network_profile": record["network_profile"],
             "result": "passed",
         }
         scenario_report = scenario_root / "report.json"
@@ -264,12 +273,14 @@ class LiveJobTest(unittest.TestCase):
                     "encoding": "rgb",
                     "h264_client_policy": "strict",
                     "lifecycle_profile": "application-exit",
+                    "network_profile": record["network_profile"],
                     "invocation": {
                         "alpha_scenarios": "default",
                         "application": "zed",
                         "h264_client_policy": "strict",
                         "job_id": JOB_ID,
                         "lifecycle": "application-exit",
+                        "network_profile": record["network_profile"],
                         "render_node": record["render_node"],
                         "run_id": run,
                         "selection": record["selection"],
@@ -361,6 +372,7 @@ class LiveJobTest(unittest.TestCase):
             encoding="h264",
             h264_client_policy="adaptive-alpha",
             lifecycle="application-exit",
+            network_profile=job.DEFAULT_NETWORK_PROFILE,
             render_node=None,
             run="hardware-profile",
             selection="stacks/develop",
@@ -416,6 +428,7 @@ class LiveJobTest(unittest.TestCase):
         freeze_argv = captured[0]["argv"]
         self.assertIn("_freeze", freeze_argv)
         self.assertEqual(record["application"], "hardware")
+        self.assertEqual(record["network_profile"], args.network_profile)
         argv = captured[1]["argv"]
         self.assertEqual(argv[:2], [sys.executable, "-B"])
         self.assertEqual(
@@ -426,6 +439,10 @@ class LiveJobTest(unittest.TestCase):
         )
         self.assertEqual(argv[argv.index("--application") + 1], "hardware")
         self.assertEqual(argv[argv.index("--lifecycle") + 1], "application-exit")
+        self.assertEqual(
+            argv[argv.index("--network-profile") + 1],
+            args.network_profile,
+        )
         self.assertIn("--bound-inputs", argv)
         self.assertNotIn("--zed-directory", argv)
         self.assertEqual(
@@ -440,6 +457,7 @@ class LiveJobTest(unittest.TestCase):
             encoding="h264",
             h264_client_policy="adaptive-alpha",
             lifecycle="application-exit",
+            network_profile=job.DEFAULT_NETWORK_PROFILE,
             render_node=None,
             run="retained-main-launch",
             selection="stacks/develop",
@@ -493,6 +511,7 @@ class LiveJobTest(unittest.TestCase):
             encoding="rgb",
             h264_client_policy="strict",
             lifecycle="application-exit",
+            network_profile=job.DEFAULT_NETWORK_PROFILE,
             render_node=None,
             run="clean-selection",
             selection=None,
@@ -623,6 +642,7 @@ class LiveJobTest(unittest.TestCase):
                     record.pop("h264_client_policy")
                     record.pop("input_provenance")
                     record.pop("lifecycle")
+                    record.pop("network_profile")
                     record.pop("render_node")
                     record.pop("result_report")
                     record["schema"] = 2
@@ -1947,15 +1967,32 @@ class LiveRunnerCleanupTest(unittest.TestCase):
             patch.object(live_run, "pull_all_container_artifacts") as pull,
             patch.object(live_run, "wait_for", side_effect=wait_twice),
         ):
-            live_run.wait_for_hardware_fixture("server", 101, Path(raw))
+            live_run.wait_for_hardware_fixture("server", 101, Path(raw), "hardware")
 
         self.assertEqual(alive.call_count, 4)
         self.assertEqual(execute.call_count, 2)
         for call in execute.call_args_list:
             self.assertEqual(call.args[0], "server")
             self.assertEqual(call.args[1][:2], ["python3", "-c"])
+            self.assertEqual(call.args[1][-1], "vkcube")
             self.assertEqual(call.kwargs, {"announce": False, "check": False})
         pull.assert_not_called()
+
+    def test_opengl_fixture_readiness_binds_the_glmark2_primary(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch.object(live_run, "container_process_exists", return_value=True),
+            patch.object(
+                live_run,
+                "podman_exec",
+                return_value=completed(["python3"]),
+            ) as execute,
+            patch.object(live_run, "wait_for", side_effect=lambda _name, ready: ready()),
+        ):
+            live_run.wait_for_hardware_fixture("server", 101, Path(raw), "opengl")
+
+        command = execute.call_args.args[1]
+        self.assertEqual(command[-1], "opengl")
 
     def test_dead_hardware_child_stops_server_before_collecting_evidence(self) -> None:
         events: list[str] = []
@@ -1992,7 +2029,7 @@ class LiveRunnerCleanupTest(unittest.TestCase):
             predicate: object,
             **_kwargs: object,
         ) -> None:
-            if description == "hardware fixture GTK and Vulkan readiness":
+            if description == "hardware fixture GTK and vulkan readiness":
                 predicate()  # type: ignore[operator]
             else:
                 self.assertTrue(predicate())  # type: ignore[operator]
@@ -2009,7 +2046,7 @@ class LiveRunnerCleanupTest(unittest.TestCase):
             patch.object(live_run, "wait_for", side_effect=wait_control),
             self.assertRaisesRegex(live_run.LabFailure, "GTK failed"),
         ):
-            live_run.wait_for_hardware_fixture("server", 101, Path(raw))
+            live_run.wait_for_hardware_fixture("server", 101, Path(raw), "hardware")
 
         self.assertEqual(
             events,
@@ -2517,6 +2554,53 @@ class LiveRunnerCleanupTest(unittest.TestCase):
                     },
                 )
 
+    def test_source_viewport_crop_binds_fixed_source_inside_larger_backing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            backing = live_run.Image.new("RGBA", (4, 3), (0, 0, 0, 255))
+            backing.putpixel((0, 0), (255, 0, 0, 255))
+            backing.putpixel((1, 0), (0, 255, 0, 255))
+            backing.putpixel((0, 1), (0, 0, 255, 255))
+            backing.putpixel((1, 1), (255, 255, 255, 255))
+            backing.save(directory / "window.rgba.png")
+            evidence = live_run.crop_client_source_viewport(
+                directory,
+                "window",
+                "source",
+                (2, 2),
+            )
+            (directory / "client.stdout").write_text(
+                "viewport: (0, 1, 2, 2) for backing size=(4, 3)\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(evidence["image"]["width"], 2)
+            self.assertEqual(evidence["image"]["height"], 2)
+            self.assertEqual(
+                evidence["viewport"],
+                {
+                    "backing_size": [4, 3],
+                    "origin": [0, 0],
+                    "source_size": [2, 2],
+                },
+            )
+            self.assertTrue(
+                live_run.client_source_viewport_logged(
+                    directory,
+                    (2, 2),
+                    (4, 3),
+                )
+            )
+            self.assertFalse(
+                live_run.client_source_viewport_logged(
+                    directory,
+                    (3, 2),
+                    (4, 3),
+                )
+            )
+
     def test_saved_update_payload_cannot_escape_its_update_directory(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
@@ -2532,8 +2616,20 @@ class LiveRunnerCleanupTest(unittest.TestCase):
     def test_live_user_mapping_is_independent_of_the_host_uid(self) -> None:
         self.assertEqual(
             live_run.live_user_options(),
-            ["--userns", "keep-id:uid=1001,gid=1001", "--user", "1001:1001"],
+            [
+                "--userns",
+                "keep-id:uid=1001,gid=1001,size=2048",
+                "--user",
+                "1001:1001",
+            ],
         )
+
+    def test_live_command_rejects_an_unbounded_user_namespace(self) -> None:
+        with self.assertRaisesRegex(live_run.LabFailure, "explicit size"):
+            live_run.run(
+                ["podman", "run", "--userns=keep-id:uid=1001,gid=1001", "image"],
+                announce=False,
+            )
 
     def test_artifact_collection_failure_fails_scenario_acceptance(self) -> None:
         report = {
@@ -2794,12 +2890,130 @@ class LiveSourceTest(unittest.TestCase):
 
 
 class LiveTransportProfileTest(unittest.TestCase):
+    def test_tracked_live_configuration_drives_all_runner_option_blocks(self) -> None:
+        default, profiles = live_run.live_config.load_network_profiles()
+        self.assertIn(default, profiles)
+        self.assertEqual(tuple(profiles), live_run.NETWORK_PROFILES)
+        self.assertEqual(default, live_run.DEFAULT_NETWORK_PROFILE)
+
+        for profile_name, profile in profiles.items():
+            with self.subTest(profile=profile_name):
+                self.assertEqual(
+                    live_run.client_network_options(profile_name),
+                    list(profile.client_options()),
+                )
+
+        configured = live_run.live_config.load_live_cli()
+        for role, blocks in configured.items():
+            for block, options in blocks.items():
+                if block in {"commands", "transports"}:
+                    continue
+                with self.subTest(role=role, block=block):
+                    self.assertEqual(
+                        live_run.static_cli_options(role, block),
+                        list(options),
+                    )
+            for command, options in blocks["commands"].items():
+                with self.subTest(role=role, command=command):
+                    self.assertEqual(
+                        live_run.command_cli_options(role, command),
+                        list(options),
+                    )
+            for encoding, transport in blocks["transports"].items():
+                for policy in transport["policies"]:
+                    with self.subTest(
+                        role=role,
+                        encoding=encoding,
+                        policy=policy,
+                    ):
+                        self.assertEqual(
+                            live_run.transport_encoding_options(
+                                encoding,
+                                policy,
+                                client=role == "client",
+                            ),
+                            list(
+                                live_run.live_config.transport_options(
+                                    role,
+                                    encoding,
+                                    policy,
+                                )
+                            ),
+                        )
+
+        harness = set(live_run.HARNESS_INPUTS)
+        self.assertEqual(job.HARNESS_INPUTS, live_run.HARNESS_INPUTS)
+        self.assertIn(live_run.LIVE_CONFIG_MODULE, harness)
+        self.assertIn(live_run.NETWORK_PROFILES_CONFIG, harness)
+        self.assertIn(live_run.LIVE_CLI_CONFIG, harness)
+
+    def test_tracked_live_configuration_parser_fails_closed_generically(self) -> None:
+        for source in (
+            live_run.NETWORK_PROFILES_CONFIG,
+            live_run.LIVE_CLI_CONFIG,
+        ):
+            with self.subTest(source=source.name), tempfile.TemporaryDirectory() as raw:
+                candidate = Path(raw) / source.name
+                lines = source.read_text(encoding="utf-8").splitlines()
+                first_content = next(
+                    index
+                    for index, line in enumerate(lines)
+                    if line and not line.startswith("#")
+                )
+                lines[first_content] += " "
+                candidate.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                with self.assertRaisesRegex(
+                    live_run.live_config.LiveConfigError,
+                    "unsafe whitespace",
+                ):
+                    live_run.live_config.load_strict_yaml(candidate)
+
+    def test_every_tracked_network_profile_supports_every_acceptance_profile(
+        self,
+    ) -> None:
+        for application in live_run.APPLICATIONS:
+            for lifecycle in live_run.LIFECYCLES:
+                for encoding in ("rgb", "h264"):
+                    for policy in live_run.H264_CLIENT_POLICIES:
+                        for alpha_scenarios in live_run.ALPHA_SCENARIOS:
+                            values = (
+                                application,
+                                lifecycle,
+                                encoding,
+                                policy,
+                                alpha_scenarios,
+                            )
+                            outcomes = []
+                            for profile_name in live_run.NETWORK_PROFILES:
+                                try:
+                                    live_run.validate_profile(
+                                        application=application,
+                                        lifecycle=lifecycle,
+                                        encoding=encoding,
+                                        h264_client_policy=policy,
+                                        alpha_scenarios=alpha_scenarios,
+                                        network_profile_name=profile_name,
+                                    )
+                                except live_run.ProfileError:
+                                    outcomes.append(False)
+                                else:
+                                    outcomes.append(True)
+                            with self.subTest(values=values):
+                                self.assertEqual(len(set(outcomes)), 1)
+
     def test_supported_xpra_only_profiles_are_exact(self) -> None:
         expected = {
             ("zed", "application-exit", "rgb", "strict", "default"),
             ("zed", "application-exit", "h264", "adaptive-alpha", "default"),
             (
                 "hardware",
+                "application-exit",
+                "h264",
+                "adaptive-alpha",
+                "default",
+            ),
+            (
+                "opengl",
                 "application-exit",
                 "h264",
                 "adaptive-alpha",
@@ -2945,6 +3159,13 @@ class LiveTransportProfileTest(unittest.TestCase):
             ),
             "live-xpra-hardware": (
                 "APPLICATION=hardware",
+                "LIFECYCLE=application-exit",
+                "ENCODING=h264",
+                "H264_CLIENT_POLICY=adaptive-alpha",
+                "ALPHA_SCENARIOS=default",
+            ),
+            "live-xpra-opengl-hardware": (
+                "APPLICATION=opengl",
                 "LIFECYCLE=application-exit",
                 "ENCODING=h264",
                 "H264_CLIENT_POLICY=adaptive-alpha",
@@ -3236,6 +3457,11 @@ class LiveTransportProfileTest(unittest.TestCase):
         self.assertEqual(command, "/opt/xpra-lab/start_hardware_fixture.sh")
         self.assertEqual(titles, ("vkcube",))
         self.assertEqual(pid_file, "vkcube.pid")
+
+        command, titles, pid_file = live_run.application_contract("opengl")
+        self.assertEqual(command, "/opt/xpra-lab/start_hardware_fixture.sh opengl")
+        self.assertEqual(titles, ("glmark2",))
+        self.assertEqual(pid_file, "opengl.pid")
         context_names = {path.name for path in live_run.BUILD_CONTEXT_INPUTS}
         self.assertIn("start_hardware_fixture.sh", context_names)
 
@@ -3247,19 +3473,6 @@ class LiveTransportProfileTest(unittest.TestCase):
         self.assertEqual(command, "/opt/xpra-lab/start_zed.sh")
         self.assertEqual(titles, ("empty project", "zed"))
         self.assertEqual(pid_file, "zed.pid")
-
-    def test_profiles_use_the_bounded_server_debug_set(self) -> None:
-        base = "wayland,damage,encoding,encoder,argb"
-        self.assertEqual(live_run.server_debug_categories("zed", "strict"), base)
-        self.assertEqual(live_run.server_debug_categories("gtk", "strict"), base)
-        self.assertEqual(
-            live_run.server_debug_categories("zed", "adaptive-alpha"),
-            base,
-        )
-        self.assertEqual(
-            live_run.server_debug_categories("hardware", "adaptive-alpha"),
-            base,
-        )
 
     def test_frame_alpha_states_are_parsed_and_bound_to_exact_windows(self) -> None:
         server_log = (
@@ -3480,13 +3693,23 @@ class LiveTransportProfileTest(unittest.TestCase):
             "vkcube.pid",
             "vkcube.stderr",
             "vkcube.stdout",
+            "opengl.exit",
+            "opengl.pid",
+            "opengl.stderr",
+            "opengl.stdout",
         )
         for name in allowed:
             with self.subTest(name=name):
                 self.assertTrue(
                     any(pattern.fullmatch(name) for pattern in live_run.SERVER_ARTIFACT_PATTERNS)
                 )
-        for name in ("interaction.core", "vkcube.trace", "vkcube.exit.extra"):
+        for name in (
+            "interaction.core",
+            "opengl.core",
+            "opengl.trace",
+            "vkcube.trace",
+            "vkcube.exit.extra",
+        ):
             with self.subTest(name=name):
                 self.assertFalse(
                     any(pattern.fullmatch(name) for pattern in live_run.SERVER_ARTIFACT_PATTERNS)
@@ -3511,6 +3734,12 @@ class LiveTransportProfileTest(unittest.TestCase):
                 "#!/bin/sh\nexit \"$FAKE_VULKAN_STATUS\"\n",
                 encoding="utf-8",
             )
+            (binaries / "glmark2-wayland").write_text(
+                "#!/bin/sh\n"
+                "test -z \"${DISPLAY+x}\" || exit 97\n"
+                "exit \"$FAKE_OPENGL_STATUS\"\n",
+                encoding="utf-8",
+            )
             (binaries / "python3").write_text(
                 "#!/bin/sh\n"
                 "test -z \"${DISPLAY+x}\" || exit 98\n"
@@ -3518,7 +3747,11 @@ class LiveTransportProfileTest(unittest.TestCase):
                 "exit \"$FAKE_INTERACTION_STATUS\"\n",
                 encoding="utf-8",
             )
-            for executable in (binaries / "vkcube", binaries / "python3"):
+            for executable in (
+                binaries / "glmark2-wayland",
+                binaries / "vkcube",
+                binaries / "python3",
+            ):
                 executable.chmod(0o700)
 
             for interaction, vulkan, expected in ((0, 0, 0), (7, 0, 7), (0, 9, 9)):
@@ -3533,6 +3766,7 @@ class LiveTransportProfileTest(unittest.TestCase):
                         {
                             "DISPLAY": ":150",
                             "FAKE_INTERACTION_STATUS": str(interaction),
+                            "FAKE_OPENGL_STATUS": "0",
                             "FAKE_VULKAN_STATUS": str(vulkan),
                             "PATH": f"{binaries}:{environment['PATH']}",
                         }
@@ -3554,6 +3788,29 @@ class LiveTransportProfileTest(unittest.TestCase):
                         f"{vulkan}\n",
                     )
 
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "DISPLAY": ":150",
+                    "FAKE_INTERACTION_STATUS": "0",
+                    "FAKE_OPENGL_STATUS": "11",
+                    "FAKE_VULKAN_STATUS": "0",
+                    "PATH": f"{binaries}:{environment['PATH']}",
+                }
+            )
+            result = subprocess.run(
+                ["bash", str(script), "opengl"],
+                capture_output=True,
+                check=False,
+                env=environment,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 11, result.stderr)
+            self.assertEqual(
+                (artifacts / "opengl.exit").read_text(encoding="ascii"),
+                "11\n",
+            )
+
     def test_interaction_fixture_is_ready_and_has_a_transparent_border(self) -> None:
         source = (LIVE_DIRECTORY / "interaction_fixture.py").read_text(encoding="utf-8")
         self.assertIn('READY_MARKER = Path("/tmp/xpra-hardware-interaction-ready")', source)
@@ -3565,8 +3822,26 @@ class LiveTransportProfileTest(unittest.TestCase):
         self.assertIn("button.set_valign(Gtk.Align.CENTER)", source)
         self.assertIn("button.set_size_request(360, 120)", source)
         self.assertIn("GLib.idle_add(publish_ready)", source)
-        self.assertLess(source.index("window.show_all()"), source.index("GLib.idle_add"))
-        self.assertLess(source.index("GLib.idle_add"), source.index("Gtk.main()"))
+        self.assertLess(
+            source.index("window.show_all()"),
+            source.index("GLib.idle_add"),
+        )
+        self.assertLess(
+            source.index("GLib.idle_add"),
+            source.index("Gtk.main()"),
+        )
+
+    def test_hardware_launcher_uses_an_opaque_native_wayland_opengl_primary(
+        self,
+    ) -> None:
+        source = (LIVE_DIRECTORY / "start_hardware_fixture.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("glmark2-wayland --run-forever", source)
+        self.assertIn("--size 640x480", source)
+        self.assertIn("--swap-mode fifo", source)
+        self.assertIn("red=8:green=8:blue=8:alpha=0:buffer=24", source)
+        self.assertIn("--benchmark jellyfish", source)
 
     def test_server_image_makes_interaction_fixture_readable_by_runtime_user(self) -> None:
         source = (LIVE_DIRECTORY / "Containerfile").read_text(encoding="utf-8")
@@ -3578,6 +3853,7 @@ class LiveTransportProfileTest(unittest.TestCase):
         runtime_check = "test -r /opt/xpra-lab/interaction_fixture.py"
         self.assertIn(chmod, server_stage)
         self.assertIn(runtime_check, server_stage)
+        self.assertIn("glmark2-wayland", server_stage)
         self.assertLess(server_stage.index(chmod), server_stage.index("USER lab"))
         self.assertGreater(server_stage.index(runtime_check), server_stage.index("USER lab"))
 
@@ -3585,6 +3861,7 @@ class LiveTransportProfileTest(unittest.TestCase):
         self.assertEqual(live_run.pixel_error_limit("zed", "rgb"), 0.0)
         self.assertEqual(live_run.pixel_error_limit("gtk", "rgb"), 1.0)
         self.assertEqual(live_run.pixel_error_limit("hardware", "h264"), 15.0)
+        self.assertEqual(live_run.pixel_error_limit("opengl", "h264"), 15.0)
         self.assertEqual(live_run.pixel_error_limit("vkcube", "rgb"), 0.0)
 
     def test_hardware_application_uses_observable_vulkan_boundaries(self) -> None:
@@ -3592,7 +3869,7 @@ class LiveTransportProfileTest(unittest.TestCase):
             application="hardware",
             application_activity={
                 "process_alive": True,
-                "vulkan_motion": {"changed": True},
+                "graphics_motion": {"changed": True},
             },
             application_gpu={
                 "gpu_mappings": ["/usr/lib/libvulkan_radeon.so"],
@@ -3609,8 +3886,74 @@ class LiveTransportProfileTest(unittest.TestCase):
         )
         self.assertTrue(all(checks.values()))
         self.assertNotIn("wayland_ack_configure", checks)
-        checks["vulkan_frames_changed"] = False
+        checks["graphics_frames_changed"] = False
         self.assertFalse(all(checks.values()))
+
+    def test_opengl_application_requires_live_hardware_context_and_driver(self) -> None:
+        activity = {
+            "process_alive": True,
+            "graphics_motion": {"changed": True},
+            "opengl": {
+                "api": "OpenGL",
+                "renderer": "AMD Radeon Graphics (radeonsi)",
+                "source": "glmark2-wayland",
+                "vendor": "AMD",
+                "version": "4.6 (Core Profile) Mesa",
+            },
+        }
+        gpu = {
+            "gpu_mappings": ["/usr/lib/x86_64-linux-gnu/libgallium.so"],
+            "render_nodes": ["/dev/dri/renderD128"],
+        }
+        checks = live_run.application_boundary_checks(
+            application="opengl",
+            application_activity=activity,
+            application_gpu=gpu,
+            log_evidence={"wayland_protocol": {}},
+            render_node=Path("/dev/dri/renderD128"),
+        )
+        self.assertTrue(all(checks.values()))
+
+        activity["opengl"] = {**activity["opengl"], "renderer": "llvmpipe"}
+        software = live_run.application_boundary_checks(
+            application="opengl",
+            application_activity=activity,
+            application_gpu=gpu,
+            log_evidence={"wayland_protocol": {}},
+            render_node=Path("/dev/dri/renderD128"),
+        )
+        self.assertFalse(software["opengl_hardware_renderer"])
+
+    def test_opengl_renderer_evidence_is_exact_and_private(self) -> None:
+        expected = {
+            "api": "OpenGL",
+            "renderer": "AMD Radeon Graphics (radeonsi)",
+            "source": "glmark2-wayland",
+            "vendor": "AMD",
+            "version": "4.6 (Compatibility Profile) Mesa",
+        }
+        output = """
+=======================================================
+    glmark2 2023.01
+=======================================================
+    OpenGL Information
+    GL_VENDOR:      AMD
+    GL_RENDERER:    AMD Radeon Graphics (radeonsi)
+    GL_VERSION:     4.6 (Compatibility Profile) Mesa
+=======================================================
+"""
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "opengl.stdout"
+            path.write_text(output, encoding="utf-8")
+            path.chmod(0o600)
+            self.assertEqual(live_run.load_opengl_evidence(path), expected)
+
+            path.write_text(
+                output.replace("AMD\n", "AMD\n    GL_VENDOR: Intel\n"),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(live_run.LabFailure, "invalid vendor"):
+                live_run.load_opengl_evidence(path)
 
     def test_h264_only_packet_check_rejects_empty_and_rgb_windows(self) -> None:
         updates = {
@@ -3957,6 +4300,84 @@ class LiveTransportProfileTest(unittest.TestCase):
             )
         )
 
+    def test_hardware_phase_uses_saved_source_size_not_client_geometry(self) -> None:
+        packets = [
+            {
+                "encoding": "h264",
+                "h": 480,
+                "options": {
+                    "flush": 0,
+                    "frame": 0,
+                    "type": "IDR",
+                    "window-size": [640, 480],
+                },
+                "payload_bytes": 100,
+                "relative_info": "screen-updates/1/1000/0.info",
+                "sequence": 1,
+                "w": 640,
+                "x": 0,
+                "y": 0,
+            },
+            {
+                "encoding": "h264",
+                "h": 480,
+                "options": {
+                    "flush": 0,
+                    "frame": 1,
+                    "type": "P",
+                    "window-size": [640, 480],
+                },
+                "payload_bytes": 90,
+                "relative_info": "screen-updates/1/1125/0.info",
+                "sequence": 2,
+                "w": 640,
+                "x": 0,
+                "y": 0,
+            },
+        ]
+        updates = {
+            "count": 2,
+            "encodings": ["h264"],
+            "initial_pixel_format": "BGRX",
+            "updates": packets,
+            "window_id": 1,
+        }
+
+        def wait_for_once(
+            description: str,
+            predicate: object,
+            *,
+            timeout: int,
+        ) -> None:
+            self.assertEqual(description, "stable hardware H.264 phase baseline")
+            self.assertEqual(timeout, 15)
+            self.assertTrue(callable(predicate))
+            assert callable(predicate)
+            self.assertTrue(predicate())
+
+        with (
+            patch.object(
+                live_run,
+                "synchronize_saved_updates",
+                return_value=updates,
+            ),
+            patch.object(live_run, "wait_for", side_effect=wait_for_once),
+        ):
+            interval = live_run.begin_hardware_h264_stimulus(
+                "server",
+                LIVE_DIRECTORY,
+                1,
+            )
+
+        self.assertEqual(
+            interval,
+            {
+                "baseline_sequence": 2,
+                "first_sequence": 1,
+                "window_size": [640, 480],
+            },
+        )
+
     def test_hardware_phase_excludes_safe_resize_epilogue_but_proves_va_stream(
         self,
     ) -> None:
@@ -4167,6 +4588,7 @@ class LiveTransportProfileTest(unittest.TestCase):
         )
         metrics = live_run.h264_production_metrics("hardware", updates)
         self.assertTrue(all(live_run.h264_dominance_checks(metrics).values()))
+        self.assertEqual(live_run.h264_production_metrics("opengl", updates), metrics)
         context_updates = live_run.hardware_h264_context_updates(updates)
         self.assertIsNotNone(context_updates)
         assert context_updates is not None
@@ -4212,6 +4634,49 @@ class LiveTransportProfileTest(unittest.TestCase):
             allow_lossless_rgb_edges=True,
         )
         self.assertFalse(strict["all_streams_proven"])
+
+        client_lagged = live_run.match_h264_production_stream(
+            context_updates,
+            {"contexts": [context("server", 12)], "files": ["server-va.trace"]},
+            {"contexts": [context("client", 11)], "files": ["client-va.trace"]},
+            allow_alpha_gaps=True,
+            allow_lossless_rgb_edges=True,
+            allow_terminal_client_frame=True,
+            allow_window_resize_gaps=True,
+        )
+        self.assertTrue(client_lagged["all_streams_proven"])
+        self.assertTrue(
+            client_lagged["matched_stream"]["terminal_client_frame_inflight"]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            lines = []
+            for packet in context_updates["updates"]:
+                lines.append(
+                    "process_draw: {payload_bytes} bytes for window 1, "
+                    "sequence {sequence}, {w}x{h} at {x},{y} using {encoding} "
+                    "encoding with options=typedict({options!r})".format(**packet)
+                )
+            (directory / "client.stdout").write_text(
+                "\n".join(lines) + "\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                live_run.terminal_client_h264_frame_inflight(
+                    directory,
+                    context_updates,
+                )
+            )
+            (directory / "client.stdout").write_text(
+                "\n".join(lines[:-1]) + "\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(
+                live_run.terminal_client_h264_frame_inflight(
+                    directory,
+                    context_updates,
+                )
+            )
 
     def test_adaptive_h264_requires_sustained_temporal_and_pixel_dominance(self) -> None:
         width, height = 800, 600
@@ -4627,39 +5092,29 @@ class LiveTransportProfileTest(unittest.TestCase):
                 live_run.saved_window_initial_pixel_format(Path(raw), 2)
 
     def test_transport_encoding_options(self) -> None:
-        self.assertEqual(
-            live_run.transport_encoding_options("h264", "strict", client=False),
-            [
-                "--video=yes",
-                "--encodings=h264",
-                "--video-encoders=libva",
-                "--csc-modules=libyuv",
-            ],
-        )
-        self.assertEqual(
-            live_run.transport_encoding_options("h264", "fallback-auto", client=True),
-            [
-                "--video=yes",
-                "--encodings=h264,rgb",
-                "--opengl=force:native",
-                "--video-decoders=libva",
-                "--csc-modules=none",
-            ],
-        )
-        forced = live_run.transport_encoding_options(
-            "h264", "fallback-h264", client=True
-        )
-        self.assertEqual(forced[-1], "--encoding=h264")
-        self.assertIn("--encodings=h264,rgb", forced)
-        adaptive = live_run.transport_encoding_options(
-            "h264", "adaptive-alpha", client=True
-        )
-        self.assertIn("--encodings=h264,webp,rgb", adaptive)
-        self.assertEqual(adaptive[-1], "--encoding=h264")
-        self.assertIn(
-            "--encodings=h264,webp,rgb",
-            live_run.transport_encoding_options("h264", "adaptive-alpha", client=False),
-        )
+        configured = live_run.live_config.load_live_cli()
+        for role, role_config in configured.items():
+            for encoding, transport in role_config["transports"].items():
+                for policy in transport["policies"]:
+                    with self.subTest(
+                        role=role,
+                        encoding=encoding,
+                        policy=policy,
+                    ):
+                        self.assertEqual(
+                            live_run.transport_encoding_options(
+                                encoding,
+                                policy,
+                                client=role == "client",
+                            ),
+                            list(
+                                live_run.live_config.transport_options(
+                                    role,
+                                    encoding,
+                                    policy,
+                                )
+                            ),
+                        )
         with self.assertRaisesRegex(live_run.LabFailure, "H.264 policies require"):
             live_run.transport_encoding_options("rgb", "fallback-auto", client=True)
 
@@ -5067,6 +5522,17 @@ class H264EvidenceTest(unittest.TestCase):
                 ),
                 "record_decode_time(True, ) wid=0x1, h264: 1596x1172, 8.4ms",
                 "sending ack: ('window-ack', 1, 1596, 1172, 3, 8468, \"''\")",
+                (
+                    "process_draw: 50 bytes for window 2, sequence 4, "
+                    "480x357 at 0,0 using webp encoding with options="
+                    "typedict({'flush': 0})"
+                ),
+                "sending ack: ('window-ack', 2, 480, 357, 4, 100, \"''\")",
+                (
+                    "process_draw: 40 bytes for window 1, sequence 4, "
+                    "1596x1172 at 0,0 using h264 encoding with options="
+                    "typedict({'frame': 1, 'type': 'P'})"
+                ),
                 "do_present_fbo(GLXWindowContext(0x400015)) will blit [(0, 0, 1596, 1173)]",
                 "1.do_gl_show(GLDrawingArea(1, (1596, 1173))) swapping buffers now",
                 "GLDrawingArea(1, (1596, 1173)).do_present_fbo() done",

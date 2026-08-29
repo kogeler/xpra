@@ -157,8 +157,8 @@ formatting churn.
 
 Work on one atomic behavior at a time. Preserve unrelated user changes and
 remotes. Never reset, clean, or switch a non-clean checkout automatically.
-Run `git diff --check` on every candidate and use the current upstream lint
-configuration.
+Run `git diff --check` on every candidate and use the lint configuration from
+the source embedded in current `develop`.
 
 Every new source or test file introduced by a downstream patch must carry
 `Copyright (C) <current-year> kogeler` using that file's native comment syntax.
@@ -291,7 +291,8 @@ Stop at the first unexplained failure:
 3. run the affected native or subsystem boundary;
 4. reassess every quarantined upstream module on the clean embedded source;
 5. run all three Ubuntu 26.04 unit-test legs;
-6. run required RGB or hardware-H.264 live acceptance.
+6. run every positive live acceptance gate required by the selected case or
+   stack.
 
 The fixed `live-xpra-hardware` gate uses `APPLICATION=hardware`,
 `ENCODING=h264`, `H264_CLIENT_POLICY=adaptive-alpha`,
@@ -300,9 +301,9 @@ primary `vkcube` and auxiliary GTK Xpra window IDs independently by their exact
 titles. Its first saved `window.info` is only an initial snapshot and must be
 `BGRX` or `RGBX`; exact per-window frame-state logs prove that later primary
 frames remain opaque. Startup layout and picture packets are structurally
-validated but cannot establish acceptance. After both title-bound windows have
-their stable tiled geometry, the runner binds the active primary IDR group,
-records an exact input interval, and closes that interval before the auxiliary
+validated but cannot establish acceptance. After both title-bound windows are
+stable, the runner binds the active primary IDR group to its exact saved source
+geometry, records an exact input interval, and closes it before the auxiliary
 window exits. Within it, only positive H.264 main regions and their exact
 required one-pixel lossless RGB24/RGB32 codec edges are allowed; arbitrary,
 interior, larger, or alpha-bearing RGB regions fail. H.264 must predominate for
@@ -313,19 +314,37 @@ startup or post-exit resize packets never contribute to those thresholds.
 
 The auxiliary native-Wayland GTK fixture requires an RGBA visual and a
 deterministic transparent border around its opaque interactive button. Its
-`BGRA`/`RGBA` window must expose both transparent and opaque pixels in its exact
-server-side source screenshots and emit only positive WebP or alpha-bearing
-RGB32 packets with exact contained geometry. Client captures prove the visible
-composited result and input response; they need not retain a source alpha
-channel after composition. H.264, RGB24, and non-alpha RGB32 are failures.
+`BGRA`/`RGBA` window must expose both transparent and opaque pixels in every
+collected source screenshot for that exact window and emit only positive WebP
+or alpha-bearing RGB32 packets with exact contained geometry. Client captures
+prove the visible composited result and input response; they need not retain a
+source alpha channel after composition. H.264, RGB24, and non-alpha RGB32 are
+failures.
+
+The fixed `live-xpra-opengl-hardware` gate uses the same adaptive-alpha,
+application-exit, H.264, auxiliary-window, input, VA-API, client-presentation,
+pixel, lifecycle, and cleanup contract. Its separately title-bound opaque
+primary is the native-Wayland `glmark2-wayland` synthetic OpenGL `jellyfish`
+benchmark instead of `vkcube`. It requests an EGL visual with no alpha channel.
+Its fixed source viewport may be smaller than the tiled client backing, so the
+pixel gate requires the exact logged viewport placement before comparing the
+source crop. The server process must report metadata from a live OpenGL context,
+use the selected render node and AMD Mesa/Radeon hardware driver rather than a
+software renderer, and produce changing nonuniform client frames. This
+complements the Vulkan gate; neither is a substitute for the other.
 
 The only named positive live profiles are Zed RGB, adaptive-alpha Zed H.264,
-RGB detach, RGB transport-loss fault injection, and the hardware profile above.
-Their Make wrappers fix every profile dimension and require a nonempty reviewed
-case or stack selection. A clean source or picture-fallback diagnostic cannot
-publish live acceptance. Negative unit cases only prevent a false pass; every
-public live target must finish with positive rendering, input, lifecycle, and
-owned-cleanup evidence.
+RGB detach, RGB transport-loss fault injection, multi-window Vulkan hardware,
+and multi-window OpenGL hardware. Their Make wrappers fix every acceptance
+dimension and require a nonempty reviewed case or stack selection. The
+orthogonal client-only `NETWORK_PROFILE` is loaded from
+`fork-maintenance/profiles.yml`; its YAML default is used for the normal six
+gates. Static Xpra arguments come only from `fork-maintenance/live-cli.yml`.
+Neither YAML value set may be duplicated in Python, Make, or unit-test
+assertions. A clean-source or picture-fallback diagnostic cannot publish live
+acceptance. Negative unit cases only prevent a false pass; every public live
+target must finish with positive rendering, input, lifecycle, and owned-cleanup
+evidence.
 
 Tests used to accept a patch belong in the tracked case or
 `fork-maintenance/infra`. Ad hoc probes can diagnose but cannot establish
@@ -353,7 +372,7 @@ change. Resolve the refreshed queue, run whitespace and fork-control checks,
 and state the proof in the handoff; do not launch focused, native, full, or live
 jobs. This exception never applies after `develop-rebase`: every explicit
 upstream rebase requires the clean quarantine reassessment, all fork-control,
-focused, native, and three full upstream legs, plus all five positive live
+focused, native, and three full upstream legs, plus all six positive live
 profiles, even when every retained patch applies without textual changes. Any
 uncertainty or semantic change uses the normal ladder.
 

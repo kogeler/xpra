@@ -28,6 +28,7 @@ sys.path.insert(0, str(TOOLS_ROOT))
 
 import background_job
 import container_payload
+import podman_policy
 
 STATE_ROOT = PROJECT_ROOT / ".artifacts" / "fork-maintenance" / "upstream-tests"
 LOG_ROOT = STATE_ROOT / "logs"
@@ -66,6 +67,7 @@ RUNNER_INPUTS = (
     RUNNER_ROOT / "job.py",
     TOOLS_ROOT / "background_job.py",
     TOOLS_ROOT / "container_payload.py",
+    TOOLS_ROOT / "podman_policy.py",
 )
 IMAGE_CONTEXT_INPUTS = {
     ".containerignore": RUNNER_ROOT / ".containerignore",
@@ -92,6 +94,10 @@ def command(
     cwd: Path | None = None,
     pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
+    try:
+        podman_policy.validate_podman_argv(argv)
+    except podman_policy.PodmanPolicyError as error:
+        raise JobError(str(error)) from error
     result = subprocess.run(
         argv,
         check=False,
@@ -715,7 +721,7 @@ def payload_environment(args: argparse.Namespace, selection_sha256: str) -> list
 def test_runtime_options(args: argparse.Namespace, selection_sha256: str) -> list[str]:
     return [
         "--userns",
-        "keep-id:uid=1000,gid=1000",
+        podman_policy.keep_id_userns(1000, 1000),
         "--user",
         "1000:1000",
         *payload_environment(args, selection_sha256),

@@ -170,8 +170,8 @@ XPRA_CI_TARGET=full-no-compat make -C fork-maintenance ci-upstream-tests
 
 Each invocation deliberately runs one heavy leg and may build the container
 image. For ordinary patch acceptance use the named `test-start`/`test-wait`
-lifecycle from `upstream-tests.md`; the CI foreground target is not durable
-local evidence.
+lifecycle from [`upstream-tests.md`](upstream-tests.md); the CI foreground
+target is not durable local evidence.
 
 Do not invoke `ci-deb-release` as local reproduction: a successful call creates
 a remote tag and ordinary GitHub release and may delete older exact owned DEB
