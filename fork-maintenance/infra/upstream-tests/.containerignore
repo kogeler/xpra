@@ -1,4 +1,5 @@
 *
 !Containerfile
+!container_payload.py
 !entrypoint.sh
 !selection.py

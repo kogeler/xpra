@@ -146,6 +146,11 @@ class PrivateStateTest(unittest.TestCase):
 
 
 class UpstreamMakeContractTest(unittest.TestCase):
+    def test_local_runner_defaults_to_fork_master(self) -> None:
+        makefile = MAKEFILE.read_text(encoding="utf-8")
+        self.assertIn("SOURCE_REMOTE ?= origin", makefile)
+        self.assertNotIn("SOURCE_REMOTE ?= upstream", makefile)
+
     def test_tests_only_mode_keeps_production_unpatched(self) -> None:
         entrypoint = ENTRYPOINT.read_text(encoding="utf-8")
         self.assertIn("clean|tests-only|patched", entrypoint)
@@ -154,27 +159,26 @@ class UpstreamMakeContractTest(unittest.TestCase):
         self.assertIn("tests-only workspace", CONTRACT.read_text(encoding="utf-8"))
 
     def test_source_bundle_is_verified_before_publication(self) -> None:
-        makefile = MAKEFILE.read_text(encoding="utf-8")
-        recipe = makefile.split("source-snapshot:", 1)[1].split(
-            "\nimage image-check:",
+        source = Path(__file__).with_name("job.py").read_text(encoding="utf-8")
+        snapshot = source.split("def source_snapshot", 1)[1].split(
+            "def publish_bytes",
             1,
         )[0]
-
-        create = recipe.index('bundle create "$$tmp_bundle"')
-        verify = recipe.index('bundle verify "$$tmp_bundle"')
-        heads = recipe.index('bundle list-heads "$$tmp_bundle"')
-        publish = recipe.index('mv -T -n "$$tmp_bundle" "$(SOURCE_BUNDLE)"')
+        create = snapshot.index("created = subprocess.run(")
+        verify = snapshot.index("verify_source_bundle(partial", create)
+        publish = snapshot.index("container_payload.rename_no_replace", verify)
         self.assertLess(create, verify)
-        self.assertLess(verify, heads)
-        self.assertLess(heads, publish)
+        self.assertLess(verify, publish)
+        self.assertIn("pass_fds=(lock_fd,)", snapshot)
 
     def test_source_identity_crosses_the_make_container_boundary(self) -> None:
         makefile = MAKEFILE.read_text(encoding="utf-8")
         entrypoint = ENTRYPOINT.read_text(encoding="utf-8")
         job = Path(__file__).with_name("job.py").read_text(encoding="utf-8")
 
-        self.assertIn("XPRA_EXPECTED_SOURCE_HEAD=$(SOURCE_TIP_COMMIT)", makefile)
-        self.assertIn("XPRA_EXPECTED_SOURCE_REF=$(SOURCE_REF)", makefile)
+        self.assertIn('--source-head "$(SOURCE_TIP_COMMIT)"', makefile)
+        self.assertIn('f"XPRA_EXPECTED_SOURCE_HEAD={args.source_head}"', job)
+        self.assertIn('f"XPRA_EXPECTED_SOURCE_REF={source_ref}"', job)
         self.assertIn("$EXPECTED_SOURCE_HEAD $EXPECTED_SOURCE_REF", entrypoint)
         self.assertIn("XPRA_EXPECTED_SOURCE_REF={source_ref}", job)
         self.assertNotIn(
@@ -201,7 +205,9 @@ class UpstreamMakeContractTest(unittest.TestCase):
         makefile = MAKEFILE.read_text(encoding="utf-8")
         job = Path(__file__).with_name("job.py").read_text(encoding="utf-8")
         self.assertIn('"podman", "create", "--name", name', job)
-        self.assertIn('command(["podman", "start", created])', job)
+        self.assertIn('["podman", "start", created],', job)
+        self.assertIn("int(args.lifecycle_lock_descriptor)", job)
+        self.assertIn("int(args.image_cache_lock_descriptor)", job)
         self.assertIn('command(["podman", "wait", record["container_id"]]', job)
         self.assertIn("background_job.launch(", job)
         self.assertIn('"podman",\n        "build"', job)
@@ -209,38 +215,41 @@ class UpstreamMakeContractTest(unittest.TestCase):
 
     def test_collected_results_bind_the_verified_selection_resolution(self) -> None:
         job = Path(__file__).with_name("job.py").read_text(encoding="utf-8")
-        for artifact in (
-            "selection-resolution.json",
-            "selection-resolution.sha256",
-        ):
-            self.assertIn(artifact, job)
-        self.assertIn('"verify-resolution"', job)
+        self.assertIn("def resolution_from_log", job)
+        self.assertNotIn('"podman", "cp"', job)
         self.assertIn('"selection_resolution_ok": int(resolution_ok)', job)
-        self.assertIn('status.get("selection_resolution_ok") == "1"', job)
+        self.assertIn("resolution_from_log(log_path(name).read_bytes())", job)
 
     def test_failed_jobs_keep_an_exact_cleanup_path(self) -> None:
         job = Path(__file__).with_name("job.py").read_text(encoding="utf-8")
-        self.assertIn("validation_ok = exit_code == 0 and labels_ok", job)
+        self.assertIn("and labels_ok", job)
+        self.assertIn('and not finished.startswith("0001-")', job)
         self.assertIn("verify_image_evidence(name, record)", job)
         self.assertIn("verify_test_evidence(name, record)", job)
         self.assertIn('"validation_ok": int(validation_ok)', job)
 
-    def test_unfinished_jobs_have_an_owned_make_only_abort_path(self) -> None:
+    def test_abort_paths_preserve_current_completed_jobs(self) -> None:
         job = Path(__file__).with_name("job.py").read_text(encoding="utf-8")
         test_abort_source = job.split("def test_abort", 1)[1].split(
             "def image_context", 1
         )[0]
+        owned_test_abort = test_abort_source.split(
+            "record = load_test_record(name, require_current=False)",
+            1,
+        )[1]
         image_abort_source = job.split("def image_abort", 1)[1].split(
             "def runner_sha", 1
         )[0]
         self.assertLess(
-            test_abort_source.index("container_state(record)"),
-            test_abort_source.index('["podman", "rm", "--force"'),
+            owned_test_abort.index("container_lifecycle_state(record)"),
+            owned_test_abort.index('["podman", "rm", "--force"'),
         )
+        self.assertIn("completed test jobs must be collected", test_abort_source)
         self.assertLess(
-            image_abort_source.index("background_job.terminate("),
+            image_abort_source.index("background_job.process_state("),
             image_abort_source.index("shutil.rmtree(image_context(name))"),
         )
+        self.assertIn("completed image jobs must be collected", image_abort_source)
         root_makefile = LAB_MAKEFILE.read_text(encoding="utf-8")
         self.assertIn("test-abort", root_makefile)
         self.assertIn("test-image-abort", root_makefile)

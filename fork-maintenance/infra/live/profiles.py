@@ -12,6 +12,15 @@ H264_ACCEPTANCE_POLICIES = ("strict", "adaptive-alpha")
 H264_FALLBACK_POLICIES = ("fallback-auto", "fallback-h264")
 H264_CLIENT_POLICIES = H264_ACCEPTANCE_POLICIES + H264_FALLBACK_POLICIES
 ALPHA_SCENARIOS = ("default", "disabled", "both")
+LIVE_ACCEPTANCE_PROFILES = frozenset(
+    {
+        ("zed", "application-exit", "rgb", "strict", "default"),
+        ("zed", "application-exit", "h264", "adaptive-alpha", "default"),
+        ("gtk", "detach", "rgb", "strict", "default"),
+        ("gtk", "transport-loss", "rgb", "strict", "default"),
+        ("hardware", "application-exit", "h264", "adaptive-alpha", "default"),
+    }
+)
 
 
 class ProfileError(ValueError):
@@ -37,30 +46,15 @@ def validate_profile(
         raise ProfileError(f"unsupported H.264 client policy: {h264_client_policy}")
     if alpha_scenarios not in ALPHA_SCENARIOS:
         raise ProfileError(f"unsupported alpha scenarios: {alpha_scenarios}")
-    if encoding != "h264" and h264_client_policy != "strict":
-        raise ProfileError("non-strict H.264 policies require the H.264 live profile")
-
-    if lifecycle in {"detach", "transport-loss"}:
-        expected = (application, encoding, h264_client_policy, alpha_scenarios)
-        if expected != ("gtk", "rgb", "strict", "default"):
-            raise ProfileError(
-                f"{lifecycle} requires application=gtk, encoding=rgb, "
-                "H264_CLIENT_POLICY=strict, and ALPHA_SCENARIOS=default"
-            )
-    elif application == "hardware":
-        if (
-            encoding != "h264"
-            or h264_client_policy != "strict"
-            or alpha_scenarios != "default"
-        ):
-            raise ProfileError(
-                "the hardware fixture requires the strict H.264-only policy and "
-                "ALPHA_SCENARIOS=default"
-            )
-    elif application in {"vkcube", "gtk"} and alpha_scenarios != "default":
-        raise ProfileError(
-            f"application={application} requires ALPHA_SCENARIOS=default"
-        )
+    profile = (
+        application,
+        lifecycle,
+        encoding,
+        h264_client_policy,
+        alpha_scenarios,
+    )
+    if profile not in LIVE_ACCEPTANCE_PROFILES:
+        raise ProfileError(f"unsupported live acceptance profile: {profile!r}")
 
 
 def scenario_specs(
@@ -81,7 +75,7 @@ def main() -> int:
     parser.add_argument("application", choices=APPLICATIONS)
     parser.add_argument("lifecycle", choices=LIFECYCLES)
     parser.add_argument("encoding", choices=ENCODINGS)
-    parser.add_argument("h264_client_policy", choices=H264_CLIENT_POLICIES)
+    parser.add_argument("h264_client_policy", choices=H264_ACCEPTANCE_POLICIES)
     parser.add_argument("alpha_scenarios", choices=ALPHA_SCENARIOS)
     args = parser.parse_args()
     try:

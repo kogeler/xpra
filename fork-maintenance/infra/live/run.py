@@ -22,9 +22,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import pairwise
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+TOOLS_ROOT = Path(__file__).resolve().parents[2] / "tools"
+sys.path.insert(0, str(TOOLS_ROOT))
+
+import container_payload
 import PIL
 from PIL import Image, ImageChops, ImageStat
 from profiles import (
@@ -46,10 +50,11 @@ MAIN_REPOSITORY_ROOT = LAB_ROOT.parent
 SOURCE_REPOSITORY = MAIN_REPOSITORY_ROOT
 SELECTION_TOOL = INFRA_ROOT.parent / "upstream-tests" / "selection.py"
 BACKGROUND_SUPERVISOR = LAB_ROOT / "tools" / "background_job.py"
+PAYLOAD_HELPER = LAB_ROOT / "tools" / "container_payload.py"
 DEFAULT_STATE_ROOT = MAIN_REPOSITORY_ROOT / ".artifacts" / "fork-maintenance"
 DEFAULT_ZED_DIRECTORY = Path.home() / ".local" / "zed.app"
 DEFAULT_RENDER_NODE = Path("/dev/dri/renderD128")
-UPSTREAM_REMOTE_URL = "https://github.com/Xpra-org/xpra.git"
+FORK_REMOTE_URL = "https://github.com/kogeler/xpra.git"
 SERVER_DISPLAY = ":150"
 SERVER_PORT = 14500
 CLIENT_PROXY_PORT = 14501
@@ -60,6 +65,7 @@ INTERACTION_READY_TITLE = "Xpra Hardware Interaction Ready"
 INTERACTION_CLICKED_TITLE = "Xpra Hardware Interaction Clicked"
 INTERACTION_CLICK_MARKER = "/tmp/xpra-hardware-pointer-clicked"
 INTERACTION_KEY_MARKER = "/tmp/xpra-hardware-keyboard-escape"
+INTERACTION_READY_MARKER = "/tmp/xpra-hardware-interaction-ready"
 LEGACY_SOURCE_VARIANT_SELECTORS = {"master": ()}
 HARNESS_INPUTS = (
     INFRA_ROOT / ".containerignore",
@@ -74,6 +80,7 @@ HARNESS_INPUTS = (
     INFRA_ROOT / "xwd_to_png.py",
     SELECTION_TOOL,
     BACKGROUND_SUPERVISOR,
+    PAYLOAD_HELPER,
 )
 BUILD_CONTEXT_INPUTS = (
     INFRA_ROOT / ".containerignore",
@@ -81,6 +88,158 @@ BUILD_CONTEXT_INPUTS = (
     INFRA_ROOT / "interaction_fixture.py",
     INFRA_ROOT / "start_hardware_fixture.sh",
     INFRA_ROOT / "start_zed.sh",
+    PAYLOAD_HELPER,
+)
+CONTAINER_PAYLOAD = "/opt/xpra-lab/container_payload.py"
+LIVE_CONTAINER_UID = "1001"
+LIVE_CONTAINER_GID = "1001"
+FRAME_LOG_CHUNK_BYTES = 256 * 1024
+FRAME_LOG_SCAN_BYTES = 64 * 1024 * 1024
+FRAME_LOG_TOTAL_BYTES = 8 * 1024 * 1024
+H264_MIN_AGGREGATE_PIXEL_PERCENT = 90
+H264_MIN_DAMAGE_SPAN_MS = 1000
+H264_MIN_FRAME_PIXEL_PERCENT = 99
+H264_MIN_MAIN_FRAMES = 10
+ZED_THEME_TOGGLE_CYCLES = 8
+ZED_THEME_TOGGLE_DELAY = 0.125
+LAB_LABEL_PREFIX = "io.xpra.lab."
+CONTAINER_LOG_DELTA_PROBE = r"""
+import errno
+import json
+import os
+import pathlib
+import stat
+import sys
+
+offsets = json.loads(sys.argv[1])
+match_limit = int(sys.argv[2])
+scan_limit = int(sys.argv[3])
+root = pathlib.Path(sys.argv[4])
+markers = json.loads(sys.argv[5])
+result = {}
+for name, offset in offsets.items():
+    path = root / name
+    descriptor = -1
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        details = os.fstat(descriptor)
+        if not stat.S_ISREG(details.st_mode):
+            result[name] = {'error': 'unsafe'}
+            continue
+        if details.st_size < offset:
+            result[name] = {'error': 'truncated', 'size': details.st_size}
+            continue
+        remaining = min(scan_limit, details.st_size - offset)
+        os.lseek(descriptor, offset, os.SEEK_SET)
+        chunks = []
+        while remaining:
+            block = os.read(descriptor, min(1024 * 1024, remaining))
+            if not block:
+                result[name] = {'error': 'truncated', 'size': os.fstat(descriptor).st_size}
+                break
+            chunks.append(block)
+            remaining -= len(block)
+        if name in result:
+            continue
+        current = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_dev != details.st_dev
+            or current.st_ino != details.st_ino
+            or current.st_mode != details.st_mode
+        ):
+            result[name] = {'error': 'unsafe'}
+            continue
+        if current.st_size < details.st_size:
+            result[name] = {'error': 'truncated', 'size': current.st_size}
+            continue
+        payload = b''.join(chunks)
+        newline = payload.rfind(b'\n')
+        if newline < 0:
+            if len(payload) >= scan_limit:
+                result[name] = {'error': 'line-too-long'}
+                continue
+            complete = b''
+        else:
+            complete = payload[:newline + 1]
+        encoded_markers = tuple(value.encode() for value in markers[name])
+        matched = b''.join(
+            line for line in complete.splitlines(keepends=True)
+            if any(marker in line for marker in encoded_markers)
+        )
+        if len(matched) > match_limit:
+            result[name] = {'error': 'matched-overflow'}
+            continue
+        result[name] = {
+            'data': matched.decode('utf-8', errors='replace'),
+            'next': offset + len(complete),
+            'scanned': len(complete),
+            'size': details.st_size,
+        }
+    except OSError as error:
+        result[name] = {
+            'error': 'unsafe' if error.errno == errno.ELOOP else 'unavailable'
+        }
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+print(json.dumps(result, sort_keys=True))
+"""
+
+FRAME_LOG_MARKERS = {
+    "server.stderr": (
+        "commit wid ",
+        "no compatible rgb format for 'RGBX'!",
+        "only: ('BGRX', 'BGRA')",
+        "rgb_encode using",
+        "do_set_client_properties(",
+        "client does not support any csc modes with h264",
+        "no common encodings found",
+        "no video pipeline options found",
+        "failed to create data packet",
+        "failed to encode h264 frame",
+        "h264 video compression failed",
+    ),
+    "client.stdout": (
+        "register_window",
+        "draw_region(",
+        "choose_decoder(",
+        "paint_with_video_decoder: new libva",
+        "do_video_paint('h264'",
+        "record_decode_time(",
+        "do_present_fbo(",
+        "cairo._do_paint_rgb",
+        "draw_widget(",
+        "cairo_draw: window size=",
+    ),
+    "client.stderr": (
+        "register_window",
+        "draw_region(",
+        "choose_decoder(",
+        "paint_with_video_decoder: new libva",
+        "do_video_paint('h264'",
+        "record_decode_time(",
+        "do_present_fbo(",
+        "cairo._do_paint_rgb",
+        "draw_widget(",
+        "cairo_draw: window size=",
+    ),
+}
+
+SERVER_ARTIFACT_PATTERNS = (
+    re.compile(r"server(?:\..+|-va.*)"),
+    re.compile(r"screen-updates"),
+    re.compile(r"zed\..+"),
+    re.compile(r"vkcube\.(?:exit|pid|stderr|stdout)"),
+    re.compile(r"interaction\.(?:exit|pid|stderr|stdout)"),
+)
+CLIENT_ARTIFACT_PATTERNS = (
+    re.compile(r"client(?:\..+|-va.*)"),
+    re.compile(r"transport-proxy\..+"),
+    re.compile(r"sway(?:\..+|-child\.env)"),
+    re.compile(r"xwayland-xdpyinfo\.txt"),
+    re.compile(r"(?:xvfb|openbox|picom)\..+"),
+    re.compile(r"(?:root|window|interaction)-.+"),
 )
 
 
@@ -136,6 +295,49 @@ def ensure_private_regular_file(path: Path) -> None:
         raise LabFailure(f"unsafe private file: {path}")
 
 
+def privatize_regular_tree(root: Path) -> None:
+    """Normalize one owned tree to private directories and owner-only files."""
+    if root.is_symlink() or not root.is_dir() or root.lstat().st_uid != os.getuid():
+        raise LabFailure(f"cannot privatize an unsafe tree: {root}")
+    for directory_name, directory_names, file_names in os.walk(
+        root,
+        followlinks=False,
+    ):
+        directory = Path(directory_name)
+        directory.chmod(0o700)
+        for name in tuple(directory_names):
+            path = directory / name
+            if path.is_symlink():
+                directory_names.remove(name)
+                continue
+            if not path.is_dir():
+                raise LabFailure(f"private tree contains an unsafe directory: {path}")
+        for name in file_names:
+            path = directory / name
+            if path.is_symlink():
+                continue
+            if not path.is_file():
+                raise LabFailure(f"private tree contains an unsafe file: {path}")
+            mode = path.stat().st_mode
+            path.chmod(0o700 if mode & stat.S_IXUSR else 0o600)
+
+
+def replace_private_json(path: Path, payload: dict[str, Any]) -> None:
+    ensure_private_directory(path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 @dataclass(frozen=True)
 class Scenario:
     name: str
@@ -189,6 +391,33 @@ def transport_encoding_options(
     ]
 
 
+def server_debug_categories(application: str, h264_client_policy: str) -> str:
+    """Return the bounded server debug set required by one live application."""
+    del application, h264_client_policy
+    return "wayland,damage,encoding,encoder,argb"
+
+
+def live_user_options() -> list[str]:
+    return [
+        "--userns",
+        f"keep-id:uid={LIVE_CONTAINER_UID},gid={LIVE_CONTAINER_GID}",
+        "--user",
+        f"{LIVE_CONTAINER_UID}:{LIVE_CONTAINER_GID}",
+    ]
+
+
+def scenario_acceptance(report: dict[str, Any], cleanup: dict[str, Any]) -> bool:
+    collection = report.get("container_artifact_collection")
+    return bool(collection) and all(
+        isinstance(item, dict) and item.get("status") == "collected"
+        for item in collection
+    ) and (
+        cleanup.get("passed") is True
+        and report.get("classification", {}).get("diagnostic_only") is not True
+        and report.get("classification", {}).get("first_failed_boundary") == "passed"
+    )
+
+
 @dataclass(frozen=True)
 class SourceSnapshot:
     archive_path: Path
@@ -217,6 +446,19 @@ class BuildContext:
     path: Path
     resolution: dict[str, Any]
     selection: PatchSelection
+    archive_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class BoundInputs:
+    client_context: BuildContext
+    input_manifest_sha256: str
+    input_tree_sha256: str
+    server_context: BuildContext
+    snapshot: SourceSnapshot
+    zed_archive: Path | None
+    zed_archive_sha256: str | None
+    zed_binary_sha256: str | None
 
 
 def format_command(command: list[str]) -> str:
@@ -273,6 +515,391 @@ def podman_exec(
     )
 
 
+def stream_build_context(command: list[str], context: Path) -> None:
+    """Send one immutable Podman build context through stdin."""
+    print(f"+ {format_command(command)} < validated-tar({context})", flush=True)
+    entries = tuple(
+        container_payload.PayloadEntry(path, PurePosixPath(path.name))
+        for path in sorted(context.iterdir(), key=lambda item: os.fsencode(item.name))
+    )
+    try:
+        container_payload.stream_to_process(command, entries)
+    except container_payload.PayloadError as error:
+        raise LabFailure(str(error)) from error
+
+
+def stream_bound_build_context(command: list[str], context: BuildContext) -> None:
+    """Send the exact context archive frozen and bound by live-start."""
+    if context.archive_sha256 is None or sha256_file(context.path) != context.archive_sha256:
+        raise LabFailure("frozen live build-context archive changed before use")
+    print(f"+ {format_command(command)} < frozen-tar({context.path})", flush=True)
+    try:
+        container_payload.stream_archive_to_process(
+            command,
+            context.path,
+            expected_sha256=context.archive_sha256,
+        )
+    except container_payload.PayloadError as error:
+        raise LabFailure(str(error)) from error
+
+
+def _artifact_relative(value: str) -> str:
+    try:
+        return str(container_payload.archive_path(value))
+    except container_payload.PayloadError as error:
+        raise LabFailure(str(error)) from error
+
+
+def container_artifact_exists(container: str, relative: str) -> bool:
+    relative = _artifact_relative(relative)
+    return (
+        podman_exec(
+            container,
+            ["test", "-e", f"/artifacts/{relative}"],
+            check=False,
+            announce=False,
+        ).returncode
+        == 0
+    )
+
+
+def container_artifact_contains(container: str, relative: str, marker: str) -> bool:
+    relative = _artifact_relative(relative)
+    return (
+        podman_exec(
+            container,
+            ["grep", "--fixed-strings", "--quiet", "--", marker, f"/artifacts/{relative}"],
+            check=False,
+            announce=False,
+        ).returncode
+        == 0
+    )
+
+
+def container_artifact_size(container: str, relative: str) -> int:
+    """Return an exact remote artifact size without copying its active content."""
+    relative = _artifact_relative(relative)
+    probe = r"""
+import os
+import stat
+import sys
+
+details = os.lstat(sys.argv[1])
+if not stat.S_ISREG(details.st_mode):
+    raise SystemExit(2)
+print(details.st_size)
+"""
+    result = podman_exec(
+        container,
+        ["python3", "-c", probe, f"/artifacts/{relative}"],
+        check=False,
+        announce=False,
+    )
+    if result.returncode:
+        raise LabFailure(f"container artifact is not a regular file: {relative}")
+    value = result.stdout.strip()
+    if not re.fullmatch(r"[0-9]+", value):
+        raise LabFailure(f"invalid container artifact size for {relative}: {value!r}")
+    return int(value)
+
+
+def container_artifact_suffix_matches(
+    container: str,
+    relative: str,
+    offset: int,
+    patterns: tuple[str, ...],
+) -> bool:
+    relative = _artifact_relative(relative)
+    if offset < 0 or not patterns:
+        raise LabFailure("invalid container artifact suffix query")
+    script = r"""
+import os
+import re
+import stat
+import sys
+
+offset = int(sys.argv[2])
+limit = int(sys.argv[3])
+flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+try:
+    descriptor = os.open(sys.argv[1], flags)
+    with os.fdopen(descriptor, 'rb') as stream:
+        details = os.fstat(stream.fileno())
+        if not stat.S_ISREG(details.st_mode) or details.st_size < offset:
+            raise SystemExit(3)
+        stream.seek(offset)
+        payload = stream.read(limit + 1)
+except OSError:
+    raise SystemExit(3)
+if len(payload) > limit:
+    raise SystemExit(2)
+data = payload.decode('utf-8', errors='replace')
+try:
+    matched = all(re.search(pattern, data) for pattern in sys.argv[4:])
+except re.error:
+    raise SystemExit(3)
+raise SystemExit(0 if matched else 1)
+"""
+    result = podman_exec(
+        container,
+        [
+            "python3",
+            "-c",
+            script,
+            f"/artifacts/{relative}",
+            str(offset),
+            str(FRAME_LOG_TOTAL_BYTES),
+            *patterns,
+        ],
+        check=False,
+        announce=False,
+    )
+    if result.returncode not in {0, 1}:
+        raise LabFailure(f"container artifact suffix exceeds its limit: {relative}")
+    return result.returncode == 0
+
+
+def container_artifact_files(
+    container: str,
+    relative: str,
+    name: str,
+) -> tuple[str, ...]:
+    relative = _artifact_relative(relative)
+    if "/" in name or name in {"", ".", ".."}:
+        raise LabFailure(f"invalid artifact basename query: {name!r}")
+    listing = podman_exec(
+        container,
+        [
+            "find",
+            f"/artifacts/{relative}",
+            "-type",
+            "f",
+            "-name",
+            name,
+            "-printf",
+            "%P\\0",
+        ],
+        announce=False,
+    )
+    return tuple(
+        _artifact_relative(f"{relative}/{value}")
+        for value in listing.stdout.split("\0")
+        if value
+    )
+
+
+def pull_container_artifacts(
+    container: str,
+    destination: Path,
+    relatives: tuple[str, ...],
+) -> None:
+    """Receive exact live artifacts through the common validated tar stream."""
+    if not relatives:
+        return
+    ensure_private_directory(destination)
+    command = [
+        "podman",
+        "exec",
+        container,
+        "python3",
+        CONTAINER_PAYLOAD,
+        "create",
+    ]
+    seen: set[str] = set()
+    for value in relatives:
+        relative = _artifact_relative(value)
+        if relative in seen:
+            continue
+        seen.add(relative)
+        command.extend(
+            ("--entry-json", json.dumps([f"/artifacts/{relative}", relative]))
+        )
+    try:
+        container_payload.merge_from_process(command, destination)
+    except container_payload.PayloadError as error:
+        raise LabFailure(str(error)) from error
+
+
+def read_container_log_deltas(
+    container: str,
+    offsets: dict[str, int],
+    *,
+    markers: dict[str, tuple[str, ...]] | None = None,
+) -> dict[str, tuple[int, str]]:
+    """Scan one stable log snapshot and return only bounded evidence lines."""
+    if not offsets or any(
+        _artifact_relative(name) != name
+        or "/" in name
+        or not isinstance(offset, int)
+        or offset < 0
+        for name, offset in offsets.items()
+    ):
+        raise LabFailure("invalid incremental container-log request")
+    selected_markers = markers or {
+        name: FRAME_LOG_MARKERS[name]
+        for name in offsets
+        if name in FRAME_LOG_MARKERS
+    }
+    if (
+        set(selected_markers) != set(offsets)
+        or any(
+            not isinstance(values, tuple)
+            or not values
+            or any(
+                not isinstance(value, str) or not value or "\n" in value
+                for value in values
+            )
+            for values in selected_markers.values()
+        )
+    ):
+        raise LabFailure("invalid incremental container-log markers")
+    response = podman_exec(
+        container,
+        [
+            "python3",
+            "-c",
+            CONTAINER_LOG_DELTA_PROBE,
+            json.dumps(offsets, sort_keys=True),
+            str(FRAME_LOG_CHUNK_BYTES),
+            str(FRAME_LOG_SCAN_BYTES),
+            "/artifacts",
+            json.dumps(selected_markers, sort_keys=True),
+        ],
+        announce=False,
+    )
+    try:
+        payload = json.loads(response.stdout)
+    except json.JSONDecodeError as error:
+        raise LabFailure("incremental container-log probe returned invalid JSON") from error
+    if not isinstance(payload, dict) or set(payload) != set(offsets):
+        raise LabFailure("incremental container-log probe returned invalid fields")
+    result: dict[str, tuple[int, str]] = {}
+    for name, old_offset in offsets.items():
+        item = payload[name]
+        if not isinstance(item, dict):
+            raise LabFailure(f"incremental container-log probe is invalid: {name}")
+        error = item.get("error")
+        if error == "truncated":
+            raise LabFailure(f"container log was truncated during frame polling: {name}")
+        if error in {"unavailable", "unsafe"}:
+            raise LabFailure(f"container log is {error} during frame polling: {name}")
+        if error in {"line-too-long", "matched-overflow"}:
+            raise LabFailure(f"container log evidence exceeds its limit: {name}")
+        if error is not None:
+            raise LabFailure(f"incremental container-log probe is invalid: {name}")
+        data = item.get("data")
+        next_offset = item.get("next")
+        scanned = item.get("scanned")
+        size = item.get("size")
+        if (
+            not isinstance(data, str)
+            or not isinstance(next_offset, int)
+            or isinstance(next_offset, bool)
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or not isinstance(scanned, int)
+            or isinstance(scanned, bool)
+            or next_offset < old_offset
+            or scanned != next_offset - old_offset
+            or scanned > FRAME_LOG_SCAN_BYTES
+            or len(data.encode()) > FRAME_LOG_CHUNK_BYTES
+            or size < next_offset
+        ):
+            raise LabFailure(f"incremental container-log probe is inconsistent: {name}")
+        result[name] = next_offset, data
+    return result
+
+
+def pull_all_container_artifacts(
+    container: str,
+    destination: Path,
+    role: str,
+) -> None:
+    listing = podman_exec(
+        container,
+        [
+            "find",
+            "/artifacts",
+            "-mindepth",
+            "1",
+            "-maxdepth",
+            "1",
+            "-printf",
+            "%f\\0",
+        ],
+        announce=False,
+    )
+    relatives = tuple(name for name in listing.stdout.split("\0") if name)
+    patterns = {
+        "server": SERVER_ARTIFACT_PATTERNS,
+        "client": CLIENT_ARTIFACT_PATTERNS,
+    }.get(role)
+    if patterns is None:
+        raise LabFailure(f"invalid live artifact role: {role}")
+    other_patterns = (
+        CLIENT_ARTIFACT_PATTERNS if role == "server" else SERVER_ARTIFACT_PATTERNS
+    )
+    ambiguous = [
+        relative
+        for relative in relatives
+        if any(pattern.fullmatch(relative) for pattern in patterns)
+        and any(pattern.fullmatch(relative) for pattern in other_patterns)
+    ]
+    if ambiguous:
+        raise LabFailure(
+            f"ambiguous {role} artifact names: {', '.join(sorted(ambiguous))}"
+        )
+    unexpected = [
+        relative
+        for relative in relatives
+        if not any(pattern.fullmatch(relative) for pattern in patterns)
+    ]
+    if unexpected:
+        raise LabFailure(
+            f"unexpected {role} artifact names: {', '.join(sorted(unexpected))}"
+        )
+    pull_container_artifacts(container, destination, relatives)
+
+
+def wait_for_container_artifact(
+    container: str,
+    directory: Path,
+    relative: str,
+    description: str,
+) -> Path:
+    wait_for(description, lambda: container_artifact_exists(container, relative))
+    pull_container_artifacts(container, directory, (relative,))
+    return directory / _artifact_relative(relative)
+
+
+def send_zed_payload(
+    container: str,
+    zed_archive: Path,
+    expected_sha256: str,
+) -> None:
+    """Populate the optional application input from one frozen archive."""
+    if sha256_file(zed_archive) != expected_sha256:
+        raise LabFailure("frozen Zed payload digest changed before transfer")
+    try:
+        container_payload.stream_archive_to_process(
+            [
+                "podman",
+                "exec",
+                "--interactive",
+                container,
+                "python3",
+                CONTAINER_PAYLOAD,
+                "extract",
+                "--destination",
+                "/home/lab/live-input",
+            ],
+            zed_archive,
+            expected_sha256=expected_sha256,
+        )
+    except container_payload.PayloadError as error:
+        raise LabFailure(str(error)) from error
+
+
 def inspect_lab_image(
     image: str,
     *,
@@ -292,26 +919,32 @@ def inspect_lab_image(
         labels = config.get("Labels") if isinstance(config, dict) else None
     if not isinstance(labels, dict):
         raise LabFailure(f"image has no Xpra lab provenance labels: {image}")
+    if not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in labels.items()
+    ):
+        raise LabFailure(f"image has invalid provenance labels: {image}")
     expected = {
         "io.xpra.lab.context": context_digest,
         "io.xpra.lab.owner": "live",
         "io.xpra.lab.role": role,
         "io.xpra.lab.source": source_commit,
     }
-    mismatches = {
-        key: {"expected": value, "observed": labels.get(key)}
-        for key, value in expected.items()
-        if labels.get(key) != value
+    lab_labels = {
+        key: value for key, value in labels.items() if key.startswith(LAB_LABEL_PREFIX)
     }
-    if mismatches:
+    if lab_labels != expected:
         raise LabFailure(
             f"image provenance labels do not match the frozen inputs for {image}: "
-            f"{json.dumps(mismatches, sort_keys=True)}"
+            f"expected {json.dumps(expected, sort_keys=True)}, "
+            f"observed {json.dumps(labels, sort_keys=True)}"
         )
     image_id = inspection.get("Id")
-    if not isinstance(image_id, str) or not image_id:
+    if not isinstance(image_id, str) or not re.fullmatch(
+        r"(?:sha256:)?[0-9a-f]{64}", image_id
+    ):
         raise LabFailure(f"image has no immutable identifier: {image}")
-    return {"id": image_id, "labels": expected}
+    return {"id": image_id, "labels": lab_labels}
 
 
 def verify_container_image(container: str, expected_image_id: str) -> None:
@@ -329,7 +962,7 @@ def verify_container_image(container: str, expected_image_id: str) -> None:
         )
 
 
-def inspect_podman_object_labels(kind: str, name: str) -> dict[str, str]:
+def inspect_podman_object(kind: str, name: str) -> tuple[str, dict[str, str]]:
     if kind not in {"container", "network"}:
         raise LabFailure(f"unsupported Podman object kind: {kind}")
     result = run(["podman", kind, "inspect", name], check=False, announce=False)
@@ -347,9 +980,11 @@ def inspect_podman_object_labels(kind: str, name: str) -> dict[str, str]:
     if not isinstance(inspection, dict):
         raise LabFailure(f"invalid Podman inspection object for {kind} {name}")
     if kind == "container":
+        object_id = str(inspection.get("Id", ""))
         config = inspection.get("Config")
         labels = config.get("Labels") if isinstance(config, dict) else None
     else:
+        object_id = str(inspection.get("id", inspection.get("ID", "")))
         label_fields = [
             (field, inspection[field])
             for field in ("Labels", "labels")
@@ -366,7 +1001,13 @@ def inspect_podman_object_labels(kind: str, name: str) -> dict[str, str]:
         isinstance(key, str) and isinstance(value, str) for key, value in labels.items()
     ):
         raise LabFailure(f"{kind} has invalid provenance labels: {name}")
-    return labels
+    if not re.fullmatch(r"[0-9a-f]{64}", object_id):
+        raise LabFailure(f"{kind} has no immutable ID: {name}")
+    return object_id, labels
+
+
+def inspect_podman_object_labels(kind: str, name: str) -> dict[str, str]:
+    return inspect_podman_object(kind, name)[1]
 
 
 def list_podman_object_names(kind: str) -> subprocess.CompletedProcess[str]:
@@ -383,24 +1024,29 @@ def remove_owned_podman_object(
     kind: str,
     name: str,
     expected_labels: dict[str, str],
+    expected_id: str | None = None,
 ) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "expected_labels": expected_labels,
         "name": name,
     }
     try:
-        labels = inspect_podman_object_labels(kind, name)
+        object_id, labels = inspect_podman_object(kind, name)
     except LabFailure as error:
         entry.update({"error": str(error), "status": "inspect-failed"})
         return entry
     observed = {key: labels.get(key) for key in expected_labels}
     entry["observed_labels"] = observed
+    entry["observed_id"] = object_id
+    if expected_id is not None and object_id != expected_id:
+        entry["status"] = "identity-mismatch"
+        return entry
     if observed != expected_labels:
         entry["status"] = "ownership-mismatch"
         return entry
-    command = ["podman", "rm", "--force", name]
+    command = ["podman", "rm", "--force", object_id]
     if kind == "network":
-        command = ["podman", "network", "rm", name]
+        command = ["podman", "network", "rm", object_id]
     result = run(command, check=False)
     postcheck = list_podman_object_names(kind)
     remaining_names = (
@@ -466,6 +1112,69 @@ def container_process_exists(container: str, pid: int) -> bool:
     )
 
 
+def quiesce_failed_workloads(
+    processes: tuple[tuple[str, str, int], ...],
+    *,
+    timeout: float = 15,
+) -> dict[str, Any]:
+    """Stop exact scenario processes before collecting failure evidence."""
+    evidence: list[dict[str, Any]] = []
+    active: list[tuple[str, str, int]] = []
+    for role, container, pid in processes:
+        item: dict[str, Any] = {"container": container, "pid": pid, "role": role}
+        if pid <= 0:
+            item["status"] = "not-started"
+            evidence.append(item)
+            continue
+        try:
+            alive = container_process_exists(container, pid)
+        except BaseException as error:  # noqa: BLE001
+            item.update({"error": str(error), "status": "probe-failed"})
+            evidence.append(item)
+            continue
+        if not alive:
+            item["status"] = "already-exited"
+            evidence.append(item)
+            continue
+        termination = podman_exec(
+            container,
+            ["kill", "-TERM", str(pid)],
+            check=False,
+            announce=False,
+        )
+        item.update(
+            {
+                "termination_returncode": termination.returncode,
+                "termination_stderr": termination.stderr,
+                "termination_stdout": termination.stdout,
+                "status": "termination-requested",
+            }
+        )
+        evidence.append(item)
+        active.append((role, container, pid))
+
+    deadline = time.monotonic() + timeout
+    remaining = list(active)
+    while remaining and time.monotonic() < deadline:
+        remaining = [
+            value
+            for value in remaining
+            if container_process_exists(value[1], value[2])
+        ]
+        if remaining:
+            time.sleep(0.1)
+    remaining_keys = {(container, pid) for _role, container, pid in remaining}
+    for item in evidence:
+        key = item["container"], item["pid"]
+        if item["status"] == "termination-requested":
+            item["status"] = "still-running" if key in remaining_keys else "exited"
+    passed = not remaining and all(
+        item["status"] in {"already-exited", "exited", "not-started"}
+        for item in evidence
+    )
+    return {"passed": passed, "processes": evidence}
+
+
 def wait_for_log(
     container: str,
     pid: int,
@@ -473,14 +1182,15 @@ def wait_for_log(
     marker: str,
     description: str,
 ) -> None:
+    relative = path.name
+
     def ready() -> bool:
-        if path.is_file() and marker in path.read_text(
-            encoding="utf-8", errors="replace"
-        ):
+        if container_artifact_contains(container, relative, marker):
             return True
         if not container_process_exists(container, pid):
             tail = ""
-            if path.is_file():
+            if container_artifact_exists(container, relative):
+                pull_container_artifacts(container, path.parent, (relative,))
                 tail = "\n".join(
                     path.read_text(encoding="utf-8", errors="replace").splitlines()[
                         -80:
@@ -492,11 +1202,200 @@ def wait_for_log(
     wait_for(description, ready)
 
 
+def fail_with_exited_server_artifacts(
+    server: str,
+    directory: Path,
+    message: str,
+) -> None:
+    """Collect complete quiesced server evidence, then raise one diagnostic."""
+    pull_all_container_artifacts(server, directory, "server")
+    sections: list[str] = []
+    for name in (
+        "server.stderr",
+        "interaction.stderr",
+        "interaction.exit",
+        "vkcube.stderr",
+        "vkcube.exit",
+    ):
+        path = directory / name
+        if not path.is_file():
+            continue
+        tail = "\n".join(
+            path.read_text(encoding="utf-8", errors="replace").splitlines()[-80:]
+        )
+        sections.append(f"[{name}]\n{tail}")
+    detail = "\n".join(sections)
+    suffix = f"\n{detail}" if detail else ""
+    raise LabFailure(f"{message}{suffix}")
+
+
+def wait_for_server_tcp_endpoint(
+    server: str,
+    server_pid: int,
+    client: str,
+    host: str,
+    port: int,
+    server_log: Path,
+) -> None:
+    """Wait until the Xpra TCP endpoint is reachable from the client container."""
+    if not host or port < 1 or port > 65535:
+        raise LabFailure("invalid server TCP endpoint")
+    probe = r"""
+import socket
+import sys
+
+try:
+    connection = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=0.5)
+except OSError:
+    raise SystemExit(75)
+connection.close()
+"""
+
+    def server_exited() -> None:
+        fail_with_exited_server_artifacts(
+            server,
+            server_log.parent,
+            "Xpra server exited before its TCP endpoint was ready",
+        )
+
+    def reachable() -> bool:
+        if not container_process_exists(server, server_pid):
+            server_exited()
+        result = podman_exec(
+            client,
+            ["python3", "-c", probe, host, str(port)],
+            check=False,
+            announce=False,
+        )
+        if not container_process_exists(server, server_pid):
+            server_exited()
+        if result.returncode == 0:
+            return True
+        if result.returncode == 75:
+            return False
+        detail = result.stderr.strip()
+        suffix = f": {detail[-2000:]}" if detail else ""
+        raise LabFailure(f"client TCP readiness probe failed{suffix}")
+
+    wait_for("Xpra server TCP endpoint from the client container", reachable)
+
+
+def wait_for_hardware_fixture(
+    server: str,
+    server_pid: int,
+    directory: Path,
+) -> None:
+    """Require both hardware children and the GTK main-loop readiness marker."""
+    probe = r"""
+import os
+import re
+import stat
+from pathlib import Path
+
+def child_state(name):
+    path = Path('/artifacts') / f'{name}.pid'
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(details.st_mode):
+        return False
+    payload = path.read_bytes()
+    if len(payload) > 32 or not re.fullmatch(rb'[1-9][0-9]*\n?', payload):
+        return False
+    try:
+        os.kill(int(payload), 0)
+    except OSError:
+        return False
+    return True
+
+states = tuple(child_state(name) for name in ('interaction', 'vkcube'))
+if False in states:
+    raise SystemExit(76)
+marker = Path('/tmp/xpra-hardware-interaction-ready')
+try:
+    marker_details = marker.lstat()
+except FileNotFoundError:
+    marker_details = None
+if marker_details is not None and not stat.S_ISREG(marker_details.st_mode):
+    raise SystemExit(76)
+if all(state is True for state in states) and marker_details is not None:
+    raise SystemExit(0)
+raise SystemExit(75)
+"""
+
+    def server_exited(message: str) -> None:
+        fail_with_exited_server_artifacts(server, directory, message)
+
+    def stop_failed_fixture() -> None:
+        podman_exec(
+            server,
+            ["kill", "-TERM", str(server_pid)],
+            check=False,
+            announce=False,
+        )
+        wait_for(
+            "Xpra server exit after hardware fixture readiness failure",
+            lambda: not container_process_exists(server, server_pid),
+            timeout=15,
+        )
+        server_exited("hardware fixture child exited before GTK readiness")
+
+    def ready() -> bool:
+        if not container_process_exists(server, server_pid):
+            server_exited("Xpra server exited before hardware fixture readiness")
+        result = podman_exec(
+            server,
+            ["python3", "-c", probe],
+            check=False,
+            announce=False,
+        )
+        if not container_process_exists(server, server_pid):
+            server_exited("Xpra server exited before hardware fixture readiness")
+        if result.returncode == 0:
+            return True
+        if result.returncode == 75:
+            return False
+        if result.returncode == 76:
+            stop_failed_fixture()
+        detail = result.stderr.strip()
+        suffix = f": {detail[-2000:]}" if detail else ""
+        raise LabFailure(f"hardware fixture readiness probe failed{suffix}")
+
+    wait_for("hardware fixture GTK and Vulkan readiness", ready)
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         while block := stream.read(1024 * 1024):
             digest.update(block)
+    return digest.hexdigest()
+
+
+def harness_sha256() -> str:
+    digest = hashlib.sha256()
+    for path in HARNESS_INPUTS:
+        if path.is_symlink() or not path.is_file():
+            raise LabFailure(f"live harness input is unavailable: {path}")
+        digest.update(path.relative_to(LAB_ROOT).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(bytes.fromhex(sha256_file(path)))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def harness_snapshot_sha256(root: Path) -> str:
+    digest = hashlib.sha256()
+    for source in HARNESS_INPUTS:
+        relative = source.relative_to(LAB_ROOT)
+        path = root / relative
+        if path.is_symlink() or not path.is_file():
+            raise LabFailure(f"frozen live harness input is unavailable: {relative}")
+        digest.update(relative.as_posix().encode())
+        digest.update(b"\0")
+        digest.update(bytes.fromhex(sha256_file(path)))
+        digest.update(b"\0")
     return digest.hexdigest()
 
 
@@ -587,7 +1486,7 @@ def resolve_patch_selection(
         for selector, selector_digest in selector_digests:
             digest.update(f"{selector}\0{selector_digest}\0".encode())
         if not selectors:
-            digest.update(b"clean-upstream-master\0")
+            digest.update(b"clean-fork-master\0")
         selection_digest = digest.hexdigest()
     return PatchSelection(
         case_slugs=tuple(case_slugs),
@@ -710,19 +1609,17 @@ def git_output(*arguments: str) -> str:
     return run(["git", "-C", str(SOURCE_REPOSITORY), *arguments]).stdout.strip()
 
 
-def resolve_live_upstream_master() -> tuple[str, str, int]:
+def resolve_live_fork_master() -> tuple[str, str, int]:
     if not (SOURCE_REPOSITORY / ".git").exists():
         raise LabFailure(f"Xpra fork checkout is missing: {SOURCE_REPOSITORY}")
     if git_output("rev-parse", "--is-inside-work-tree") != "true":
         raise LabFailure(f"Xpra source is not a working tree: {SOURCE_REPOSITORY}")
     remotes = set(git_output("remote").splitlines())
-    if "upstream" not in remotes:
-        raise LabFailure("Xpra fork checkout has no 'upstream' remote")
-    upstream_url = git_output("remote", "get-url", "upstream").removesuffix("/")
-    if upstream_url.removesuffix(".git") != UPSTREAM_REMOTE_URL.removesuffix(".git"):
-        raise LabFailure(
-            f"Xpra 'upstream' remote has an unexpected URL: {upstream_url}"
-        )
+    if "origin" not in remotes:
+        raise LabFailure("Xpra fork checkout has no 'origin' remote")
+    origin_url = git_output("remote", "get-url", "origin").removesuffix("/")
+    if origin_url.removesuffix(".git") != FORK_REMOTE_URL.removesuffix(".git"):
+        raise LabFailure(f"Xpra 'origin' remote has an unexpected URL: {origin_url}")
 
     run(
         [
@@ -731,23 +1628,23 @@ def resolve_live_upstream_master() -> tuple[str, str, int]:
             str(SOURCE_REPOSITORY),
             "fetch",
             "--no-tags",
-            "upstream",
-            "+refs/heads/master:refs/remotes/upstream/master",
+            "origin",
+            "+refs/heads/master:refs/remotes/origin/master",
         ],
         capture=False,
     )
-    local_commit = git_output("rev-parse", "refs/remotes/upstream/master")
-    remote_line = git_output("ls-remote", "--heads", "upstream", "refs/heads/master")
+    local_commit = git_output("rev-parse", "refs/remotes/origin/master")
+    remote_line = git_output("ls-remote", "--heads", "origin", "refs/heads/master")
     remote_commit, separator, remote_ref = remote_line.partition("\t")
     if (
         not separator
         or remote_ref != "refs/heads/master"
         or not re.fullmatch(r"[0-9a-f]{40}", remote_commit)
     ):
-        raise LabFailure("could not resolve the live upstream/master commit")
+        raise LabFailure("could not resolve the live fork origin/master commit")
     if local_commit != remote_commit:
         raise LabFailure(
-            "upstream/master moved while it was being frozen; run the command again"
+            "origin/master moved while it was being frozen; run the command again"
         )
 
     describe = git_output("describe", "--long", "--always", "--tags", remote_commit)
@@ -759,12 +1656,18 @@ def resolve_live_upstream_master() -> tuple[str, str, int]:
     return remote_commit, commit_marker, revision
 
 
-def create_source_snapshot(state_root: Path) -> SourceSnapshot:
-    commit, commit_marker, revision = resolve_live_upstream_master()
+def create_source_snapshot(
+    state_root: Path,
+    *,
+    temporary_root: Path | None = None,
+) -> SourceSnapshot:
+    commit, commit_marker, revision = resolve_live_fork_master()
     archive_root = state_root / "source-archives"
     ensure_private_directory(archive_root, create=True)
+    temporary_directory = temporary_root or archive_root
+    ensure_private_directory(temporary_directory, create=True)
     with tempfile.NamedTemporaryFile(
-        dir=archive_root,
+        dir=temporary_directory,
         prefix=f".{commit}.",
         suffix=".tar",
         delete=False,
@@ -799,9 +1702,9 @@ def create_source_snapshot(state_root: Path) -> SourceSnapshot:
         try:
             workflow = archive.extractfile(".github/workflows/test.yml")
         except KeyError as error:
-            raise LabFailure("upstream source archive has no test workflow") from error
+            raise LabFailure("fork-master source archive has no test workflow") from error
         if workflow is None:
-            raise LabFailure("upstream source archive has no test workflow")
+            raise LabFailure("fork-master source archive has no test workflow")
         with workflow:
             workflow_sha256 = hashlib.sha256(workflow.read()).hexdigest()
     return SourceSnapshot(
@@ -879,6 +1782,8 @@ def prepare_build_context(
     state_root: Path,
     snapshot: SourceSnapshot,
     selection: PatchSelection,
+    *,
+    temporary_root: Path | None = None,
 ) -> BuildContext:
     patches = selection.patches
     ensure_patch_selection_current(selection)
@@ -887,7 +1792,9 @@ def prepare_build_context(
             raise LabFailure(f"case patch is missing: {patch}")
     context_root = state_root / "build-contexts" / "live"
     ensure_private_directory(context_root, create=True)
-    temporary = Path(tempfile.mkdtemp(prefix=".context.", dir=context_root))
+    temporary_directory = temporary_root or context_root
+    ensure_private_directory(temporary_directory, create=True)
+    temporary = Path(tempfile.mkdtemp(prefix=".context.", dir=temporary_directory))
     ensure_private_directory(temporary)
     try:
         for source in BUILD_CONTEXT_INPUTS:
@@ -990,15 +1897,18 @@ def prepare_build_context(
             encoding="utf-8",
         )
         ensure_patch_selection_current(selection)
+        privatize_regular_tree(temporary)
         context_digest = tree_sha256(temporary)
         context_path = context_root / context_digest
         if context_path.is_symlink():
             raise LabFailure(f"cached build context is a symlink: {context_path}")
         if not context_path.exists():
             try:
-                temporary.rename(context_path)
+                container_payload.rename_no_replace(temporary, context_path)
             except FileExistsError:
                 pass
+            except container_payload.PayloadError as error:
+                raise LabFailure(str(error)) from error
         ensure_private_directory(context_path)
         if temporary.exists():
             if tree_sha256(context_path) != context_digest:
@@ -1069,39 +1979,113 @@ def snapshot_build_inputs(
     snapshot: SourceSnapshot,
     server_context: BuildContext,
     client_context: BuildContext,
-) -> str:
+    zed_directory: Path | None,
+    *,
+    zed_binary_sha256: str | None = None,
+) -> tuple[str, Path | None, str | None]:
     inputs = result_directory / "inputs"
     harness = inputs / "harness"
     harness.mkdir(parents=True)
     for source in HARNESS_INPUTS:
-        shutil.copy2(source, harness / source.name)
+        relative = source.relative_to(LAB_ROOT)
+        destination = harness / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
     shutil.copy2(snapshot.archive_path, inputs / "source.tar")
     contexts = inputs / "contexts"
     contexts.mkdir()
-    shutil.copytree(server_context.path, contexts / "server", symlinks=True)
-    shutil.copytree(client_context.path, contexts / "client", symlinks=True)
+    context_archive_sha256: dict[str, str] = {}
+    for role, context in (
+        ("server", server_context),
+        ("client", client_context),
+    ):
+        archive_path = contexts / f"{role}.tar"
+        with archive_path.open("xb") as stream:
+            container_payload.write_archive(
+                stream,
+                tuple(
+                    container_payload.PayloadEntry(
+                        path,
+                        PurePosixPath(path.name),
+                    )
+                    for path in sorted(
+                        context.path.iterdir(),
+                        key=lambda item: os.fsencode(item.name),
+                    )
+                ),
+            )
+        (contexts / f"{role}.manifest.json").write_text(
+            json.dumps(context.manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        context_archive_sha256[role] = sha256_file(archive_path)
+        if tree_sha256(context.path) != context.digest:
+            raise LabFailure(f"{role} build context changed while it was frozen")
     selections = inputs / "selections"
     selections.mkdir()
     snapshot_patch_selection(selections / "server", server_context)
     snapshot_patch_selection(selections / "client", client_context)
+    zed_archive: Path | None = None
+    zed_archive_sha256: str | None = None
+    if zed_directory is not None:
+        zed_archive = inputs / "zed.tar"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(zed_archive, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
+                container_payload.write_archive(
+                    stream,
+                    (
+                        container_payload.PayloadEntry(
+                            zed_directory,
+                            PurePosixPath("zed.app"),
+                        ),
+                    ),
+                )
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        zed_archive_sha256 = sha256_file(zed_archive)
     manifest = {
+        "schema": 2,
+        "client_context_archive_sha256": context_archive_sha256["client"],
         "client_context_sha256": client_context.digest,
+        "client_selection": client_context.selection.name,
+        "client_selection_resolution_sha256": client_context.resolution[
+            "resolution_sha256"
+        ],
         "client_selection_sha256": client_context.selection.digest,
-        "harness": {path.name: sha256_file(path) for path in HARNESS_INPUTS},
+        "harness": {
+            path.relative_to(LAB_ROOT).as_posix(): sha256_file(
+                harness / path.relative_to(LAB_ROOT)
+            )
+            for path in HARNESS_INPUTS
+        },
+        "harness_sha256": harness_snapshot_sha256(harness),
+        "server_context_archive_sha256": context_archive_sha256["server"],
         "server_context_sha256": server_context.digest,
+        "server_selection": server_context.selection.name,
         "server_selection_sha256": server_context.selection.digest,
         "server_selection_resolution_sha256": server_context.resolution[
             "resolution_sha256"
         ],
         "source_archive_sha256": snapshot.archive_sha256,
         "source_commit": snapshot.commit,
+        "source_commit_marker": snapshot.commit_marker,
+        "source_revision": snapshot.revision,
         "source_workflow_sha256": snapshot.workflow_sha256,
+        "zed_archive_sha256": zed_archive_sha256,
+        "zed_binary_sha256": zed_binary_sha256,
     }
     manifest_path = inputs / "manifest.json"
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    privatize_regular_tree(inputs)
     checksum_lines: list[str] = []
     for path in sorted(inputs.rglob("*")):
         if path.is_file() and not path.is_symlink() and path.name != "SHA256SUMS":
@@ -1110,7 +2094,282 @@ def snapshot_build_inputs(
             )
     checksums = inputs / "SHA256SUMS"
     checksums.write_text("".join(checksum_lines), encoding="utf-8")
-    return sha256_file(manifest_path)
+    checksums.chmod(0o600)
+    return sha256_file(manifest_path), zed_archive, zed_archive_sha256
+
+
+def freeze_owned_inputs(
+    result_directory: Path,
+    state_root: Path,
+    *,
+    application: str,
+    selection_name: str | None,
+    zed_directory: Path | None,
+) -> dict[str, Any]:
+    """Freeze every mutable named-run input before its owner is launched."""
+    if selection_name is None:
+        raise LabFailure("live acceptance requires one non-empty case or stack selection")
+    ensure_private_directory(result_directory)
+    if tuple(result_directory.iterdir()):
+        raise LabFailure(f"live input staging directory is not empty: {result_directory}")
+    initial_harness_sha256 = harness_sha256()
+    if application == "zed":
+        if zed_directory is None:
+            raise LabFailure("Zed input directory is required for the Zed profile")
+        zed_binary = zed_directory / "libexec" / "zed-editor"
+        if not zed_binary.is_file() or not os.access(zed_binary, os.X_OK):
+            raise LabFailure(f"Zed executable is unavailable: {zed_binary}")
+        zed_binary_sha256 = sha256_file(zed_binary)
+    else:
+        zed_binary = None
+        zed_binary_sha256 = None
+
+    freeze_root = result_directory / ".freeze"
+    freeze_root.mkdir(mode=0o700)
+    try:
+        snapshot = create_source_snapshot(state_root, temporary_root=freeze_root)
+        server_selection = resolve_patch_selection(selection_name, None)
+        client_selection = resolve_patch_selection(None, "master")
+        server_context = prepare_build_context(
+            state_root,
+            snapshot,
+            server_selection,
+            temporary_root=freeze_root,
+        )
+        client_context = prepare_build_context(
+            state_root,
+            snapshot,
+            client_selection,
+            temporary_root=freeze_root,
+        )
+        input_manifest_sha256, _zed_archive, _zed_archive_sha256 = (
+            snapshot_build_inputs(
+                result_directory,
+                snapshot,
+                server_context,
+                client_context,
+                zed_directory if application == "zed" else None,
+                zed_binary_sha256=zed_binary_sha256,
+            )
+        )
+        if zed_binary is not None and sha256_file(zed_binary) != zed_binary_sha256:
+            raise LabFailure("Zed executable changed while its payload was frozen")
+        if harness_sha256() != initial_harness_sha256:
+            raise LabFailure("live harness changed while its inputs were being frozen")
+    finally:
+        if freeze_root.exists():
+            shutil.rmtree(freeze_root)
+
+    inputs = result_directory / "inputs"
+    manifest = json.loads((inputs / "manifest.json").read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise LabFailure("frozen live input manifest is not an object")
+    if manifest.get("harness_sha256") != initial_harness_sha256:
+        raise LabFailure("frozen live harness digest does not match its source")
+    return {
+        **manifest,
+        "input_manifest_sha256": input_manifest_sha256,
+        "input_tree_sha256": tree_sha256(inputs),
+    }
+
+
+def _validated_input_checksums(inputs: Path) -> dict[str, str]:
+    checksum_path = inputs / "SHA256SUMS"
+    ensure_private_regular_file(checksum_path)
+    expected: dict[str, str] = {}
+    for line in checksum_path.read_text(encoding="utf-8").splitlines():
+        digest, separator, relative_value = line.partition("  ")
+        try:
+            relative = container_payload.archive_path(relative_value)
+        except container_payload.PayloadError as error:
+            raise LabFailure("frozen live input checksum has an unsafe path") from error
+        key = str(relative)
+        if not separator or not re.fullmatch(r"[0-9a-f]{64}", digest) or key in expected:
+            raise LabFailure("frozen live input checksum manifest is invalid")
+        expected[key] = digest
+    observed: dict[str, str] = {}
+    for directory, directory_names, file_names in os.walk(inputs, followlinks=False):
+        root = Path(directory)
+        for name in directory_names:
+            path = root / name
+            if path.is_symlink() or not path.is_dir():
+                raise LabFailure(f"frozen live inputs contain an unsafe directory: {path}")
+        for name in file_names:
+            path = root / name
+            if path.is_symlink() or not path.is_file():
+                raise LabFailure(f"frozen live inputs contain an unsafe file: {path}")
+            if path != checksum_path:
+                observed[path.relative_to(inputs).as_posix()] = sha256_file(path)
+    if observed != expected:
+        raise LabFailure("frozen live input checksums do not match their files")
+    return observed
+
+
+def _bound_context(inputs: Path, role: str, manifest: dict[str, Any]) -> BuildContext:
+    context_manifest_path = inputs / "contexts" / f"{role}.manifest.json"
+    ensure_private_regular_file(context_manifest_path)
+    try:
+        context_manifest = json.loads(context_manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise LabFailure(f"frozen {role} context manifest is invalid JSON") from error
+    if not isinstance(context_manifest, dict):
+        raise LabFailure(f"frozen {role} context manifest is not an object")
+    selection_value = context_manifest.get("selection")
+    if not isinstance(selection_value, dict):
+        raise LabFailure(f"frozen {role} selection provenance is missing")
+    case_slugs = selection_value.get("case_slugs")
+    selectors = selection_value.get("selectors")
+    selector_digests = selection_value.get("selector_digests")
+    resolution = selection_value.get("resolution")
+    selection_name = selection_value.get("name")
+    selection_digest = selection_value.get("digest")
+    if (
+        not isinstance(case_slugs, list)
+        or not all(isinstance(value, str) for value in case_slugs)
+        or not isinstance(selectors, list)
+        or not all(isinstance(value, str) for value in selectors)
+        or not isinstance(selector_digests, dict)
+        or set(selector_digests) != set(selectors)
+        or not all(
+            isinstance(key, str)
+            and isinstance(value, str)
+            and re.fullmatch(r"[0-9a-f]{64}", value)
+            for key, value in selector_digests.items()
+        )
+        or not isinstance(resolution, dict)
+        or not isinstance(selection_name, str)
+        or not isinstance(selection_digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", selection_digest)
+    ):
+        raise LabFailure(f"frozen {role} selection provenance is invalid")
+    context_digest = manifest.get(f"{role}_context_sha256")
+    context_archive_sha256 = manifest.get(f"{role}_context_archive_sha256")
+    if (
+        not isinstance(context_digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", context_digest)
+        or not isinstance(context_archive_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", context_archive_sha256)
+        or manifest.get(f"{role}_selection") != selection_name
+        or manifest.get(f"{role}_selection_sha256") != selection_digest
+        or manifest.get(f"{role}_selection_resolution_sha256")
+        != resolution.get("resolution_sha256")
+    ):
+        raise LabFailure(f"frozen {role} context provenance is inconsistent")
+    archive = inputs / "contexts" / f"{role}.tar"
+    ensure_private_regular_file(archive)
+    if sha256_file(archive) != context_archive_sha256:
+        raise LabFailure(f"frozen {role} context archive changed")
+    with tempfile.TemporaryDirectory(
+        prefix=f".{role}-context-validation-",
+        dir=inputs.parent,
+    ) as temporary_name:
+        extracted = Path(temporary_name) / "context"
+        try:
+            with archive.open("rb") as stream:
+                container_payload.extract_archive(stream, extracted)
+        except container_payload.PayloadError as error:
+            raise LabFailure(f"frozen {role} context archive is invalid") from error
+        if tree_sha256(extracted) != context_digest:
+            raise LabFailure(
+                f"frozen {role} context archive does not match its context digest"
+            )
+    selection = PatchSelection(
+        case_slugs=tuple(case_slugs),
+        digest=selection_digest,
+        name=selection_name,
+        patches=(),
+        selector_digests=tuple((key, selector_digests[key]) for key in selectors),
+        selectors=tuple(selectors),
+    )
+    return BuildContext(
+        digest=context_digest,
+        manifest=context_manifest,
+        patches=(),
+        path=archive,
+        resolution=resolution,
+        selection=selection,
+        archive_sha256=context_archive_sha256,
+    )
+
+
+def load_bound_inputs(
+    inputs: Path,
+    *,
+    expected_manifest_sha256: str,
+    expected_tree_sha256: str,
+) -> BoundInputs:
+    """Load and fully validate the immutable input tree bound by live-start."""
+    ensure_private_directory(inputs)
+    if tree_sha256(inputs) != expected_tree_sha256:
+        raise LabFailure("frozen live input tree does not match its owner record")
+    _validated_input_checksums(inputs)
+    manifest_path = inputs / "manifest.json"
+    ensure_private_regular_file(manifest_path)
+    if sha256_file(manifest_path) != expected_manifest_sha256:
+        raise LabFailure("frozen live input manifest does not match its owner record")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise LabFailure("frozen live input manifest is invalid JSON") from error
+    if not isinstance(manifest, dict) or manifest.get("schema") != 2:
+        raise LabFailure("frozen live input manifest has an unsupported schema")
+    source_archive = inputs / "source.tar"
+    ensure_private_regular_file(source_archive)
+    source_commit = manifest.get("source_commit")
+    source_archive_sha256 = manifest.get("source_archive_sha256")
+    source_workflow_sha256 = manifest.get("source_workflow_sha256")
+    source_commit_marker = manifest.get("source_commit_marker")
+    source_revision = manifest.get("source_revision")
+    if (
+        not isinstance(source_commit, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", source_commit)
+        or not isinstance(source_archive_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", source_archive_sha256)
+        or sha256_file(source_archive) != source_archive_sha256
+        or not isinstance(source_workflow_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", source_workflow_sha256)
+        or not isinstance(source_commit_marker, str)
+        or not isinstance(source_revision, int)
+    ):
+        raise LabFailure("frozen live source provenance is invalid")
+    if manifest.get("harness_sha256") != harness_sha256():
+        raise LabFailure("executing live harness does not match the frozen input manifest")
+    zed_archive_sha256 = manifest.get("zed_archive_sha256")
+    zed_binary_sha256 = manifest.get("zed_binary_sha256")
+    zed_archive = inputs / "zed.tar"
+    if zed_archive_sha256 is None:
+        if zed_archive.exists() or zed_archive.is_symlink() or zed_binary_sha256 is not None:
+            raise LabFailure("unexpected Zed data in frozen live inputs")
+        zed_archive_path: Path | None = None
+    else:
+        if (
+            not isinstance(zed_archive_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", zed_archive_sha256)
+            or not isinstance(zed_binary_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", zed_binary_sha256)
+        ):
+            raise LabFailure("frozen Zed provenance is invalid")
+        ensure_private_regular_file(zed_archive)
+        if sha256_file(zed_archive) != zed_archive_sha256:
+            raise LabFailure("frozen Zed archive changed")
+        zed_archive_path = zed_archive
+    return BoundInputs(
+        client_context=_bound_context(inputs, "client", manifest),
+        input_manifest_sha256=expected_manifest_sha256,
+        input_tree_sha256=expected_tree_sha256,
+        server_context=_bound_context(inputs, "server", manifest),
+        snapshot=SourceSnapshot(
+            archive_path=source_archive,
+            archive_sha256=source_archive_sha256,
+            commit=source_commit,
+            commit_marker=source_commit_marker,
+            revision=source_revision,
+            workflow_sha256=source_workflow_sha256,
+        ),
+        zed_archive=zed_archive_path,
+        zed_archive_sha256=zed_archive_sha256,
+        zed_binary_sha256=zed_binary_sha256,
+    )
 
 
 def write_command_output(
@@ -1176,6 +2435,7 @@ def window_geometry(container: str, window_id: str) -> dict[str, int]:
 
 def capture_xwd(
     container: str,
+    directory: Path,
     destination: str,
     *,
     window_id: str | None = None,
@@ -1200,6 +2460,7 @@ def capture_xwd(
         ],
         announce=announce,
     )
+    pull_container_artifacts(container, directory, (destination,))
 
 
 def capture_grim(
@@ -1218,6 +2479,7 @@ def capture_grim(
             f"/artifacts/{stem}.rgba.png",
         ],
     )
+    pull_container_artifacts(container, directory, (f"{stem}.rgba.png",))
     rgba_path = directory / f"{stem}.rgba.png"
     with Image.open(rgba_path) as source:
         rgba = source.convert("RGBA")
@@ -1249,8 +2511,16 @@ def analyze_image(image: Image.Image) -> dict[str, Any]:
     )
     alpha_sample = center.resize((min(320, center.width), min(240, center.height)))
     alpha_values = list(alpha_sample.get_flattened_data())
+    alpha_histogram = alpha.histogram()
+    alpha_pixels = sum(alpha_histogram)
+    alpha_minimum, alpha_maximum = alpha.getextrema()
     rgb_bytes = rgb.tobytes()
     return {
+        "alpha_maximum": alpha_maximum,
+        "alpha_minimum": alpha_minimum,
+        "alpha_nonopaque_ratio": (
+            sum(alpha_histogram[:255]) / alpha_pixels if alpha_pixels else 0.0
+        ),
         "central_opaque_ratio": (
             sum(value == 255 for value in alpha_values) / len(alpha_values)
             if alpha_values
@@ -1263,6 +2533,34 @@ def analyze_image(image: Image.Image) -> dict[str, Any]:
         "rgb_sha256": hashlib.sha256(rgb_bytes).hexdigest(),
         "rgb_channel_stddev": [round(value, 3) for value in stat.stddev],
         "width": rgba.width,
+    }
+
+
+def image_alpha_content_checks(
+    image: Any,
+    *,
+    prefix: str,
+) -> dict[str, bool]:
+    """Require measured nonopaque and fully opaque pixels in one image."""
+    alpha_minimum = image.get("alpha_minimum") if isinstance(image, dict) else None
+    alpha_maximum = image.get("alpha_maximum") if isinstance(image, dict) else None
+    nonopaque_ratio = (
+        image.get("alpha_nonopaque_ratio") if isinstance(image, dict) else None
+    )
+    return {
+        f"{prefix}_has_transparent_pixels": bool(
+            isinstance(alpha_minimum, int)
+            and not isinstance(alpha_minimum, bool)
+            and alpha_minimum < 255
+            and isinstance(nonopaque_ratio, (int, float))
+            and not isinstance(nonopaque_ratio, bool)
+            and 0 < nonopaque_ratio <= 1
+        ),
+        f"{prefix}_has_opaque_pixels": bool(
+            isinstance(alpha_maximum, int)
+            and not isinstance(alpha_maximum, bool)
+            and alpha_maximum == 255
+        ),
     }
 
 
@@ -1504,23 +2802,6 @@ grep -E 'libvulkan_radeon|radeonsi_dri|swrast_dri|libgallium|libva\.so' "/proc/$
     }
 
 
-def client_xpra_window_id(directory: Path) -> int:
-    client_log = "\n".join(
-        path.read_text(encoding="utf-8", errors="replace")
-        for path in (directory / "client.stdout", directory / "client.stderr")
-        if path.is_file()
-    )
-    matches = re.findall(
-        r"register_window\(\.\.\) window\(0x([0-9a-fA-F]+)\)="
-        r"[A-Za-z0-9_]*ClientWindow\(0x\1\b",
-        client_log,
-    )
-    window_ids = [int(value, 16) for value in matches if int(value, 16) > 0]
-    if not window_ids:
-        raise LabFailure("the client log does not identify the forwarded Xpra window")
-    return window_ids[-1]
-
-
 def server_xpra_window_id(info_path: Path, title_patterns: tuple[str, ...]) -> int:
     """Resolve one server window ID from its title in ``xpra info``."""
     expected = {pattern.casefold() for pattern in title_patterns}
@@ -1566,10 +2847,11 @@ def wait_for_process_exit(
         f"{name} process exit",
         lambda: (
             not container_process_exists(container, pid)
-            and (directory / f"{name}.exit").is_file()
+            and container_artifact_exists(container, f"{name}.exit")
         ),
         timeout=timeout,
     )
+    pull_container_artifacts(container, directory, (f"{name}.exit",))
     return process_exit_status(directory, name)
 
 
@@ -1578,7 +2860,16 @@ def parse_saved_updates(directory: Path, xpra_wid: int) -> dict[str, Any]:
     window_directory = directory / "screen-updates" / str(xpra_wid)
     for info_path in sorted(window_directory.glob("*/[0-9]*.info")):
         info = json.loads(info_path.read_text(encoding="utf-8"))
-        payload = info_path.parent / str(info["file"])
+        if not isinstance(info, dict):
+            raise LabFailure(f"saved update metadata is not an object: {info_path}")
+        payload_name = info.get("file")
+        if (
+            not isinstance(payload_name, str)
+            or payload_name in {"", ".", ".."}
+            or PurePosixPath(payload_name).name != payload_name
+        ):
+            raise LabFailure(f"saved update payload name is unsafe: {info_path}")
+        payload = info_path.parent / payload_name
         info["payload_bytes"] = payload.stat().st_size if payload.is_file() else -1
         info["payload_sha256"] = sha256_file(payload) if payload.is_file() else ""
         info["relative_info"] = str(info_path.relative_to(directory))
@@ -1603,17 +2894,148 @@ def parse_saved_updates(directory: Path, xpra_wid: int) -> dict[str, Any]:
     }
 
 
-def only_positive_h264_packets(updates: dict[str, Any] | None) -> bool:
-    """Return whether one exact window produced only non-empty H.264 updates."""
-    return bool(
-        updates
-        and updates.get("count", 0) > 0
-        and set(updates.get("encodings", ())) == {"h264"}
-        and all(
-            int(update.get("payload_bytes", -1)) > 0
-            for update in updates.get("updates", ())
+def synchronize_saved_updates(
+    container: str,
+    directory: Path,
+    xpra_wid: int,
+) -> dict[str, Any]:
+    """Pull only completed immutable packet metadata and payloads for one window."""
+    prefix = f"screen-updates/{xpra_wid}/"
+    listed_info = tuple(
+        relative
+        for relative in container_artifact_files(
+            container,
+            "screen-updates",
+            "*.info",
+        )
+        if relative.startswith(prefix)
+    )
+    window_info = f"{prefix}window.info"
+    if window_info not in listed_info:
+        raise LabFailure(f"saved window metadata is unavailable: {window_info}")
+    remote_info = tuple(
+        relative
+        for relative in listed_info
+        if re.fullmatch(
+            rf"screen-updates/{xpra_wid}/(?:0|[1-9][0-9]*)/"
+            r"(?:0|[1-9][0-9]*)\.info",
+            relative,
         )
     )
+    missing_info = tuple(
+        relative
+        for relative in (window_info, *remote_info)
+        if not (directory / relative).is_file()
+    )
+    if missing_info:
+        pull_container_artifacts(container, directory, missing_info)
+    payloads: list[str] = []
+    for relative in remote_info:
+        info_path = directory / relative
+        try:
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise LabFailure(f"invalid saved update metadata: {relative}") from error
+        if not isinstance(info, dict):
+            raise LabFailure(f"saved update metadata is not an object: {relative}")
+        payload_name = info.get("file")
+        if (
+            not isinstance(payload_name, str)
+            or payload_name in {"", ".", ".."}
+            or PurePosixPath(payload_name).name != payload_name
+        ):
+            raise LabFailure(f"saved update payload name is unsafe: {relative}")
+        payload = (PurePosixPath(relative).parent / payload_name).as_posix()
+        if not (directory / payload).is_file():
+            payloads.append(payload)
+    if payloads:
+        pull_container_artifacts(
+            container,
+            directory,
+            tuple(sorted(set(payloads))),
+        )
+    updates = parse_saved_updates(directory, xpra_wid)
+    updates["initial_pixel_format"] = saved_window_initial_pixel_format(
+        directory,
+        xpra_wid,
+    )
+    return updates
+
+
+def saved_window_initial_pixel_format(directory: Path, xpra_wid: int) -> str:
+    """Read the source pixel format saved with one window's first update."""
+    info_path = directory / "screen-updates" / str(xpra_wid) / "window.info"
+    try:
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise LabFailure(f"invalid saved window metadata: {info_path}") from error
+    if not isinstance(info, dict):
+        raise LabFailure(f"saved window metadata is not an object: {info_path}")
+    pixel_format = info.get("pixel-format")
+    if not isinstance(pixel_format, str) or not pixel_format:
+        raise LabFailure(f"saved window metadata has no pixel format: {info_path}")
+    return pixel_format
+
+
+def only_positive_h264_packets(updates: dict[str, Any] | None) -> bool:
+    """Return whether one exact window produced only non-empty H.264 updates."""
+    if not isinstance(updates, dict):
+        return False
+    packets = updates.get("updates")
+    count = _exact_int(updates.get("count"), positive=True)
+    encodings = updates.get("encodings")
+    return bool(
+        isinstance(packets, list)
+        and count == len(packets)
+        and isinstance(encodings, list)
+        and all(isinstance(encoding, str) for encoding in encodings)
+        and set(encodings) == {"h264"}
+        and all(
+            isinstance(packet, dict)
+            and packet.get("encoding") == "h264"
+            and _exact_int(packet.get("payload_bytes"), positive=True) is not None
+            for packet in packets
+        )
+    )
+
+
+def only_positive_alpha_capable_packets(updates: dict[str, Any] | None) -> bool:
+    """Validate one alpha window's exact non-empty WebP/RGB32 packet set."""
+    if not isinstance(updates, dict):
+        return False
+    packets = updates.get("updates")
+    count = _exact_int(updates.get("count"), positive=True)
+    encodings = updates.get("encodings")
+    if (
+        not isinstance(packets, list)
+        or count != len(packets)
+        or not isinstance(encodings, list)
+        or not all(isinstance(encoding, str) for encoding in encodings)
+        or len(encodings) != len(set(encodings))
+        or not all(isinstance(packet, dict) for packet in packets)
+        or not all(isinstance(packet.get("encoding"), str) for packet in packets)
+        or updates.get("initial_pixel_format") not in {"BGRA", "RGBA"}
+    ):
+        return False
+    actual_encodings = {packet.get("encoding") for packet in packets}
+    if (
+        set(encodings) != actual_encodings
+        or not actual_encodings
+        or not actual_encodings <= {"webp", "rgb32"}
+    ):
+        return False
+    window_id = _exact_int(updates.get("window_id"), positive=True)
+    sequences = [
+        _exact_int(packet.get("sequence"), positive=True) for packet in packets
+    ]
+    if window_id is None or any(sequence is None for sequence in sequences):
+        return False
+    exact_sequences = [int(sequence) for sequence in sequences if sequence is not None]
+    if exact_sequences != list(
+        range(exact_sequences[0], exact_sequences[0] + len(exact_sequences))
+    ):
+        return False
+    return _alpha_safe_warmup_groups_valid(packets, window_id)
 
 
 def _exact_int(value: Any, *, positive: bool = False) -> int | None:
@@ -1705,8 +3127,309 @@ def _h264_main_size(update: dict[str, Any]) -> tuple[int, int] | None:
     return width, height
 
 
+def _saved_update_group_location(
+    update: dict[str, Any],
+    window_id: int,
+) -> tuple[str, int] | None:
+    relative_info = update.get("relative_info")
+    if not isinstance(relative_info, str) or not relative_info:
+        return None
+    path = PurePosixPath(relative_info)
+    if path.is_absolute() or path.as_posix() != relative_info or len(path.parts) != 4:
+        return None
+    root, relative_window_id, group, filename = path.parts
+    index_match = re.fullmatch(r"(0|[1-9][0-9]*)\.info", filename)
+    if (
+        root != "screen-updates"
+        or relative_window_id != str(window_id)
+        or re.fullmatch(r"(0|[1-9][0-9]*)", group) is None
+        or index_match is None
+    ):
+        return None
+    return group, int(index_match.group(1))
+
+
+def _ordered_saved_damage_groups(
+    packets: list[dict[str, Any]],
+    window_id: int,
+) -> list[list[dict[str, Any]]] | None:
+    seen_groups: set[str] = set()
+    previous_group = ""
+    expected_index = 0
+    for packet in packets:
+        location = _saved_update_group_location(packet, window_id)
+        sequence = _exact_int(packet.get("sequence"), positive=True)
+        if location is None or sequence is None:
+            return None
+        group, index = location
+        if group != previous_group:
+            if group in seen_groups:
+                return None
+            if previous_group and int(group) <= int(previous_group):
+                return None
+            seen_groups.add(group)
+            previous_group = group
+            expected_index = 0
+        if index != expected_index:
+            return None
+        expected_index += 1
+
+    ordered_groups: list[list[dict[str, Any]]] = []
+    offset = 0
+    while offset < len(packets):
+        first = packets[offset]
+        first_options = first.get("options")
+        first_flush = (
+            _exact_int(first_options.get("flush"))
+            if isinstance(first_options, dict)
+            else None
+        )
+        if first_flush is None or first_flush < 0:
+            return None
+        group_length = first_flush + 1
+        group_packets = packets[offset : offset + group_length]
+        if len(group_packets) != group_length:
+            return None
+        first_location = _saved_update_group_location(first, window_id)
+        if first_location is None:
+            return None
+        directory = first_location[0]
+        if any(
+            (location := _saved_update_group_location(packet, window_id)) is None
+            or location[0] != directory
+            for packet in group_packets
+        ):
+            return None
+        sequences = [int(packet["sequence"]) for packet in group_packets]
+        if sequences != list(range(sequences[0], sequences[0] + len(sequences))):
+            return None
+        flushes: list[int] = []
+        for packet in group_packets:
+            options = packet.get("options")
+            flush = _exact_int(options.get("flush")) if isinstance(options, dict) else None
+            if flush is None or flush < 0:
+                return None
+            flushes.append(flush)
+        if flushes != list(range(len(group_packets) - 1, -1, -1)):
+            return None
+        ordered_groups.append(group_packets)
+        offset += group_length
+    return ordered_groups
+
+
+def _alpha_safe_warmup_groups_valid(
+    packets: list[dict[str, Any]],
+    window_id: int,
+) -> bool:
+    groups = _ordered_saved_damage_groups(packets, window_id)
+    if groups is None:
+        return False
+    for group in groups:
+        for packet in group:
+            if not _alpha_safe_packet(packet):
+                return False
+    return True
+
+
+def _alpha_safe_packet(packet: dict[str, Any]) -> bool:
+    if _exact_int(packet.get("payload_bytes"), positive=True) is None:
+        return False
+    geometry = _packet_geometry(packet)
+    window_size = _packet_window_size(packet)
+    if geometry is None or window_size is None:
+        return False
+    x, y, width, height = geometry
+    window_width, window_height = window_size
+    if x + width > window_width or y + height > window_height:
+        return False
+    if packet.get("encoding") == "webp":
+        return True
+    options = packet.get("options")
+    return bool(
+        packet.get("encoding") == "rgb32"
+        and isinstance(options, dict)
+        and options.get("rgb_format") in {"BGRA", "RGBA"}
+    )
+
+
+def _safe_h264_context_gap(packet: dict[str, Any]) -> bool:
+    """Accept a positive contained non-video region between one codec stream."""
+    if _exact_int(packet.get("payload_bytes"), positive=True) is None:
+        return False
+    geometry = _packet_geometry(packet)
+    window_size = _packet_window_size(packet)
+    options = packet.get("options")
+    if geometry is None or window_size is None or not isinstance(options, dict):
+        return False
+    x, y, width, height = geometry
+    if x + width > window_size[0] or y + height > window_size[1]:
+        return False
+    if packet.get("encoding") == "webp":
+        return True
+    return bool(
+        packet.get("encoding") in {"rgb24", "rgb32"}
+        and options.get("rgb_format")
+        in {
+            "BGR",
+            "BGRA",
+            "BGRX",
+            "RGB",
+            "RGBA",
+            "RGBX",
+            "XBGR",
+            "XRGB",
+        }
+    )
+
+
+def _h264_packet_groups_valid(groups: list[list[dict[str, Any]]]) -> bool:
+    cropped_signatures: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+    edge_complete_signatures: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+    for group_packets in groups:
+        terminal = group_packets[-1]
+        main_size = _h264_main_size(terminal)
+        window_size = _packet_window_size(terminal)
+        if main_size is None or window_size is None:
+            return False
+        if any(packet.get("encoding") == "h264" for packet in group_packets[:-1]):
+            return False
+        if any(_packet_window_size(packet) != window_size for packet in group_packets):
+            return False
+        main_width, main_height = main_size
+        window_width, window_height = window_size
+        required_edges = set()
+        if main_width == window_width - 1:
+            required_edges.add("right")
+        if main_height == window_height - 1:
+            required_edges.add("bottom")
+        crop_signature = (window_size, main_size)
+        if required_edges:
+            cropped_signatures.add(crop_signature)
+
+        edge_packets = group_packets[:-1]
+        if not edge_packets:
+            continue
+        edge_kinds = [_lossless_rgb_edge_kind(packet) for packet in edge_packets]
+        if (
+            any(edge is None for edge in edge_kinds)
+            or len(edge_kinds) != len(set(edge_kinds))
+            or set(edge_kinds) != required_edges
+        ):
+            return False
+        edge_complete_signatures.add(crop_signature)
+    return cropped_signatures <= edge_complete_signatures
+
+
+def _h264_readiness_group_valid(group_packets: list[dict[str, Any]]) -> bool:
+    """Validate one safe early H.264 group without requiring its final edges."""
+    terminal = group_packets[-1]
+    main_size = _h264_main_size(terminal)
+    window_size = _packet_window_size(terminal)
+    options = terminal.get("options")
+    if (
+        main_size is None
+        or window_size is None
+        or not isinstance(options, dict)
+        or (_exact_int(options.get("frame")) is None)
+        or int(options["frame"]) < 0
+        or not isinstance(options.get("type"), str)
+        or not options["type"]
+        or any(packet.get("encoding") == "h264" for packet in group_packets[:-1])
+        or any(_packet_window_size(packet) != window_size for packet in group_packets)
+    ):
+        return False
+    main_width, main_height = main_size
+    window_width, window_height = window_size
+    required_edges = set()
+    if main_width == window_width - 1:
+        required_edges.add("right")
+    if main_height == window_height - 1:
+        required_edges.add("bottom")
+    edge_kinds = [
+        _lossless_rgb_edge_kind(packet) for packet in group_packets[:-1]
+    ]
+    return bool(
+        not any(edge is None for edge in edge_kinds)
+        and len(edge_kinds) == len(set(edge_kinds))
+        and set(edge_kinds) <= required_edges
+    )
+
+
+def adaptive_h264_frame_readiness_valid(
+    application: str,
+    updates: dict[str, Any] | None,
+) -> bool:
+    """Validate safe saved packets for the first decoded adaptive H.264 frame."""
+    if application not in {"hardware", "zed"}:
+        return False
+    allowed_initial_formats = (
+        {"BGRX", "RGBX"}
+        if application == "hardware"
+        else {"BGRA", "BGRX", "RGBA", "RGBX"}
+    )
+    if (
+        not isinstance(updates, dict)
+        or updates.get("initial_pixel_format") not in allowed_initial_formats
+    ):
+        return False
+    packets = updates.get("updates")
+    count = _exact_int(updates.get("count"), positive=True)
+    encodings = updates.get("encodings")
+    window_id = _exact_int(updates.get("window_id"), positive=True)
+    if (
+        not isinstance(packets, list)
+        or count != len(packets)
+        or not isinstance(encodings, list)
+        or not all(isinstance(encoding, str) for encoding in encodings)
+        or len(encodings) != len(set(encodings))
+        or not all(isinstance(packet, dict) for packet in packets)
+        or not all(isinstance(packet.get("encoding"), str) for packet in packets)
+        or window_id is None
+    ):
+        return False
+    actual_encodings = {packet.get("encoding") for packet in packets}
+    if set(encodings) != actual_encodings:
+        return False
+    sequences = [
+        _exact_int(packet.get("sequence"), positive=True) for packet in packets
+    ]
+    if any(sequence is None for sequence in sequences):
+        return False
+    exact_sequences = [int(sequence) for sequence in sequences if sequence is not None]
+    if exact_sequences != list(
+        range(exact_sequences[0], exact_sequences[0] + len(exact_sequences))
+    ):
+        return False
+    groups = _ordered_saved_damage_groups(packets, window_id)
+    if groups is None:
+        return False
+    h264_group_seen = False
+    for group in groups:
+        group_encodings = {packet.get("encoding") for packet in group}
+        if group_encodings <= {"webp", "rgb32"}:
+            if not all(_alpha_safe_packet(packet) for packet in group):
+                return False
+            continue
+        if not _h264_readiness_group_valid(group):
+            return False
+        h264_group_seen = True
+    return h264_group_seen
+
+
+def _h264_damage_groups_valid(updates: dict[str, Any]) -> bool:
+    """Validate exact packet grouping and flush order for one H.264 window."""
+    window_id = _exact_int(updates.get("window_id"), positive=True)
+    packets = updates.get("updates")
+    if window_id is None or not isinstance(packets, list) or not packets:
+        return False
+    if not all(isinstance(packet, dict) for packet in packets):
+        return False
+    groups = _ordered_saved_damage_groups(packets, window_id)
+    return groups is not None and _h264_packet_groups_valid(groups)
+
+
 def h264_with_lossless_rgb_edges(updates: dict[str, Any] | None) -> bool:
-    """Validate H.264 main regions plus only exact one-pixel RGB codec edges."""
+    """Validate H.264 regions and exact per-damage one-pixel RGB codec edges."""
     if not isinstance(updates, dict):
         return False
     packets = updates.get("updates")
@@ -1734,37 +3457,1001 @@ def h264_with_lossless_rgb_edges(updates: dict[str, Any] | None) -> bool:
     ):
         return False
 
-    groups: dict[tuple[int, int], dict[str, set[Any]]] = {}
     for packet in packets:
-        window_size = _packet_window_size(packet)
-        if window_size is None:
-            return False
-        group = groups.setdefault(window_size, {"edges": set(), "main_sizes": set()})
         if packet.get("encoding") == "h264":
-            main_size = _h264_main_size(packet)
-            if main_size is None:
+            if _h264_main_size(packet) is None:
                 return False
-            group["main_sizes"].add(main_size)
         else:
-            edge = _lossless_rgb_edge_kind(packet)
-            if edge is None:
+            if _lossless_rgb_edge_kind(packet) is None:
                 return False
-            group["edges"].add(edge)
+    return _h264_damage_groups_valid(updates)
 
-    for window_size, group in groups.items():
-        main_sizes = group["main_sizes"]
-        if len(main_sizes) != 1:
-            return False
-        main_width, main_height = next(iter(main_sizes))
-        window_width, window_height = window_size
-        required_edges = set()
-        if main_width == window_width - 1:
-            required_edges.add("right")
-        if main_height == window_height - 1:
-            required_edges.add("bottom")
-        if group["edges"] != required_edges:
+
+def adaptive_h264_production_updates(
+    updates: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Validate adaptive groups and return the final exact H.264 production phase."""
+    if not isinstance(updates, dict) or updates.get("initial_pixel_format") not in {
+        "BGRA",
+        "BGRX",
+        "RGBA",
+        "RGBX",
+    }:
+        return None
+    packets = updates.get("updates")
+    count = _exact_int(updates.get("count"), positive=True)
+    encodings = updates.get("encodings")
+    window_id = _exact_int(updates.get("window_id"), positive=True)
+    if (
+        not isinstance(packets, list)
+        or count != len(packets)
+        or not isinstance(encodings, list)
+        or not all(isinstance(encoding, str) for encoding in encodings)
+        or len(encodings) != len(set(encodings))
+        or not all(isinstance(packet, dict) for packet in packets)
+        or not all(isinstance(packet.get("encoding"), str) for packet in packets)
+        or window_id is None
+    ):
+        return None
+    actual_encodings = {str(packet["encoding"]) for packet in packets}
+    if set(encodings) != actual_encodings:
+        return None
+    sequences = [
+        _exact_int(packet.get("sequence"), positive=True) for packet in packets
+    ]
+    if any(sequence is None for sequence in sequences):
+        return None
+    exact_sequences = [int(sequence) for sequence in sequences if sequence is not None]
+    if exact_sequences != list(
+        range(exact_sequences[0], exact_sequences[0] + len(exact_sequences))
+    ):
+        return None
+    groups = _ordered_saved_damage_groups(packets, window_id)
+    if groups is None:
+        return None
+    h264_groups: list[list[dict[str, Any]]] = []
+    for group in groups:
+        group_encodings = {str(packet["encoding"]) for packet in group}
+        if group_encodings <= {"webp", "rgb32"}:
+            if not _alpha_safe_warmup_groups_valid(group, window_id):
+                return None
+            continue
+        if not _h264_readiness_group_valid(group):
+            return None
+        h264_groups.append(group)
+    production_groups: list[list[dict[str, Any]]] | None = None
+    for start in range(len(h264_groups)):
+        candidate = h264_groups[start:]
+        if _h264_packet_groups_valid(candidate):
+            production_groups = candidate
+            break
+    if not production_groups:
+        return None
+    production_packets = [
+        packet for group in production_groups for packet in group
+    ]
+    return {
+        **updates,
+        "count": len(production_packets),
+        "encodings": sorted(
+            {str(packet["encoding"]) for packet in production_packets}
+        ),
+        "updates": production_packets,
+    }
+
+
+def zed_h264_stimulus_updates(
+    updates: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return the exact stable-geometry packet interval owned by Zed input."""
+    if not isinstance(updates, dict):
+        return None
+    interval = updates.get("h264_stimulus")
+    packets = updates.get("updates")
+    window_id = _exact_int(updates.get("window_id"), positive=True)
+    if (
+        not isinstance(interval, dict)
+        or not isinstance(packets, list)
+        or not all(isinstance(packet, dict) for packet in packets)
+        or window_id is None
+    ):
+        return None
+    baseline = _exact_int(interval.get("baseline_sequence"))
+    last_sequence = _exact_int(interval.get("last_sequence"), positive=True)
+    window_size_value = interval.get("window_size")
+    if (
+        baseline is None
+        or baseline < 0
+        or last_sequence is None
+        or last_sequence <= baseline
+        or not isinstance(window_size_value, (tuple, list))
+        or len(window_size_value) != 2
+    ):
+        return None
+    window_width = _exact_int(window_size_value[0], positive=True)
+    window_height = _exact_int(window_size_value[1], positive=True)
+    if window_width is None or window_height is None:
+        return None
+    selected = [
+        packet
+        for packet in packets
+        if (
+            (sequence := _exact_int(packet.get("sequence"), positive=True))
+            is not None
+            and baseline < sequence <= last_sequence
+        )
+    ]
+    sequences = [int(packet["sequence"]) for packet in selected]
+    if (
+        not selected
+        or sequences
+        != list(range(baseline + 1, last_sequence + 1))
+        or any(
+            _packet_window_size(packet) != (window_width, window_height)
+            for packet in selected
+        )
+    ):
+        return None
+    return {
+        **updates,
+        "count": len(selected),
+        "encodings": sorted({str(packet.get("encoding")) for packet in selected}),
+        "updates": selected,
+    }
+
+
+def hardware_h264_stimulus_updates(
+    updates: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return the exact stable primary interval recorded before auxiliary exit."""
+    if not isinstance(updates, dict):
+        return None
+    interval = updates.get("h264_stimulus")
+    packets = updates.get("updates")
+    if (
+        not isinstance(interval, dict)
+        or not isinstance(packets, list)
+        or not all(isinstance(packet, dict) for packet in packets)
+    ):
+        return None
+    first_sequence = _exact_int(interval.get("first_sequence"), positive=True)
+    baseline_sequence = _exact_int(
+        interval.get("baseline_sequence"), positive=True
+    )
+    last_sequence = _exact_int(interval.get("last_sequence"), positive=True)
+    window_size_value = interval.get("window_size")
+    if (
+        first_sequence is None
+        or baseline_sequence is None
+        or last_sequence is None
+        or not first_sequence <= baseline_sequence < last_sequence
+        or not isinstance(window_size_value, (tuple, list))
+        or len(window_size_value) != 2
+    ):
+        return None
+    window_width = _exact_int(window_size_value[0], positive=True)
+    window_height = _exact_int(window_size_value[1], positive=True)
+    if window_width is None or window_height is None:
+        return None
+    selected = [
+        packet
+        for packet in packets
+        if (
+            (sequence := _exact_int(packet.get("sequence"), positive=True))
+            is not None
+            and first_sequence <= sequence <= last_sequence
+        )
+    ]
+    sequences = [int(packet["sequence"]) for packet in selected]
+    if (
+        not selected
+        or sequences != list(range(first_sequence, last_sequence + 1))
+        or any(
+            _packet_window_size(packet) != (window_width, window_height)
+            for packet in selected
+        )
+    ):
+        return None
+    return {
+        **updates,
+        "count": len(selected),
+        "encodings": sorted({str(packet.get("encoding")) for packet in selected}),
+        "updates": selected,
+    }
+
+
+def _hardware_complete_packet_prefix(
+    updates: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[list[dict[str, Any]]]] | None:
+    """Exclude only a safe shutdown-truncated epilogue after the bound phase."""
+    packets = updates.get("updates")
+    interval = updates.get("h264_stimulus")
+    window_id = _exact_int(updates.get("window_id"), positive=True)
+    last_sequence = (
+        _exact_int(interval.get("last_sequence"), positive=True)
+        if isinstance(interval, dict)
+        else None
+    )
+    if not isinstance(packets, list) or window_id is None or last_sequence is None:
+        return None
+    for end in range(len(packets), 0, -1):
+        prefix = packets[:end]
+        groups = _ordered_saved_damage_groups(prefix, window_id)
+        if groups is None:
+            continue
+        tail = packets[end:]
+        if any(
+            (_exact_int(packet.get("sequence"), positive=True) or 0) <= last_sequence
+            or packet.get("encoding") == "h264"
+            or _exact_int(packet.get("payload_bytes"), positive=True) is None
+            or _packet_geometry(packet) is None
+            or _packet_window_size(packet) is None
+            or not isinstance(packet.get("options"), dict)
+            or _exact_int(packet["options"].get("flush"), positive=True) is None
+            or (
+                packet.get("encoding") in {"rgb24", "rgb32"}
+                and packet["options"].get("rgb_format")
+                not in {"BGR", "BGRX", "RGB", "RGBX", "XBGR", "XRGB"}
+            )
+            or packet.get("encoding") not in {"rgb24", "rgb32", "webp"}
+            for packet in tail
+        ):
+            continue
+        if any(
+            (geometry := _packet_geometry(packet)) is None
+            or (window_size := _packet_window_size(packet)) is None
+            or geometry[0] + geometry[2] > window_size[0]
+            or geometry[1] + geometry[3] > window_size[1]
+            for packet in tail
+        ):
+            continue
+        return prefix, groups
+    return None
+
+
+def hardware_h264_history_valid(updates: dict[str, Any] | None) -> bool:
+    """Validate every primary packet, including safe prelude and resize epilogue."""
+    if not isinstance(updates, dict):
+        return False
+    packets = updates.get("updates")
+    count = _exact_int(updates.get("count"), positive=True)
+    encodings = updates.get("encodings")
+    interval = updates.get("h264_stimulus")
+    window_id = _exact_int(updates.get("window_id"), positive=True)
+    if (
+        not isinstance(packets, list)
+        or count != len(packets)
+        or not isinstance(encodings, list)
+        or not all(isinstance(encoding, str) for encoding in encodings)
+        or len(encodings) != len(set(encodings))
+        or not isinstance(interval, dict)
+        or window_id is None
+        or not all(isinstance(packet, dict) for packet in packets)
+    ):
+        return False
+    first_sequence = _exact_int(interval.get("first_sequence"), positive=True)
+    if first_sequence is None:
+        return False
+    sequences = [
+        _exact_int(packet.get("sequence"), positive=True) for packet in packets
+    ]
+    if any(sequence is None for sequence in sequences):
+        return False
+    exact_sequences = [int(sequence) for sequence in sequences if sequence is not None]
+    if (
+        exact_sequences
+        != list(range(exact_sequences[0], exact_sequences[0] + len(exact_sequences)))
+        or set(encodings) != {str(packet.get("encoding")) for packet in packets}
+    ):
+        return False
+    complete = _hardware_complete_packet_prefix(updates)
+    if complete is None:
+        return False
+    _complete_packets, groups = complete
+    for group in groups:
+        for packet in group:
+            geometry = _packet_geometry(packet)
+            window_size = _packet_window_size(packet)
+            if (
+                geometry is None
+                or window_size is None
+                or _exact_int(packet.get("payload_bytes"), positive=True) is None
+                or packet.get("encoding") not in {"h264", "rgb24", "rgb32", "webp"}
+            ):
+                return False
+            x, y, width, height = geometry
+            if x + width > window_size[0] or y + height > window_size[1]:
+                return False
+            if packet.get("encoding") in {"rgb24", "rgb32"}:
+                options = packet.get("options")
+                if (
+                    not isinstance(options, dict)
+                    or options.get("rgb_format")
+                    not in {
+                        "BGR",
+                        "BGRA",
+                        "BGRX",
+                        "RGB",
+                        "RGBA",
+                        "RGBX",
+                        "XBGR",
+                        "XRGB",
+                    }
+                ):
+                    return False
+        if int(group[-1]["sequence"]) < first_sequence and not (
+            all(_alpha_safe_packet(packet) for packet in group)
+            or _h264_readiness_group_valid(group)
+        ):
             return False
     return True
+
+
+def hardware_h264_context_updates(
+    updates: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return all packets from the bound production IDR through final quiescence."""
+    if not hardware_h264_history_valid(updates):
+        return None
+    assert isinstance(updates, dict)
+    interval = updates.get("h264_stimulus")
+    complete = _hardware_complete_packet_prefix(updates)
+    packets = complete[0] if complete is not None else None
+    if not isinstance(interval, dict) or not isinstance(packets, list):
+        return None
+    first_sequence = _exact_int(interval.get("first_sequence"), positive=True)
+    if first_sequence is None or not all(isinstance(packet, dict) for packet in packets):
+        return None
+    selected = [
+        packet
+        for packet in packets
+        if (
+            (sequence := _exact_int(packet.get("sequence"), positive=True))
+            is not None
+            and sequence >= first_sequence
+        )
+    ]
+    sequences = [int(packet["sequence"]) for packet in selected]
+    if (
+        not selected
+        or sequences != list(range(first_sequence, sequences[-1] + 1))
+        or any(
+            _exact_int(packet.get("payload_bytes"), positive=True) is None
+            or _packet_geometry(packet) is None
+            or _packet_window_size(packet) is None
+            for packet in selected
+        )
+        or any(
+            packet.get("encoding") not in {"h264", "rgb24", "rgb32", "webp"}
+            for packet in selected
+        )
+    ):
+        return None
+    return {
+        **updates,
+        "count": len(selected),
+        "encodings": sorted({str(packet.get("encoding")) for packet in selected}),
+        "updates": selected,
+    }
+
+
+def hardware_h264_production_updates(
+    updates: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Validate and return the exact bound hardware H.264 production interval."""
+    if not hardware_h264_history_valid(updates):
+        return None
+    exact_updates = hardware_h264_stimulus_updates(updates)
+    if (
+        not isinstance(exact_updates, dict)
+        or exact_updates.get("initial_pixel_format") not in {
+        "BGRX",
+        "RGBX",
+        }
+    ):
+        return None
+    packets = exact_updates.get("updates")
+    count = _exact_int(exact_updates.get("count"), positive=True)
+    encodings = exact_updates.get("encodings")
+    if (
+        not isinstance(packets, list)
+        or count != len(packets)
+        or not isinstance(encodings, list)
+        or not all(isinstance(encoding, str) for encoding in encodings)
+        or len(encodings) != len(set(encodings))
+        or not all(isinstance(packet, dict) for packet in packets)
+        or not all(isinstance(packet.get("encoding"), str) for packet in packets)
+    ):
+        return None
+    actual_encodings = {str(packet["encoding"]) for packet in packets}
+    if set(encodings) != actual_encodings:
+        return None
+    sequences = [
+        _exact_int(packet.get("sequence"), positive=True) for packet in packets
+    ]
+    if any(sequence is None for sequence in sequences):
+        return None
+    exact_sequences = [int(sequence) for sequence in sequences if sequence is not None]
+    if exact_sequences != list(
+        range(exact_sequences[0], exact_sequences[0] + len(exact_sequences))
+    ):
+        return None
+    window_id = _exact_int(exact_updates.get("window_id"), positive=True)
+    if window_id is None:
+        return None
+    groups = _ordered_saved_damage_groups(packets, window_id)
+    if groups is None:
+        return None
+    first_h264_group = next(
+        (
+            index for index, group in enumerate(groups)
+            if any(packet.get("encoding") == "h264" for packet in group)
+        ),
+        None,
+    )
+    if first_h264_group is None:
+        return None
+    warmup_packets = [
+        packet for group in groups[:first_h264_group] for packet in group
+    ]
+    if not _alpha_safe_warmup_groups_valid(warmup_packets, window_id):
+        return None
+    production_packets = [
+        packet for group in groups[first_h264_group:] for packet in group
+    ]
+    production = {
+        **exact_updates,
+        "count": len(production_packets),
+        "encodings": sorted(
+            {str(packet["encoding"]) for packet in production_packets}
+        ),
+        "updates": production_packets,
+    }
+    return production if h264_with_lossless_rgb_edges(production) else None
+
+
+def hardware_h264_phase_start_sequence(
+    updates: dict[str, Any] | None,
+    window_size: tuple[int, int],
+) -> int | None:
+    """Find the active stable-geometry IDR group before recording a phase."""
+    if not isinstance(updates, dict):
+        return None
+    packets = updates.get("updates")
+    window_id = _exact_int(updates.get("window_id"), positive=True)
+    if (
+        not isinstance(packets, list)
+        or not packets
+        or not all(isinstance(packet, dict) for packet in packets)
+        or window_id is None
+    ):
+        return None
+    groups = _ordered_saved_damage_groups(packets, window_id)
+    if groups is None:
+        return None
+    for index in range(len(groups) - 1, -1, -1):
+        group = groups[index]
+        terminal = group[-1]
+        options = terminal.get("options")
+        if (
+            terminal.get("encoding") != "h264"
+            or not isinstance(options, dict)
+            or options.get("frame") != 0
+            or options.get("type") != "IDR"
+        ):
+            continue
+        production_groups = groups[index:]
+        if (
+            all(
+                _packet_window_size(packet) == window_size
+                for candidate in production_groups
+                for packet in candidate
+            )
+            and _h264_packet_groups_valid(production_groups)
+        ):
+            return int(group[0]["sequence"])
+    return None
+
+
+def begin_hardware_h264_stimulus(
+    server: str,
+    directory: Path,
+    xpra_wid: int,
+    geometry: dict[str, int],
+) -> dict[str, Any]:
+    """Bind the already-running stable primary stream before auxiliary input."""
+    window_size = (geometry["width"], geometry["height"])
+    interval: dict[str, Any] | None = None
+
+    def stable_phase_ready() -> bool:
+        nonlocal interval
+        updates = synchronize_saved_updates(server, directory, xpra_wid)
+        first_sequence = hardware_h264_phase_start_sequence(updates, window_size)
+        sequences = [
+            _exact_int(packet.get("sequence"), positive=True)
+            for packet in updates.get("updates", [])
+            if isinstance(packet, dict)
+        ]
+        if (
+            first_sequence is None
+            or not sequences
+            or any(sequence is None for sequence in sequences)
+        ):
+            return False
+        baseline_sequence = max(
+            int(sequence) for sequence in sequences if sequence is not None
+        )
+        if baseline_sequence <= first_sequence:
+            return False
+        interval = {
+            "baseline_sequence": baseline_sequence,
+            "first_sequence": first_sequence,
+            "window_size": list(window_size),
+        }
+        return True
+
+    wait_for("stable hardware H.264 phase baseline", stable_phase_ready, timeout=15)
+    assert interval is not None
+    return interval
+
+
+def finish_hardware_h264_stimulus(
+    server: str,
+    directory: Path,
+    xpra_wid: int,
+    interval: dict[str, Any],
+) -> dict[str, Any]:
+    """Close the exact primary interval while the auxiliary window is alive."""
+    completed: dict[str, Any] | None = None
+
+    def sustained_phase_ready() -> bool:
+        nonlocal completed
+        updates = synchronize_saved_updates(server, directory, xpra_wid)
+        sequences = [
+            _exact_int(packet.get("sequence"), positive=True)
+            for packet in updates.get("updates", [])
+            if isinstance(packet, dict)
+        ]
+        if not sequences or any(sequence is None for sequence in sequences):
+            return False
+        candidate = {
+            **interval,
+            "last_sequence": max(
+                int(sequence) for sequence in sequences if sequence is not None
+            ),
+        }
+        updates["h264_stimulus"] = candidate
+        metrics = h264_production_metrics("hardware", updates)
+        checks = h264_dominance_checks(metrics)
+        if not all(checks.values()):
+            return False
+        completed = {
+            **candidate,
+            "dominance_checks": checks,
+            "metrics": metrics,
+        }
+        return True
+
+    wait_for("sustained dominant hardware H.264 phase", sustained_phase_ready, timeout=15)
+    assert completed is not None
+    return completed
+
+
+def empty_h264_production_metrics() -> dict[str, Any]:
+    return {
+        "aggregate_encoded_pixels": 0,
+        "aggregate_h264_pixel_ratio": 0.0,
+        "h264_damage_span_ms": 0,
+        "h264_main_frame_count": 0,
+        "h264_main_pixels": 0,
+        "minimum_frame_h264_pixels": 0,
+        "minimum_frame_window_pixels": 0,
+    }
+
+
+def h264_production_metrics(
+    application: str,
+    updates: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Measure dominant H.264 regions over one validated adaptive sequence."""
+    if application == "hardware":
+        exact_updates = hardware_h264_stimulus_updates(updates)
+    elif application == "zed":
+        exact_updates = zed_h264_stimulus_updates(updates)
+    else:
+        exact_updates = updates
+    production = (
+        hardware_h264_production_updates(exact_updates)
+        if application == "hardware"
+        else adaptive_h264_production_updates(exact_updates)
+    )
+    if production is None or not isinstance(exact_updates, dict):
+        return empty_h264_production_metrics()
+    coverage: list[tuple[int, int]] = []
+    h264_damage_times: list[int] = []
+    window_id = _exact_int(exact_updates.get("window_id"), positive=True)
+    if window_id is None:
+        return empty_h264_production_metrics()
+    for packet in production["updates"]:
+        if packet.get("encoding") != "h264":
+            continue
+        main_size = _h264_main_size(packet)
+        window_size = _packet_window_size(packet)
+        location = _saved_update_group_location(packet, window_id)
+        if main_size is None or window_size is None or location is None:
+            return empty_h264_production_metrics()
+        coverage.append(
+            (main_size[0] * main_size[1], window_size[0] * window_size[1])
+        )
+        h264_damage_times.append(int(location[0]))
+    if not coverage:
+        return empty_h264_production_metrics()
+    aggregate_encoded_pixels = 0
+    for packet in production["updates"]:
+        geometry = _packet_geometry(packet)
+        if geometry is None:
+            return empty_h264_production_metrics()
+        aggregate_encoded_pixels += geometry[2] * geometry[3]
+    minimum_main, minimum_window = coverage[0]
+    for main_pixels, window_pixels in coverage[1:]:
+        if main_pixels * minimum_window < minimum_main * window_pixels:
+            minimum_main, minimum_window = main_pixels, window_pixels
+    h264_main_pixels = sum(main_pixels for main_pixels, _window_pixels in coverage)
+    return {
+        "aggregate_encoded_pixels": aggregate_encoded_pixels,
+        "aggregate_h264_pixel_ratio": (
+            h264_main_pixels / aggregate_encoded_pixels
+            if aggregate_encoded_pixels
+            else 0.0
+        ),
+        "h264_damage_span_ms": max(h264_damage_times) - min(h264_damage_times),
+        "h264_main_frame_count": len(coverage),
+        "h264_main_pixels": h264_main_pixels,
+        "minimum_frame_h264_pixels": minimum_main,
+        "minimum_frame_window_pixels": minimum_window,
+    }
+
+
+def h264_dominance_checks(metrics: dict[str, Any]) -> dict[str, bool]:
+    """Require sustained, predominant H.264 coverage over the observed interval."""
+    frames = _exact_int(metrics.get("h264_main_frame_count"), positive=True)
+    main_pixels = _exact_int(metrics.get("minimum_frame_h264_pixels"), positive=True)
+    window_pixels = _exact_int(
+        metrics.get("minimum_frame_window_pixels"), positive=True
+    )
+    aggregate_h264_pixels = _exact_int(
+        metrics.get("h264_main_pixels"), positive=True
+    )
+    aggregate_encoded_pixels = _exact_int(
+        metrics.get("aggregate_encoded_pixels"), positive=True
+    )
+    damage_span_ms = _exact_int(metrics.get("h264_damage_span_ms"))
+    return {
+        "primary_h264_aggregate_pixels_dominant": bool(
+            aggregate_h264_pixels is not None
+            and aggregate_encoded_pixels is not None
+            and aggregate_h264_pixels <= aggregate_encoded_pixels
+            and aggregate_h264_pixels * 100
+            >= aggregate_encoded_pixels * H264_MIN_AGGREGATE_PIXEL_PERCENT
+        ),
+        "primary_h264_damage_span_stable": bool(
+            damage_span_ms is not None and damage_span_ms >= H264_MIN_DAMAGE_SPAN_MS
+        ),
+        "primary_h264_main_frames_stable": bool(
+            frames is not None and frames >= H264_MIN_MAIN_FRAMES
+        ),
+        "primary_h264_per_frame_pixels_dominant": bool(
+            main_pixels is not None
+            and window_pixels is not None
+            and main_pixels <= window_pixels
+            and main_pixels * 100
+            >= window_pixels * H264_MIN_FRAME_PIXEL_PERCENT
+        ),
+    }
+
+
+def matched_h264_stream_stability_checks(
+    production: dict[str, Any],
+    metrics: dict[str, Any],
+) -> dict[str, bool]:
+    """Bind stability and dominance to the exact VA-matched H.264 stream."""
+    matched = production.get("matched_stream")
+    if not isinstance(matched, dict):
+        matched = {}
+    packet_count = _exact_int(matched.get("packet_count"), positive=True)
+    damage_span_ms = _exact_int(matched.get("damage_span_ms"))
+    matched_pixels = _exact_int(matched.get("pixel_count"), positive=True)
+    total_h264_pixels = _exact_int(metrics.get("h264_main_pixels"), positive=True)
+    return {
+        "matched_h264_stream_damage_span_stable": bool(
+            damage_span_ms is not None
+            and (_exact_int(metrics.get("h264_damage_span_ms")) is not None)
+            and damage_span_ms >= int(metrics["h264_damage_span_ms"])
+        ),
+        "matched_h264_stream_frames_stable": bool(
+            packet_count is not None
+            and (_exact_int(metrics.get("h264_main_frame_count"), positive=True)
+                 is not None)
+            and packet_count >= int(metrics["h264_main_frame_count"])
+        ),
+        "matched_h264_stream_pixels_dominant": bool(
+            matched_pixels is not None
+            and total_h264_pixels is not None
+            and matched_pixels >= total_h264_pixels
+        ),
+    }
+
+
+def primary_h264_packets_valid(
+    application: str,
+    h264_client_policy: str,
+    updates: dict[str, Any] | None,
+) -> bool:
+    """Apply the exact primary-window codec contract for one live profile."""
+    if h264_client_policy == "adaptive-alpha":
+        metrics = h264_production_metrics(application, updates)
+        return all(h264_dominance_checks(metrics).values())
+    return only_positive_h264_packets(updates)
+
+
+def primary_h264_frame_ready(
+    application: str,
+    h264_client_policy: str,
+    updates: dict[str, Any] | None,
+) -> bool:
+    """Accept one structurally valid H.264 group for interaction readiness."""
+    if h264_client_policy == "adaptive-alpha":
+        return adaptive_h264_frame_readiness_valid(application, updates)
+    return only_positive_h264_packets(updates)
+
+
+def primary_h264_packet_contract_name(
+    application: str,
+    h264_client_policy: str,
+) -> str:
+    if application == "hardware":
+        return "alpha_safe_warmup_then_h264_with_only_lossless_rgb_edges"
+    if h264_client_policy == "adaptive-alpha":
+        return "adaptive_alpha_groups_with_dominant_h264_and_only_lossless_rgb_edges"
+    return "only_h264_packets"
+
+
+FRAME_ALPHA_STATE_RE = re.compile(
+    r"(?:^|\s)window 0x(?P<window_id>[0-9a-fA-F]+) "
+    r"frame pixel format=(?P<pixel_format>[A-Za-z0-9]+), "
+    r"want-alpha=(?P<want_alpha>True|False)\s*$"
+)
+SAVED_PACKET_RE = re.compile(
+    r"(?:^|\s)saved\s+(?P<encoding>[a-z0-9]+)\s*:\s*"
+    r"[1-9][0-9]*\s+bytes to '/artifacts/"
+    r"(?P<payload>screen-updates/(?P<window_id>[1-9][0-9]*)/"
+    r"(?P<group>0|[1-9][0-9]*)/(?P<index>0|[1-9][0-9]*)\."
+    r"(?P=encoding))'\s*$"
+)
+
+
+def parse_frame_alpha_states(server_log: str) -> list[dict[str, Any]]:
+    """Parse exact per-window frame alpha transitions from the server log."""
+    states: list[dict[str, Any]] = []
+    for line in server_log.splitlines():
+        match = FRAME_ALPHA_STATE_RE.search(line)
+        if match is None:
+            continue
+        states.append(
+            {
+                "pixel_format": match.group("pixel_format"),
+                "want_alpha": match.group("want_alpha") == "True",
+                "window_id": int(match.group("window_id"), 16),
+            }
+        )
+    return states
+
+
+def parse_saved_packet_frame_states(server_log: str) -> list[dict[str, Any]]:
+    """Bind each exact saved packet path to the latest state for its window."""
+    current: dict[int, dict[str, Any]] = {}
+    packets: list[dict[str, Any]] = []
+    for line in server_log.splitlines():
+        state_match = FRAME_ALPHA_STATE_RE.search(line)
+        if state_match is not None:
+            window_id = int(state_match.group("window_id"), 16)
+            current[window_id] = {
+                "pixel_format": state_match.group("pixel_format"),
+                "want_alpha": state_match.group("want_alpha") == "True",
+            }
+            continue
+        packet_match = SAVED_PACKET_RE.search(line)
+        if packet_match is None:
+            continue
+        window_id = int(packet_match.group("window_id"))
+        payload = PurePosixPath(packet_match.group("payload"))
+        state = current.get(window_id, {})
+        packets.append(
+            {
+                "encoding": packet_match.group("encoding"),
+                "pixel_format": state.get("pixel_format"),
+                "relative_info": payload.with_suffix(".info").as_posix(),
+                "want_alpha": state.get("want_alpha"),
+                "window_id": window_id,
+            }
+        )
+    return packets
+
+
+def exact_window_frame_alpha_states(
+    states: Any,
+    window_id: Any,
+    *,
+    pixel_formats: set[str],
+    want_alpha: bool,
+) -> bool:
+    """Validate every recorded alpha transition for one exact Xpra window."""
+    exact_window_id = _exact_int(window_id, positive=True)
+    if not isinstance(states, list) or exact_window_id is None or not pixel_formats:
+        return False
+    matching: list[dict[str, Any]] = []
+    for state in states:
+        if not isinstance(state, dict):
+            return False
+        state_window_id = _exact_int(state.get("window_id"), positive=True)
+        pixel_format = state.get("pixel_format")
+        state_want_alpha = state.get("want_alpha")
+        if (
+            state_window_id is None
+            or not isinstance(pixel_format, str)
+            or not isinstance(state_want_alpha, bool)
+        ):
+            return False
+        if state_window_id == exact_window_id:
+            matching.append(state)
+    return bool(matching) and all(
+        state["pixel_format"] in pixel_formats
+        and state["want_alpha"] is want_alpha
+        for state in matching
+    )
+
+
+def hardware_frame_alpha_state_checks(
+    log_evidence: dict[str, Any],
+    updates: dict[str, Any],
+    interaction_updates: dict[str, Any] | None,
+) -> dict[str, bool]:
+    """Bind opaque and alpha frame transitions to the two hardware windows."""
+    interaction = interaction_updates if isinstance(interaction_updates, dict) else {}
+    states = log_evidence.get("frame_alpha_states")
+    return {
+        "primary_window_opaque_frame_states": exact_window_frame_alpha_states(
+            states,
+            updates.get("window_id"),
+            pixel_formats={"BGRX", "RGBX"},
+            want_alpha=False,
+        ),
+        "interaction_window_alpha_frame_states": exact_window_frame_alpha_states(
+            states,
+            interaction.get("window_id"),
+            pixel_formats={"BGRA", "RGBA"},
+            want_alpha=True,
+        ),
+    }
+
+
+def adaptive_frame_alpha_state_checks(
+    log_evidence: dict[str, Any],
+    updates: dict[str, Any],
+) -> dict[str, bool]:
+    """Bind adaptive alpha codecs to consistent transitions for one exact window."""
+    states = log_evidence.get("frame_alpha_states")
+    window_id = _exact_int(updates.get("window_id"), positive=True)
+    if not isinstance(states, list) or window_id is None:
+        matching: list[dict[str, Any]] = []
+        structurally_valid = False
+    else:
+        matching = []
+        structurally_valid = True
+        for state in states:
+            if not isinstance(state, dict):
+                structurally_valid = False
+                break
+            state_window_id = _exact_int(state.get("window_id"), positive=True)
+            if (
+                state_window_id is None
+                or not isinstance(state.get("pixel_format"), str)
+                or not isinstance(state.get("want_alpha"), bool)
+            ):
+                structurally_valid = False
+                break
+            if state_window_id == window_id:
+                matching.append(state)
+    transitions_consistent = bool(matching) and structurally_valid and all(
+        (
+            state["pixel_format"] in {"BGRX", "RGBX"}
+            and state["want_alpha"] is False
+        )
+        or (
+            state["pixel_format"] in {"BGRA", "RGBA"}
+            and state["want_alpha"] is True
+        )
+        for state in matching
+    )
+    packets = updates.get("updates")
+    exact_packets = packets if isinstance(packets, list) else []
+    state_records = log_evidence.get("saved_packet_frame_states")
+    state_by_path: dict[str, dict[str, Any]] = {}
+    records_valid = isinstance(state_records, list)
+    if records_valid:
+        for record in state_records:
+            if not isinstance(record, dict):
+                records_valid = False
+                break
+            relative = record.get("relative_info")
+            record_window = _exact_int(record.get("window_id"), positive=True)
+            if (
+                not isinstance(relative, str)
+                or not relative
+                or record_window is None
+                or relative in state_by_path
+                or not isinstance(record.get("encoding"), str)
+                or not isinstance(record.get("pixel_format"), str)
+                or not isinstance(record.get("want_alpha"), bool)
+            ):
+                records_valid = False
+                break
+            state_by_path[relative] = record
+    packets_bound = bool(exact_packets) and records_valid
+    h264_states_valid = packets_bound
+    alpha_rgb32_states_valid = packets_bound
+    for packet in exact_packets:
+        if not isinstance(packet, dict):
+            packets_bound = False
+            h264_states_valid = False
+            alpha_rgb32_states_valid = False
+            break
+        relative = packet.get("relative_info")
+        record = state_by_path.get(relative) if isinstance(relative, str) else None
+        if (
+            record is None
+            or record.get("window_id") != window_id
+            or record.get("encoding") != packet.get("encoding")
+        ):
+            packets_bound = False
+            h264_states_valid = False
+            alpha_rgb32_states_valid = False
+            continue
+        opaque = (
+            record["pixel_format"] in {"BGRX", "RGBX"}
+            and record["want_alpha"] is False
+        )
+        alpha = (
+            record["pixel_format"] in {"BGRA", "RGBA"}
+            and record["want_alpha"] is True
+        )
+        encoding = packet.get("encoding")
+        if encoding == "h264" and not opaque:
+            h264_states_valid = False
+            packets_bound = False
+        if encoding == "rgb24" and not opaque:
+            packets_bound = False
+        if encoding == "rgb32":
+            options = packet.get("options")
+            rgb_format = options.get("rgb_format") if isinstance(options, dict) else None
+            if (
+                rgb_format in {"BGRA", "RGBA"} and not alpha
+                or rgb_format not in {"BGRA", "RGBA"} and not opaque
+            ):
+                alpha_rgb32_states_valid = False
+                packets_bound = False
+    return {
+        "primary_alpha_rgb32_packets_have_alpha_frame_state": bool(
+            transitions_consistent and alpha_rgb32_states_valid
+        ),
+        "primary_h264_packets_have_opaque_frame_state": bool(
+            transitions_consistent and h264_states_valid
+        ),
+        "primary_packets_bound_to_frame_state": bool(
+            transitions_consistent and packets_bound
+        ),
+        "primary_window_frame_alpha_states_consistent": transitions_consistent,
+    }
 
 
 def inspect_logs(directory: Path) -> dict[str, Any]:
@@ -1855,6 +4542,8 @@ def inspect_logs(directory: Path) -> dict[str, Any]:
             )
         ),
         "empty_wayland_commits": sum("rects=[]" in line for line in commit_lines),
+        "frame_alpha_states": parse_frame_alpha_states(server_log),
+        "saved_packet_frame_states": parse_saved_packet_frame_states(server_log),
         "gtk_cairo_draws": client_log.count("cairo_draw: window size="),
         "gtk_draw_widgets": client_log.count("draw_widget("),
         "h264_draw_regions": len(re.findall(r"draw_region\([^\n]+h264", client_log)),
@@ -2033,9 +4722,12 @@ def parse_va_contexts(directory: Path, prefix: str) -> dict[str, Any]:
 def h264_packet_streams(
     updates: dict[str, Any],
     *,
+    allow_alpha_gaps: bool = False,
     allow_lossless_rgb_edges: bool = False,
+    allow_window_resize_gaps: bool = False,
 ) -> list[dict[str, Any]]:
-    edge_mode = allow_lossless_rgb_edges and h264_with_lossless_rgb_edges(updates)
+    alpha_mode = allow_alpha_gaps
+    edge_mode = allow_lossless_rgb_edges
     packets_by_sequence = {
         int(update["sequence"]): update
         for update in updates["updates"]
@@ -2050,12 +4742,22 @@ def h264_packet_streams(
         if not edge_mode or sequence <= previous_sequence + 1:
             return False
         window_size = _packet_window_size(packet)
-        if window_size is None or _packet_window_size(previous) != window_size:
+        if window_size is None:
+            return False
+        if (
+            _packet_window_size(previous) != window_size
+            and not allow_window_resize_gaps
+        ):
             return False
         return all(
             intermediate in packets_by_sequence
-            and _packet_window_size(packets_by_sequence[intermediate]) == window_size
-            and _lossless_rgb_edge_kind(packets_by_sequence[intermediate]) is not None
+            and (
+                _lossless_rgb_edge_kind(packets_by_sequence[intermediate]) is not None
+                or alpha_mode
+                and _alpha_safe_packet(packets_by_sequence[intermediate])
+                or allow_window_resize_gaps
+                and _safe_h264_context_gap(packets_by_sequence[intermediate])
+            )
             for intermediate in range(previous_sequence + 1, sequence)
         )
 
@@ -2089,6 +4791,7 @@ def h264_packet_streams(
             grouped[-1].append(packet)
 
     streams: list[dict[str, Any]] = []
+    window_id = _exact_int(updates.get("window_id"), positive=True)
     for packets_in_stream in grouped:
         first = packets_in_stream[0]
         sequences = [int(packet["sequence"]) for packet in packets_in_stream]
@@ -2098,6 +4801,14 @@ def h264_packet_streams(
         width = int(first["w"])
         height = int(first["h"])
         encoded_width, encoded_height = h264_encoded_size(first)
+        damage_times: list[int] = []
+        if window_id is not None:
+            for packet in packets_in_stream:
+                location = _saved_update_group_location(packet, window_id)
+                if location is None:
+                    damage_times = []
+                    break
+                damage_times.append(int(location[0]))
         transport_sequences = list(range(sequences[0], sequences[-1] + 1))
         interleaved_edge_sequences = [
             sequence
@@ -2105,6 +4816,13 @@ def h264_packet_streams(
             if sequence not in sequences
             and sequence in packets_by_sequence
             and _lossless_rgb_edge_kind(packets_by_sequence[sequence]) is not None
+        ]
+        interleaved_alpha_sequences = [
+            sequence
+            for sequence in transport_sequences
+            if sequence not in sequences
+            and sequence in packets_by_sequence
+            and _alpha_safe_packet(packets_by_sequence[sequence])
         ]
         streams.append(
             {
@@ -2115,10 +4833,15 @@ def h264_packet_streams(
                     sequence_gap_is_edges(previous, packet)
                     for previous, packet in pairwise(packets_in_stream)
                 ),
+                "damage_span_ms": (
+                    max(damage_times) - min(damage_times) if damage_times else 0
+                ),
                 "first_sequence": sequences[0],
+                "interleaved_alpha_sequences": interleaved_alpha_sequences,
                 "interleaved_edge_sequences": interleaved_edge_sequences,
                 "last_sequence": sequences[-1],
                 "packet_count": len(packets_in_stream),
+                "pixel_count": len(packets_in_stream) * width * height,
                 "packet_sequences": sequences,
                 "positive_payloads": all(
                     int(packet.get("payload_bytes", -1)) > 0
@@ -2160,12 +4883,12 @@ def _context_key(context: dict[str, Any]) -> tuple[str, str, int]:
     )
 
 
-def _matching_va_contexts(
+def _eligible_va_contexts(
     contexts: list[dict[str, Any]],
-    stream: dict[str, Any],
+    surface_size: tuple[int, int],
     entrypoints: set[str],
 ) -> list[dict[str, Any]]:
-    width, height = stream["surface_size"]
+    width, height = surface_size
     return [
         context
         for context in contexts
@@ -2173,7 +4896,6 @@ def _matching_va_contexts(
         and context["profile"].startswith("VAProfileH264")
         and context["entrypoint"] in entrypoints
         and [context["width"], context["height"]] == [width, height]
-        and context["completed_frames"] == stream["packet_count"]
         and context["incomplete_frames"] == 0
     ]
 
@@ -2183,36 +4905,80 @@ def match_h264_production_stream(
     server_trace: dict[str, Any],
     client_trace: dict[str, Any],
     *,
+    allow_alpha_gaps: bool = False,
     allow_lossless_rgb_edges: bool = False,
+    allow_terminal_server_frame: bool = False,
+    allow_window_resize_gaps: bool = False,
 ) -> dict[str, Any]:
     streams = h264_packet_streams(
         updates,
+        allow_alpha_gaps=allow_alpha_gaps,
         allow_lossless_rgb_edges=allow_lossless_rgb_edges,
+        allow_window_resize_gaps=allow_window_resize_gaps,
     )
-    candidates: list[dict[str, Any]] = []
-    for stream in streams:
-        server_matches = _matching_va_contexts(
+    candidates = [
+        {
+            **stream,
+            "client_contexts": [],
+            "complete": False,
+            "server_contexts": [],
+            "structurally_complete": bool(
+                stream["contiguous_frames"]
+                and stream["contiguous_sequences"]
+                and stream["positive_payloads"]
+                and stream["starts_with_idr"]
+            ),
+        }
+        for stream in streams
+    ]
+    candidates_by_size: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        surface_size = tuple(int(value) for value in candidate["surface_size"])
+        candidates_by_size.setdefault(surface_size, []).append(candidate)
+    for surface_size, grouped_candidates in candidates_by_size.items():
+        server_matches = _eligible_va_contexts(
             server_trace["contexts"],
-            stream,
+            surface_size,
             {"VAEntrypointEncSlice", "VAEntrypointEncSliceLP"},
         )
-        client_matches = _matching_va_contexts(
-            client_trace["contexts"], stream, {"VAEntrypointVLD"}
+        client_matches = _eligible_va_contexts(
+            client_trace["contexts"],
+            surface_size,
+            {"VAEntrypointVLD"},
         )
-        candidate = {
-            **stream,
-            "client_contexts": client_matches,
-            "server_contexts": server_matches,
-        }
-        candidate["complete"] = bool(
-            stream["contiguous_frames"]
-            and stream["contiguous_sequences"]
-            and stream["positive_payloads"]
-            and stream["starts_with_idr"]
-            and len(server_matches) == 1
-            and len(client_matches) == 1
+        expected_frames = sum(
+            int(candidate["packet_count"]) for candidate in grouped_candidates
         )
-        candidates.append(candidate)
+        server_frames = sum(
+            int(context["completed_frames"]) for context in server_matches
+        )
+        client_frames = sum(
+            int(context["completed_frames"]) for context in client_matches
+        )
+        server_frames_match = server_frames == expected_frames
+        if allow_terminal_server_frame:
+            server_frames_match = server_frames in {
+                expected_frames,
+                expected_frames + 1,
+            }
+        group_complete = bool(
+            all(candidate["structurally_complete"] for candidate in grouped_candidates)
+            and server_matches
+            and client_matches
+            and server_frames_match
+            and client_frames == expected_frames
+        )
+        for candidate in grouped_candidates:
+            candidate["client_contexts"] = client_matches
+            candidate["client_completed_frames"] = client_frames
+            candidate["complete"] = group_complete
+            candidate["expected_packet_frames"] = expected_frames
+            candidate["server_contexts"] = server_matches
+            candidate["server_completed_frames"] = server_frames
+            candidate["terminal_server_frame_untransmitted"] = bool(
+                allow_terminal_server_frame
+                and server_frames == expected_frames + 1
+            )
     complete = [candidate for candidate in candidates if candidate["complete"]]
     selected = max(
         complete,
@@ -2223,10 +4989,13 @@ def match_h264_production_stream(
         default=None,
     )
     production_keys = set()
-    if selected:
+    for candidate in complete:
         production_keys.update(
             _context_key(context)
-            for context in (*selected["server_contexts"], *selected["client_contexts"])
+            for context in (
+                *candidate["server_contexts"],
+                *candidate["client_contexts"],
+            )
         )
     all_contexts = [*server_trace["contexts"], *client_trace["contexts"]]
     selftest_contexts = [
@@ -2244,7 +5013,10 @@ def match_h264_production_stream(
         and context not in selftest_contexts
     ]
     return {
+        "all_streams_proven": bool(candidates)
+        and len(complete) == len(candidates),
         "candidates": candidates,
+        "complete_streams": complete,
         "matched_stream": selected,
         "production_proven": selected is not None,
         "selftest_contexts": selftest_contexts,
@@ -2484,7 +5256,10 @@ def h264_hardware_evidence(
     directory: Path,
     updates: dict[str, Any],
     *,
+    allow_alpha_gaps: bool = False,
     allow_lossless_rgb_edges: bool = False,
+    allow_terminal_server_frame: bool = False,
+    allow_window_resize_gaps: bool = False,
 ) -> dict[str, Any]:
     server_trace = parse_va_contexts(directory, "server-va")
     client_trace = parse_va_contexts(directory, "client-va")
@@ -2492,7 +5267,10 @@ def h264_hardware_evidence(
         updates,
         server_trace,
         client_trace,
+        allow_alpha_gaps=allow_alpha_gaps,
         allow_lossless_rgb_edges=allow_lossless_rgb_edges,
+        allow_terminal_server_frame=allow_terminal_server_frame,
+        allow_window_resize_gaps=allow_window_resize_gaps,
     )
     matched = production["matched_stream"]
     packet_chain = h264_client_packet_chain(directory, updates, matched)
@@ -2505,16 +5283,29 @@ def h264_hardware_evidence(
         context = contexts[0] if len(contexts) == 1 else None
         return {
             "contexts": trace["contexts"],
-            "entrypoint_present": bool(context),
+            "entrypoint_present": bool(contexts),
             "files": trace["files"],
             "h264_profile_present": bool(
-                context and context["profile"].startswith("VAProfileH264")
+                contexts
+                and all(
+                    item["profile"].startswith("VAProfileH264")
+                    for item in contexts
+                )
             ),
             "production_context": context,
-            "production_dimensions": (
-                [[context["width"], context["height"]]] if context else []
+            "production_contexts": contexts,
+            "production_dimensions": [
+                list(size)
+                for size in sorted(
+                    {
+                        (int(item["width"]), int(item["height"]))
+                        for item in contexts
+                    }
+                )
+            ],
+            "submitted_frames": sum(
+                int(item["completed_frames"]) for item in contexts
             ),
-            "submitted_frames": int(context["completed_frames"]) if context else 0,
         }
 
     return {
@@ -2551,38 +5342,79 @@ def wait_for_frame_boundary(
     directory: Path,
     encoding: str,
     h264_client_policy: str,
+    *,
+    application: str,
+    expected_xpra_wid: int,
 ) -> str:
+    if _exact_int(expected_xpra_wid, positive=True) is None:
+        raise LabFailure(f"invalid expected Xpra window ID: {expected_xpra_wid!r}")
     outcome = "pending"
     h264_failure_seen_at: float | None = None
+    server_offsets = {"server.stderr": 0}
+    client_offsets = {"client.stdout": 0, "client.stderr": 0}
+    frame_logs = {name: "" for name in (*server_offsets, *client_offsets)}
+    frame_log_bytes = dict.fromkeys(frame_logs, 0)
+    incomplete_update_info: set[str] = set()
+    incomplete_screenshots: set[str] = set()
 
-    def read_log(name: str) -> str:
-        path = directory / name
-        return (
-            path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
-        )
+    def update_logs(container: str, offsets: dict[str, int]) -> None:
+        for name, (next_offset, delta) in read_container_log_deltas(
+            container,
+            offsets,
+        ).items():
+            delta_bytes = len(delta.encode())
+            if frame_log_bytes[name] + delta_bytes > FRAME_LOG_TOTAL_BYTES:
+                raise LabFailure(f"container log exceeds frame-poll limit: {name}")
+            offsets[name] = next_offset
+            frame_log_bytes[name] += delta_bytes
+            frame_logs[name] += delta
 
     def reached() -> bool:
         nonlocal outcome, h264_failure_seen_at
-        server_log = read_log("server.stderr")
-        client_log = read_log("client.stdout") + read_log("client.stderr")
+        update_logs(server, server_offsets)
+        update_logs(client, client_offsets)
+        server_log = frame_logs["server.stderr"]
+        client_log = frame_logs["client.stdout"] + frame_logs["client.stderr"]
         nonempty_commit = any(
             "rects=[]" not in line
             for line in server_log.splitlines()
-            if "commit wid " in line
+            if re.search(rf"\bcommit wid {expected_xpra_wid}\b", line)
         )
         if encoding == "rgb":
+            window_prefix = f"screen-updates/{expected_xpra_wid}/"
+            screenshots = tuple(
+                relative
+                for relative in container_artifact_files(
+                    server, "screen-updates", "screenshot.png"
+                )
+                if relative.startswith(window_prefix)
+            )
+            screenshots_to_pull = tuple(
+                relative
+                for relative in screenshots
+                if not (directory / relative).is_file()
+                or relative in incomplete_screenshots
+            )
+            if screenshots_to_pull:
+                pull_container_artifacts(server, directory, screenshots_to_pull)
             failed = (
                 nonempty_commit
                 and "no compatible rgb format for 'RGBX'!" in server_log
                 and "only: ('BGRX', 'BGRA')" in server_log
             )
             source_ready = False
-            for screenshot in directory.glob("screen-updates/*/*/screenshot.png"):
+            incomplete_screenshots.clear()
+            for screenshot in directory.glob(
+                f"screen-updates/{expected_xpra_wid}/*/screenshot.png"
+            ):
                 try:
                     if analyze_png(screenshot)["quantized_rgb_colors"] > 32:
                         source_ready = True
                         break
                 except (OSError, ValueError):
+                    incomplete_screenshots.add(
+                        screenshot.relative_to(directory).as_posix()
+                    )
                     continue
             painted = (
                 nonempty_commit
@@ -2638,11 +5470,65 @@ def wait_for_frame_boundary(
             else:
                 h264_failure_seen_at = None
                 failed = False
+            window_prefix = f"screen-updates/{expected_xpra_wid}/"
+            remote_update_info = tuple(
+                relative
+                for relative in container_artifact_files(
+                    server, "screen-updates", "*.info"
+                )
+                if relative.startswith(window_prefix)
+            )
+            update_info_to_pull = tuple(
+                relative
+                for relative in remote_update_info
+                if not (directory / relative).is_file()
+                or relative in incomplete_update_info
+            )
+            if update_info_to_pull:
+                pull_container_artifacts(server, directory, update_info_to_pull)
+            incomplete_update_info.clear()
+            update_payloads: list[str] = []
+            for info_path in directory.glob(
+                f"screen-updates/{expected_xpra_wid}/*/[0-9]*.info"
+            ):
+                try:
+                    info = json.loads(info_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    incomplete_update_info.add(
+                        info_path.relative_to(directory).as_posix()
+                    )
+                    continue
+                if not isinstance(info, dict):
+                    raise LabFailure(
+                        f"saved update metadata is not an object: {info_path}"
+                    )
+                payload_name = info.get("file")
+                if (
+                    not isinstance(payload_name, str)
+                    or payload_name in {"", ".", ".."}
+                    or PurePosixPath(payload_name).name != payload_name
+                ):
+                    raise LabFailure(f"saved update payload name is unsafe: {info_path}")
+                payload_relative = (
+                    info_path.parent / payload_name
+                ).relative_to(directory).as_posix()
+                if not (directory / payload_relative).is_file():
+                    update_payloads.append(payload_relative)
+            if update_payloads:
+                pull_container_artifacts(
+                    server,
+                    directory,
+                    tuple(sorted(set(update_payloads))),
+                )
             try:
-                xpra_wid = client_xpra_window_id(directory)
-                updates = parse_saved_updates(directory, xpra_wid)
+                updates = parse_saved_updates(directory, expected_xpra_wid)
+                updates["initial_pixel_format"] = saved_window_initial_pixel_format(
+                    directory, expected_xpra_wid
+                )
             except (LabFailure, OSError, ValueError, json.JSONDecodeError):
-                xpra_wid = 0
+                incomplete_update_info.add(
+                    f"screen-updates/{expected_xpra_wid}/window.info"
+                )
                 updates = {"count": 0, "encodings": [], "updates": []}
             if h264_client_policy in H264_FALLBACK_POLICIES and updates["count"] > 0:
                 actual_encodings = set(updates["encodings"])
@@ -2652,11 +5538,11 @@ def wait_for_frame_boundary(
                     outcome = "unexpected-h264"
                 return True
             production_marker = (
-                f"register_window(..) window(0x{xpra_wid:x})=" if xpra_wid else ""
+                f"register_window(..) window(0x{expected_xpra_wid:x})="
             )
             production_log = (
                 client_log[client_log.find(production_marker) :]
-                if production_marker and production_marker in client_log
+                if production_marker in client_log
                 else ""
             )
             draw_match = re.search(r"draw_region\([^\n]+h264", production_log)
@@ -2671,16 +5557,14 @@ def wait_for_frame_boundary(
             decode_acknowledged = bool(
                 re.search(
                     rf"record_decode_time\((?:True|1),[^\n]*\) "
-                    rf"wid=0x{xpra_wid:x}, h264:",
+                    rf"wid=0x{expected_xpra_wid:x}, h264:",
                     after_draw,
                 )
             )
             presented = bool(
                 nonempty_commit
-                and (
-                    h264_with_lossless_rgb_edges(updates)
-                    if h264_client_policy == "adaptive-alpha"
-                    else only_positive_h264_packets(updates)
+                and primary_h264_frame_ready(
+                    application, h264_client_policy, updates
                 )
                 and draw_match
                 and decoder_selected
@@ -2717,6 +5601,7 @@ def capture_window_when_ready(
     window_id: str,
     directory: Path,
     *,
+    application: str,
     expect_content: bool,
 ) -> dict[str, Any]:
     evidence: dict[str, Any] | None = None
@@ -2725,22 +5610,36 @@ def capture_window_when_ready(
         nonlocal evidence
         capture_xwd(
             container,
+            directory,
             "window-direct.xwd",
             window_id=window_id,
             announce=False,
         )
         evidence = convert_xwd(directory, "window-direct")
-        return bool(
-            evidence["xwd"]["unique_rgb_colors"] > 100
-            and evidence["image"]["central_opaque_ratio"] >= 0.99
-        )
+        return client_window_content_ready(application, evidence)
 
     if expect_content:
-        wait_for("nonuniform opaque pixels in the client window", capture)
+        wait_for("nonuniform source-appropriate client pixels", capture)
     else:
         capture()
     assert evidence is not None
     return evidence
+
+
+def client_window_content_ready(
+    application: str,
+    evidence: dict[str, Any],
+) -> bool:
+    """Apply the reviewed opaque or real-alpha readiness rule."""
+    xwd = evidence.get("xwd")
+    image = evidence.get("image")
+    if not isinstance(xwd, dict) or not isinstance(image, dict):
+        return False
+    if xwd.get("unique_rgb_colors", 0) <= 100:
+        return False
+    if application == "gtk":
+        return all(image_alpha_content_checks(image, prefix="window").values())
+    return image.get("central_opaque_ratio", 0) >= 0.99
 
 
 def detect_zed_system_theme_control(image: Image.Image) -> dict[str, Any]:
@@ -2886,7 +5785,8 @@ def rgb_luminance(rgb: list[int]) -> float:
 
 
 def exercise_zed_mouse(
-    container: str,
+    server: str,
+    client: str,
     window_id: str,
     geometry: dict[str, int],
     directory: Path,
@@ -2919,21 +5819,21 @@ def exercise_zed_mouse(
             "detected Zed theme control does not show the expected light System state"
         )
 
-    log_paths = {
-        "client": directory / "client.stdout",
-        "server": directory / "server.stderr",
-        "zed": directory / "zed.stderr",
-    }
     log_offsets = {
-        name: path.stat().st_size if path.is_file() else 0
-        for name, path in log_paths.items()
+        "client": container_artifact_size(client, "client.stdout"),
+        "server": container_artifact_size(server, "server.stderr"),
+        "zed": container_artifact_size(server, "zed.stderr"),
     }
     before_screenshots = {
-        path.relative_to(directory)
-        for path in directory.glob("screen-updates/*/*/screenshot.png")
+        Path(value)
+        for value in container_artifact_files(
+            server,
+            "screen-updates",
+            "screenshot.png",
+        )
     }
     podman_exec(
-        container,
+        client,
         [
             "env",
             f"DISPLAY={CLIENT_DISPLAY}",
@@ -2954,42 +5854,58 @@ def exercise_zed_mouse(
 
     input_path: dict[str, bool] = {}
 
-    def read_log_suffix(name: str) -> str:
-        path = log_paths[name]
-        if not path.is_file():
-            return ""
-        with path.open("rb") as stream:
-            stream.seek(log_offsets[name])
-            return stream.read().decode("utf-8", errors="replace")
-
     def pointer_path_complete() -> bool:
         nonlocal input_path
-        client_log = read_log_suffix("client")
-        server_log = read_log_suffix("server")
-        zed_log = read_log_suffix("zed")
         input_path = {
-            "client_coordinates": (f", {click_x}, {click_y})" in client_log),
-            "client_press_release": bool(
-                re.search(r"_button_action\(1,[^\n]+, True\)", client_log)
-                and re.search(r"_button_action\(1,[^\n]+, False\)", client_log)
+            "client_coordinates": container_artifact_suffix_matches(
+                client,
+                "client.stdout",
+                log_offsets["client"],
+                (re.escape(f", {click_x}, {click_y}"),),
             ),
-            "server_coordinates": (f"move_pointer({click_x}, {click_y}," in server_log),
-            "server_press_release": (
-                "click(1, True" in server_log and "click(1, False" in server_log
+            "client_press_release": container_artifact_suffix_matches(
+                client,
+                "client.stdout",
+                log_offsets["client"],
+                (
+                    r"_button_action\(1,[^\n]+, True\)",
+                    r"_button_action\(1,[^\n]+, False\)",
+                ),
             ),
-            "zed_coordinates": bool(
-                re.search(
-                    rf"wl_pointer#\d+\.(?:enter|motion)\([^\n]*"
-                    rf"{click_x}\.0+,\s*{click_y}\.0+",
-                    zed_log,
-                )
+            "server_coordinates": container_artifact_suffix_matches(
+                server,
+                "server.stderr",
+                log_offsets["server"],
+                (re.escape(f"move_pointer({click_x}, {click_y},"),),
             ),
-            "zed_press_release": bool(
-                re.search(r"wl_pointer#\d+\.button\([^\n]+,\s*272,\s*1\)", zed_log)
-                and re.search(
+            "server_press_release": container_artifact_suffix_matches(
+                server,
+                "server.stderr",
+                log_offsets["server"],
+                (
+                    re.escape("click(1, True"),
+                    re.escape("click(1, False"),
+                ),
+            ),
+            "zed_coordinates": container_artifact_suffix_matches(
+                server,
+                "zed.stderr",
+                log_offsets["zed"],
+                (
+                    (
+                        rf"wl_pointer#\d+\.(?:enter|motion)\([^\n]*"
+                        rf"{click_x}\.0+,\s*{click_y}\.0+"
+                    ),
+                ),
+            ),
+            "zed_press_release": container_artifact_suffix_matches(
+                server,
+                "zed.stderr",
+                log_offsets["zed"],
+                (
+                    r"wl_pointer#\d+\.button\([^\n]+,\s*272,\s*1\)",
                     r"wl_pointer#\d+\.button\([^\n]+,\s*272,\s*0\)",
-                    zed_log,
-                )
+                ),
             ),
         }
         return all(input_path.values())
@@ -3000,7 +5916,8 @@ def exercise_zed_mouse(
     def theme_changed() -> bool:
         nonlocal after
         capture_xwd(
-            container,
+            client,
+            directory,
             "window-after-pointer.xwd",
             window_id=window_id,
             announce=False,
@@ -3054,12 +5971,20 @@ def exercise_zed_mouse(
 
     def post_click_server_frame() -> bool:
         nonlocal matching_updates
-        current_screenshots = {
-            path.relative_to(directory)
-            for path in directory.glob("screen-updates/*/*/screenshot.png")
+        listed = {
+            Path(value) for value in container_artifact_files(
+                server, "screen-updates", "screenshot.png"
+            )
         }
+        new_screenshots = listed - before_screenshots
+        if new_screenshots:
+            pull_container_artifacts(
+                server,
+                directory,
+                tuple(path.as_posix() for path in sorted(new_screenshots)),
+            )
         comparisons: list[dict[str, Any]] = []
-        for relative_path in sorted(current_screenshots - before_screenshots):
+        for relative_path in sorted(new_screenshots):
             try:
                 comparison = compare_rgb_images(
                     directory / relative_path,
@@ -3108,6 +6033,160 @@ def exercise_zed_mouse(
     }
 
 
+def exercise_zed_h264_stability(
+    server: str,
+    client: str,
+    window_id: str,
+    xpra_wid: int,
+    geometry: dict[str, int],
+    directory: Path,
+    interaction: dict[str, Any],
+) -> dict[str, Any]:
+    """Alternate the real Zed theme controls and prove sustained H.264."""
+
+    def target_center(name: str) -> tuple[int, int]:
+        target = interaction.get("target")
+        bounds = target.get(name) if isinstance(target, dict) else None
+        if (
+            not isinstance(bounds, list)
+            or len(bounds) != 4
+            or any(_exact_int(value) is None for value in bounds)
+        ):
+            raise LabFailure(f"Zed H.264 stimulus has invalid {name}")
+        left, top, right, bottom = (int(value) for value in bounds)
+        if not (0 <= left < right <= geometry["width"]):
+            raise LabFailure(f"Zed H.264 stimulus {name} is outside the window")
+        if not (0 <= top < bottom <= geometry["height"]):
+            raise LabFailure(f"Zed H.264 stimulus {name} is outside the window")
+        return (left + right) // 2, (top + bottom) // 2
+
+    system_position = target_center("system_bounds")
+    dark_position = target_center("dark_bounds")
+    # Let the initial dark-theme transition and its lossless refresh finish before
+    # recording the exact owned production interval.
+    time.sleep(2.0)
+    baseline_updates = synchronize_saved_updates(server, directory, xpra_wid)
+    baseline_sequences = [
+        _exact_int(packet.get("sequence"), positive=True)
+        for packet in baseline_updates["updates"]
+    ]
+    if not baseline_sequences or any(value is None for value in baseline_sequences):
+        raise LabFailure("Zed H.264 stimulus has no valid baseline sequence")
+    baseline_sequence = max(int(value) for value in baseline_sequences if value)
+    window_size = [geometry["width"], geometry["height"]]
+
+    capture_xwd(
+        client,
+        directory,
+        "window-h264-theme-baseline.xwd",
+        window_id=window_id,
+        announce=False,
+    )
+    baseline = convert_xwd(directory, "window-h264-theme-baseline")
+    attempts: list[dict[str, Any]] = []
+    final_updates: dict[str, Any] | None = None
+    final_metrics: dict[str, Any] | None = None
+    final_checks: dict[str, bool] | None = None
+    for attempt in range(1, 4):
+        light: dict[str, Any] | None = None
+        for cycle in range(ZED_THEME_TOGGLE_CYCLES):
+            for state, position in (
+                ("system", system_position),
+                ("dark", dark_position),
+            ):
+                result = podman_exec(
+                    client,
+                    [
+                        "env",
+                        f"DISPLAY={CLIENT_DISPLAY}",
+                        "xdotool",
+                        "windowactivate",
+                        "--sync",
+                        window_id,
+                        "mousemove",
+                        "--sync",
+                        "--window",
+                        window_id,
+                        str(position[0]),
+                        str(position[1]),
+                        "click",
+                        "1",
+                    ],
+                    check=False,
+                )
+                if result.returncode:
+                    raise LabFailure(f"Zed {state} theme stimulus failed")
+                time.sleep(ZED_THEME_TOGGLE_DELAY)
+                if cycle == 0 and state == "system":
+                    stem = f"window-h264-theme-{attempt}-light"
+                    capture_xwd(
+                        client,
+                        directory,
+                        f"{stem}.xwd",
+                        window_id=window_id,
+                        announce=False,
+                    )
+                    light = convert_xwd(directory, stem)
+        if light is None:
+            raise LabFailure("Zed H.264 stimulus did not capture its light phase")
+        dark_stem = f"window-h264-theme-{attempt}-dark"
+        capture_xwd(
+            client,
+            directory,
+            f"{dark_stem}.xwd",
+            window_id=window_id,
+            announce=False,
+        )
+        dark = convert_xwd(directory, dark_stem)
+        updates = synchronize_saved_updates(server, directory, xpra_wid)
+        sequences = [
+            _exact_int(packet.get("sequence"), positive=True)
+            for packet in updates["updates"]
+        ]
+        if not sequences or any(value is None for value in sequences):
+            raise LabFailure("Zed H.264 stimulus produced invalid packet sequences")
+        last_sequence = max(int(value) for value in sequences if value)
+        updates["h264_stimulus"] = {
+            "baseline_sequence": baseline_sequence,
+            "last_sequence": last_sequence,
+            "window_size": window_size,
+        }
+        metrics = h264_production_metrics("zed", updates)
+        checks = h264_dominance_checks(metrics)
+        changed = (
+            light["image"]["rgb_sha256"]
+            != baseline["image"]["rgb_sha256"]
+        )
+        attempts.append(
+            {
+                "checks": checks,
+                "client_frame_changed": changed,
+                "last_sequence": last_sequence,
+                "metrics": metrics,
+            }
+        )
+        if changed and all(checks.values()):
+            final_updates = updates
+            final_metrics = metrics
+            final_checks = checks
+            break
+    if final_updates is None or final_metrics is None or final_checks is None:
+        raise LabFailure("Zed theme toggles did not produce sustained dominant H.264")
+    stimulus = final_updates["h264_stimulus"]
+    return {
+        **stimulus,
+        "attempts": attempts,
+        "client_frames": {
+            "baseline": baseline["image"]["rgb_sha256"],
+            "dark": dark["image"]["rgb_sha256"],
+            "light": light["image"]["rgb_sha256"],
+        },
+        "dominance_checks": final_checks,
+        "metrics": final_metrics,
+        "theme_toggle_cycles_per_attempt": ZED_THEME_TOGGLE_CYCLES,
+    }
+
+
 def capture_vulkan_motion(
     container: str,
     window_id: str,
@@ -3121,6 +6200,7 @@ def capture_vulkan_motion(
         nonlocal later
         capture_xwd(
             container,
+            directory,
             "window-motion.xwd",
             window_id=window_id,
             announce=False,
@@ -3157,6 +6237,7 @@ def exercise_interaction_fixture(
     click_y = geometry["height"] // 2
     capture_xwd(
         client,
+        directory,
         "interaction-before.xwd",
         window_id=window_id,
         announce=False,
@@ -3199,6 +6280,7 @@ def exercise_interaction_fixture(
         nonlocal after
         capture_xwd(
             client,
+            directory,
             "interaction-after.xwd",
             window_id=window_id,
             announce=False,
@@ -3247,6 +6329,79 @@ def exercise_interaction_fixture(
         "pointer_marker_present": True,
         "before": before,
         "after": after,
+    }
+
+
+def interaction_alpha_content_checks(
+    interaction: dict[str, Any],
+) -> dict[str, bool]:
+    """Prove source alpha and visible composited GTK frames before and after input."""
+    source = interaction.get("source_alpha")
+    checks = {
+        "interaction_source_screenshots_present": bool(
+            isinstance(source, dict)
+            and _exact_int(source.get("count"), positive=True) is not None
+        ),
+        "interaction_source_has_transparent_pixels": bool(
+            isinstance(source, dict) and source.get("all_have_transparent_pixels")
+        ),
+        "interaction_source_has_opaque_pixels": bool(
+            isinstance(source, dict) and source.get("all_have_opaque_pixels")
+        ),
+    }
+    for phase in ("before", "after"):
+        capture = interaction.get(phase)
+        xwd = capture.get("xwd") if isinstance(capture, dict) else None
+        checks[f"interaction_{phase}_visible_content"] = bool(
+            isinstance(xwd, dict)
+            and _exact_int(xwd.get("unique_rgb_colors"), positive=True) is not None
+            and int(xwd["unique_rgb_colors"]) > 10
+        )
+    return checks
+
+
+def saved_source_alpha_evidence(
+    directory: Path,
+    updates: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Measure alpha directly in the exact server-side source screenshots."""
+    if not isinstance(updates, dict):
+        raise LabFailure("interaction source updates are unavailable")
+    window_id = _exact_int(updates.get("window_id"), positive=True)
+    screenshots = updates.get("screenshots")
+    if window_id is None or not isinstance(screenshots, list) or not screenshots:
+        raise LabFailure("interaction source screenshots are unavailable")
+    metrics: list[dict[str, Any]] = []
+    for relative in screenshots:
+        if not isinstance(relative, str):
+            raise LabFailure("interaction source screenshot path is invalid")
+        path = PurePosixPath(relative)
+        if (
+            path.is_absolute()
+            or path.as_posix() != relative
+            or len(path.parts) != 4
+            or path.parts[0] != "screen-updates"
+            or path.parts[1] != str(window_id)
+            or re.fullmatch(r"(?:0|[1-9][0-9]*)", path.parts[2]) is None
+            or path.parts[3] != "screenshot.png"
+        ):
+            raise LabFailure(f"interaction source screenshot path is unsafe: {relative}")
+        local = directory / relative
+        try:
+            with Image.open(local) as image:
+                metrics.append(analyze_image(image.convert("RGBA")))
+        except OSError as error:
+            raise LabFailure(
+                f"interaction source screenshot is invalid: {relative}"
+            ) from error
+    return {
+        "all_have_opaque_pixels": all(
+            metric["alpha_maximum"] == 255 for metric in metrics
+        ),
+        "all_have_transparent_pixels": all(
+            metric["alpha_minimum"] < 255 for metric in metrics
+        ),
+        "count": len(metrics),
     }
 
 
@@ -3332,18 +6487,25 @@ def start_sway_desktop(
     )
 
     def xwayland_ready() -> bool:
-        environment_path = directory / "sway-child.env"
-        display_info = directory / "xwayland-xdpyinfo.txt"
         return bool(
-            environment_path.is_file()
-            and f"DISPLAY={CLIENT_DISPLAY}"
-            in environment_path.read_text(encoding="utf-8", errors="replace")
-            and display_info.is_file()
-            and "name of display:"
-            in display_info.read_text(encoding="utf-8", errors="replace")
+            container_artifact_contains(
+                container,
+                "sway-child.env",
+                f"DISPLAY={CLIENT_DISPLAY}",
+            )
+            and container_artifact_contains(
+                container,
+                "xwayland-xdpyinfo.txt",
+                "name of display:",
+            )
         )
 
     wait_for("Sway Xwayland display", xwayland_ready)
+    pull_container_artifacts(
+        container,
+        directory,
+        ("sway-child.env", "xwayland-xdpyinfo.txt"),
+    )
     child_environment = {}
     for line in (
         (directory / "sway-child.env")
@@ -3357,18 +6519,26 @@ def start_sway_desktop(
     if not wayland_display:
         raise LabFailure("Sway did not publish WAYLAND_DISPLAY")
 
-    sway_log_path = directory / "sway.stderr"
     renderer = ""
 
     def hardware_renderer_ready() -> bool:
         nonlocal renderer
-        if not sway_log_path.is_file():
+        result = podman_exec(
+            container,
+            ["grep", "--fixed-strings", "GL renderer:", "/artifacts/sway.stderr"],
+            check=False,
+            announce=False,
+        )
+        if result.returncode:
             return False
-        log = sway_log_path.read_text(encoding="utf-8", errors="replace")
-        match = re.search(r"GL renderer: ([^\n]+)", log)
+        match = re.search(r"GL renderer: ([^\n]+)", result.stdout)
         renderer = match.group(1).strip() if match else ""
         return bool(
-            str(render_node) in log
+            container_artifact_contains(
+                container,
+                "sway.stderr",
+                str(render_node),
+            )
             and renderer
             and not any(
                 name in renderer.lower()
@@ -3471,7 +6641,7 @@ def start_client_desktop(
         json.dumps(probe, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    capture_xwd(container, "root-before.xwd")
+    capture_xwd(container, directory, "root-before.xwd")
     probe["background_capture"] = convert_xwd(directory, "root-before")
     background = probe["background_capture"]
     if background["xwd"]["unique_rgb_colors"] != 1 or background["image"][
@@ -3746,15 +6916,18 @@ def classify_boundaries(
             ],
             "no_server_logging_error": log_evidence["server_logging_errors"] == 0,
         }
-        packet_contract_name = (
-            "h264_main_with_only_lossless_rgb_edges"
-            if args.h264_client_policy == "adaptive-alpha"
-            else "only_h264_packets"
+        packet_contract_name = primary_h264_packet_contract_name(
+            args.application, args.h264_client_policy
         )
-        packet_contract_passed = (
-            h264_with_lossless_rgb_edges(updates)
+        packet_contract_passed = primary_h264_packets_valid(
+            args.application,
+            args.h264_client_policy,
+            updates,
+        )
+        all_production_streams_proven = bool(
+            production.get("all_streams_proven")
             if args.h264_client_policy == "adaptive-alpha"
-            else only_positive_h264_packets(updates)
+            else production.get("production_proven")
         )
         encoding_checks = {
             "no_h264_pipeline_error": not log_evidence["h264_pipeline_errors"],
@@ -3766,13 +6939,36 @@ def classify_boundaries(
                 encode.get("production_dimensions")
             ),
             "hardware_encoded_frames": int(encode.get("submitted_frames", 0)) > 0,
-            "production_stream_matches_encoder_context": bool(
-                production.get("production_proven")
+            "production_streams_match_encoder_context": (
+                all_production_streams_proven
             ),
         }
+        if args.h264_client_policy == "adaptive-alpha":
+            primary_metrics = codec_hardware.get("h264_primary", {})
+            encoding_checks.update(
+                h264_dominance_checks(primary_metrics)
+            )
+            if args.application == "hardware":
+                encoding_checks.update(
+                    matched_h264_stream_stability_checks(
+                        production,
+                        primary_metrics,
+                    )
+                )
         if args.application == "hardware":
-            encoding_checks["interaction_window_h264_packets"] = (
-                only_positive_h264_packets(interaction_updates)
+            encoding_checks["interaction_window_alpha_capable_packets"] = (
+                only_positive_alpha_capable_packets(interaction_updates)
+            )
+            encoding_checks.update(
+                hardware_frame_alpha_state_checks(
+                    log_evidence,
+                    updates,
+                    interaction_updates,
+                )
+            )
+        elif args.h264_client_policy == "adaptive-alpha":
+            encoding_checks.update(
+                adaptive_frame_alpha_state_checks(log_evidence, updates)
             )
         transport_checks = {
             "client_received_h264": log_evidence["h264_draw_regions"] > 0,
@@ -3826,8 +7022,15 @@ def classify_boundaries(
             pixel_evidence.get("matching_server_frame")
         ),
         "red_blue_order_verified": bool(pixel_evidence.get("red_blue_order_verified")),
-        "window_central_alpha_opaque": direct_image["central_opaque_ratio"] >= 0.99,
     }
+    if args.application == "gtk":
+        final_checks.update(
+            image_alpha_content_checks(direct_image, prefix="window")
+        )
+    else:
+        final_checks["window_central_alpha_opaque"] = (
+            direct_image["central_opaque_ratio"] >= 0.99
+        )
     lifecycle_checks = lifecycle_boundary_checks(args.lifecycle, lifecycle)
     if args.application == "zed":
         interaction_checks = {
@@ -3841,6 +7044,8 @@ def classify_boundaries(
             "pointer_marker_present": bool(interaction.get("pointer_marker_present")),
             "pointer_changed_pixels": bool(interaction.get("pointer_changed_pixels")),
         }
+        if args.application == "hardware":
+            interaction_checks.update(interaction_alpha_content_checks(interaction))
         if args.lifecycle == "application-exit":
             interaction_checks["keyboard_escape_received"] = bool(
                 interaction.get("keyboard_escape_received")
@@ -3928,6 +7133,8 @@ def run_scenario(
     server_image_id: str,
     client_image_id: str,
     result_directory: Path,
+    zed_archive: Path | None,
+    zed_archive_sha256: str | None,
 ) -> dict[str, Any]:
     directory = result_directory / scenario.name
     directory.mkdir(mode=0o700)
@@ -3944,6 +7151,7 @@ def run_scenario(
             "io.xpra.lab.owner": "live",
             "io.xpra.lab.role": "server",
             "io.xpra.lab.run-id": run_id,
+            "io.xpra.lab.scenario": scenario.name,
             "io.xpra.lab.source": commit,
         },
         client: {
@@ -3952,14 +7160,62 @@ def run_scenario(
             "io.xpra.lab.owner": "live",
             "io.xpra.lab.role": "client",
             "io.xpra.lab.run-id": run_id,
+            "io.xpra.lab.scenario": scenario.name,
             "io.xpra.lab.source": commit,
         },
     }
     network_labels = {
         "io.xpra.lab.owner": "live",
+        "io.xpra.lab.role": "network",
         "io.xpra.lab.run-id": run_id,
+        "io.xpra.lab.scenario": scenario.name,
     }
+    ledger_path = directory / "podman-objects.json"
+    ledger: dict[str, Any] = {
+        "objects": {
+            "client": {
+                "id": "",
+                "kind": "container",
+                "labels": container_labels[client],
+                "name": client,
+                "state": "planned",
+            },
+            "network": {
+                "id": "",
+                "kind": "network",
+                "labels": network_labels,
+                "name": network,
+                "state": "planned",
+            },
+            "server": {
+                "id": "",
+                "kind": "container",
+                "labels": container_labels[server],
+                "name": server,
+                "state": "planned",
+            },
+        },
+        "owner": "live",
+        "run_id": run_id,
+        "scenario": scenario.name,
+        "schema": 1,
+    }
+    replace_private_json(ledger_path, ledger)
+
+    def bind_object(role: str) -> str:
+        item = ledger["objects"][role]
+        object_id, labels = inspect_podman_object(item["kind"], item["name"])
+        if {key: labels.get(key) for key in item["labels"]} != item["labels"]:
+            raise LabFailure(f"created live {role} labels do not match its ledger")
+        item.update({"id": object_id, "labels": labels, "state": "created"})
+        replace_private_json(ledger_path, ledger)
+        return object_id
+
     network_created = False
+    workloads_exited = False
+    server_pid = 0
+    client_pid = 0
+    collected_containers: set[str] = set()
     report: dict[str, Any] = {"name": scenario.name, "result": "failed"}
     try:
         run(
@@ -3971,10 +7227,15 @@ def run_scenario(
                 "io.xpra.lab.owner=live",
                 "--label",
                 f"io.xpra.lab.run-id={run_id}",
+                "--label",
+                f"io.xpra.lab.scenario={scenario.name}",
+                "--label",
+                "io.xpra.lab.role=network",
                 network,
             ]
         )
         network_created = True
+        bind_object("network")
         server_run = [
             "podman",
             "run",
@@ -3985,6 +7246,8 @@ def run_scenario(
             "io.xpra.lab.owner=live",
             "--label",
             f"io.xpra.lab.run-id={run_id}",
+            "--label",
+            f"io.xpra.lab.scenario={scenario.name}",
             "--label",
             "io.xpra.lab.role=server",
             "--label",
@@ -3997,8 +7260,7 @@ def run_scenario(
             network,
             "--network-alias",
             "xpra-server",
-            "--userns",
-            "keep-id",
+            *live_user_options(),
             "--device",
             f"{args.render_node}:{args.render_node}",
             "--group-add",
@@ -4007,17 +7269,18 @@ def run_scenario(
             "1g",
             "--env",
             "XDG_RUNTIME_DIR=/tmp/server-runtime",
-            "--volume",
-            f"{directory.resolve()}:/artifacts",
         ]
-        if args.application == "zed":
-            server_run.extend(
-                ["--volume", f"{args.zed_directory.resolve()}:/opt/zed.app:ro"]
-            )
         server_run.append(server_image_id)
         containers.append(server)
-        run(server_run)
+        server_created = run(server_run).stdout.strip()
+        server_id = bind_object("server")
+        if server_created != server_id:
+            raise LabFailure("server container create output does not match its immutable ID")
         verify_container_image(server, server_image_id)
+        if args.application == "zed":
+            if zed_archive is None or zed_archive_sha256 is None:
+                raise LabFailure("frozen Zed payload is unavailable")
+            send_zed_payload(server, zed_archive, zed_archive_sha256)
 
         client_run = [
             "podman",
@@ -4030,6 +7293,8 @@ def run_scenario(
             "--label",
             f"io.xpra.lab.run-id={run_id}",
             "--label",
+            f"io.xpra.lab.scenario={scenario.name}",
+            "--label",
             "io.xpra.lab.role=client",
             "--label",
             f"io.xpra.lab.source={commit}",
@@ -4039,14 +7304,11 @@ def run_scenario(
             f"io.xpra.lab.image-id={client_image_id}",
             "--network",
             network,
-            "--userns",
-            "keep-id",
+            *live_user_options(),
             "--shm-size",
             "1g",
             "--env",
             "XDG_RUNTIME_DIR=/tmp/client-runtime",
-            "--volume",
-            f"{directory.resolve()}:/artifacts",
         ]
         if args.encoding == "h264":
             client_run.extend(
@@ -4059,7 +7321,10 @@ def run_scenario(
             )
         client_run.append(client_image_id)
         containers.append(client)
-        run(client_run)
+        client_created = run(client_run).stdout.strip()
+        client_id = bind_object("client")
+        if client_created != client_id:
+            raise LabFailure("client container create output does not match its immutable ID")
         verify_container_image(client, client_image_id)
 
         for container, runtime in (
@@ -4067,6 +7332,7 @@ def run_scenario(
             (client, "/tmp/client-runtime"),
         ):
             podman_exec(container, ["install", "-d", "-m", "0700", runtime])
+            podman_exec(container, ["test", "-w", "/artifacts"])
 
         versions = {
             "server": podman_exec(server, ["xpra", "--version"]).stdout.strip(),
@@ -4148,7 +7414,7 @@ def run_scenario(
             "--html=off",
             *encoding_options,
             "-d",
-            "wayland,damage,encoding,encoder,argb",
+            server_debug_categories(args.application, args.h264_client_policy),
         ]
         server_environment = [
             "XPRA_SCREEN_UPDATES_DIRECTORY=/artifacts/screen-updates",
@@ -4170,8 +7436,13 @@ def run_scenario(
             ">/artifacts/server.stdout 2>/artifacts/server.stderr"
         )
         podman_exec(server, ["bash", "-lc", server_script], detach=True)
-        wait_for("server PID publication", lambda: (directory / "server.pid").is_file())
-        server_pid = int((directory / "server.pid").read_text().strip())
+        server_pid_path = wait_for_container_artifact(
+            server,
+            directory,
+            "server.pid",
+            "server PID publication",
+        )
+        server_pid = int(server_pid_path.read_text().strip())
         wait_for_log(
             server,
             server_pid,
@@ -4179,6 +7450,16 @@ def run_scenario(
             "xpra is ready.",
             "Wayland Xpra server readiness",
         )
+        wait_for_server_tcp_endpoint(
+            server,
+            server_pid,
+            client,
+            "xpra-server",
+            SERVER_PORT,
+            directory / "server.stderr",
+        )
+        if args.application == "hardware":
+            wait_for_hardware_fixture(server, server_pid, directory)
 
         client_encoding_options = transport_encoding_options(
             args.encoding,
@@ -4197,13 +7478,13 @@ def run_scenario(
                 "2>/artifacts/transport-proxy.stderr"
             )
             podman_exec(client, ["bash", "-lc", proxy_script], detach=True)
-            wait_for(
+            proxy_pid_path = wait_for_container_artifact(
+                client,
+                directory,
+                "transport-proxy.pid",
                 "transport proxy PID publication",
-                lambda: (directory / "transport-proxy.pid").is_file(),
             )
-            transport_proxy_pid = int(
-                (directory / "transport-proxy.pid").read_text().strip()
-            )
+            transport_proxy_pid = int(proxy_pid_path.read_text().strip())
 
             def transport_proxy_ready() -> bool:
                 if not container_process_exists(client, transport_proxy_pid):
@@ -4253,14 +7534,21 @@ def run_scenario(
             'printf \'%s\\n\' "$status" > /artifacts/client.exit; exit "$status"'
         )
         podman_exec(client, ["bash", "-lc", client_script], detach=True)
-        wait_for("client PID publication", lambda: (directory / "client.pid").is_file())
-        client_pid = int((directory / "client.pid").read_text().strip())
+        client_pid_path = wait_for_container_artifact(
+            client,
+            directory,
+            "client.pid",
+            "client PID publication",
+        )
+        client_pid = int(client_pid_path.read_text().strip())
 
         found: tuple[str, str] | None = None
 
         def application_window_ready() -> bool:
             nonlocal found
             if not container_process_exists(client, client_pid):
+                if container_artifact_exists(client, "client.stderr"):
+                    pull_container_artifacts(client, directory, ("client.stderr",))
                 log = (
                     (directory / "client.stderr").read_text(
                         encoding="utf-8", errors="replace"
@@ -4277,6 +7565,18 @@ def run_scenario(
         wait_for("forwarded application window", application_window_ready)
         assert found is not None
         window_id, window_title = found
+        write_command_output(
+            server,
+            [
+                "xpra",
+                "info",
+                "wayland-0",
+                "--socket-dir=/tmp/server-runtime/xpra-sockets",
+            ],
+            directory / "server-info.txt",
+            check=False,
+        )
+        xpra_wid = server_xpra_window_id(directory / "server-info.txt", title_patterns)
         frame_outcome = wait_for_frame_boundary(
             server,
             server_pid,
@@ -4285,6 +7585,8 @@ def run_scenario(
             directory,
             args.encoding,
             args.h264_client_policy,
+            application=args.application,
+            expected_xpra_wid=xpra_wid,
         )
         geometry = window_geometry(client, window_id)
         write_command_output(
@@ -4314,6 +7616,7 @@ def run_scenario(
             client,
             window_id,
             directory,
+            application=args.application,
             expect_content=frame_outcome in {"success", "picture-fallback"},
         )
         background_rgb = tuple(
@@ -4353,11 +7656,12 @@ def run_scenario(
         else:
             capture_xwd(
                 client,
+                directory,
                 "window-focused-screen.xwd",
                 window_id=window_id,
                 screen=True,
             )
-            capture_xwd(client, "root-after.xwd")
+            capture_xwd(client, directory, "root-after.xwd")
             focused_screen = convert_xwd(directory, "window-focused-screen")
             root_after = convert_xwd(directory, "root-after")
             root_crop = crop_composited_window(
@@ -4371,25 +7675,14 @@ def run_scenario(
             directory / "window-focused-screen.rgba.png",
             background_rgb,
         )
-        write_command_output(
-            server,
-            [
-                "xpra",
-                "info",
-                "wayland-0",
-                "--socket-dir=/tmp/server-runtime/xpra-sockets",
-            ],
-            directory / "server-info.txt",
-            check=False,
-        )
-        xpra_wid = server_xpra_window_id(directory / "server-info.txt", title_patterns)
-
         if pid_file:
-            wait_for(
+            application_pid_path = wait_for_container_artifact(
+                server,
+                directory,
+                pid_file,
                 "application PID publication",
-                lambda: (directory / pid_file).is_file(),
             )
-            application_pid = int((directory / pid_file).read_text().strip())
+            application_pid = int(application_pid_path.read_text().strip())
         else:
             executable = (
                 "vkcube" if args.application == "vkcube" else "interaction_fixture.py"
@@ -4417,11 +7710,13 @@ def run_scenario(
                 raise LabFailure("Zed did not map the RADV Vulkan driver")
 
         interaction: dict[str, Any] = {"attempted": False}
+        hardware_h264_interval: dict[str, Any] | None = None
         if args.application == "zed" and frame_outcome in {
             "success",
             "picture-fallback",
         }:
             interaction = exercise_zed_mouse(
+                server,
                 client,
                 window_id,
                 geometry,
@@ -4429,10 +7724,27 @@ def run_scenario(
                 direct,
             )
             interaction["attempted"] = True
+            if args.encoding == "h264":
+                interaction["h264_stimulus"] = exercise_zed_h264_stability(
+                    server,
+                    client,
+                    window_id,
+                    xpra_wid,
+                    geometry,
+                    directory,
+                    interaction,
+                )
         elif args.application in {"hardware", "vkcube"}:
             application_activity["vulkan_motion"] = capture_vulkan_motion(
                 client, window_id, directory, direct
             )
+            if args.application == "hardware" and args.encoding == "h264":
+                hardware_h264_interval = begin_hardware_h264_stimulus(
+                    server,
+                    directory,
+                    xpra_wid,
+                    geometry,
+                )
 
         interaction_window: tuple[str, str] | None = None
         interaction_xpra_wid: int | None = None
@@ -4468,8 +7780,42 @@ def run_scenario(
                 client,
                 interaction_window[0],
                 directory,
-                close_with_keyboard=True,
+                close_with_keyboard=False,
             )
+            if hardware_h264_interval is None:
+                raise LabFailure("hardware H.264 phase baseline is unavailable")
+            interaction["h264_stimulus"] = finish_hardware_h264_stimulus(
+                server,
+                directory,
+                xpra_wid,
+                hardware_h264_interval,
+            )
+            podman_exec(
+                client,
+                [
+                    "env",
+                    f"DISPLAY={CLIENT_DISPLAY}",
+                    "xdotool",
+                    "windowactivate",
+                    "--sync",
+                    interaction_window[0],
+                    "key",
+                    "Escape",
+                ],
+            )
+            wait_for(
+                "GTK keyboard marker",
+                lambda: (
+                    podman_exec(
+                        server,
+                        ["test", "-f", INTERACTION_KEY_MARKER],
+                        check=False,
+                        announce=False,
+                    ).returncode
+                    == 0
+                ),
+            )
+            interaction["keyboard_escape_received"] = True
         elif args.application == "gtk":
             interaction = exercise_interaction_fixture(
                 server,
@@ -4593,12 +7939,49 @@ def run_scenario(
             )
             lifecycle["server_exited_after_application"] = True
 
+        workloads_exited = True
+        pull_all_container_artifacts(server, directory, "server")
+        collected_containers.add(server)
+        pull_all_container_artifacts(client, directory, "client")
+        collected_containers.add(client)
         updates = parse_saved_updates(directory, xpra_wid)
+        updates["initial_pixel_format"] = saved_window_initial_pixel_format(
+            directory, xpra_wid
+        )
+        if args.application == "zed" and args.encoding == "h264":
+            stimulus = interaction.get("h264_stimulus")
+            if not isinstance(stimulus, dict):
+                raise LabFailure("Zed H.264 stimulus evidence is unavailable")
+            updates["h264_stimulus"] = {
+                "baseline_sequence": stimulus.get("baseline_sequence"),
+                "last_sequence": stimulus.get("last_sequence"),
+                "window_size": stimulus.get("window_size"),
+            }
+        elif args.application == "hardware" and args.encoding == "h264":
+            stimulus = interaction.get("h264_stimulus")
+            if not isinstance(stimulus, dict):
+                raise LabFailure("hardware H.264 stimulus evidence is unavailable")
+            updates["h264_stimulus"] = {
+                "baseline_sequence": stimulus.get("baseline_sequence"),
+                "first_sequence": stimulus.get("first_sequence"),
+                "last_sequence": stimulus.get("last_sequence"),
+                "window_size": stimulus.get("window_size"),
+            }
         interaction_updates = (
             parse_saved_updates(directory, interaction_xpra_wid)
             if interaction_xpra_wid is not None
             else None
         )
+        if interaction_updates is not None and interaction_xpra_wid is not None:
+            interaction_updates["initial_pixel_format"] = (
+                saved_window_initial_pixel_format(
+                    directory, interaction_xpra_wid
+                )
+            )
+            interaction["source_alpha"] = saved_source_alpha_evidence(
+                directory,
+                interaction_updates,
+            )
         log_evidence = inspect_logs(directory)
         pixel_evidence, source_image = pixel_pipeline_evidence(
             directory,
@@ -4617,10 +8000,34 @@ def run_scenario(
             hardware["server_vaapi_h264"] = bool(
                 server_vainfo and "VAProfileH264" in server_vainfo.stdout
             )
+            h264_production_updates = updates
+            allow_alpha_gaps = False
+            allow_lossless_rgb_edges = args.h264_client_policy == "adaptive-alpha"
+            if args.h264_client_policy == "adaptive-alpha":
+                if args.application == "hardware":
+                    h264_production_updates = hardware_h264_context_updates(
+                        updates
+                    ) or {
+                        **updates,
+                        "count": 0,
+                        "encodings": [],
+                        "updates": [],
+                    }
+                    allow_alpha_gaps = True
+                else:
+                    allow_alpha_gaps = True
+                allow_lossless_rgb_edges = True
+                hardware["h264_primary"] = h264_production_metrics(
+                    args.application,
+                    updates,
+                )
             h264_hardware = h264_hardware_evidence(
                 directory,
-                updates,
-                allow_lossless_rgb_edges=(args.h264_client_policy == "adaptive-alpha"),
+                h264_production_updates,
+                allow_alpha_gaps=allow_alpha_gaps,
+                allow_lossless_rgb_edges=allow_lossless_rgb_edges,
+                allow_terminal_server_frame=args.application == "hardware",
+                allow_window_resize_gaps=args.application == "hardware",
             )
             hardware["h264_encode"] = h264_hardware["server"]
             hardware["h264_decode"] = h264_hardware["client"]
@@ -4700,12 +8107,51 @@ def run_scenario(
         return report
     except BaseException as error:
         report["failure"] = str(error)
+        if not workloads_exited:
+            quiescence = quiesce_failed_workloads(
+                (
+                    ("client", client, client_pid),
+                    ("server", server, server_pid),
+                )
+            )
+            report["failure_quiescence"] = quiescence
+            workloads_exited = bool(quiescence["passed"])
         (directory / "report.json").write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         raise
     finally:
+        artifact_collection: list[dict[str, str]] = []
+        roles = {server: "server", client: "client"}
+        for container in containers:
+            if container in collected_containers:
+                artifact_collection.append(
+                    {"container": container, "status": "collected"}
+                )
+                continue
+            if not workloads_exited:
+                artifact_collection.append(
+                    {
+                        "container": container,
+                        "status": "skipped-active-workload",
+                    }
+                )
+                continue
+            try:
+                pull_all_container_artifacts(container, directory, roles[container])
+                artifact_collection.append(
+                    {"container": container, "status": "collected"}
+                )
+            except BaseException as collection_error:  # noqa: BLE001
+                artifact_collection.append(
+                    {
+                        "container": container,
+                        "error": str(collection_error),
+                        "status": "collection-failed",
+                    }
+                )
+        report["container_artifact_collection"] = artifact_collection
         cleanup: dict[str, Any] = {
             "containers": [],
             "kept": bool(args.keep_containers),
@@ -4726,15 +8172,27 @@ def run_scenario(
             )
         else:
             for container in reversed(containers):
-                cleanup["containers"].append(
-                    remove_owned_podman_object(
-                        "container", container, container_labels[container]
-                    )
+                role = "server" if container == server else "client"
+                item = ledger["objects"][role]
+                removal = remove_owned_podman_object(
+                    "container",
+                    container,
+                    item["labels"],
+                    item["id"] or None,
                 )
+                cleanup["containers"].append(removal)
+                item["state"] = removal["status"]
+                replace_private_json(ledger_path, ledger)
             if network_created:
+                network_item = ledger["objects"]["network"]
                 cleanup["network"] = remove_owned_podman_object(
-                    "network", network, network_labels
+                    "network",
+                    network,
+                    network_item["labels"],
+                    network_item["id"] or None,
                 )
+                network_item["state"] = cleanup["network"]["status"]
+                replace_private_json(ledger_path, ledger)
             else:
                 cleanup["network"] = {"name": network, "status": "not-created"}
             cleanup["passed"] = all(
@@ -4742,13 +8200,10 @@ def run_scenario(
             ) and cleanup["network"]["status"] in {"removed", "not-created"}
         report["artifact_sha256"] = artifact_sha256(directory)
         report["cleanup"] = cleanup
-        report["result"] = (
-            "passed"
-            if cleanup["passed"]
-            and report.get("classification", {}).get("first_failed_boundary")
-            == "passed"
-            else "failed"
+        report["artifact_collection_passed"] = bool(artifact_collection) and all(
+            item["status"] == "collected" for item in artifact_collection
         )
+        report["result"] = "passed" if scenario_acceptance(report, cleanup) else "failed"
         (directory / "report.json").write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -4767,27 +8222,21 @@ def main() -> int:
         "--encoding",
         choices=("rgb", "h264"),
         default="rgb",
-        help="strict Xpra transport; RGB is the diagnostic default",
+        help="reviewed Xpra transport encoding; RGB is the strict default",
     )
     parser.add_argument(
         "--h264-client-policy",
-        choices=H264_CLIENT_POLICIES,
+        choices=H264_ACCEPTANCE_POLICIES,
         default="strict",
-        help=(
-            "strict and adaptive-alpha are H.264 acceptance profiles; "
-            "fallback-auto and fallback-h264 are picture-fallback diagnostics"
-        ),
+        help="reviewed H.264 acceptance policy",
     )
     parser.add_argument(
         "--selection",
         metavar="{cases,stacks}/SLUG",
+        required=True,
         help="validated case or stack manifest to apply to the server image",
     )
-    parser.add_argument(
-        "--source-variant",
-        choices=tuple(LEGACY_SOURCE_VARIANT_SELECTORS),
-        help="deprecated compatibility alias for the original cumulative variants",
-    )
+    parser.set_defaults(source_variant=None)
     parser.add_argument(
         "--application",
         choices=APPLICATIONS,
@@ -4803,14 +8252,14 @@ def main() -> int:
     parser.add_argument(
         "--alpha-scenarios",
         choices=ALPHA_SCENARIOS,
-        default="both",
-        help="run the normal client, an XPRA_ALPHA=0 diagnostic control, or both",
+        default="default",
+        help="run the reviewed positive alpha scenario",
     )
     parser.add_argument(
         "--zed-directory",
         type=Path,
         default=DEFAULT_ZED_DIRECTORY,
-        help="host Zed application directory mounted read-only into the server",
+        help="host Zed application directory streamed read-only into the server",
     )
     parser.add_argument(
         "--render-node",
@@ -4845,6 +8294,9 @@ def main() -> int:
         "--run-id",
         help="validated no-clobber result directory name supplied by a supervisor",
     )
+    parser.add_argument("--bound-inputs", type=Path)
+    parser.add_argument("--bound-input-manifest-sha256")
+    parser.add_argument("--bound-input-tree-sha256")
     args = parser.parse_args()
     try:
         validate_profile(
@@ -4856,12 +8308,22 @@ def main() -> int:
         )
     except ProfileError as error:
         raise LabFailure(str(error)) from error
+    if args.selection is None:
+        raise LabFailure("live acceptance requires one non-empty case or stack selection")
+    if args.source_variant is not None:
+        raise LabFailure("live acceptance does not support clean source variants")
     transport_encoding_options(args.encoding, args.h264_client_policy, client=True)
     if args.run_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.run_id):
         raise LabFailure(f"invalid run ID: {args.run_id!r}")
-    server_selection = resolve_patch_selection(args.selection, args.source_variant)
-    client_selection = resolve_patch_selection(None, "master")
-    args.selected_case_slugs = server_selection.case_slugs
+    bound_values = (
+        args.bound_inputs,
+        args.bound_input_manifest_sha256,
+        args.bound_input_tree_sha256,
+    )
+    if any(value is not None for value in bound_values) and not all(
+        value is not None for value in bound_values
+    ):
+        raise LabFailure("bound live inputs require path, manifest digest, and tree digest")
 
     if shutil.which("podman") is None:
         raise LabFailure("podman is not available")
@@ -4871,26 +8333,20 @@ def main() -> int:
         raise LabFailure(
             f"render node is not readable and writable: {args.render_node}"
         )
-    if args.application == "zed":
+    if args.application == "zed" and args.bound_inputs is None:
         zed_binary = args.zed_directory / "libexec" / "zed-editor"
         if not zed_binary.is_file() or not os.access(zed_binary, os.X_OK):
             raise LabFailure(f"Zed executable is unavailable: {zed_binary}")
+        zed_binary_sha256 = sha256_file(zed_binary)
     else:
         zed_binary = None
+        zed_binary_sha256 = None
 
     if args.state_root.is_symlink():
         raise LabFailure(f"state root must not be a symlink: {args.state_root}")
     state_root = args.state_root.absolute()
     ensure_trusted_parent_directory(state_root.parent)
     ensure_private_directory(state_root, create=True)
-    snapshot = create_source_snapshot(state_root)
-    commit = snapshot.commit
-    server_context = prepare_build_context(
-        state_root,
-        snapshot,
-        server_selection,
-    )
-    client_context = prepare_build_context(state_root, snapshot, client_selection)
     if args.run_id:
         result_name = args.run_id
     else:
@@ -4899,14 +8355,66 @@ def main() -> int:
     result_root = state_root / "live-results"
     ensure_private_directory(result_root, create=True)
     result_directory = result_root / result_name
-    result_directory.mkdir(mode=0o700, exist_ok=False)
-    ensure_private_directory(result_directory)
-    input_manifest_sha256 = snapshot_build_inputs(
-        result_directory,
-        snapshot,
-        server_context,
-        client_context,
-    )
+    if args.bound_inputs is not None:
+        if args.source_variant is not None:
+            raise LabFailure("bound live inputs cannot use a source-variant alias")
+        if args.bound_inputs != result_directory / "inputs":
+            raise LabFailure("bound live input path does not match the supervised run")
+        ensure_private_directory(result_directory)
+        if {path.name for path in result_directory.iterdir()} != {"inputs"}:
+            raise LabFailure("bound live result directory has unexpected pre-run content")
+        bound = load_bound_inputs(
+            args.bound_inputs,
+            expected_manifest_sha256=args.bound_input_manifest_sha256,
+            expected_tree_sha256=args.bound_input_tree_sha256,
+        )
+        snapshot = bound.snapshot
+        server_context = bound.server_context
+        client_context = bound.client_context
+        server_selection = server_context.selection
+        client_selection = client_context.selection
+        input_manifest_sha256 = bound.input_manifest_sha256
+        input_tree_sha256 = bound.input_tree_sha256
+        zed_archive = bound.zed_archive
+        zed_archive_sha256 = bound.zed_archive_sha256
+        zed_binary_sha256 = bound.zed_binary_sha256
+        if args.selection != (None if server_selection.name == "master" else server_selection.name):
+            raise LabFailure("bound live selection does not match the invocation")
+    else:
+        server_selection = resolve_patch_selection(args.selection, args.source_variant)
+        client_selection = resolve_patch_selection(None, "master")
+        snapshot = create_source_snapshot(state_root)
+        server_context = prepare_build_context(
+            state_root,
+            snapshot,
+            server_selection,
+        )
+        client_context = prepare_build_context(state_root, snapshot, client_selection)
+        result_directory.mkdir(mode=0o700, exist_ok=False)
+        ensure_private_directory(result_directory)
+        input_manifest_sha256, zed_archive, zed_archive_sha256 = snapshot_build_inputs(
+            result_directory,
+            snapshot,
+            server_context,
+            client_context,
+            args.zed_directory if args.application == "zed" else None,
+            zed_binary_sha256=zed_binary_sha256,
+        )
+        if zed_binary is not None and sha256_file(zed_binary) != zed_binary_sha256:
+            raise LabFailure("Zed executable changed while its payload was frozen")
+        input_tree_sha256 = tree_sha256(result_directory / "inputs")
+    input_manifest_path = result_directory / "inputs" / "manifest.json"
+    ensure_private_regular_file(input_manifest_path)
+    if sha256_file(input_manifest_path) != input_manifest_sha256:
+        raise LabFailure("frozen live input manifest changed before use")
+    try:
+        input_provenance = json.loads(input_manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise LabFailure("frozen live input manifest is invalid JSON") from error
+    if not isinstance(input_provenance, dict) or input_provenance.get("schema") != 2:
+        raise LabFailure("frozen live input manifest has an unsupported schema")
+    args.selected_case_slugs = server_selection.case_slugs
+    commit = snapshot.commit
     server_context_digest = server_context.digest
     client_context_digest = client_context.digest
     selection_tag = re.sub(r"[^a-z0-9_.-]+", "-", server_selection.name).strip("-")
@@ -4919,30 +8427,31 @@ def main() -> int:
             ("server", server_image, server_context),
             ("client", client_image, client_context),
         ):
-            run(
-                [
-                    "podman",
-                    "build",
-                    "--target",
-                    target,
-                    "--build-arg",
-                    f"XPRA_COMMIT={commit}",
-                    "--build-arg",
-                    f"XPRA_SELECTION={context.selection.name}",
-                    "--label",
-                    "io.xpra.lab.owner=live",
-                    "--label",
-                    f"io.xpra.lab.role={target}-image",
-                    "--label",
-                    f"io.xpra.lab.source={commit}",
-                    "--label",
-                    f"io.xpra.lab.context={context.digest}",
-                    "--tag",
-                    image,
-                    str(context.path),
-                ],
-                capture=False,
-            )
+            build_command = [
+                "podman",
+                "build",
+                "--target",
+                target,
+                "--build-arg",
+                f"XPRA_COMMIT={commit}",
+                "--build-arg",
+                f"XPRA_SELECTION={context.selection.name}",
+                "--label",
+                "io.xpra.lab.owner=live",
+                "--label",
+                f"io.xpra.lab.role={target}-image",
+                "--label",
+                f"io.xpra.lab.source={commit}",
+                "--label",
+                f"io.xpra.lab.context={context.digest}",
+                "--tag",
+                image,
+                "-",
+            ]
+            if context.archive_sha256 is None:
+                stream_build_context(build_command, context.path)
+            else:
+                stream_bound_build_context(build_command, context)
     else:
         run(["podman", "image", "exists", server_image])
         run(["podman", "image", "exists", client_image])
@@ -4960,6 +8469,12 @@ def main() -> int:
             context_digest=client_context_digest,
         ),
     }
+    patch_manifest = server_context.manifest.get("patches")
+    patch_series = server_context.manifest.get("patch_series")
+    if not isinstance(patch_manifest, dict) or not isinstance(patch_series, list):
+        raise LabFailure("server build context has invalid patch provenance")
+    if tree_sha256(result_directory / "inputs") != input_tree_sha256:
+        raise LabFailure("frozen live inputs changed before scenario execution")
 
     scenarios = [
         Scenario(name, disable_alpha)
@@ -5010,19 +8525,12 @@ def main() -> int:
             "analysis_python_version": sys.version.split()[0],
             "archive_sha256": snapshot.archive_sha256,
             "commit": commit,
-            "harness_sha256": sha256_file(Path(__file__)),
+            "harness_sha256": harness_sha256(),
             "input_manifest_sha256": input_manifest_sha256,
-            "patches": {
-                path.relative_to(LAB_ROOT).as_posix(): sha256_file(path)
-                for path in server_selection.patches
-            },
-            "patch_series": [
-                {
-                    "path": path.relative_to(LAB_ROOT).as_posix(),
-                    "sha256": sha256_file(path),
-                }
-                for path in server_selection.patches
-            ],
+            "input_provenance": input_provenance,
+            "input_tree_sha256": input_tree_sha256,
+            "patches": patch_manifest,
+            "patch_series": patch_series,
             "selection": {
                 "case_slugs": server_selection.case_slugs,
                 "digest": server_selection.digest,
@@ -5031,11 +8539,12 @@ def main() -> int:
                 "selector_digests": dict(server_selection.selector_digests),
                 "selectors": server_selection.selectors,
             },
-            "upstream_master": commit,
+            "fork_master": commit,
             "supervisor_sha256": sha256_file(INFRA_ROOT / "job.py"),
             "background_supervisor_sha256": sha256_file(BACKGROUND_SUPERVISOR),
             "workflow_sha256": snapshot.workflow_sha256,
-            "zed_sha256": sha256_file(zed_binary) if zed_binary else None,
+            "zed_sha256": zed_binary_sha256,
+            "zed_archive_sha256": zed_archive_sha256,
         },
     }
     try:
@@ -5051,6 +8560,8 @@ def main() -> int:
                     server_image_id=image_inspections["server"]["id"],
                     client_image_id=image_inspections["client"]["id"],
                     result_directory=result_directory,
+                    zed_archive=zed_archive,
+                    zed_archive_sha256=zed_archive_sha256,
                 )
             )
         aggregate["scenario_report_sha256"] = {
@@ -5061,20 +8572,16 @@ def main() -> int:
             report["name"]: report["classification"]["appearance"]
             for report in aggregate["scenarios"]
         }
-        passed = all(
-            report["classification"]["first_failed_boundary"] == "passed"
-            and report["cleanup"]["passed"] is True
-            for report in aggregate["scenarios"]
-        )
-        aggregate["comparison"] = {"appearances": appearances}
-        if args.lifecycle == "application-exit":
-            aggregate["comparison"]["alpha_changes_empty_window"] = (
-                appearances.get("default-alpha") == "transparent-empty"
-                and appearances.get("alpha-disabled") == "opaque-empty"
-            )
-        else:
-            aggregate["comparison"]["lifecycle"] = args.lifecycle
+        passed = all(report.get("result") == "passed" for report in aggregate["scenarios"])
+        aggregate["comparison"] = {
+            "all_scenarios_rendered": bool(appearances)
+            and all(appearance == "rendered" for appearance in appearances.values()),
+            "appearances": appearances,
+            "lifecycle": args.lifecycle,
+        }
         aggregate["result"] = "passed" if passed else "failed"
+        if tree_sha256(result_directory / "inputs") != input_tree_sha256:
+            raise LabFailure("frozen live inputs changed during scenario execution")
         (result_directory / "report.json").write_text(
             json.dumps(aggregate, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",

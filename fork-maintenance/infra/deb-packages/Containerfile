@@ -1,0 +1,27 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        curl \
+        dpkg-dev \
+        git \
+        gnupg \
+        python3 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && install -d -m 0700 /work
+
+COPY builder.py container_payload.py selection.py /opt/xpra-deb-builder/
+
+RUN chmod 0755 \
+        /opt/xpra-deb-builder/builder.py \
+        /opt/xpra-deb-builder/container_payload.py \
+        /opt/xpra-deb-builder/selection.py
+
+WORKDIR /work
+
+ENTRYPOINT ["python3", "/opt/xpra-deb-builder/builder.py"]

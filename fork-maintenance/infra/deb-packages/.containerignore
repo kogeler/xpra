@@ -1,0 +1,5 @@
+*
+!Containerfile
+!builder.py
+!container_payload.py
+!selection.py

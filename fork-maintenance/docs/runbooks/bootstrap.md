@@ -5,7 +5,15 @@
 Provide Git, GNU Make, Python 3.11 or newer, Ruff, and Podman. Physical profiles
 additionally need access to the selected `/dev/dri/renderD*` node and, for the
 Zed scenario, a readable application directory. No host service manager is a
-runner prerequisite.
+runner prerequisite. The lifecycle creates no systemd unit and never invokes
+`systemctl`; the upstream-compatible image's `libsystemd-dev` package is only a
+source-build dependency.
+
+The private artifacts filesystem must support Linux anonymous temporary files
+and `linkat(AT_EMPTY_PATH)`. Immutable background owner, completion, and status
+records are fsynced and linked into place without a named temporary file; the
+automation fails closed rather than weakening this no-clobber publication
+boundary on an unsupported filesystem.
 
 The automation never installs into system Python. Create its hash-locked live
 analysis environment explicitly:
@@ -13,6 +21,13 @@ analysis environment explicitly:
 ```bash
 make -C fork-maintenance live-venv
 ```
+
+Creation is serialized by retained `venvs/.environment.lock`. It publishes
+`venvs/.environment.partial.owner.json` before using the deterministic
+`venvs/.environment.partial` directory; the venv and pip children inherit the
+kernel lock. After an interruption, the next `live-venv` validates that marker
+and removes only its exact partial before retrying. A markerless or ambiguous
+partial fails closed.
 
 Run offline source checks before host/GPU diagnostics:
 
@@ -23,9 +38,9 @@ make -C fork-maintenance doctor
 
 `doctor` performs no package installation and no remote mutation.
 
-GitHub-hosted CI uses the explicit `ubuntu-26.04` image, which already provides
-Git, GNU Make, Python, and Podman. The workflow does not install host packages;
-each of its three matrix jobs calls
+The GitHub-hosted develop test workflow uses the explicit `ubuntu-26.04` image,
+which already provides Git, GNU Make, Python, and Podman. The workflow does not
+install host packages; each of its three matrix jobs calls
 `make -C fork-maintenance ci-upstream-tests` with one fixed
 `XPRA_CI_TARGET`, and the tracked runner builds the frozen Ubuntu 26.04 test
 container when its verified image is absent. No display, render node, or
@@ -50,45 +65,55 @@ make -C fork-maintenance repo-status
 Do not initialize a nested checkout. If a remote is missing or has a different
 identity, stop for owner review rather than rewriting it automatically.
 
-## Fork-master gate
+## Fork-master refresh
 
-Before updating local `master`, rebasing `develop`, beginning any patch work,
-or making a publication claim, run:
+The hosted `master-sync.yml` workflow normally fast-forwards
+`kogeler/xpra:master` from `Xpra-org/xpra:master` at 00:37 and 12:37 UTC. It
+does not update local refs or rebase `develop`. See
+[`master-sync.md`](master-sync.md).
+
+When the operator wants a fresh upstream attempt immediately before work rather
+than relying on the most recent scheduled run, they dispatch the same workflow
+from `develop` and wait for it to complete:
+
+```bash
+gh workflow run master-sync.yml --repo kogeler/xpra --ref develop
+```
+
+Agents never dispatch it. Local work independently fetches and verifies both
+master refs:
 
 ```bash
 make -C fork-maintenance repo-sync
 ```
 
-The command fetches `upstream/master` and `origin/master`, verifies each cached
-ref against live `ls-remote`, and requires exact live equality. It does not
-modify either remote branch.
-
-Only when this fresh gate reports that the fork is stale does the operator
-run:
+The command verifies cached `origin/master` and `upstream/master` against their
+live GitHub refs and requires exact fork/canonical equality. It does not modify
+either remote branch. If it reports a stale fork, only the operator may run:
 
 ```bash
 gh repo sync kogeler/xpra --source Xpra-org/xpra --branch master
 ```
 
-Never use `--force`. Repeat `repo-sync` afterward. If the fork cannot
-fast-forward, stop; do not reset or rewrite master.
+Never add `--force`. Repeat `repo-sync` after the operator action.
 
-After equality is proven, update only the local mirror:
+Update only the local mirror:
 
 ```bash
 make -C fork-maintenance master-update
 ```
 
-This target creates or fast-forwards local `master` to the verified commit. It
-rejects local master that is ahead or divergent and never pushes it.
+This target creates or fast-forwards local `master` to fetched
+`origin/master`. It rejects local master that is ahead or divergent and never
+pushes it.
 
 ## Develop branch
 
-For the first local setup only, create `develop` from the verified canonical
+For the first local setup only, create `develop` from the fetched fork
 commit while the checkout is clean:
 
 ```bash
-git switch --no-track -c develop refs/remotes/upstream/master
+git switch --no-track -c develop refs/remotes/origin/master
 ```
 
 Before host-worktree patch operations or publication, transfer later upstream
@@ -99,9 +124,9 @@ git switch develop
 make -C fork-maintenance develop-rebase
 ```
 
-If Git stops for conflicts, inspect each one against current upstream and the
-fork-maintenance intent, edit it, and continue only after staging the exact
-resolution:
+If Git stops for conflicts, inspect each one against current fork-master source
+and the fork-maintenance intent, edit it, and continue only after staging the
+exact resolution:
 
 ```bash
 git status --short
@@ -128,7 +153,7 @@ the reviewed branch with the exact-SHA `--force-with-lease` procedure in
 
 When fork-control files are still uncommitted, do not switch or rebase the
 dirty checkout. Use `isolated-start-check` and the named workspace flow to
-audit and refresh existing cases against verified master first. The clean
+audit and refresh existing cases against fetched fork master first. The clean
 rebase above remains required before the resulting control-plane change is
 committed or published.
 
@@ -139,7 +164,7 @@ same reviewed cycle.
 
 ## Runtime root
 
-Generated state is rooted at:
+Durable runtime, build, result, publication, and cache state is rooted at:
 
 ```text
 .artifacts/fork-maintenance/
@@ -147,11 +172,14 @@ Generated state is rooted at:
 
 The repository `.gitignore` must ignore `.artifacts/`. Private-state helpers
 create owned directories and reject symlinks or unsafe permissions. Do not
-copy results into the tracked automation tree.
+copy results into the tracked automation tree. Interpreter and tool caches may
+exist only at another explicitly ignored local path. The root `clean` Make
+target removes the automation's transient `__pycache__` entries.
 
 ## Upstream-test image
 
-`test-image` verifies the content-addressed image and never builds it:
+`test-image` verifies the input-keyed, label-verified upstream-test image and
+never builds it:
 
 ```bash
 make -C fork-maintenance test-image
@@ -163,18 +191,44 @@ If missing, build it as a durable job with a never-reused identity:
 IMAGE_RUN=upstream-image-01
 make -C fork-maintenance test-image-start IMAGE_RUN="$IMAGE_RUN"
 make -C fork-maintenance test-image-wait IMAGE_RUN="$IMAGE_RUN"
-make -C fork-maintenance test-image IMAGE_RUN="$IMAGE_RUN"
+make -C fork-maintenance test-image
 make -C fork-maintenance test-image-remove IMAGE_RUN="$IMAGE_RUN"
 ```
 
 The final removal deletes only reviewed transient process/context state. It
-keeps the verified image and collected local result. Use `test-image-abort`
-only for an unfinished build without collected output, and use
-`test-image-cache-remove` only for an explicit cache refresh.
+first publishes retained `upstream-tests/logs/<IMAGE_RUN>.remove.json`, then
+keeps the verified image and collected local log/status/transaction result. An
+interrupted removal is retried through the same exact target. Use
+`test-image-abort`
+for a running or lost build without collected output, or to exact-discard a
+completed uncollected build only after its recorded runner becomes stale. A
+current completed build must be collected. Use `test-image-cache-remove` only
+for an explicit cache refresh.
 
-To exercise the image-build lifecycle without replacing the normal content tag,
-use a lowercase, hyphenated suffix and a unique run, then remove both through
-their exact targets:
+Before populating `upstream-tests/image-builds/<IMAGE_RUN>/`, image start
+publishes
+`upstream-tests/image-builds/.<IMAGE_RUN>.image-prelaunch.json`. The retained
+upstream lifecycle lock prevents concurrent terminal action during start;
+after an interrupted start, `test-image-status` reports the marker and
+`test-image-abort` removes only that exact marker/context. Normal remove and
+abort also delete the matching marker.
+
+Retained `upstream-tests/image-builds/.image-cache.lock` serializes image
+creation, immutable-ID inspection/use handoff, and explicit cache removal. The
+Podman build child inherits the open lock. The lock remains after the named run
+and is validated, not deleted, by cycle cleanup.
+`test-image-cache-remove` also refuses a matching image-build or test
+prelaunch/owner. It can identify an otherwise exact owned cache whose recorded
+source commit is older than the current source, but it still requires the full
+label set, input/workflow identity, and immutable image ID before removal.
+
+This standalone upstream-test image lifecycle is the only image build that uses
+`IMAGE_RUN`. Live and DEB runners build or reuse their images inside the parent
+job and own them through that job's `RUN`.
+
+To exercise the image-build lifecycle without replacing the normal input-keyed
+tag, use a lowercase, hyphenated suffix and a unique run, then remove both
+through their exact targets:
 
 ```bash
 make -C fork-maintenance test-image-start \

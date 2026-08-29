@@ -9,10 +9,10 @@ make -C fork-maintenance isolated-start-check
 ```
 
 The gate allows dirty fork-control files but rejects every host Xpra source or
-test change. It fetches and verifies master, records the host branch and HEAD,
-and never switches, merges, rebases, resets, stashes, stages, or commits. Old
-logs and previous patch applicability are leads, not evidence about the newly
-recorded master commit.
+test change. It fetches and verifies equal live fork and canonical master refs,
+records the host branch and HEAD, and never switches, merges, rebases, resets,
+stashes, stages, or commits. Old logs and previous patch applicability are
+leads, not evidence about the newly recorded master commit.
 
 Read the current affected source, adjacent tests, recent maintainer-authored
 history, `CLAUDE.md`, `CONTRIBUTING.md`, the current test workflow, and lint
@@ -27,6 +27,17 @@ Use a behavior-based lowercase slug:
 make -C fork-maintenance case-new CASE=short-behavior-name
 ```
 
+If an interrupted `case-new` left marker-backed staging, inspect it and recover
+only that case identity before retrying:
+
+```bash
+make -C fork-maintenance case-recover CASE=short-behavior-name
+```
+
+Recovery removes the exact stale marker/partial, or validates an already
+published draft and removes only its marker. Unowned or ambiguous staging is an
+operator-review boundary.
+
 The draft is intentionally unselectable by test jobs. Complete its
 human-authored kind, title, commit subject, dependencies, focused tests,
 required gates, and README. Leave `draft`, `patch_sha256`, and `paths`
@@ -39,6 +50,19 @@ make -C fork-maintenance workspace-create \
 make -C fork-maintenance workspace-stage WORKSPACE=short-behavior-01
 make -C fork-maintenance workspace-update WORKSPACE=short-behavior-01
 ```
+
+Draft promotion is an exact case-update transaction: it binds the new patch and
+manifest together with the promoted workspace metadata and resolution. If the
+export is interrupted, run `case-recover CASE=short-behavior-name`; it discards
+only an incomplete preparation, finishes a complete `transaction.json`, or
+clears an owner-only boundary after validating the published case and workspace.
+Before recursively deleting a preparation or completed transaction, recovery
+publishes `<slug>.update.remove.json`, stages the exact tree at
+`.<slug>.update.remove`, deletes the update owner after the tree, and deletes
+the removal phase last. Its canonical target array continues to validate the
+published case and bound workspace outputs during phase-only retry. Never
+hand-edit `case-updates/`; unresolved update state blocks further updates and
+cycle cleanup.
 
 For every source or test file created by the candidate, use the file's native
 comment syntax to add `Copyright (C) <current-year> kogeler` before staging.

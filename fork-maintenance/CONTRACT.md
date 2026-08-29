@@ -15,7 +15,14 @@ remote roles:
 
 - `origin`: `https://github.com/kogeler/xpra.git`;
 - `upstream`: `https://github.com/Xpra-org/xpra.git`;
-- canonical base: live, verified `upstream/master`.
+- operational patch base: the exact equal live commits at `origin/master` and
+  `upstream/master`.
+
+`upstream/master` is the canonical source. Local work fetches and verifies both
+master refs and refuses to proceed until live fork and canonical master are
+equal. The scheduled hosted master-sync workflow normally refreshes remote fork
+`master`; after a local mismatch, only the operator may run the documented
+non-forced sync command.
 
 There is no second linked Git worktree and no replaceable canonical checkout.
 The isolated workflow may create a private detached copy of one verified
@@ -29,28 +36,35 @@ level.
 
 ### `master`
 
-Remote fork `origin/master`, cached `origin/master`, cached
-`upstream/master`, live `upstream/master`, and local `master` must converge on
-the same commit before an upstream refresh is complete.
+Live remote fork `master`, cached `origin/master`, and local `master` converge
+on the same commit before a local fork-base refresh is complete.
 
-`repo-sync` fetches only the two master remote-tracking refs, verifies each
-against live `ls-remote`, and compares the live commits. It never updates a
-remote branch, switches a branch, merges, rebases, resets, commits, or pushes.
+`repo-sync` fetches `origin/master` and `upstream/master`, verifies both cached
+refs against their live GitHub refs, and requires exact equality. It never
+updates a remote branch, switches a branch, merges, rebases, resets, commits,
+or pushes.
 
-When live fork master is stale, only the operator runs:
+Remote fork `master` is the periodically synchronized operational base. The
+dedicated hosted master-sync workflow checks its relationship with upstream
+every 12 hours. When fork master is stale and can fast-forward, its service
+identity runs:
 
 ```bash
 gh repo sync kogeler/xpra --source Xpra-org/xpra --branch master
 ```
 
-The command is requested only after a fresh mismatch and never with
-`--force`. A fork master that cannot fast-forward is an owner-review boundary.
-After successful remote equality, `master-update` may fast-forward local
-`master`; it rejects an ahead or divergent local branch.
+The command is never run with `--force`. The workflow verifies both live refs
+afterward, changes no local ref, and fails when fork master cannot fast-forward.
+Agents never invoke or dispatch this remote-mutating path. If `repo-sync`
+reports a stale fork, the operator may run that exact command without
+`--force`, then repeat `repo-sync`. `master-update` may fast-forward local
+`master` only after equality is freshly proven. An ahead or divergent fork or
+local branch stops for owner review.
 
 Fork-only files, production fixes, tests not intended for upstream, merge
-commits, and automation commits are forbidden on `master`. Nothing in this
-automation pushes `master`.
+commits, and automation commits are forbidden on `master`. The hosted sync is
+the only automation allowed to update remote `master`, and only by the
+non-forced fast-forward above.
 
 ### `develop`
 
@@ -59,22 +73,23 @@ branch. Its committed difference from current master is limited to:
 
 - root `AGENTS.md`;
 - the root `.gitignore` runtime boundary;
-- `.github/workflows/develop.yml` and the disabled upstream-workflow
+- `.github/workflows/develop.yml`, `.github/workflows/master-sync.yml`,
+  `.github/workflows/deb-packages.yml`, and the disabled upstream-workflow
   rename boundary below `.github/upstream-workflows/`;
 - `fork-maintenance/`.
 
 Production source changes are stored in `cases/*/fix.patch`; their applied
-copies are not committed on clean `develop`. Every upstream refresh rebases
-the fork-only `develop` commits onto the verified local `master`, followed by
+copies are not committed on clean `develop`. Every fork-master refresh rebases
+the fork-only `develop` commits onto the fetched local `master`, followed by
 an explicit patch-resolution cycle. Merging `master`, `upstream/master`, or an
 equivalent upstream ref into `develop` is forbidden.
 
 Current master must be the linear base of `develop`, and the fork-only
 `master..develop` range must contain no merge commits. `develop-rebase`
-requires clean `develop`, freshly verifies fork/canonical master equality,
-requires local `master` at that exact commit, and runs a local rebase. If Git
-stops on conflicts, patch work remains blocked until every conflict is resolved
-and the rebase completes.
+requires clean `develop`, freshly fetches and verifies equal live fork and
+canonical master refs, requires local `master` at that exact commit, and runs a
+local rebase. If Git stops on conflicts, patch work remains blocked until every
+conflict is resolved and the rebase completes.
 
 A published `develop` is intentionally rewritten by later refreshes. Agents
 and automation never publish that rewrite. The operator may do so only with an
@@ -87,20 +102,23 @@ boundary. It remains the publication boundary, not the pre-commit isolated
 investigation boundary.
 
 `isolated-start-check` is the pre-commit investigation boundary. It requires
-the checked-out branch to remain `develop`, fetches and verifies live fork and
-canonical master equality, rejects dirty or committed Xpra source changes, and
-permits local changes only in `AGENTS.md`, `.gitignore`, the controlled
-`.github/` CI paths, and `fork-maintenance/`. It records the branch, HEAD,
-worktree status, and exact master commit and must not change any of them except
-the two cached remote tracking refs it fetches.
+the checked-out branch to remain `develop`, fetches and verifies equal live
+fork and canonical master refs, rejects dirty or committed Xpra source changes,
+and permits local changes only in `AGENTS.md`, `.gitignore`,
+`.github/workflows/`, `.github/upstream-workflows/`, and `fork-maintenance/`. It
+records the branch, HEAD, worktree status, and exact master commit and must not
+change any of them except the cached `origin/master` and `upstream/master`
+remote-tracking refs it fetches.
 
 ### Temporary branches
 
-A clean non-master branch may be used for isolated patch development. It must
-be descended from the fully rebased local `develop`, contain current verified
-master, and have no committed changes on the selected case paths. The same
-patch commands work on `develop` and temporary branches. Parallel worktrees
-are outside the supported model.
+A clean non-master branch may be used only for exceptional host-worktree
+integration diagnosis and patch operations. It must be descended from the fully
+rebased local `develop`, contain current verified fork master, and have no committed
+changes on the selected case paths. Host patch commands work on `develop` and
+such a temporary branch. The default isolated workspace lifecycle requires
+`develop` and does not support temporary branches. Parallel worktrees are
+outside the supported model.
 
 ## Patch case contract
 
@@ -140,7 +158,7 @@ Every patch must satisfy all of these conditions:
 There is exactly one active test-quarantine case. It is an explicit temporary
 exception, never a production fix or a place for unrelated test repair. Each
 entry requires a current clean-master failure in the frozen matrix. After
-every upstream rebase, the clean quarantine gates invert the usual result:
+every fork-master rebase, the clean quarantine gates invert the usual result:
 they pass only when every listed module remains an exact ignored failure. A
 passing module makes the case stale and must be removed or narrowed before the
 quarantine patch or full patched matrix is accepted.
@@ -161,8 +179,10 @@ Only these active cases are retained:
 ## Stack contract
 
 `stacks/develop.toml` is the complete active queue in dependency/application
-order. A stack contains unique known cases, places selected dependencies before
-their consumers, and declares the union of integration gates.
+order. Here `develop` is a stable queue slug, not a Git-branch precondition for
+branch-agnostic consumers such as DEB packaging. A stack contains unique known
+cases, places selected dependencies before their consumers, and declares the
+union of integration gates.
 
 The resolver evaluates each patch against an isolated snapshot in sequence:
 
@@ -178,8 +198,8 @@ with rejects, fuzz workarounds, source rewriting, or whitespace relaxation.
 
 The default pre-commit patch cycle never applies a production patch to the host
 worktree. `workspace-create` makes a no-clobber named directory under the
-ignored private runtime root, copies the complete verified master commit into
-a detached local checkout, removes its remote, resolves the selected case or
+ignored private runtime root, copies the complete verified fork-master commit
+into a detached local checkout, removes its remote, resolves the selected case or
 stack, and applies either the complete patch, only its retained tests, or
 nothing. The copied tree and its private index are generated runtime state.
 
@@ -192,34 +212,112 @@ An atomic case workspace may be edited and staged with `workspace-stage`.
 `workspace-update` requires the same host branch and HEAD, a complete staged
 candidate, no untracked or unstaged workspace output, exact path ownership
 unless explicitly expanded, and deterministic forward/reverse application to
-the recorded master commit. It then atomically replaces only that case's
-`fix.patch`, `patch_sha256`, and `paths`. It never stages the host index or
-edits inherited Xpra source in `develop`.
+the recorded master commit. It then atomically replaces that case's
+`fix.patch`, `patch_sha256`, and `paths` together with the workspace selection
+resolution and metadata. A successful workspace remains current and may be
+edited, staged, and exported again. It never stages the host index or edits
+inherited Xpra source in `develop`.
+
+Every host `patch-update` and isolated `workspace-update` publishes an ignored
+case-update owner and exact old/new payload transaction below
+`case-updates/<slug>.update{,.owner.json}` before replacing a tracked target.
+Forward-application and exact-reverse verification use the preparation-only
+`case-updates/<slug>.update/candidate-lab/source` tree. They never create
+verification scratch in the finalized workspace; the candidate lab is removed
+before the transaction marker is published.
+
+Every workspace export binds the case patch/manifest and that workspace's
+resolution and metadata in the same all-new transaction. Draft promotion moves
+the workspace from clean to patched mode; an existing case remains patched. A
+complete `transaction.json` is replayed to the recorded new state after
+interruption; preparation without that marker is discarded. An owner without a
+transaction is cleared only after the currently published case and any bound
+workspace validate. Only `case-recover CASE=<slug>` may perform these actions,
+under the retained global `case-updates/.lifecycle.lock`.
+
+Before recursively deleting either a completed transaction or an aborted
+preparation, the case lifecycle publishes external schema-1
+`case-updates/<slug>.update.remove.json` with
+`kind=case-update-rmtree-started` and disposition `complete` or `abort`. It
+binds the transaction's full fingerprint, device, inode, update owner, and
+operation identity before a no-replace rename to
+`case-updates/.<slug>.update.remove`. After that rename, a retry validates the
+bound device/inode because recursive deletion necessarily changes the tree. The
+canonical `targets` array continues to validate the exact published patch,
+manifest, and any bound workspace resolution/metadata by path, mode, and
+SHA-256. After the tree is gone, cleanup deletes the update owner and only then
+the removal marker. A crash in that interval leaves a valid phase-only retry
+that still validates its recorded operation, workspace, owner digest, and
+published targets.
 
 `PATCH_MODE=tests-only` applies only paths below `tests/` from the selected
 patch. This is the durable non-vacuous clean-master regression mode: retained
 tests execute against unmodified production code. A tests-only workspace can
 never replace a complete case patch.
 
-Workspace cleanup validates the exact name and ownership record and removes
-only that generated directory. An identity is never reused.
+All workspace operations and fingerprint publication are serialized by retained
+`upstream-tests/workspaces/.lifecycle.lock`; workspace update acquires it before
+`case-updates/.lifecycle.lock`. Workspace cleanup validates the exact name and
+ownership record. Before its first destructive step it publishes schema-1
+`upstream-tests/workspaces/.<name>.remove.owner.json`, binding the complete tree
+fingerprint, device, and inode, then atomically renames the target to
+`.<name>.remove`. A retry of `workspace-remove` or `workspace-recover` validates
+the staged device/inode, completes only that removal, and deletes the external
+owner last. An identity is never reused.
+
+Case creation first publishes
+`.artifacts/fork-maintenance/case-staging/<slug>.create.owner.json` and may then
+own the matching `.create.partial`. Workspace creation uses deterministic
+`upstream-tests/workspaces/.<name>.create.{owner.json,partial}` paths, and its
+finalization audit first publishes external schema-2
+`workspace-fingerprints/<name>.fingerprint.owner.json`, then may own the matching
+`<name>.fingerprint/` scratch. Scratch cleanup publishes schema-1
+`<name>.fingerprint.remove.json` (`kind=workspace-fingerprint-rmtree-started`)
+before a no-replace rename to `.<name>.fingerprint.remove`; a partial retry is
+bound by device/inode. The phase also binds the fingerprint-owner operation ID
+and digest. After the tree is gone, cleanup deletes that owner and then the
+phase marker last, leaving a valid phase-only retry boundary. Interrupted
+create, remove, fingerprint, or update state is recoverable only through
+`case-recover CASE=<slug>` or
+`workspace-recover WORKSPACE=<name>`. Each target validates the marker and
+exact entry set. Case recovery preserves a valid completed create, aborts only
+an incomplete update preparation, completes an already published update
+transaction, or finishes its removal phase. Workspace recovery preserves a
+valid completed create and finishes only its exact marker-backed create,
+remove, or fingerprint transition. Unowned or ambiguous state fails closed.
 
 Final cleanup of a complete work cycle uses a common lowercase prefix for all
 of its `RUN`, `IMAGE_RUN`, and `WORKSPACE` identities. `cycle-clean-plan`
+is branch-agnostic and does not require a named remote; it never reads or
+changes a branch or ref. It rejects any dirty host Xpra source regardless of
+where it is invoked, then
 requires transient job ownership to have been collected and removed, verifies
 collected log/report hashes, and proves every matching workspace has no
 unexported candidate and is exactly represented by the current patch queue. It
 prints an exact target set and its confirmation digest. `cycle-clean` rebuilds
-that plan and removes it only when the supplied digest still matches.
+that plan when no transaction is pending and removes it only when the supplied
+digest still matches. Before the first deletion it publishes
+`cycle-cleanups/<CYCLE>.remove.json`; an interrupted deletion validates and
+resumes only that stored plan with the same digest. Its schema-2 record also
+binds every workspace/live-result directory's device, inode, and fingerprint
+before atomically staging it at
+`cycle-cleanups/.<CYCLE>.<index>.remove`. Before recursive deletion of that
+staging, cleanup publishes schema-1
+`cycle-cleanups/.<CYCLE>.<index>.rmtree.json` with
+`kind=cycle-clean-rmtree-started`, binding the outer transaction and staging
+identity. A retry validates the phase and device/inode rather than trying to
+match the original fingerprint after partial deletion; the phase is removed
+only after that staging is gone.
 
 ## Host patch lifecycle
 
 Host patch application, refresh, or integration diagnosis starts with the
 clean publication refresh contract below. `patch-start-check` then re-verifies
-live fork/canonical equality, exact local master, linear rebased `develop`, and
-the ancestry of any temporary branch. Committed versions of all patch-owned
-source paths must match current master. Pre-commit investigation and acceptance
-instead start with `isolated-start-check` and use the isolated lifecycle above.
+equal live fork and canonical master refs, exact local master, linear rebased
+`develop`, and the ancestry of any temporary branch. Committed versions of all
+patch-owned source paths must match current master. Pre-commit investigation
+and acceptance instead start with `isolated-start-check` and use the isolated
+lifecycle above.
 
 `patch-apply` or `stack-apply` applies only resolver entries in `apply` state
 with `git apply --index --whitespace=error-all`. It stages source and test
@@ -247,29 +345,32 @@ Before committing or publishing a refreshed `develop`, use this clean sequence:
 
 1. require a clean checkout;
 2. run `repo-sync`;
-3. when required, wait for the operator's non-forced fork sync and rerun the
-   gate;
-4. fast-forward local `master` with `master-update`;
-5. switch to `develop` and run `develop-rebase`;
-6. resolve and stage every conflict, then use `git rebase --continue` until the
+3. fast-forward local `master` with `master-update`;
+4. switch to `develop` and run `develop-rebase`;
+5. resolve and stage every conflict, then use `git rebase --continue` until the
    rebase completes; abort and stop if correct resolution is not possible;
-7. run `patch-start-check` and resolve the complete active stack against new
+6. run `patch-start-check` and resolve the complete active stack against new
    master;
-8. run every clean quarantine gate and remove or narrow entries that no longer
+7. run every clean quarantine gate and remove or narrow entries that no longer
    fail on this exact master;
-9. confirm that isolated run provenance and patch digests still bind this exact
+8. confirm that isolated run provenance and patch digests still bind this exact
    master, apply the non-semantic exception below, or rerun the affected gates;
-10. run any remaining focused, native, full, and required live gates;
-11. run `develop-check` before handoff.
+9. run any remaining focused, native, full, and required live gates;
+10. run `develop-check` before handoff.
+
+This sequence fetches both master refs and requires live fork/canonical equality.
+If step 2 reports a stale fork, the operator may run the exact non-forced
+`gh repo sync` command printed by the gate, then repeat step 2. Agents never run
+that remote mutation.
 
 No form of `git merge master`, `git merge upstream/master`, or an equivalent
 merge is accepted as upstream transfer. `develop-check` rejects merge commits
 above current master even when current master is technically an ancestor.
 
 Pre-commit investigation may precede this clean publication refresh only via
-`isolated-start-check`; its outputs are bound to the verified master commit and
-patch digests. Old reports and previous successful resolution are not proof
-after the master or executable/test semantics change. A digest-only change may
+`isolated-start-check`; its outputs are bound to the verified fork-master
+commit and patch digests. Old reports and previous successful resolution are
+not proof after the master or executable/test semantics change. A digest-only change may
 reuse the prior functional result solely under the non-semantic validation
 exception below. Do not delete an active patch merely because nearby upstream
 code looks equivalent. Review the exact production path and run the retained
@@ -279,14 +380,15 @@ a tracked history archive.
 
 ## Source and runner provenance
 
-Local upstream-test and live acceptance runners freeze verified live
-`upstream/master`, never the mutable develop working tree. Hosted CI instead
-uses cached checkout `origin/master` to locate the merge base already embedded
-in pushed `develop` and freezes that commit; a later fork-master advance does
-not change the source under test. It does not query moving live master refs or
-create an `upstream` remote during the job. Each run binds:
+Local upstream-test and live acceptance runners freeze the exact verified
+fork/canonical master commit, never the mutable develop working tree. Hosted develop test CI
+instead uses cached checkout `origin/master` to locate the merge base already
+embedded in pushed `develop` and freezes that commit; a later fork-master
+advance does not change the source under test. It does not query moving live
+master refs or create an `upstream` remote during the job. Each test or live run
+binds:
 
-- exact canonical commit and workflow digest;
+- exact fork-master commit and workflow digest;
 - selection manifest and patch digests;
 - base-aware resolution and its digest;
 - runner/build-input digests;
@@ -298,48 +400,248 @@ Build contexts contain a credential-free source archive plus the selected
 patch inputs. They exclude `.git`, remotes, credentials, global configuration,
 ignored paths, and unrelated working-tree state.
 
+A detached upstream-test start publishes
+`upstream-tests/runs/<RUN>.prelaunch.json` before `podman create`. That record
+binds the starter PID/start ticks, run UUID, payload path, immutable image ID,
+and complete expected lab labels. The final owner is published only after the
+created container's immutable ID and labels match. An active starter cannot be
+aborted concurrently; once it is gone, the prelaunch record is sufficient to
+inspect and exact-reclaim only its orphaned container/payload state.
+
+The prelaunch record remains until the container is started and the complete
+source/selection payload is delivered through the readiness FIFO. The retained
+subsystem lifecycle lock is inherited across selection freezing, container
+creation and start, and payload streaming, so abort cannot reclaim an in-flight
+publisher. The matching image-cache lock is also inherited through container
+create/start and held by the starter through payload delivery.
+
+Hosted foreground tests use deterministic
+`upstream-tests/.foreground-payload{,.owner.json}` staging under retained
+`.foreground-payload.lock`. The same foreground operation validates and
+recovers only that marker-owned partial before reuse; cycle cleanup treats a
+remaining payload or marker as active state. Upstream image creation,
+inspection/use handoff, and explicit cache removal are serialized by retained
+`upstream-tests/image-builds/.image-cache.lock`; Podman children inherit the
+open lock through the handoff.
+Exact cache removal takes the same lock and refuses any matching unresolved
+image-build or test prelaunch/owner. It may recognize an older valid source
+label only for cleanup, while still requiring the complete exact lab-label set,
+image input/workflow identity, and immutable image ID.
+
+A named standalone image start publishes
+`upstream-tests/image-builds/.<IMAGE_RUN>.image-prelaunch.json` before creating
+or populating its context. The final image-build owner uses schema 3 and is
+released only after durable owner publication. Status and abort recognize the
+prelaunch marker; normal remove/abort deletes it. Hosted foreground image
+creation streams the tracked context inputs directly and creates no
+`.ci-image.*` host staging directory.
+
+A live start first publishes
+`jobs/live/<RUN>.freeze-prelaunch.json`, then launches and durably publishes the
+owned input-freeze process record. Before the main live owner exists, that
+process freezes one source archive, the complete harness, server and
+clean-client selection snapshots plus resolutions, both validated context
+archives/tree digests, the optional Zed archive, and the manifest/checksum tree
+below run-owned staging. The validated tree is atomically published as
+`live-results/<RUN>/inputs`; the main worker launches from the frozen harness
+and reads only those bound inputs. Final report/status validation binds the
+source, both selections and context/resolution digests, Zed/harness/input
+digests, and actual immutable image IDs with complete ownership labels. The
+retained live subsystem lifecycle lock is acquired before the prelaunch marker
+and held through durable main-owner publication, excluding terminal transitions
+from that handoff. Status and abort route through the exact prelaunch/freeze
+boundary before the main owner exists. Before deleting freeze-owned input
+directories, abort publishes schema-1 `kind=live-input-freeze-abort` at
+`jobs/live/<RUN>.freeze-abort.json`, binds each device/inode, atomically moves it to
+`live-results/.<RUN>.freeze-abort-{staging,result}`, and deletes the transaction
+only after both exact directories are gone. An interrupted transaction is
+continued only by the same `live-abort` target.
+
+DEB source selection is branch-agnostic. It uses the current `HEAD` and all
+local or remote-tracking refs whose final component is exactly `master`, then
+requires one uniquely latest merge base. It never fetches, syncs, or requires a
+current branch or remote name. The range from that clean boundary to `HEAD`
+must contain no merge commit and may touch only fork-control paths; any dirty or
+committed Xpra source copy is rejected. The selected exact master ref is frozen
+in a private bundle only as provenance. Every package run freezes the complete
+active queue into one private immutable selection snapshot before container
+execution; publication reuses one snapshot for both distributions and rejects a
+live selection change across the builds. Package builds apply that queue,
+selected by the stable `stacks/develop` slug, to the clean boundary inside the
+container. They require an x86-64 Podman host and produce amd64 packages, need
+network access and sufficient disk space, and invoke `dpkg-buildpackage`
+unsigned with `-us -uc`. The build forces xz-compressed Debian control and data
+members; the Python 3.11+ host validator streams and validates those exact
+members with a 256 MiB XZ decoder memory limit before accepting a tar. The
+input-keyed builder image cache is verified by its full input labels. Each
+created package container executes the actual immutable image ID, and each
+accepted result records it. The result binds the checkout commit, selected
+master ref and commit, source commit, workflow digest, selection and resolution
+digests, base and builder image IDs, builder-image input digest, version,
+sequential revision, architecture, and exact DEB checksums.
+
+The retained DEB queue cache has the exact shape
+`selections/<selection-sha>-<metadata-sha>/{lab,selection.json}`. The first
+digest is the semantic complete-queue digest; the second is the SHA-256 of the
+metadata file, which binds the exact private `lab/` tree digest. A local package
+owner records both digests and the absolute selection-state/snapshot paths before
+its worker starts. Local Make freezes the source snapshot before invoking
+package start, then package start freezes the selection before creating its
+`RUN`; hosted publication freezes one selection and one source snapshot before
+either distribution build and reuses both across them.
+
+A local package start publishes
+`deb-packages/runs/<RUN>.prelaunch.json` before creating the run directory or
+main process owner. Status and logs expose this boundary. Before changing an
+ownerless prelaunch or owned run, `deb-abort` publishes
+`deb-packages/runs/<RUN>.abort.json`; status reports that exact aborting phase,
+and a retry validates and completes the transaction before deleting its marker
+last. Each mutable builder-image key is serialized by retained
+`deb-packages/locks/images/<distro>-<input-sha>.lock`, and the Podman build child
+inherits that lock until immutable-ID handoff.
+
+Package-output validation owns only the deterministic sibling paths
+`.<tar>.validate`, `..<tar>.validate.partial`, and
+`.<tar>.validate.owner.json`. The marker binds the exact output path, device,
+inode, size, and both scratch paths. For named local output, a later validation,
+`deb-remove`, or `deb-abort` may recover only that exact marker-backed scratch;
+unowned or changed state fails closed and blocks cleanup of its matching cycle.
+Hosted scratch remains in its release-attempt staging for operator review.
+
+Every Podman build context, source snapshot, patch selection, live application
+input, and returned artifact crosses the process boundary through
+`tools/container_payload.py` as a validated streaming tar. Extraction accepts
+only plain, uncompressed tar and separately bounds raw archive bytes, member
+count, expanded content, and PAX/GNU extended metadata; sparse entries,
+transparent compression, concatenated streams, and trailing bytes are rejected.
+Bind mounts, bind-style `--mount`, and `podman cp` are forbidden for these
+transfers. The upstream-test ccache named volume is a cache-only exception;
+render-node `--device` access is hardware access. Upstream unit tests return no
+artifact tar: their normal logs contain the selected resolution digest and test
+output.
+
+Their entry process waits on a pre-created, validated payload-ready FIFO and
+executes only after extraction writes its ready byte. Payload readiness uses no
+process signal; the sender retries a non-blocking FIFO open only for a bounded
+interval while the reader attaches. Each extraction uses the deterministic
+`.<destination>.partial` sibling, refuses any pre-existing partial, and
+publishes with an atomic no-replace rename rather than random staging.
+When reverse process output has no caller-owned deterministic partial path, the
+common exchange helper stages it in an anonymous `O_TMPFILE`, fsyncs it, and
+links it into place without replacement; there is no named generic fallback.
+
 ## GitHub CI contract
 
 Canonical Xpra workflow files are never executed on `develop`. Every
 `.yml`/`.yaml` file from current
-`upstream/master:.github/workflows/` is relocated without content changes to
+`origin/master:.github/workflows/` is relocated without content changes to
 the same relative name below `.github/upstream-workflows/`. The executable
-directory contains exactly `.github/workflows/develop.yml`.
-`ci-layout-check` compares the disabled files byte-for-byte with current master,
-rejects a missing, extra, edited, or still-active upstream workflow, and checks
-the exact thin fork workflow interface. After a rebase, upstream edits are
-resolved as rename/modify updates; any new canonical workflow is relocated in
-the same cycle before publication.
+directory contains exactly `.github/workflows/develop.yml`,
+`.github/workflows/master-sync.yml`, and
+`.github/workflows/deb-packages.yml`.
+`ci-layout-check` compares the disabled files byte-for-byte with cached fork
+`origin/master`, rejects a missing, extra, edited, or still-active upstream
+workflow, and checks all exact thin fork workflow interfaces. After a rebase,
+upstream edits are resolved as rename/modify updates; any new canonical
+workflow is relocated in the same cycle before publication.
 
 `ci-layout-check` is an explicit rebase and publication audit. `ci-prepare`
 does not invoke it: once GitHub has selected the workflow, a self-check of its
 tracked filename or layout must not prevent the upstream test matrix from
 starting.
 
-The fork workflow:
+The develop test workflow:
 
 - triggers only on a push to `develop`;
-- uses the GitHub-hosted `ubuntu-26.04` runner and read-only contents permission;
+- uses the GitHub-hosted `ubuntu-26.04` runner, a six-hour timeout, and read-only
+  contents permission;
 - pins each external action to a reviewed full commit SHA and records the
   corresponding current release version in an inline comment;
+- requires a clean checkout at the exact hosted `GITHUB_SHA` before reading
+  any queue or runner input;
 - declares the exact `full`, `full-cython`, and `full-no-compat` matrix with
   fail-fast disabled and `max-parallel: 3`;
-- performs checkout and, for each matrix value, invokes exactly
+- fetches full checkout history without persisting credentials and, for each
+  matrix value, invokes exactly
   `make -C fork-maintenance ci-upstream-tests` with that value in
   `XPRA_CI_TARGET`.
 
+The master-sync workflow:
+
+- runs at minute 37 every 12 hours and supports operator `workflow_dispatch`;
+- uses the GitHub-hosted `ubuntu-26.04` runner with a ten-minute timeout;
+- grants only its job `contents: write` and pins checkout to the reviewed full
+  action SHA and `develop` at depth one without persisting credentials;
+- invokes exactly `make -C fork-maintenance ci-master-sync` with the ephemeral
+  job token;
+- accepts only its expected hosted event, repository, workflow ref, develop
+  ref, and exact checkout SHA;
+- compares live fork and upstream master before and after the operation;
+- calls only `gh repo sync kogeler/xpra --source Xpra-org/xpra --branch master`
+  and never adds `--force`;
+- leaves the develop checkout, local refs, commits, and worktree unchanged.
+
+The scheduled sync updates only fork `master`. It never rebases, merges, signs,
+commits, or publishes `develop`; the operator performs the documented local
+`repo-sync` / `master-update` / `develop-rebase` cycle later against the exact
+fork/canonical commit proven equal by the local gate. An ahead,
+divergent, missing, concurrently moving, unauthorized, or post-sync unequal ref
+fails closed for owner review.
+
+The package-release workflow:
+
+- supports only operator `workflow_dispatch` on the selected branch or tag
+  revision;
+- does not hard-code the selected branch name and pins checkout to the reviewed
+  full action SHA with `fetch-depth: 0` and no persisted credentials;
+- runs on GitHub-hosted Ubuntu 26.04 with a six-hour timeout and job-scoped
+  `contents: write`;
+- invokes exactly `make -C fork-maintenance ci-deb-release` with the ephemeral
+  job token;
+- accepts only its exact hosted event, repository, workflow path/ref and
+  checkout SHA, and requires a clean checkout, GitHub CLI 2.97.0 or newer, and
+  Podman;
+- runs no live, display, render-node, or hardware-codec profile;
+- builds and validates one complete DEB tar for Ubuntu 26.04 and one for Debian
+  13 from one frozen selection snapshot and requires a common version/revision;
+- updates no local checkout or source-selection ref; publication alone stages
+  one draft prerelease at the exact checkout SHA through authenticated REST,
+  records its immutable release ID directly from the create response, uploads
+  and validates exactly those two assets, publishes the draft, and verifies its
+  unique package tag target; it never looks up a draft through the
+  published-only `/releases/tags/{tag}` endpoint, and every later release
+  query, upload, publish, or deletion addresses the captured immutable ID;
+- on publication failure, may delete only the release it created and its tag
+  while the tag still points at that checkout SHA. It deletes and verifies tag
+  absence first, then deletes and verifies the immutable release ID last; a
+  missing release with an extant tag or any changed tag fails cleanup closed for
+  owner review;
+- before publishing a retried attempt, may remove only an exact draft/tag left
+  by an earlier failed attempt of the same hosted workflow run, after validating
+  that Actions attempt and the canonical embedded transaction, release ID,
+  asset subset, checkout, version, and unchanged tag target, using the same
+  tag-first/release-last order. Published releases, tag-only state, and
+  ambiguous ownership are never altered. Current-tag absence and exact orphan
+  recovery use a bounded authenticated pagination of the release collection and
+  require one unique matching transaction. If the create response is malformed,
+  only that same listing may discover one exact draft, journal its immutable ID,
+  and enter the ordered rollback.
+
 No dependency installation, Podman command, patch logic, test command, dynamic
 test discovery, fallback, skip policy, or cleanup implementation belongs in
-YAML. The fixed matrix is only hosted-runner fan-out; Make validates its value.
-Each job derives the `develop`/checkout-`origin/master` merge base, freezes that
-already embedded commit without a live remote query, applies the complete
-`stacks/develop` queue inside the container, and runs exactly its selected leg.
-The three jobs run independently, and one failure does not cancel the remaining
-legs. The CI path never fetches, syncs, switches, merges, or rebases. Live
-fork/canonical equality and the actual rebase remain mandatory pre-publication
-operator steps, not moving hosted-job dependencies. Here "never fetches"
-describes the tracked Make/Python path after `actions/checkout` has populated
-the checkout.
+YAML. The fixed `develop.yml` matrix is only hosted-runner fan-out; Make
+validates its value. Each of its three test jobs derives the
+`develop`/checkout-`origin/master` merge base, freezes that already embedded
+commit without a live remote query, applies the complete `stacks/develop` queue
+inside the container, and runs exactly its selected leg. The jobs run
+independently, and one failure does not cancel the remaining legs. The
+master-sync and package-release workflows have no test matrix.
+
+The develop test and package source/build paths never fetch, sync, switch,
+merge, or rebase after `actions/checkout` has populated the checkout. Before
+publication, the local operator cycle freshly verifies both live master refs,
+requires exact fork/canonical equality, and rebases onto that commit. Hosted
+tests do not repeat those live queries after checkout.
 
 CI never invokes a `live-*` target and cannot satisfy RGB, render-node,
 Wayland hardware-H.264, Vulkan, input, detach, or transport-loss acceptance.
@@ -361,7 +663,7 @@ For one patch, validate in increasing scope:
 6. each live gate declared by the production cases and complete stack.
 
 A proven non-semantic refresh does not restart this ladder. It requires the
-same verified master plus an exact old/new applied-tree diff limited to
+same verified fork master plus an exact old/new applied-tree diff limited to
 comments, copyright notices, or documentation. Paths, modes, executable data,
 configuration, test assertions, source selection/application, build commands,
 runner behavior, and live assertions must remain unchanged. Refresh derived
@@ -380,29 +682,89 @@ reassessment gates. No exception is implied by old lab results.
 A failure before a downstream test target starts is a control-plane failure,
 not a failed Xpra test. When the change only removes or narrows that pre-test
 guard, validate it with the focused automation unit test and the exact direct
-preflight command. Do not run the expensive downstream matrix if canonical
-master, selection and patch digests, image inputs, container entrypoint, and
-test commands are unchanged: those tests cannot validate whether the removed
-guard still blocks them. Any change to a downstream input or execution path
-restores the normal validation ladder.
+preflight command. Do not run the expensive downstream matrix if the exact
+frozen fork source commit, selection and patch digests, image inputs, container
+entrypoint, and test commands are unchanged: those tests cannot validate
+whether the removed guard still blocks them. Any change to a downstream input
+or execution path restores the normal validation ladder.
 
 The live runner keeps direct Xpra boundaries distinct from SSH orchestration.
-It owns RGB, adaptive Wayland hardware H.264, real detach, direct TCP transport
-loss, and multi-window Vulkan/input profiles. Foreground probes are diagnostic;
-named supervised jobs are the acceptance path.
+Its exact positive set is Zed RGB, adaptive-alpha Zed H.264, RGB detach, RGB
+direct-TCP transport-loss fault injection, and multi-window Vulkan/input
+hardware H.264. Each fixed Make wrapper binds every profile dimension and every
+named job requires a nonempty reviewed case or stack selection. Foreground,
+clean-source, and picture-fallback probes are diagnostic and cannot publish
+acceptance. A positive fault-injection profile first proves rendering and input,
+then proves the intended disconnect and survival behavior.
+
+The named hardware-H.264 gate is the fixed application-exit profile
+`APPLICATION=hardware`, `ENCODING=h264`,
+`H264_CLIENT_POLICY=adaptive-alpha`, and `ALPHA_SCENARIOS=default`. It resolves
+the primary `vkcube` and auxiliary GTK Xpra window IDs independently from their
+exact titles; registration order is never authority. The primary's first saved
+`window.info` is only an initial `BGRX`/`RGBX` snapshot. Every exact-window
+frame-state record must remain opaque, and its complete saved packet history
+must have positive contiguous sequence numbers in recorded order. The rounded
+damage-time directory is storage only: one millisecond may contain multiple
+damage groups, which are reconstructed by each exact descending `flush`
+countdown. Startup layout/picture groups remain structurally validated but are
+not production evidence. Once both title-bound windows have stable tiled
+geometry, the runner records a baseline against the active exact IDR group and
+an end sequence before auxiliary exit. Each group in that interval has
+contiguous sequences, one terminal positive H.264 main region, and only the
+exact positive one-pixel right or bottom lossless RGB24/RGB32 edges allowed by
+its crop. Every observed `(window-size, main-region-size)` crop signature must
+gain one complete required edge set in the interval; an unchanged edge need not
+be resent with every H.264 frame. Missing signature coverage, duplicate,
+dangling, cross-group, arbitrary, interior, larger, or alpha-bearing RGB regions
+fail.
+
+The H.264 main path must contain at least ten frames spanning at least one
+second, cover at least 99% of each production window, and account for at least
+90% of all encoded packet-region pixels. Its dominant stream must complete the
+exact VA-API encode/decode, client-packet, hardware-presentation, and pixel
+chain; safe warmup and post-auxiliary resize packets are not production
+evidence. The complete H.264 context suffix remains VA-bound through final
+quiescence. The client decode count equals its transmitted H.264 packet count;
+the server count may exceed it only by one completed terminal encode that was
+not transmitted during ordered shutdown, and that exception is recorded.
+
+The auxiliary fixture must require an RGBA visual and expose a deterministic
+transparent border around its opaque input control. Its exact window must
+report `BGRA` or `RGBA`, expose both transparent and fully opaque pixels in
+every exact saved server-side source screenshot, and produce a nonempty set
+containing only positive WebP or RGB32 packets with contained geometry and
+exact group metadata. Client captures prove visible composition and input
+response; an X11 compositor is not required to preserve the source alpha
+channel in those captures. An RGB32 packet is accepted only with `BGRA` or
+`RGBA` `rgb_format`. H.264, RGB24, non-alpha RGB32, or an opaque auxiliary
+source format fails the auxiliary contract. A software H.264 encoder or
+decoder or software presentation renderer fails the complete gate.
+
+The adaptive-alpha Zed H.264 profile applies the same positive principle to one
+dynamic window. Exact saved-packet records bind H.264 to opaque frame state and
+alpha-bearing RGB32 to alpha state; WebP is alpha-capable but is not itself
+proof of an alpha frame. Every H.264 stream is bound to complete VA contexts,
+and the owned stable-geometry stimulus must meet the same temporal, per-frame,
+and aggregate pixel-dominance thresholds.
 
 ## Runtime storage contract
 
-All generated state lives below repository-level:
+All durable runtime, build, result, publication, and cache state lives below
+repository-level:
 
 ```text
 .artifacts/fork-maintenance/
 ```
 
-This includes source archives, build contexts, image-build records, test and
-live logs, reports, screenshots, status files, checksums, local publication
-text, virtual environments, and caches. The root `.gitignore` must ignore the
-entire `.artifacts/` tree.
+This includes source archives and bundles, build contexts, image-build records,
+test and live logs, DEB packages and release staging, reports, screenshots,
+status files, checksums, local publication text, virtual environments, and
+caches. Transient interpreter and tool caches may exist only at another
+explicitly ignored local path and are never results. The root `.gitignore` must
+ignore the entire `.artifacts/` tree. Owned Podman containers, images, networks,
+and volumes remain engine runtime objects; their immutable identities and labels
+are recorded in that private filesystem state.
 
 No result is copied back under `fork-maintenance/`. In particular, tracked
 `evidence/`, `runs/`, `results/`, and `communications/` directories are
@@ -410,52 +772,175 @@ forbidden. Git history records inputs and reproducible automation, never run
 outputs.
 
 Private state creation fails closed on symlinks, wrong ownership, or unsafe
-permissions. Long jobs use unique validated `RUN` names; image builds use
-unique `IMAGE_RUN` names. An identity is never reused for a retry. Cleanup
-requires exact ownership and removes only reviewed run-owned transient objects.
+permissions. Upstream-test, live, and DEB jobs use unique validated `RUN` names.
+The private filesystem must support `O_TMPFILE` and
+`linkat(AT_EMPTY_PATH)`: immutable runner records are written and fsynced as
+anonymous files, linked into place without replacement, and followed by a
+directory fsync. There is no named publication temporary or weaker fallback.
+Only a standalone upstream-test image build uses a unique `IMAGE_RUN`; live and
+DEB image builds are embedded in and owned by their parent `RUN`. An identity is
+never reused for a retry. Cleanup requires exact ownership and removes only
+reviewed run-owned transient objects. Runner lifecycle and supervision create no
+systemd unit and never invoke `systemctl`; `libsystemd-dev` in the upstream test
+image is only an inherited source-build dependency.
 
 The public lifecycle interface is the root `fork-maintenance/Makefile`.
 Operators and agents never signal recorded process groups or call destructive
 Podman commands directly for a named job. Make targets validate the owner
 record, PID plus kernel start ticks and process group for host jobs, immutable
 container identity and labels for container jobs, and the result boundary
-before aborting or removing anything. Complex lifecycle logic belongs in
+before aborting or removing anything. Every new host-process owner includes a
+private 256-bit token in its owner and completion records; the supervisor passes
+that token through the payload environment. Complex lifecycle logic belongs in
 tracked Python helpers; Make remains the public orchestration interface.
+The supervisor is also held behind a private release pipe: the payload starts
+only after anonymous-file publication has fsynced and no-replace-linked the
+owner and the launcher writes one exact release byte. EOF or launcher death
+before that byte exits without starting the payload.
 Collection and acceptance require the currently tracked runner and supervisor
 digests. Status, abort, and removal may use an older recorded digest only to
 inspect or clean an already-owned job after automation changed; that path can
 never promote new acceptance evidence.
+Abort may exact-discard a running or lost uncollected job, or a completed
+uncollected job only after its runner digest becomes stale. `lost` requires no
+valid completion and no remaining exact owned runtime. A dead supervisor whose
+recorded process group still contains a live owned member remains `running` and
+is terminated as a group; it is never cleaned as lost. In that orphaned-group
+path, every live same-session member must expose exactly the recorded owner
+token. A missing, duplicate, or mismatched token makes ownership unprovable, so
+abort fails closed and preserves all state. A legacy tokenless orphan remains
+owned and cannot be signaled. Abort rejects current
+completed jobs, which must be collected, and every job that already has
+collected evidence. An active upstream-test prelaunch starter is refused; its
+inactive exact prelaunch owner is the only authority for orphan recovery. Live
+status/logs/abort route first through
+`jobs/live/<RUN>.freeze-prelaunch.json`, then through the owned input-freeze
+process until the main owner is published. Local DEB status/logs/abort likewise
+route through its retained prelaunch record before a main owner exists; abort
+publishes `deb-packages/runs/<RUN>.abort.json` before the first destructive step
+and deletes it only after the exact transaction completes.
+
+Upstream-test and live collect/abort transitions each use one retained,
+mode-`0600` subsystem `.lifecycle.lock`. DEB start/collect/remove/abort
+transitions use the retained `deb-packages/locks/terminal.lock`. These files
+hold crash-releasing kernel locks and are not per-run results. Upstream bundle
+publication uses a retained exact `.bundle.lock`; DEB source and selection
+publication use retained `.source-snapshot.lock` and `.selection-cache.lock`.
+Deterministic partials are recoverable only by their matching locked snapshot
+path. Retained upstream `.foreground-payload.lock` and
+`image-builds/.image-cache.lock` protect foreground payload publication and
+mutable image-cache handoff. Each DEB builder key has its own retained
+`locks/images/<distro>-<input-sha>.lock`. All workspace operations and
+fingerprint publication use retained
+`upstream-tests/workspaces/.lifecycle.lock`; an update acquires it before the
+case-update lock.
+
+Every collected upstream test, standalone upstream image build, live run, and
+local DEB build publishes a retained removal transaction before its first
+destructive step. The exact paths are `upstream-tests/logs/<name>.remove.json`,
+`jobs/live/<RUN>.remove.json`, and
+`deb-packages/results/<RUN>.remove.json`. Each transaction binds the old owner
+and collected evidence, authorizes an exact idempotent retry after a crash, and
+remains mandatory evidence until cycle cleanup.
+
+If a live main owner is absent and its exact schema-1 removal transaction
+remains, that transaction is the sole read-only authority for the removed run.
+`live-status` validates it, the final log/status digests, and all still-present
+bound runtime records, then reports `phase=removing` while any such record
+remains or `phase=removed` otherwise. `live-logs` performs the same validation
+and emits only the digest-bound final log. Schema, evidence, or runtime mismatch
+fails closed; neither route falls back to pre-main freeze state or unbound
+Podman inspection.
+
+Live environment creation uses retained `venvs/.environment.lock` and exact
+`venvs/.environment.partial{,.owner.json}` staging. The venv and pip children
+inherit the lock file descriptor, and the next explicit `live-venv` validates
+the external marker before removing only that partial. Markerless or ambiguous
+state fails closed; cycle cleanup retains this shared environment state.
 
 GitHub workflow files also invoke only that public Makefile. The dedicated
-foreground CI target is not a general local lifecycle shortcut: GitHub Actions
-provides its timeout, cancellation state, and complete console log, while the
-tracked Python helper still verifies and owns each image build and Make owns
-each disposable `podman run --rm` invocation.
+foreground develop-test and package-release CI targets are not general local
+lifecycle shortcuts: GitHub Actions provides their timeout, cancellation state,
+and complete console log, while tracked Python verifies each image build and
+Make owns each disposable `podman run --rm` invocation.
 
 Collected results and finalized workspaces are removed only by the
 digest-confirmed cycle cleanup flow. It never stops active work and rejects
-remaining owner records, locks, owned processes, Podman containers or networks,
-incomplete evidence, changed fingerprints, and unfinished workspace
-candidates. Git-originated relative symlinks inside an owner-bound result tree
+remaining owner/partial records, unsafe retained lock files, owned processes,
+Podman containers or networks, incomplete evidence, changed fingerprints, and
+unfinished workspace candidates. Case-creation and workspace
+create/remove/fingerprint staging and case-update preparation/removal
+transactions are also blockers until their explicit recovery target succeeds.
+Retained valid lock files are not cleanup targets. Plan and execution take the
+retained upstream-test lifecycle, upstream image-cache, live lifecycle, DEB
+terminal, workspace lifecycle, and case-update locks in that fixed order.
+Before its first deletion,
+execution publishes `cycle-cleanups/<CYCLE>.remove.json`, binding the exact plan
+and confirmation digest plus each directory target's device, inode, and
+fingerprint. Such targets are atomically staged at
+`cycle-cleanups/.<CYCLE>.<index>.remove`, then gain a bound schema-1
+`.<CYCLE>.<index>.rmtree.json` before recursive deletion. Once that phase is
+published, partial-tree recovery relies on the original device/inode and phase
+binding rather than an impossible original-fingerprint match. An interruption
+is resumed only with that same cycle and digest; each phase is removed after its
+staging, and the outer transaction only after all exact removals complete. The
+transaction root permits only one pending cleanup, so a different cycle cannot
+be planned until it is finished.
+Git-originated relative symlinks inside an owner-bound result tree
 are fingerprinted without being followed; absolute or lexically escaping
 targets are rejected. Because the result root itself is owned mode `0700`,
 owned group-writable input files are fingerprinted; other-writable or
-hard-linked files remain forbidden. Content-addressed source archives, build
-contexts, images, ccache, and virtual environments are reusable state and
-remain outside ordinary cycle cleanup.
+hard-linked files remain forbidden. Content-verified frozen source bundles and
+archives, immutable DEB selection snapshots, input-keyed build contexts and
+images, ccache, and virtual environments are reusable state and remain outside
+ordinary cycle cleanup. Any upstream bundle partial, live input-freeze staging,
+freeze prelaunch/abort transaction, foreground upstream payload, matching local
+DEB output-validation scratch, DEB abort transaction, or DEB source/selection
+partial marker or directory blocks cleanup until its exact lifecycle or snapshot
+recovery path resolves it.
+
+Hosted DEB release staging below `deb-packages/releases/` is not a local
+cycle-named result and remains for operator review; cycle cleanup does not
+delete it implicitly. A successful attempt retains
+`releases/run-<run-id>-attempt-<n>/` with exactly the two tar assets,
+`release-notes.md`, `publication.json`, and the two hidden distribution
+container ownership records; interrupted staging is preserved for explicit
+review.
+
+Local `deb-remove` retains an immutable final status, matching hashed log, and
+removal transaction for both successful and failed collected builds, then
+removes only runtime ownership. A validated success also retains its output tar;
+a failed result must retain no output. Digest-confirmed cycle cleanup removes
+the status, log, and removal transaction plus the tar only when validation
+succeeded, and refuses an incomplete set, orphan output, active package runtime,
+changed digest, or owned package container.
+Package source bundles, immutable selection snapshots, and input-keyed,
+label-verified builder images are reusable state; each package result remains
+bound to the actual immutable image ID it executed.
 
 ## Authority boundary
 
 The automation may verify/fetch refs read-only, fast-forward local `master`,
 perform an explicitly invoked local `develop` rebase, create and remove exact
-owned isolated workspaces, remove a digest-confirmed finalized artifact cycle,
-update case files from a verified workspace, apply or remove patches in a clean
-non-master host worktree, run tests, and print status.
+owned isolated workspaces, recover exact marker-backed case/workspace staging
+and removal or case-update transactions, remove a digest-confirmed finalized
+artifact cycle, update case files from a verified workspace, apply or remove
+patches in a clean non-master host worktree, run tests, and print status.
 
 No target creates a new content commit automatically. `develop-rebase` only
-replays existing fork-only commits onto verified master and therefore changes
-their local identities. The automation never pushes, force-updates or mutates
-remote refs, runs `gh repo sync`, creates or edits a pull request, changes the
-default branch, or changes global Git configuration. An agent creates a new
-commit only after explicit current-conversation authorization. The operator
-reviews and performs all remote publication and default-branch actions.
+replays existing fork-only commits onto fetched fork master and therefore changes
+their local identities. The hosted-only `ci-master-sync` target may only perform
+the exact non-forced fork-master sync defined above. The hosted-only
+`ci-deb-release` target may only create its unique draft/prerelease, package tag,
+and two validated tar assets. If publication fails, it may delete only the
+release it just created and its tag while the tag still targets the dispatched
+checkout commit, deleting and verifying the tag first and the immutable release
+ID last. A retry may additionally apply that ordered rollback to the exact
+draft/tag of an earlier failed attempt of that same hosted workflow run after
+validating its Actions record and embedded transaction; published, tag-only, or
+ambiguous state remains untouched. All other automation never pushes,
+force-updates or mutates remote refs or releases, creates or edits a pull
+request, changes the default branch, or changes global Git configuration.
+Agents invoke neither hosted mutation target. An agent creates a new commit
+only after explicit current-conversation authorization. The operator reviews
+and performs all branch publication and default-branch actions.
