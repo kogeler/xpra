@@ -140,7 +140,8 @@ copyright notices, or documentation, while paths, modes, executable data,
 configuration, test assertions, and runner behavior are identical, classify it
 as non-semantic. Run resolution, whitespace, and fork-control checks only; do
 not launch focused, native, matrix, or live jobs. State the comparison in the
-handoff. Any other change follows the full validation ladder.
+handoff. A rebase changes the embedded source and never qualifies for this
+exception. Any other change follows the full validation ladder.
 
 Review the staged source representation and stored patch representation. Then
 restore the committed source tree:
@@ -204,6 +205,14 @@ Before applying the duty quarantine or accepting any patched full run, execute
 all three clean `quarantine*` gates from `test-quarantine.md`. Remove or narrow
 every entry that is green on the new source; forward applicability alone is
 never evidence that a quarantine remains necessary.
+
+An upstream rebase always invalidates the previous functional acceptance,
+including when every patch still applies byte-for-byte. Run the complete
+offline fork-control suite, every production case in `tests-only` mode, every
+patched focused and native gate, all three complete upstream workflow legs, and
+all five fixed positive live profiles. A new author-test failure may enter the
+single quarantine only after the same module fails on this exact clean source;
+then rerun the quarantine gates and complete patched matrix.
 
 Refresh divergent cases one at a time using the apply/edit/update/unapply cycle.
 Run focused checks after each case, then the stack gates. Finish with a clean:

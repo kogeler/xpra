@@ -32,8 +32,9 @@ been verified. The already frozen source bundle and a selection snapshot below
 published through container start, tar delivery, and the ready-byte handshake;
 the retained lifecycle lock descriptor is inherited by selection freezing,
 `podman create`, `podman start`, and the payload-streaming child. The image-cache
-lock is held across the same immutable-ID use handoff. A crash therefore leaves
-either the normal owner or an exact prelaunch owner that `test-status` can
+lock is held by the Python starter across the same immutable-ID use handoff but
+is not inherited by Podman's long-lived networking helper. A crash therefore
+leaves either the normal owner or an exact prelaunch owner that `test-status` can
 inspect and `test-abort` can recover after the recorded starter is no longer
 active.
 
@@ -55,9 +56,11 @@ If it is absent, follow the durable image-build sequence in
 pull or rebuild its environment. Test jobs inspect that cache entry and create
 their container from the returned immutable image ID, never from the mutable tag
 alone. Retained `image-builds/.image-cache.lock` serializes cache creation,
-immutable-ID inspection/use handoff, and explicit removal. Podman build and
-container-start children inherit the open lock, so a mutable tag cannot change
-between validation and use.
+immutable-ID inspection/use handoff, and explicit removal. Podman image-build
+children inherit the open lock. A detached container's Python starter instead
+holds the lock itself through validation, immutable-ID handoff, and payload
+delivery, so a mutable tag cannot change between validation and use and no
+long-lived networking helper retains the lease.
 
 `test-image-cache-remove` takes that same lock and refuses deletion while any
 matching image-build or test prelaunch/owner still leases the image. Cleanup may
@@ -92,7 +95,7 @@ make -C fork-maintenance stack-check STACK=develop
 Resolution must report only `apply` or exact `already-present`. A divergent or
 ambiguous patch stops the ladder.
 
-## Do not spend test resources on non-semantic refreshes
+## Unchanged-base non-semantic refreshes
 
 Before `test-start`, compare the exact old and new applied trees. Do not start
 container tests when the embedded source is unchanged and the only differences
@@ -101,7 +104,10 @@ modes, executable data, configuration, test assertions, source
 selection/application, build commands, and runner behavior. Refresh derived
 digests, resolve the selection, run whitespace and fork-control checks, and
 report the proof instead. Any uncertainty or semantic difference resumes the
-normal ladder.
+normal ladder. This exception never spans an upstream rebase. After
+`develop-rebase`, run the clean quarantine reassessment, tests-only controls,
+patched focused/native gates, and every full leg even when the patch files did
+not change.
 
 ## Focused tests
 
@@ -172,6 +178,13 @@ make -C fork-maintenance test-wait RUN=develop-full-no-compat-01
 All three legs are required locally even if upstream marks Cython-heavy CI
 non-blocking. The container mirrors workflow dependencies and commands, but it
 does not claim to be the GitHub-hosted runner image.
+
+After an explicit upstream rebase these three legs are mandatory as the full
+repository-author test suite for the rebased source. A failure is not added to
+the quarantine from the patched run alone: first reproduce its exact module on
+the clean embedded source in the same leg, update only the single duty
+quarantine when that control proves it is upstream-owned, and rerun the clean
+quarantine gates plus all three patched legs.
 
 The fork's hosted `develop` workflow fans the same three patched legs out to
 three independent matrix runners. Every runner uses the same thin entry point:
