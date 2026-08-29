@@ -12,6 +12,7 @@ LIVE_VENV := $(shell $(PYTHON) $(AUTOMATION_ROOT)/infra/live/job.py environment-
 LIVE_PYTHON := $(LIVE_VENV)/bin/python
 LIVE_JOB_BOOTSTRAP := $(PYTHON) $(AUTOMATION_ROOT)/infra/live/job.py
 LIVE_JOB := $(LIVE_PYTHON) $(AUTOMATION_ROOT)/infra/live/job.py
+LIVE_CONFIG := $(PYTHON) $(AUTOMATION_ROOT)/infra/live/live_config.py
 UPSTREAM_TESTS := $(AUTOMATION_ROOT)/infra/upstream-tests
 DEB_PACKAGES := $(AUTOMATION_ROOT)/infra/deb-packages
 RUFF ?= ruff
@@ -31,6 +32,7 @@ H264_CLIENT_POLICY ?= strict
 ALPHA_SCENARIOS ?= default
 APPLICATION ?= zed
 LIFECYCLE ?= application-exit
+NETWORK_PROFILE ?= $(shell $(LIVE_CONFIG) default-profile)
 RENDER_NODE ?=
 ZED_DIRECTORY ?=
 ALLOW_PATH_CHANGE ?= 0
@@ -47,6 +49,7 @@ export XPRA_LAB_H264_CLIENT_POLICY := $(H264_CLIENT_POLICY)
 export XPRA_LAB_ALPHA_SCENARIOS := $(ALPHA_SCENARIOS)
 export XPRA_LAB_APPLICATION := $(APPLICATION)
 export XPRA_LAB_LIFECYCLE := $(LIFECYCLE)
+export XPRA_LAB_NETWORK_PROFILE := $(NETWORK_PROFILE)
 export XPRA_LAB_RENDER_NODE := $(RENDER_NODE)
 export XPRA_LAB_ZED_DIRECTORY := $(ZED_DIRECTORY)
 export XPRA_LAB_SELECTOR := $(SELECTOR)
@@ -71,8 +74,9 @@ AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_zed.sh
 	test-patch-check test-focused test-quarantine test-quarantine-cython \
 	test-quarantine-no-compat test-wayland test-libyuv \
 	test-full test-full-cython test-full-no-compat \
-	live-start live-status live-logs live-wait live-collect live-remove live-abort \
+	live-profile-list live-start live-status live-logs live-wait live-collect live-remove live-abort \
 	live-rgb live-h264 live-xpra-detach live-xpra-transport-loss live-xpra-hardware \
+	live-xpra-opengl-hardware \
 	deb-start deb-status deb-logs deb-wait deb-collect deb-remove deb-abort
 
 help:
@@ -131,6 +135,9 @@ help:
 		'    Discard an owned uncollected running/lost or stale completed image build' \
 		'    IMAGE_TAG_SUFFIX isolates smoke builds' \
 		'make -C fork-maintenance live-h264 STACK=develop RUN=unique-name' \
+		'make -C fork-maintenance live-profile-list' \
+		'    List tracked client network profiles; profiles.yml supplies the default' \
+		'make -C fork-maintenance live-xpra-opengl-hardware STACK=develop RUN=unique-name' \
 		'make -C fork-maintenance live-wait RUN=unique-name' \
 		'make -C fork-maintenance live-abort RUN=unique-name' \
 		'    Run or abort a durable physical-GPU profile; outputs stay below .artifacts/' \
@@ -151,6 +158,7 @@ check: artifact-boundary ci-layout-check
 	@$(PYTHON) tools/test_contrib.py
 	@$(PYTHON) tools/test_background_job.py
 	@PYTHONPATH="$(AUTOMATION_ROOT)/tools" $(PYTHON) tools/test_container_payload.py
+	@PYTHONPATH="$(AUTOMATION_ROOT)/tools" $(PYTHON) tools/test_podman_policy.py
 	@$(MAKE) --no-print-directory -C "$(DEB_PACKAGES)" check
 	@$(PYTHON) -m unittest discover -s infra/live -p 'test_job.py'
 	@$(PYTHON) -m unittest discover -s infra/upstream-tests -p 'test_*.py'
@@ -345,7 +353,10 @@ live-options-check:
 	@$(PYTHON) infra/live/profiles.py \
 		"$${XPRA_LAB_APPLICATION}" "$${XPRA_LAB_LIFECYCLE}" \
 		"$${XPRA_LAB_ENCODING}" "$${XPRA_LAB_H264_CLIENT_POLICY}" \
-		"$${XPRA_LAB_ALPHA_SCENARIOS}"
+		"$${XPRA_LAB_ALPHA_SCENARIOS}" "$${XPRA_LAB_NETWORK_PROFILE}"
+
+live-profile-list:
+	@$(LIVE_CONFIG) list-profiles
 
 test-image:
 	@$(MAKE) --no-print-directory -C "$(UPSTREAM_TESTS)" image \
@@ -386,6 +397,7 @@ live-start: isolated-start-check selector-check run-name-check live-options-chec
 		--h264-client-policy "$${XPRA_LAB_H264_CLIENT_POLICY}" \
 		--lifecycle "$${XPRA_LAB_LIFECYCLE}" \
 		--alpha-scenarios "$${XPRA_LAB_ALPHA_SCENARIOS}" \
+		--network-profile "$${XPRA_LAB_NETWORK_PROFILE}" \
 		--selection "$${XPRA_LAB_SELECTOR}"; \
 	if [[ -n "$${XPRA_LAB_RENDER_NODE}" ]]; then set -- "$$@" --render-node "$${XPRA_LAB_RENDER_NODE}"; fi; \
 	if [[ -n "$${XPRA_LAB_ZED_DIRECTORY}" ]]; then set -- "$$@" --zed-directory "$${XPRA_LAB_ZED_DIRECTORY}"; fi; \
@@ -417,6 +429,11 @@ live-xpra-transport-loss:
 live-xpra-hardware:
 	@$(MAKE) --no-print-directory live-start \
 		APPLICATION=hardware LIFECYCLE=application-exit ENCODING=h264 \
+		H264_CLIENT_POLICY=adaptive-alpha ALPHA_SCENARIOS=default
+
+live-xpra-opengl-hardware:
+	@$(MAKE) --no-print-directory live-start \
+		APPLICATION=opengl LIFECYCLE=application-exit ENCODING=h264 \
 		H264_CLIENT_POLICY=adaptive-alpha ALPHA_SCENARIOS=default
 
 deb-policy-check:

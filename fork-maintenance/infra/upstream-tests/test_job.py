@@ -647,6 +647,31 @@ class CiImageTest(unittest.TestCase):
 
 
 class BackgroundContainerTest(unittest.TestCase):
+    def test_runtime_uses_the_bounded_upstream_user_namespace(self) -> None:
+        args = argparse.Namespace(
+            patch_mode="patched",
+            selection="stacks/develop",
+            source="2" * 40,
+            source_head="3" * 40,
+            source_remote="origin",
+            workflow_sha256="4" * 64,
+        )
+        self.assertEqual(
+            job.test_runtime_options(args, "5" * 64)[:4],
+            [
+                "--userns",
+                "keep-id:uid=1000,gid=1000,size=2048",
+                "--user",
+                "1000:1000",
+            ],
+        )
+
+    def test_command_rejects_an_unbounded_user_namespace(self) -> None:
+        with self.assertRaisesRegex(job.JobError, "explicit size"):
+            job.command(
+                ["podman", "create", "--userns=keep-id:uid=1000,gid=1000", "image"]
+            )
+
     def test_lifecycle_lock_reuses_a_stale_unlocked_file(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             logs = Path(raw)

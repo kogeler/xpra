@@ -33,6 +33,7 @@ SUPPORTED_GATES = frozenset(
         "full-no-compat",
         "live-rgb",
         "live-wayland-h264-hardware",
+        "live-wayland-opengl-h264-hardware",
     }
 )
 CASE_KINDS = frozenset({"production", "test-quarantine"})

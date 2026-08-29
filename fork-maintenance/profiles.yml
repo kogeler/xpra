@@ -1,0 +1,41 @@
+# Client-side network and quality profiles for every named live acceptance run.
+# Select one with `NETWORK_PROFILE=<name>`; `default_profile` is used otherwise.
+# Loader: infra/live/live_config.py. Integration tests: infra/live/test_job.py.
+# Contract and usage: CONTRACT.md and docs/runbooks/live-tests.md.
+schema: 1
+default_profile: "gigabit_lan"
+profiles:
+  gigabit_lan:
+    min_quality: 90
+    min_speed: 90
+    auto_refresh_delay_seconds: 0.10
+    refresh_rate_hz: 60
+    bandwidth_limit: "0"
+
+  fast_wired:
+    min_quality: 82
+    min_speed: 80
+    auto_refresh_delay_seconds: 0.20
+    refresh_rate_hz: 60
+    bandwidth_limit: "50Mbps"
+
+  mobile_5g:
+    min_quality: 78
+    min_speed: 75
+    auto_refresh_delay_seconds: 0.30
+    refresh_rate_hz: 45
+    bandwidth_limit: "25Mbps"
+
+  mobile_4g:
+    min_quality: 68
+    min_speed: 70
+    auto_refresh_delay_seconds: 0.45
+    refresh_rate_hz: 30
+    bandwidth_limit: "8Mbps"
+
+  power_saving:
+    min_quality: 72
+    min_speed: 70
+    auto_refresh_delay_seconds: 0.50
+    refresh_rate_hz: 30
+    bandwidth_limit: "8Mbps"

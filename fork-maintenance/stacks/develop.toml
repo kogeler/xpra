@@ -18,4 +18,5 @@ list = [
   "full-cython",
   "full-no-compat",
   "live-wayland-h264-hardware",
+  "live-wayland-opengl-h264-hardware",
 ]

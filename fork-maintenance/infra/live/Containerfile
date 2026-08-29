@@ -144,6 +144,7 @@ RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         dbus-x11 \
         gir1.2-gtk-3.0 \
+        glmark2-wayland \
         iproute2 \
         libasound2t64 \
         libcairo2 \

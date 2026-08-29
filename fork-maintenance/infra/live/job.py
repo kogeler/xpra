@@ -21,12 +21,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import live_config
 from profiles import (
     ALPHA_SCENARIOS,
     APPLICATIONS,
+    DEFAULT_NETWORK_PROFILE,
     H264_ACCEPTANCE_POLICIES,
     H264_CLIENT_POLICIES,
     LIFECYCLES,
+    NETWORK_PROFILES,
     ProfileError,
     validate_profile,
 )
@@ -39,6 +42,7 @@ sys.path.insert(0, str(TOOLS_ROOT))
 
 import background_job
 import container_payload
+import podman_policy
 
 live_run: Any | None = None
 
@@ -46,12 +50,17 @@ RUNNER = INFRA_ROOT / "run.py"
 SUPERVISOR = Path(__file__).resolve()
 BACKGROUND_SUPERVISOR = TOOLS_ROOT / "background_job.py"
 PAYLOAD_HELPER = TOOLS_ROOT / "container_payload.py"
+PODMAN_POLICY = TOOLS_ROOT / "podman_policy.py"
+LIVE_CONFIG_MODULE = INFRA_ROOT / "live_config.py"
+NETWORK_PROFILES_CONFIG = LAB_ROOT / "profiles.yml"
+LIVE_CLI_CONFIG = LAB_ROOT / "live-cli.yml"
 SELECTION_TOOL = LAB_ROOT / "infra" / "upstream-tests" / "selection.py"
 HARNESS_INPUTS = (
     INFRA_ROOT / ".containerignore",
     INFRA_ROOT / "Containerfile",
     INFRA_ROOT / "interaction_fixture.py",
     INFRA_ROOT / "job.py",
+    LIVE_CONFIG_MODULE,
     INFRA_ROOT / "profiles.py",
     INFRA_ROOT / "requirements.txt",
     INFRA_ROOT / "run.py",
@@ -61,6 +70,9 @@ HARNESS_INPUTS = (
     SELECTION_TOOL,
     BACKGROUND_SUPERVISOR,
     PAYLOAD_HELPER,
+    PODMAN_POLICY,
+    NETWORK_PROFILES_CONFIG,
+    LIVE_CLI_CONFIG,
 )
 ARTIFACT_ROOT = PROJECT_ROOT / ".artifacts"
 STATE_ROOT = ARTIFACT_ROOT / "fork-maintenance"
@@ -102,6 +114,10 @@ def command(
     capture: bool = True,
     pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
+    try:
+        podman_policy.validate_podman_argv(argv)
+    except podman_policy.PodmanPolicyError as error:
+        raise JobError(str(error)) from error
     result = subprocess.run(
         argv,
         check=False,
@@ -743,6 +759,8 @@ def load_record(run: str, *, require_current: bool = True) -> dict[str, Any]:
         raise JobError("live-job ownership record has an invalid H.264 client policy")
     if record.get("alpha_scenarios") not in ALPHA_SCENARIOS:
         raise JobError("live-job ownership record has invalid alpha scenarios")
+    if record.get("network_profile") not in NETWORK_PROFILES:
+        raise JobError("live-job ownership record has an invalid network profile")
     selection = record.get("selection")
     if selection is not None and (
         not isinstance(selection, str) or not SELECTOR_RE.fullmatch(selection)
@@ -1403,6 +1421,7 @@ def _start_locked(args: argparse.Namespace, run: str) -> int:
             encoding=args.encoding,
             h264_client_policy=args.h264_client_policy,
             alpha_scenarios=args.alpha_scenarios,
+            network_profile_name=args.network_profile,
         )
     except ProfileError as error:
         raise JobError(str(error)) from error
@@ -1553,6 +1572,7 @@ def _start_locked(args: argparse.Namespace, run: str) -> int:
             "input_provenance": input_provenance,
             "job_id": job_id,
             "lifecycle": args.lifecycle,
+            "network_profile": args.network_profile,
             "owner": OWNER,
             "render_node": render_node,
             "result_report": str(result_path(run)),
@@ -1576,6 +1596,8 @@ def _start_locked(args: argparse.Namespace, run: str) -> int:
             args.lifecycle,
             "--alpha-scenarios",
             args.alpha_scenarios,
+            "--network-profile",
+            args.network_profile,
             "--run-id",
             run,
             "--state-root",
@@ -1961,6 +1983,26 @@ def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
     return input_checksum_validation(root / "inputs", source)
 
 
+def network_profile_validation(
+    payload: dict[str, Any],
+    record: dict[str, Any],
+) -> bool:
+    """Bind every scenario to the selected frozen client option profile."""
+    profile_name = record.get("network_profile")
+    try:
+        expected_options = list(live_config.network_profile(str(profile_name)).client_options())
+    except live_config.LiveConfigError:
+        return False
+    scenarios = payload.get("scenarios")
+    return isinstance(scenarios, list) and bool(scenarios) and all(
+        isinstance(scenario, dict)
+        and scenario.get("network_profile") == profile_name
+        and isinstance(scenario.get("client"), dict)
+        and scenario["client"].get("network_options") == expected_options
+        for scenario in scenarios
+    )
+
+
 def report_validation(
     run: str,
     record: dict[str, Any],
@@ -2010,6 +2052,11 @@ def report_validation(
         "lifecycle": payload.get("lifecycle_profile") == record["lifecycle"]
         and isinstance(invocation, dict)
         and invocation.get("lifecycle") == record["lifecycle"],
+        "network_profile": payload.get("network_profile")
+        == record["network_profile"]
+        and isinstance(invocation, dict)
+        and invocation.get("network_profile") == record["network_profile"]
+        and network_profile_validation(payload, record),
         "result": report_result_value == "passed",
         "run_id": isinstance(invocation, dict) and invocation.get("run_id") == run,
         "render_node": isinstance(invocation, dict)
@@ -2468,6 +2515,11 @@ def parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--selection", required=True)
     start_parser.add_argument(
         "--alpha-scenarios", choices=ALPHA_SCENARIOS, default="default"
+    )
+    start_parser.add_argument(
+        "--network-profile",
+        choices=NETWORK_PROFILES,
+        default=DEFAULT_NETWORK_PROFILE,
     )
     start_parser.add_argument("--render-node")
     start_parser.add_argument("--zed-directory")
