@@ -2476,13 +2476,13 @@ def ci_master_sync(repo: Path) -> MasterSyncState:
     )
 
 
-def ci_start_check(repo: Path) -> IsolatedState:
-    """Locate the master boundary already embedded in pushed develop."""
+def embedded_develop_state(repo: Path, purpose: str) -> IsolatedState:
+    """Locate the immutable source boundary already embedded in ``develop``."""
     verify_repo(repo, ("origin",))
     artifact_boundary_check(repo)
     branch = current_branch(repo)
     if branch != INTEGRATION_BRANCH:
-        fail(f"CI checkout must stay on {INTEGRATION_BRANCH}")
+        fail(f"{purpose} must stay on {INTEGRATION_BRANCH}")
     head = rev_parse(repo, "HEAD")
     status = porcelain(repo)
     unexpected_dirty = [
@@ -2490,7 +2490,7 @@ def ci_start_check(repo: Path) -> IsolatedState:
     ]
     if unexpected_dirty:
         fail(
-            "CI refuses host Xpra source changes; only fork control paths may "
+            f"{purpose} refuses host Xpra source changes; only fork control paths may "
             f"be dirty: {unexpected_dirty}"
         )
 
@@ -2503,7 +2503,7 @@ def ci_start_check(repo: Path) -> IsolatedState:
         or not GIT_SHA_RE.fullmatch(source_commits[0])
     ):
         fail(
-            f"pushed {INTEGRATION_BRANCH} and checkout origin/{BASE_BRANCH} "
+            f"{INTEGRATION_BRANCH} and cached origin/{BASE_BRANCH} "
             "have no single usable history boundary"
         )
     source_commit = source_commits[0]
@@ -2520,9 +2520,13 @@ def ci_start_check(repo: Path) -> IsolatedState:
     if (
         current_branch(repo) != branch
         or rev_parse(repo, "HEAD") != head
+        or cached_master(repo, "origin") != source_tip
         or porcelain(repo) != status
     ):
-        fail("repository branch, HEAD, or worktree changed while preparing CI source")
+        fail(
+            "repository branch, HEAD, cached origin/master, or worktree changed "
+            "while locating the embedded source"
+        )
     return IsolatedState(
         branch=branch,
         head=head,
@@ -2531,6 +2535,11 @@ def ci_start_check(repo: Path) -> IsolatedState:
         source_in_head=True,
         worktree_status=status,
     )
+
+
+def ci_start_check(repo: Path) -> IsolatedState:
+    """Locate the source boundary already embedded in pushed ``develop``."""
+    return embedded_develop_state(repo, "CI checkout")
 
 
 def checkout_source_check(repo: Path) -> CheckoutSourceState:
@@ -2669,52 +2678,8 @@ def isolated_dirty_names(repo: Path) -> tuple[str, ...]:
 
 
 def isolated_start_check(repo: Path) -> IsolatedState:
-    """Freeze current fork master without changing the host branch or source tree."""
-    verify_repo(repo, ("origin",))
-    artifact_boundary_check(repo)
-    branch = current_branch(repo)
-    if branch != INTEGRATION_BRANCH:
-        fail(f"isolated patch work must stay on {INTEGRATION_BRANCH}")
-    head = rev_parse(repo, "HEAD")
-    status = porcelain(repo)
-    unexpected_dirty = [path for path in isolated_dirty_names(repo) if not allowed_develop_path(path)]
-    if unexpected_dirty:
-        fail(
-            "isolated patch work refuses host Xpra source changes; only fork control "
-            f"paths may be dirty: {unexpected_dirty}"
-        )
-
-    source_commit = sync_repo(repo)
-    if current_branch(repo) != branch or rev_parse(repo, "HEAD") != head or porcelain(repo) != status:
-        fail("repository branch, HEAD, or worktree changed while freezing isolated source")
-
-    merge_base = git(repo, "merge-base", "--all", source_commit, head, check=False)
-    fork_bases = tuple(merge_base.stdout.splitlines())
-    if (
-        merge_base.returncode
-        or len(fork_bases) != 1
-        or not GIT_SHA_RE.fullmatch(fork_bases[0])
-    ):
-        fail("develop and current master have no single usable history boundary")
-    fork_base = fork_bases[0]
-    committed = downstream_committed_paths(repo, fork_base, head)
-    unexpected_committed = [path for path in committed if not allowed_develop_path(path)]
-    if unexpected_committed:
-        fail(
-            "develop contains committed Xpra source changes outside the patch queue: "
-            f"{unexpected_committed}"
-        )
-    merges = git(repo, "rev-list", "--merges", f"{fork_base}..{head}").stdout.splitlines()
-    if merges:
-        fail(f"develop contains fork-side merge commits: {merges}")
-    return IsolatedState(
-        branch=branch,
-        head=head,
-        source_commit=source_commit,
-        fork_base=fork_base,
-        source_in_head=is_ancestor(repo, source_commit, head),
-        worktree_status=status,
-    )
+    """Freeze the source boundary embedded in ``develop`` without any live query."""
+    return embedded_develop_state(repo, "isolated patch work")
 
 
 def require_workspace_name(name: str) -> str:
@@ -6930,10 +6895,8 @@ def develop_rebase(repo: Path) -> str:
 
 def develop_check(repo: Path) -> dict[str, Any]:
     require_clean(repo)
-    base = sync_repo(repo)
-    if current_branch(repo) != INTEGRATION_BRANCH:
-        fail(f"current branch must be {INTEGRATION_BRANCH}")
-    require_rebased_develop(repo, base)
+    state = embedded_develop_state(repo, "develop check")
+    base = state.source_commit
     changed = git(repo, "diff", "--name-only", f"{base}..HEAD").stdout.splitlines()
     unexpected = [
         path
@@ -7200,10 +7163,19 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("doctor", help="validate the in-repository automation boundary")
     commands.add_parser("repo-status", help="show local branch and cached master refs")
-    commands.add_parser("repo-sync", help="fetch and verify live fork master")
+    commands.add_parser(
+        "repo-sync",
+        help="explicit upstream-refresh gate: fetch and verify equal master refs",
+    )
     commands.add_parser("master-update", help="fast-forward local master to fetched fork master")
-    commands.add_parser("develop-rebase", help="rebase clean develop onto local fork master")
-    commands.add_parser("patch-start-check", help="verify sync and rebase before patch work")
+    commands.add_parser(
+        "develop-rebase",
+        help="explicitly rebase develop during an operator-selected upstream refresh",
+    )
+    commands.add_parser(
+        "patch-start-check",
+        help="verify an explicitly completed upstream sync and develop rebase",
+    )
     commands.add_parser(
         "isolated-start-check",
         help="verify dirty-control-plane-safe isolated patch work without switching branches",
@@ -7340,8 +7312,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"master_commit={state.master_commit}")
         print("checkout_source_check=passed")
     elif args.command == "ci-layout-check":
-        verify_repo(repo, ("origin",))
-        base = rev_parse(repo, f"refs/remotes/origin/{BASE_BRANCH}")
+        base = embedded_develop_state(repo, "CI layout check").source_commit
         print_resolution(ci_layout_check(repo, base))
         print("ci_layout_check=passed")
     elif args.command == "ci-prepare":
@@ -7388,7 +7359,7 @@ def main(argv: list[str] | None = None) -> int:
         selection = (
             f"cases/{args.case}" if args.command == "patch-check" else f"stacks/{args.stack}"
         )
-        base = patch_start_check(repo)
+        base = isolated_start_check(repo).source_commit
         print_resolution(selection_resolution(repo, base, selection))
         print("patch_check=passed")
     elif args.command in {"patch-apply", "stack-apply"}:

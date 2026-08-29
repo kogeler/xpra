@@ -24,6 +24,8 @@ import tempfile
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime
 from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -97,10 +99,24 @@ RELEASE_WORKFLOW = ".github/workflows/deb-packages.yml"
 RELEASE_TRANSACTION_PREFIX = "<!-- xpra-deb-transaction:"
 RELEASE_LIST_PAGE_SIZE = 100
 MAX_RELEASE_LIST_PAGES = 100
+RELEASE_RETENTION_COUNT = 3
 
 
 class JobError(RuntimeError):
     """Raised when a package runtime or result cannot be trusted."""
+
+
+@dataclass(frozen=True)
+class PublishedRelease:
+    """Exact remote identity retained in a DEB release transaction body."""
+
+    assets: dict[str, dict[str, Any]]
+    body: str
+    commit: str
+    published_at: datetime
+    release_id: int
+    tag: str
+    version: str
 
 
 class _ArMemberReader(io.RawIOBase):
@@ -1962,6 +1978,8 @@ def validate_package_tar(path: Path, expected: argparse.Namespace) -> dict[str, 
             if not isinstance(entry, dict):
                 raise JobError("package manifest entry is invalid")
             name = str(entry.get("name", ""))
+            if "-dbgsym_" in name:
+                raise JobError(f"debug-symbol DEB packages are forbidden: {name}")
             if (
                 not name.startswith("xpra")
                 or not name.endswith(".deb")
@@ -1977,6 +1995,8 @@ def validate_package_tar(path: Path, expected: argparse.Namespace) -> dict[str, 
             if entry.get("sha256") != digest or entry.get("size") != package.stat().st_size:
                 raise JobError(f"manifest DEB metadata does not match: {name}")
             fields = deb_control_fields(package)
+            if fields["package"].endswith("-dbgsym"):
+                raise JobError(f"debug-symbol DEB packages are forbidden: {name}")
             if (
                 any(entry.get(key) != value for key, value in fields.items())
                 or not fields["package"].startswith("xpra")
@@ -3146,6 +3166,7 @@ def authenticated_releases() -> tuple[dict[str, Any], ...]:
     """List every release, including authenticated draft results, with a hard bound."""
     releases: list[dict[str, Any]] = []
     seen_ids: set[int] = set()
+    seen_tags: set[str] = set()
     for page in range(1, MAX_RELEASE_LIST_PAGES + 1):
         batch = gh_json_list(
             [
@@ -3172,7 +3193,10 @@ def authenticated_releases() -> tuple[dict[str, Any], ...]:
                 raise JobError("GitHub release listing contains an invalid identity")
             if release_id in seen_ids:
                 raise JobError("GitHub release listing contains a duplicate immutable ID")
+            if tag in seen_tags:
+                raise JobError("GitHub release listing contains a duplicate tag identity")
             seen_ids.add(release_id)
+            seen_tags.add(tag)
             releases.append(release)
         if len(batch) < RELEASE_LIST_PAGE_SIZE:
             return tuple(releases)
@@ -3225,7 +3249,7 @@ def validate_remote_release(
         release.get("tag_name") != tag
         or release.get("target_commitish") != github_sha
         or (draft is not None and release.get("draft") is not draft)
-        or release.get("prerelease") is not True
+        or release.get("prerelease") is not False
         or release.get("name") != title
         or release.get("body") != notes_body
     ):
@@ -3396,6 +3420,60 @@ def parse_release_transaction(body: object) -> dict[str, Any]:
     return record
 
 
+def release_transaction_tag(record: dict[str, Any]) -> str:
+    return (
+        f"kogeler-deb-{record['version']}-run{record['run_id']}"
+        f"-attempt{record['attempt']}"
+    )
+
+
+def github_release_timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise JobError("GitHub DEB release has an invalid publication timestamp")
+    try:
+        timestamp = datetime.fromisoformat(f"{value[:-1]}+00:00")
+    except ValueError as error:
+        raise JobError(
+            "GitHub DEB release has an invalid publication timestamp"
+        ) from error
+    if timestamp.utcoffset() is None:
+        raise JobError("GitHub DEB release publication timestamp has no timezone")
+    return timestamp
+
+
+def validate_published_deb_release(
+    release: dict[str, Any],
+) -> PublishedRelease | None:
+    """Return exact owned publication identity, preserving unrelated releases."""
+    if release.get("draft") is True:
+        return None
+    if release.get("draft") is not False:
+        raise JobError("GitHub release listing contains an invalid draft state")
+    body = release.get("body")
+    if not isinstance(body, str) or RELEASE_TRANSACTION_PREFIX not in body:
+        return None
+    transaction = parse_release_transaction(body)
+    tag = release_transaction_tag(transaction)
+    release_id = validate_remote_release(
+        release,
+        tag=tag,
+        title=transaction["version"],
+        notes_body=body,
+        github_sha=transaction["commit"],
+        asset_metadata=transaction["assets"],
+        draft=False,
+    )
+    return PublishedRelease(
+        assets=transaction["assets"],
+        body=body,
+        commit=transaction["commit"],
+        published_at=github_release_timestamp(release.get("published_at")),
+        release_id=release_id,
+        tag=tag,
+        version=transaction["version"],
+    )
+
+
 def release_notes_body(
     *,
     github_sha: str,
@@ -3414,8 +3492,8 @@ def release_notes_body(
             f"- upstream revision: `r{revision}`",
             "",
             (
-                "Each asset is a tar containing all generated `.deb` files, "
-                "`manifest.json`, and `SHA256SUMS`."
+                "Each asset is a tar containing all generated non-debug `.deb` "
+                "files, `manifest.json`, and `SHA256SUMS`."
             ),
             "",
             release_transaction_marker(transaction),
@@ -3464,11 +3542,11 @@ def reconcile_prior_release_attempts(
     selection: str,
     revision: int,
     asset_metadata: dict[str, dict[str, Any]],
-) -> None:
-    """Recover exact orphan drafts left by killed prior attempts of this run."""
+) -> str | None:
+    """Recover an exact orphan draft or resume exact published retention."""
     current_attempt = int(attempt)
     releases = authenticated_releases()
-    for prior_attempt in range(1, current_attempt):
+    for prior_attempt in range(current_attempt - 1, 0, -1):
         tag = f"kogeler-deb-{version}-run{run_id}-attempt{prior_attempt}"
         release = listed_release_by_tag(tag, releases)
         observed_tag = tag_commit(tag)
@@ -3478,12 +3556,8 @@ def reconcile_prior_release_attempts(
                     f"prior release attempt has an ambiguous tag without a release: {tag}"
                 )
             continue
-        if release.get("draft") is not True:
-            raise JobError(
-                f"prior GitHub release attempt is already published: {tag}"
-            )
         if observed_tag is not None and observed_tag != github_sha:
-            raise JobError("prior GitHub draft tag target changed; refusing recovery")
+            raise JobError("prior GitHub release tag target changed; refusing recovery")
         transaction = parse_release_transaction(release.get("body"))
         if (
             transaction["run_id"] != int(run_id)
@@ -3515,7 +3589,25 @@ def reconcile_prior_release_attempts(
             revision=revision,
             transaction=transaction,
         )
-        title = f"Kogeler Xpra DEB {version}"
+        title = version
+        if release.get("draft") is False:
+            release_id = validate_remote_release(
+                release,
+                tag=tag,
+                title=title,
+                notes_body=notes_body,
+                github_sha=github_sha,
+                asset_metadata=transaction["assets"],
+                draft=False,
+            )
+            if release_id != release.get("id"):
+                raise JobError(
+                    "prior published GitHub release immutable ID changed"
+                )
+            enforce_release_retention(current_tag=tag)
+            return tag
+        if release.get("draft") is not True:
+            raise JobError("prior GitHub release has an invalid draft state")
         release_id = validate_remote_release(
             release,
             tag=tag,
@@ -3542,6 +3634,7 @@ def reconcile_prior_release_attempts(
             raise JobError(
                 f"prior GitHub release-attempt recovery failed: {'; '.join(errors)}"
             )
+    return None
 
 
 @contextmanager
@@ -3707,6 +3800,120 @@ def rollback_release(
     return errors, release_id
 
 
+def delete_published_deb_release(release: PublishedRelease) -> None:
+    """Delete one exact retained release tag-first, with remote retry authority."""
+    current = gh_optional_json(
+        ["api", f"repos/{RELEASE_REPOSITORY}/releases/{release.release_id}"],
+        "DEB retention candidate",
+    )
+    if current is None:
+        if tag_commit(release.tag) is not None:
+            raise JobError(
+                "retained DEB tag exists without its release; refusing deletion"
+            )
+        return
+    if validate_published_deb_release(current) != release:
+        raise JobError("retained DEB release changed before deletion")
+
+    observed_tag = tag_commit(release.tag)
+    if observed_tag is not None and observed_tag != release.commit:
+        raise JobError("retained DEB release tag target changed; refusing deletion")
+    if observed_tag == release.commit:
+        result = command(
+            [
+                "gh",
+                "api",
+                "--method",
+                "DELETE",
+                f"repos/{RELEASE_REPOSITORY}/git/refs/tags/{release.tag}",
+            ],
+            check=False,
+        )
+        remaining_tag = tag_commit(release.tag)
+        if remaining_tag is not None:
+            raise JobError("retained DEB release tag deletion did not complete")
+        if result.returncode:
+            print(
+                "retained DEB tag deletion returned nonzero after verified absence: "
+                f"{release.tag}",
+                file=sys.stderr,
+            )
+
+    current = gh_optional_json(
+        ["api", f"repos/{RELEASE_REPOSITORY}/releases/{release.release_id}"],
+        "DEB retention candidate after tag deletion",
+    )
+    if current is None:
+        return
+    if validate_published_deb_release(current) != release:
+        raise JobError("retained DEB release changed after tag deletion")
+    result = command(
+        [
+            "gh",
+            "api",
+            "--method",
+            "DELETE",
+            f"repos/{RELEASE_REPOSITORY}/releases/{release.release_id}",
+        ],
+        check=False,
+        capture=False,
+    )
+    remaining = gh_optional_json(
+        ["api", f"repos/{RELEASE_REPOSITORY}/releases/{release.release_id}"],
+        "DEB retention deletion verification",
+    )
+    if remaining is not None:
+        raise JobError("retained DEB release deletion did not complete")
+    if result.returncode:
+        print(
+            "retained DEB release deletion returned nonzero after verified absence: "
+            f"{release.release_id}",
+            file=sys.stderr,
+        )
+
+
+def published_deb_releases(
+    releases: tuple[dict[str, Any], ...],
+) -> tuple[PublishedRelease, ...]:
+    owned: list[PublishedRelease] = []
+    for release in releases:
+        validated = validate_published_deb_release(release)
+        if validated is not None:
+            owned.append(validated)
+    return tuple(
+        sorted(
+            owned,
+            key=lambda release: (release.published_at, release.release_id),
+            reverse=True,
+        )
+    )
+
+
+def enforce_release_retention(*, current_tag: str) -> tuple[str, ...]:
+    """Keep three newest exact DEB releases and preserve every unrelated object."""
+    owned = published_deb_releases(authenticated_releases())
+    current = tuple(release for release in owned if release.tag == current_tag)
+    if len(current) != 1:
+        raise JobError("newly published DEB release is absent from retention listing")
+    retained = owned[:RELEASE_RETENTION_COUNT]
+    if current[0] not in retained:
+        raise JobError("newly published DEB release is not among the newest three")
+    for release in retained:
+        if tag_commit(release.tag) != release.commit:
+            raise JobError("retained DEB release tag does not match its commit")
+
+    expired = owned[RELEASE_RETENTION_COUNT:]
+    for release in reversed(expired):
+        delete_published_deb_release(release)
+
+    observed = published_deb_releases(authenticated_releases())
+    if {release.release_id for release in observed} != {
+        release.release_id for release in retained
+    }:
+        raise JobError("GitHub DEB release retention postcondition is not exact")
+    return tuple(release.tag for release in expired)
+
+
 @publication_interruptible
 def publish_release(
     *,
@@ -3762,7 +3969,7 @@ def publish_release(
                 "-F",
                 "draft=true",
                 "-F",
-                "prerelease=true",
+                "prerelease=false",
             ]
         )
         candidate_id = created.get("id")
@@ -3832,6 +4039,8 @@ def publish_release(
                 f"repos/kogeler/xpra/releases/{release_id}",
                 "-F",
                 "draft=false",
+                "-F",
+                "prerelease=false",
             ]
         )
         if validate_remote_release(
@@ -3847,6 +4056,10 @@ def publish_release(
         if tag_commit(tag) != github_sha:
             raise JobError("published GitHub release tag points at the wrong commit")
         record["stage"] = "published"
+        replace_json(publication, record)
+        expired_tags = enforce_release_retention(current_tag=tag)
+        record["retention_removed_tags"] = list(expired_tags)
+        record["stage"] = "retention-complete"
         replace_json(publication, record)
     except BaseException as error:
         cleanup_errors, rollback_id = rollback_release(
@@ -3982,7 +4195,7 @@ def ci_release(args: argparse.Namespace) -> int:
         encoding="utf-8",
     )
     notes.chmod(0o600)
-    reconcile_prior_release_attempts(
+    recovered_tag = reconcile_prior_release_attempts(
         run_id=run_id,
         attempt=attempt,
         github_sha=github_sha,
@@ -3992,15 +4205,29 @@ def ci_release(args: argparse.Namespace) -> int:
         revision=revision,
         asset_metadata=asset_metadata,
     )
+    if recovered_tag is not None:
+        print(
+            f"recovered published GitHub Release {version} and completed retention "
+            f"(transaction tag {recovered_tag})"
+        )
+        return 0
     publish_release(
         directory=directory,
         tag=tag,
-        title=f"Kogeler Xpra DEB {version}",
+        title=version,
         notes=notes,
         github_sha=github_sha,
         assets=assets,
     )
-    print(f"published GitHub Release {tag} with {len(assets)} assets")
+    print(
+        f"published GitHub Release {version} with {len(assets)} assets "
+        f"(transaction tag {tag})"
+    )
+    print(
+        "release retention keeps at most "
+        f"{RELEASE_RETENTION_COUNT} exact owned DEB releases; publication "
+        "transaction completed"
+    )
     return 0
 
 

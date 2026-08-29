@@ -16,8 +16,9 @@ make -C fork-maintenance workspace-remove WORKSPACE=short-behavior-01
 ```
 
 This is the required pre-commit path when fork-control files are uncommitted.
-It freezes fetched fork master and never switches the host branch or applies the
-production patch to host source. See `isolated-workspaces.md` for clean,
+It freezes the source merge base already embedded in current `develop`, without
+fetching or testing master freshness, and never switches the host branch or
+applies the production patch to host source. See `isolated-workspaces.md` for clean,
 tests-only, path-change, provenance, and cleanup details.
 
 For a complete cycle containing multiple named workspaces and runs, give every
@@ -29,13 +30,13 @@ A new draft starts with `workspace-create ... PATCH_MODE=clean`; its first
 duty case follows the separate admission and rebase rules in
 `test-quarantine.md`.
 
-The remainder of this runbook is the clean host-worktree fallback and the
-publication rebase procedure.
+The remainder of this runbook is the clean host-worktree fallback used only
+when the operator deliberately begins a new upstream adaptation cycle.
 
 ## Host-worktree fallback preconditions
 
-For the clean host-worktree fallback, fetch the fork base and prepare the branch
-in this order:
+Only when the operator chooses to move the queue to a newer upstream base,
+fetch the fork base and prepare the branch in this order:
 
 ```bash
 make -C fork-maintenance repo-sync
@@ -51,11 +52,12 @@ and requires exact fork/canonical equality. If it reports a stale fork, only
 the operator may run the printed non-forced `gh repo sync` command and repeat
 the gate. Resolve every rebase conflict and finish the rebase before
 `patch-start-check`; do not merge an upstream ref into `develop`. Only after
-this sequence may host-worktree source editing begin; the default isolated
-cycle above does not require a branch switch or rebase first.
+this sequence may host-worktree source editing against that new base begin. The
+default isolated cycle, all tests, and live acceptance of current `develop` do
+not require these commands, a branch switch, live equality, or a rebase.
 
 Patch operations refuse `master`, stale or merge-updated `develop`, and a
-temporary branch that does not descend from fully rebased `develop`. A temporary
+temporary branch that does not descend from the refreshed `develop`. A temporary
 branch is supported only for this exceptional clean host-worktree flow; the
 default isolated lifecycle remains on `develop`. Host patch operations also
 refuse a branch that already has a committed source copy on any path owned by
@@ -67,7 +69,7 @@ the selected case.
 make -C fork-maintenance patch-apply CASE=short-behavior-name
 ```
 
-The command resolves the case against current fork master, skips an exact
+The command resolves the case against the explicitly refreshed source, skips an exact
 `already-present` patch, and applies an `apply` patch with
 `git apply --index --whitespace=error-all`. The resulting production and test
 files are staged. No commit is created.
@@ -98,7 +100,7 @@ required notice on copied or derived content and add the `kogeler` line; never
 attribute a downstream-created file to an upstream maintainer.
 
 `patch-update` exports the full staged binary diff, proves that it applies and
-reverses on current master, and atomically derives `fix.patch`,
+reverses on that refreshed source, and atomically derives `fix.patch`,
 `patch_sha256`, and `paths`. For an existing case, the staged path set must
 match its current ownership. When upstream rework genuinely changes that
 boundary, inspect the staged names first and opt in explicitly:
@@ -133,7 +135,7 @@ published outputs by path, mode, and SHA-256 even during phase-only retry. An
 unresolved update blocks all later case updates and cycle cleanup.
 
 Before scheduling tests, compare the old and refreshed applied trees. When the
-master is unchanged and the complete difference is limited to comments,
+embedded source is unchanged and the complete difference is limited to comments,
 copyright notices, or documentation, while paths, modes, executable data,
 configuration, test assertions, and runner behavior are identical, classify it
 as non-semantic. Run resolution, whitespace, and fork-control checks only; do
@@ -171,9 +173,13 @@ Failure rolls back cases already applied during that operation. An integration
 stack never becomes one atomic case patch.
 
 Long or acceptance tests do not require applying patches to the host worktree;
-their runners freeze master and apply the selected queue in isolated source.
+their runners freeze the embedded source and apply the selected queue in isolation.
 
-## Refresh after fork master advances
+## Operator-selected upstream refresh
+
+An advance of any master ref does not itself invalidate or block current
+`develop`. Use this procedure only when the operator intentionally chooses that
+new commit as the next patch-adaptation base.
 
 With a clean checkout:
 
@@ -196,7 +202,7 @@ make -C fork-maintenance stack-check STACK=develop
 
 Before applying the duty quarantine or accepting any patched full run, execute
 all three clean `quarantine*` gates from `test-quarantine.md`. Remove or narrow
-every entry that is green on the new master; forward applicability alone is
+every entry that is green on the new source; forward applicability alone is
 never evidence that a quarantine remains necessary.
 
 Refresh divergent cases one at a time using the apply/edit/update/unapply cycle.
