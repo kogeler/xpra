@@ -19,11 +19,16 @@ make -C fork-maintenance isolated-start-check
 make -C fork-maintenance stack-check STACK=develop
 make -C fork-maintenance ci-layout-check
 make -C fork-maintenance develop-check
-base=$(git merge-base refs/remotes/origin/master HEAD)
-git status --short --branch
-git log --oneline --decorate "$base"..develop
-git diff --stat "$base"..develop
-git diff --check "$base"..develop
+(
+  set -euo pipefail
+  mapfile -t bases < <(git merge-base --all refs/remotes/origin/master HEAD)
+  test "${#bases[@]}" -eq 1
+  base=${bases[0]}
+  git status --short --branch
+  git log --oneline --decorate "$base"..develop
+  git diff --stat "$base"..develop
+  git diff --check "$base"..develop
+)
 ```
 
 This gate uses the unique source merge base already embedded in current
@@ -53,7 +58,7 @@ The handoff states:
 - all three clean quarantine reassessment results on this source when required;
 - after every upstream rebase, the complete offline suite, production
   tests-only controls, focused/native gates, all three full author-test legs,
-  and all five fixed positive live jobs actually completed on this base;
+  and all six fixed positive live jobs actually completed on this base;
 - any required gates still outstanding;
 - whether local commits are signed as required.
 

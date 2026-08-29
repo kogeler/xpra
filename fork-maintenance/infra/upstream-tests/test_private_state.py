@@ -201,6 +201,16 @@ class UpstreamMakeContractTest(unittest.TestCase):
         root_makefile = LAB_MAKEFILE.read_text(encoding="utf-8")
         self.assertIn('SOURCE_COMMIT="$$source_commit"', root_makefile)
 
+    def test_named_jobs_keep_the_embedded_base_after_cached_master_advances(self) -> None:
+        makefile = MAKEFILE.read_text(encoding="utf-8")
+        recipe = makefile.split("background-start:", 1)[1].split(
+            "\nbackground-name-check:",
+            1,
+        )[0]
+        self.assertNotIn('"$(BASE_COMMIT)" = "$(SOURCE_TIP_COMMIT)"', recipe)
+        self.assertIn('--source "$(BASE_COMMIT)"', recipe)
+        self.assertIn('--source-head "$(SOURCE_TIP_COMMIT)"', recipe)
+
     def test_jobs_use_podman_and_the_owned_process_supervisor(self) -> None:
         makefile = MAKEFILE.read_text(encoding="utf-8")
         job = Path(__file__).with_name("job.py").read_text(encoding="utf-8")

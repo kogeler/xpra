@@ -263,9 +263,6 @@ run: selection-check source-snapshot image
 		--source-remote "$(SOURCE_REMOTE)" --workflow-sha256 "$(WORKFLOW_SHA)"
 
 background-start: selection-check source-snapshot image
-	@test "$(BASE_COMMIT)" = "$(SOURCE_TIP_COMMIT)" || { \
-		printf '%s\n' 'named local test jobs require the selected master tip' >&2; exit 2; \
-	}
 	@python3 "$(JOB)" test start "$${XPRA_LAB_BACKGROUND_NAME}" \
 		--target "$${XPRA_LAB_BACKGROUND_TARGET}" \
 		--selection "$${XPRA_LAB_SELECTION}" --patch-mode "$${XPRA_PATCH_MODE}" \

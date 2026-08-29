@@ -11,12 +11,24 @@ moving master refs, require master freshness/equality, switch branches, merge,
 or rebase. Neither path packages `develop`, `.git`, ignored files, credentials,
 or the host working-tree diff.
 
+Cached `origin/master` may later advance to a descendant without changing the
+source selected for a named job. The credential-free bundle records that cached
+tip so it contains and authenticates the history, while the job's separate
+`source` identity remains the unique merge base embedded in `develop`. Named
+background jobs do not require those two commits to be equal.
+
 The source bundle, minimal selection snapshot, and every Podman image build
 context cross stdin through the common validated tar helper. The test source
 and queue are never bind-mounted, and the runner never uses `podman cp` or an
 artifact bind to retrieve results. The one named ccache volume is cache-only.
 Test containers return only their normal log; the entrypoint prints the exact
 selection-resolution digest into that log for collection and validation.
+Detached and hosted test containers use
+`--userns=keep-id:uid=1000,gid=1000,size=2048` with runtime UID/GID 1000. The
+explicit bound is verified on the Ubuntu 26.04 test image and leaves the rest
+of the rootless subordinate-ID range available to other bounded namespaces.
+The common Podman policy rejects `keep-id`, `nomap`, or `auto` without a
+positive `size` and always rejects `--userns=host` before container creation.
 Each exact source bundle has a retained mode-`0600` `.bundle.lock`. Publication
 holds its kernel lock across the bundle child, validates the bundle before an
 atomic no-replace rename, and may recover only its deterministic
@@ -219,8 +231,8 @@ make -C fork-maintenance test-start \
 These targets intentionally invert the result. They return success only after
 the build succeeds and every declared module is still an ignored failure; a
 passing module or a different failure set makes the gate fail as stale. Follow
-`test-quarantine.md` to remove or narrow stale entries before the patched full
-matrix.
+[`test-quarantine.md`](test-quarantine.md) to remove or narrow stale entries
+before the patched full matrix.
 
 ## Failure triage
 
@@ -285,7 +297,8 @@ commands directly.
 
 Prefix every `RUN` and `IMAGE_RUN` with the current cycle identity. Once the
 complete cycle is finalized, reviewed, and individually removed, follow
-`cycle-cleanup.md` to plan and digest-confirm deletion of retained results.
+[`cycle-cleanup.md`](cycle-cleanup.md) to plan and digest-confirm deletion of
+retained results.
 
 Hosted develop test CI is limited to the three upstream unit-test legs. It never
 runs a `live-*` target; physical display, render-node, and hardware-encoder gates

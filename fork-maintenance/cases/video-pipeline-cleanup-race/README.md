@@ -26,14 +26,18 @@ isolated candidate; never edit its digest or path list by hand.
 
 Run the focused cleanup module first, then all three upstream unit-test legs.
 Because the change affects live hardware codec lifetime, the complete
-`develop` stack also requires the fixed adaptive-alpha/default Wayland
-hardware-H.264 profile. Its exact title-bound primary has an initial
+`develop` stack also requires both fixed adaptive-alpha/default Wayland
+hardware-H.264 profiles: one with a title-bound Vulkan `vkcube` primary and one
+with a title-bound native-Wayland `glmark2-wayland` `jellyfish` primary. Each has an initial
 `BGRX`/`RGBX` snapshot and dynamic opaque frame-state proof. Startup layout and
 picture packets remain validated but are not production. An exact stable-tile
 interval bound before auxiliary exit must show predominant H.264 main regions
 and complete per-crop coverage by only exact one-pixel lossless RGB codec edges.
-It must complete the matched VA-API encode/decode, packet-chain, presentation,
-lifecycle, and cleanup boundaries. Every saved source screenshot of the
-separate deterministic transparent GTK auxiliary must prove transparent and
-opaque pixels; it may use only positive WebP or alpha-bearing RGB32 packets and
-may never enter H.264.
+Both must complete matched VA-API encode/decode, packet-chain, presentation,
+lifecycle, and cleanup boundaries; the first additionally proves RADV and the
+second a live non-software AMD Mesa context and changing frames. Every saved
+source screenshot scoped to the common deterministic transparent GTK
+auxiliary's exact window must prove transparent and opaque pixels. These
+asynchronous window samples are not packet-correlated evidence; the auxiliary
+may use only positive WebP or alpha-bearing RGB32 packets and may never enter
+H.264.
