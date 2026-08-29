@@ -13,11 +13,10 @@ The generated source lives below:
 .artifacts/fork-maintenance/upstream-tests/workspaces/<name>/source/
 ```
 
-It is a private detached copy of the exact equal, live-verified
-`origin/master` and `upstream/master` commit. Its local `origin` remote is
-removed immediately.
-The workspace metadata binds the host branch and HEAD, master commit and tree,
-selection and patch digests, resolution, and patch mode.
+It is a private detached copy of the unique source merge base already embedded
+in current `develop`. Its local `origin` remote is removed immediately. The
+workspace metadata binds the host branch and HEAD, embedded source commit and
+tree, selection and patch digests, resolution, and patch mode.
 All workspace operations and fingerprint publication are serialized by retained
 `upstream-tests/workspaces/.lifecycle.lock`.
 
@@ -33,9 +32,10 @@ Remain on `develop` and run:
 make -C fork-maintenance isolated-start-check
 ```
 
-The gate fetches `origin/master` and `upstream/master`, verifies both cached
-refs against live GitHub state, and requires exact fork/canonical equality. It
-permits dirty files only below the fork control boundary:
+The gate locates the unique source merge base of current `develop` and cached
+`origin/master`. The cached ref is a local history anchor only: the command
+does not fetch, query upstream, require master freshness/equality, or rebase.
+It permits dirty files only below the fork control boundary:
 
 - `AGENTS.md`;
 - `.gitignore`;
@@ -61,7 +61,7 @@ make -C fork-maintenance workspace-create \
 Available modes are:
 
 - `patched`: apply the complete forward-applicable case or stack;
-- `tests-only`: apply only its `tests/` paths to unmodified master production
+- `tests-only`: apply only its `tests/` paths to unmodified embedded-source production
   code;
 - `clean`: apply nothing while retaining selection and resolution provenance.
 
@@ -140,7 +140,7 @@ make -C fork-maintenance workspace-update WORKSPACE=wayland-audit-01
 ```
 
 `workspace-update` proves whitespace, full forward application, and exact
-reverse application on the recorded master commit. It atomically derives the
+reverse application on the recorded embedded source commit. It atomically derives the
 case patch, digest, and path list. The only host files it may change are that
 case's `fix.patch` and `case.toml`; host source and index stay untouched.
 Apply/reverse verification runs in the recoverable
@@ -177,7 +177,7 @@ case update and the cycle-clean planner.
 
 ## Build and test
 
-Classify the exported diff before starting a job. If the verified fork master is
+Classify the exported diff before starting a job. If the embedded source is
 unchanged and an exact old/new applied-tree comparison contains only comments,
 copyright notices, or documentation—with identical paths, modes, executable
 data, configuration, test assertions, and runner behavior—this is a
@@ -185,7 +185,7 @@ non-semantic refresh. Resolve the queue and run whitespace plus fork-control
 checks, but do not rerun focused, native, full, or live jobs. Record that proof
 in the handoff. Any uncertainty uses the normal ladder below.
 
-The Ubuntu runner independently freezes the same master commit and selection.
+The Ubuntu runner independently freezes the same embedded source and selection.
 To prove the retained regression against clean production:
 
 ```bash

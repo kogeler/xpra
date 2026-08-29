@@ -24,8 +24,8 @@ cannot encode the new frame using the previous frame's alpha state.
 path, and their focused tests listed in `case.toml`. It does not reintroduce
 upstream's initial `0x0` window fix.
 
-The patch must resolve against the current frozen fork-master source. When a
-later fork-master refresh changes the same production boundary, refresh the
+The patch must resolve against the source embedded in current `develop`. When
+an operator-selected upstream refresh changes the same production boundary, refresh the
 full staged candidate and let `workspace-update` derive both `fix.patch` and
 its manifest metadata. The clean host-worktree fallback may use `patch-update`.
 

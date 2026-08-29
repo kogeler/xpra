@@ -1609,11 +1609,13 @@ def git_output(*arguments: str) -> str:
     return run(["git", "-C", str(SOURCE_REPOSITORY), *arguments]).stdout.strip()
 
 
-def resolve_live_fork_master() -> tuple[str, str, int]:
+def resolve_embedded_source() -> tuple[str, str, int]:
     if not (SOURCE_REPOSITORY / ".git").exists():
         raise LabFailure(f"Xpra fork checkout is missing: {SOURCE_REPOSITORY}")
     if git_output("rev-parse", "--is-inside-work-tree") != "true":
         raise LabFailure(f"Xpra source is not a working tree: {SOURCE_REPOSITORY}")
+    if git_output("branch", "--show-current") != "develop":
+        raise LabFailure("live acceptance must run from the current develop branch")
     remotes = set(git_output("remote").splitlines())
     if "origin" not in remotes:
         raise LabFailure("Xpra fork checkout has no 'origin' remote")
@@ -1621,39 +1623,28 @@ def resolve_live_fork_master() -> tuple[str, str, int]:
     if origin_url.removesuffix(".git") != FORK_REMOTE_URL.removesuffix(".git"):
         raise LabFailure(f"Xpra 'origin' remote has an unexpected URL: {origin_url}")
 
-    run(
-        [
-            "git",
-            "-C",
-            str(SOURCE_REPOSITORY),
-            "fetch",
-            "--no-tags",
-            "origin",
-            "+refs/heads/master:refs/remotes/origin/master",
-        ],
-        capture=False,
-    )
-    local_commit = git_output("rev-parse", "refs/remotes/origin/master")
-    remote_line = git_output("ls-remote", "--heads", "origin", "refs/heads/master")
-    remote_commit, separator, remote_ref = remote_line.partition("\t")
-    if (
-        not separator
-        or remote_ref != "refs/heads/master"
-        or not re.fullmatch(r"[0-9a-f]{40}", remote_commit)
+    head = git_output("rev-parse", "HEAD")
+    source_tip = git_output("rev-parse", "refs/remotes/origin/master")
+    if not re.fullmatch(r"[0-9a-f]{40}", head) or not re.fullmatch(
+        r"[0-9a-f]{40}", source_tip
     ):
-        raise LabFailure("could not resolve the live fork origin/master commit")
-    if local_commit != remote_commit:
-        raise LabFailure(
-            "origin/master moved while it was being frozen; run the command again"
-        )
-
-    describe = git_output("describe", "--long", "--always", "--tags", remote_commit)
+        raise LabFailure("could not resolve develop or cached origin/master")
+    bases = git_output("merge-base", "--all", source_tip, head).splitlines()
+    if len(bases) != 1 or not re.fullmatch(r"[0-9a-f]{40}", bases[0]):
+        raise LabFailure("current develop has no single embedded source boundary")
+    commit = bases[0]
+    describe = git_output("describe", "--long", "--always", "--tags", commit)
     parts = describe.split("-")
-    commit_marker = parts[-1] if len(parts) >= 3 else f"g{remote_commit[:9]}"
+    commit_marker = parts[-1] if len(parts) >= 3 else f"g{commit[:9]}"
     revision = (
-        int(git_output("rev-list", "--count", "--first-parent", remote_commit)) + 5014
+        int(git_output("rev-list", "--count", "--first-parent", commit)) + 5014
     )
-    return remote_commit, commit_marker, revision
+    if (
+        git_output("rev-parse", "HEAD") != head
+        or git_output("rev-parse", "refs/remotes/origin/master") != source_tip
+    ):
+        raise LabFailure("develop or cached origin/master changed while freezing source")
+    return commit, commit_marker, revision
 
 
 def create_source_snapshot(
@@ -1661,7 +1652,7 @@ def create_source_snapshot(
     *,
     temporary_root: Path | None = None,
 ) -> SourceSnapshot:
-    commit, commit_marker, revision = resolve_live_fork_master()
+    commit, commit_marker, revision = resolve_embedded_source()
     archive_root = state_root / "source-archives"
     ensure_private_directory(archive_root, create=True)
     temporary_directory = temporary_root or archive_root

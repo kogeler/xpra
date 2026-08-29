@@ -2654,19 +2654,18 @@ class LiveRunnerCleanupTest(unittest.TestCase):
 
 
 class LiveSourceTest(unittest.TestCase):
-    def test_freezes_only_live_fork_master(self) -> None:
+    def test_freezes_the_source_boundary_embedded_in_develop_without_network(self) -> None:
         commit = "1" * 40
+        head = "2" * 40
+        source_tip = "3" * 40
         responses = {
             ("rev-parse", "--is-inside-work-tree"): "true",
+            ("branch", "--show-current"): "develop",
             ("remote",): "origin",
             ("remote", "get-url", "origin"): live_run.FORK_REMOTE_URL,
-            ("rev-parse", "refs/remotes/origin/master"): commit,
-            (
-                "ls-remote",
-                "--heads",
-                "origin",
-                "refs/heads/master",
-            ): f"{commit}\trefs/heads/master",
+            ("rev-parse", "HEAD"): head,
+            ("rev-parse", "refs/remotes/origin/master"): source_tip,
+            ("merge-base", "--all", source_tip, head): commit,
             ("describe", "--long", "--always", "--tags", commit): "v6.4-1-g111111111",
             ("rev-list", "--count", "--first-parent", commit): "10",
         }
@@ -2680,25 +2679,12 @@ class LiveSourceTest(unittest.TestCase):
                     "git_output",
                     side_effect=lambda *arguments: responses[arguments],
                 ),
-                patch.object(live_run, "run") as run_command,
             ):
-                resolved, marker, revision = live_run.resolve_live_fork_master()
+                resolved, marker, revision = live_run.resolve_embedded_source()
 
         self.assertEqual(resolved, commit)
         self.assertEqual(marker, "g111111111")
         self.assertEqual(revision, 5024)
-        run_command.assert_called_once_with(
-            [
-                "git",
-                "-C",
-                str(repository),
-                "fetch",
-                "--no-tags",
-                "origin",
-                "+refs/heads/master:refs/remotes/origin/master",
-            ],
-            capture=False,
-        )
 
     def test_input_evidence_archives_symlinked_build_contexts(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -2972,7 +2958,7 @@ class LiveTransportProfileTest(unittest.TestCase):
                     self.assertIn(value, recipe)
 
         self.assertIn(
-            "live-start: selector-check run-name-check live-options-check",
+            "live-start: isolated-start-check selector-check run-name-check live-options-check",
             makefile,
         )
         self.assertIn('--selection "$${XPRA_LAB_SELECTOR}"', makefile)

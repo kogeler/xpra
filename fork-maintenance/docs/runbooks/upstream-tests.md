@@ -2,15 +2,14 @@
 
 ## Frozen source model
 
-Every local acceptance job archives the exact equal live fork/canonical master
-commit, resolves the selected case or stack, and applies only
-forward-applicable patches inside an isolated container source tree. Hosted
-develop test CI uses the same runner and derives the fork base already embedded
-in pushed `develop` as its merge base with checkout `origin/master`; it does not
-follow a later fork update. It performs no fetch, sync, branch switch, merge, or
-rebase after `actions/checkout`. Local jobs fetch and require equal live fork
-and canonical master refs. Neither path packages `develop`, `.git`, ignored
-files, credentials, or the host working-tree diff.
+Every local acceptance job archives the unique source merge base already
+embedded in current `develop`, resolves the selected case or stack, and applies
+only forward-applicable patches inside an isolated container source tree.
+Hosted develop test CI uses the same model and derives that boundary from the
+checkout's cached `origin/master`. Neither local nor hosted jobs fetch, compare
+moving master refs, require master freshness/equality, switch branches, merge,
+or rebase. Neither path packages `develop`, `.git`, ignored files, credentials,
+or the host working-tree diff.
 
 The source bundle, minimal selection snapshot, and every Podman image build
 context cross stdin through the common validated tar helper. The test source
@@ -96,7 +95,7 @@ ambiguous patch stops the ladder.
 ## Do not spend test resources on non-semantic refreshes
 
 Before `test-start`, compare the exact old and new applied trees. Do not start
-container tests when the verified fork master is unchanged and the only differences
+container tests when the embedded source is unchanged and the only differences
 are comments, copyright notices, or documentation, with identical paths,
 modes, executable data, configuration, test assertions, source
 selection/application, build commands, and runner behavior. Refresh derived
@@ -106,8 +105,8 @@ normal ladder.
 
 ## Focused tests
 
-First run the retained regression against unmodified master production code by
-applying only the selected test paths:
+First run the retained regression against unmodified embedded-source production
+code by applying only the selected test paths:
 
 ```bash
 make -C fork-maintenance test-start \
@@ -189,8 +188,8 @@ in the workflow YAML. See [`ci.md`](ci.md).
 
 ## Reassess quarantined upstream modules
 
-Before applying `upstream-test-quarantine` after every rebase, run its exact
-module set on clean master in all three modes:
+Before applying `upstream-test-quarantine` after an explicitly selected upstream
+rebase, run its exact module set on the new clean source in all three modes:
 
 ```bash
 make -C fork-maintenance test-start \

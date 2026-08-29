@@ -8,8 +8,8 @@ live under `fork-maintenance/`.
 
 Before changing Xpra source, read the current `CLAUDE.md`, `CONTRIBUTING.md`,
 the canonical test workflow at `.github/upstream-workflows/test.yml` (verified
-byte-for-byte against `upstream/master:.github/workflows/test.yml`), and
-`pyproject.toml`. Before changing the fork workflow, also read
+byte-for-byte against the workflow at the source boundary embedded in current
+`develop`), and `pyproject.toml`. Before changing the fork workflow, also read
 `fork-maintenance/CONTRACT.md`, the relevant runbook, and every selected
 `cases/<id>/case.toml`.
 
@@ -20,32 +20,23 @@ never current acceptance evidence.
 ## Branch roles
 
 - `upstream/master` is the canonical Xpra source.
-- `origin/master` and local `master` are mirrors of canonical master. Never
-  commit fork-only changes on `master`, never push a patch to it, and never
-  force, reset, or rewrite it.
+- `origin/master` and local `master` are operator-maintained source refs. They
+  may intentionally lag canonical master between explicit refresh cycles.
+  Never commit fork-only changes on `master`, never push a patch to it, and
+  never force, reset, or rewrite it.
 - `develop` is the rebase-maintained fork integration branch and intended
   default branch. It carries `AGENTS.md`, the ignore and CI boundaries, and
   `fork-maintenance/`. Production changes remain stored as patches rather than
   committed copies of those patches in the Xpra source tree.
 - Temporary non-master branches are supported only for exceptional clean
   host-worktree integration diagnosis and patch operations. They must descend
-  from fully rebased `develop`; the default isolated workflow remains on
+  from the current `develop`; the default isolated workflow remains on
   `develop` and does not support temporary branches. Do not create parallel
   worktrees.
 
-Host-worktree patch application or a publication refresh still starts from a
-clean checkout and runs:
-
-```bash
-make -C fork-maintenance repo-sync
-make -C fork-maintenance master-update
-git switch develop
-make -C fork-maintenance develop-rebase
-make -C fork-maintenance patch-start-check
-```
-
-Pre-commit investigation, patch refresh, and testing use the isolated workflow
-instead. Stay on `develop`; do not switch branches. Run:
+Ordinary investigation, patch work, and testing use the source commit already
+embedded in current `develop`. They never fetch, compare live master refs, or
+require a rebase. Stay on `develop`; do not switch branches. Run:
 
 ```bash
 make -C fork-maintenance isolated-start-check
@@ -54,9 +45,9 @@ make -C fork-maintenance workspace-create \
 ```
 
 The isolated gate permits dirty files only at `AGENTS.md`, `.gitignore`, the
-controlled `.github/` CI paths, and `fork-maintenance/`. It fetches and verifies
-the live master refs, rejects any host Xpra source change, and copies the exact
-verified master commit below
+controlled `.github/` CI paths, and `fork-maintenance/`. It rejects any host
+Xpra source change and copies the unique merge base already embedded in
+`develop` below
 ignored `.artifacts/fork-maintenance/upstream-tests/workspaces/`. Patch
 application, source editing, and candidate staging occur only in that copy.
 `workspace-update` atomically exports the complete candidate back to the
@@ -82,25 +73,37 @@ partially deleted tree. The marker's canonical target array still revalidates
 the published case files and any bound workspace resolution/metadata even when
 the tree and update owner are already gone.
 
-This fetches both master refs, compares each cached ref with live GitHub state,
-and requires live fork/canonical equality. If and only if that fresh check
-reports a mismatch, the operator may run:
+Only when the operator explicitly starts a new upstream-refresh and patch-
+adaptation cycle does the clean host workflow run:
+
+```bash
+make -C fork-maintenance repo-sync
+make -C fork-maintenance master-update
+git switch develop
+make -C fork-maintenance develop-rebase
+make -C fork-maintenance patch-start-check
+```
+
+That explicit gate fetches both master refs, compares each cached ref with live
+GitHub state, and requires live fork/canonical equality. If it reports a stale
+fork, the operator may run:
 
 ```bash
 gh repo sync kogeler/xpra --source Xpra-org/xpra --branch master
 ```
 
 Never add `--force`, and agents never run this remote-mutating command. Repeat
-`repo-sync` after the operator action before continuing. A divergent or ahead
-fork master stops the workflow for owner review. `master-update` may only
-fast-forward local `master` after that gate.
+`repo-sync` after the operator action before continuing that refresh. A
+divergent or ahead fork master stops only the explicit refresh for owner
+review. `master-update` may only fast-forward local `master` after that gate.
+None of these commands is a prerequisite for testing or editing the current
+`develop` queue.
 
-Fork-master history is transferred to `develop` only by rebasing `develop` onto
-the fetched local `master`. Merging `master`, `upstream/master`, or an
-equivalent upstream ref into `develop` is forbidden. If rebase stops, resolve
-every conflict, stage the resolutions, and continue the rebase; do not begin
-patch work until `patch-start-check` passes. Temporary patch branches are
-created only from the fully rebased `develop`.
+When the operator explicitly chooses to move the embedded source base, master
+history is transferred to `develop` only by rebasing `develop` onto the fetched
+local `master`. Merging `master`, `upstream/master`, or an equivalent upstream
+ref into `develop` is forbidden. If that rebase stops, resolve every conflict,
+stage the resolutions, and continue it before accepting the refreshed queue.
 
 Rebasing an already published `develop` rewrites its fork-only commits. Agents
 still never push or force-push. The operator may publish the reviewed rewrite
@@ -123,7 +126,7 @@ The currently retained active cases are:
 The quarantine case is not a production fix. It may change only the exact
 upstream unit-test modules listed in its `[quarantine]` manifest table. Before
 applying it after every fork-master rebase, run all three clean `quarantine*`
-gates. If any listed module is green on clean current master, remove or narrow
+gates. If any listed module is green on the clean embedded source, remove or narrow
 that entry and refresh the one quarantine patch; never carry it forward merely
 because it still applies.
 
@@ -131,8 +134,8 @@ Do not resurrect deleted historical cases, verifications, evidence, or stacks
 without an explicit new request and a current-source reassessment.
 
 Host `patch-apply`, `stack-apply`, `patch-update`, and unapply operations are
-permitted only after the clean sync/rebase start gate. They are retained for
-exceptional host integration diagnosis. The default pre-commit cycle is
+retained for the exceptional explicit upstream-refresh/integration cycle. The
+default pre-commit cycle is
 `workspace-create`, `workspace-stage`, `workspace-update`, and
 `workspace-remove`; it never stages or edits inherited Xpra source in
 `develop`.
@@ -140,8 +143,8 @@ exceptional host integration diagnosis. The default pre-commit cycle is
 Never edit `patch_sha256` or `paths` manually. Never leave the applied source
 copy committed on `develop`; commit the maintained patch file and automation
 metadata only. A patch that is neither forward-applicable nor exactly
-reverse-applicable to current master is divergent and must be reworked, not
-forced.
+reverse-applicable to the embedded source is divergent and must be reworked,
+not forced.
 
 ## Implementation discipline
 
@@ -168,7 +171,8 @@ that notice and add the `kogeler` line.
 Every canonical upstream workflow is kept as a byte-identical, non-executable
 rename below `.github/upstream-workflows/`. The only executable workflows are
 `.github/workflows/develop.yml`, `.github/workflows/master-sync.yml`, and
-`.github/workflows/deb-packages.yml`. After every rebase, preserve upstream
+`.github/workflows/deb-packages.yml`. During every explicit upstream refresh,
+preserve upstream
 workflow edits through those renames, relocate any newly added upstream
 workflow, and run `make -C fork-maintenance ci-layout-check`.
 
@@ -206,14 +210,17 @@ dirty Xpra source. `stacks/develop` is the fixed queue slug, not a requirement
 that the selected revision be on a branch named `develop`. The amd64 builds
 require an x86-64 Podman host, network access, and sufficient disk space. They
 produce unsigned packages with `dpkg-buildpackage -us -uc`, force xz Debian
-members, and validate each xz stream with a 256 MiB decoder memory limit. They
-build separate Ubuntu 26.04 and Debian 13 tar assets, then stage a draft
-prerelease, upload and verify exactly those two assets, and publish its unique
-tag at the dispatched checkout commit. Publication binds the immutable GitHub
-release ID. On failure, the target may roll back only the release it just
-created and a tag that still points at that exact commit, deleting and verifying
-the tag before deleting the immutable release ID. The input-keyed builder cache
-is label-verified,
+members, disable automatic dbgsym generation with
+`DEB_BUILD_OPTIONS=noautodbgsym`, reject any debug-symbol package at both sides
+of the container boundary, and validate each xz stream with a 256 MiB decoder
+memory limit. They build separate Ubuntu 26.04 and Debian 13 tar assets, then
+stage a draft with `prerelease=false`, upload and verify exactly those two
+assets, and publish an ordinary release whose title is exactly the Debian
+version, for example `6.6-r42479-1`. Its unique transaction tag points at the
+dispatched checkout commit. Publication binds the immutable GitHub release ID.
+On failure, the target may roll back only the release it just created and a tag
+that still points at that exact commit, deleting and verifying the tag before
+deleting the immutable release ID. The input-keyed builder cache is label-verified,
 every created package container executes the actual immutable builder image ID,
 and every accepted package result binds it. Source and complete-queue snapshots
 are immutable retained caches; the latter is stored as
@@ -226,19 +233,27 @@ exact orphan draft from its own earlier failed attempt. Draft creation uses the
 authenticated releases REST endpoint and binds the immutable release ID from
 that response; draft discovery never uses the published-only tag endpoint.
 Current-tag absence and orphan recovery scan a bounded paginated release list
-and require one unique exact transaction. Agents never invoke this hosted
-remote-publication target.
+and require one unique exact transaction. After publication, that same listing
+identifies only canonical ordinary DEB releases owned by this workflow, orders
+them by publication time with immutable-ID tie-breaking, retains the three
+newest, and deletes every older owned release in exact tag-first,
+release-ID-last order. Drafts and unrelated or manual releases are never
+retention targets; malformed or ambiguous owned state fails closed. A retry of
+the same hosted run may resume retention from an exact published release left
+by a failed or cancelled prior attempt without publishing a duplicate. Agents
+never invoke this hosted remote-publication target.
 
 The hosted `ci-upstream-tests` path does not run `ci-layout-check`: GitHub has
 already selected the executable workflow, and this publication audit must not
-block the actual test matrix. Run it explicitly after rebase and before push.
+block the actual test matrix. Run it explicitly after an upstream refresh and
+before push.
 
 Hosted develop test CI does not chase live refs. It uses the checkout's
 cached `origin/master` only to locate the merge base already embedded in the
 pushed `develop`, then freezes that commit. A later `origin/master` advance must
 not change the tested source. The develop test automation never fetches, syncs,
-switches, merges, or rebases after `actions/checkout`; the actual rebase belongs
-to the operator's pre-publication cycle.
+switches, merges, or rebases after `actions/checkout`; choosing whether to
+refresh and rebase the source base belongs solely to the operator.
 
 Each matrix job in the `develop.yml` test workflow applies the complete
 `stacks/develop` queue and runs one upstream unit-test leg. The three test legs
@@ -270,10 +285,11 @@ no-replace link; the common helper has no named generic fallback.
 
 Stop at the first unexplained failure:
 
-1. resolve or reproduce against unmodified current fork master;
+1. resolve or reproduce against the unmodified source commit embedded in
+   current `develop`;
 2. run the focused case regression;
 3. run the affected native or subsystem boundary;
-4. reassess every quarantined upstream module on clean master;
+4. reassess every quarantined upstream module on the clean embedded source;
 5. run all three Ubuntu 26.04 unit-test legs;
 6. run required RGB or hardware-H.264 live acceptance.
 
@@ -330,7 +346,7 @@ Make/Python still owns every Podman build and run. They are not substitutes for
 named local acceptance evidence.
 
 Do not restart the functional ladder for a proven non-semantic refresh. This
-exception is limited to an unchanged master and an exact old/new applied diff
+exception is limited to an unchanged embedded source and an exact old/new applied diff
 containing only comments, copyright notices, or documentation, with no path,
 mode, executable data, configuration, test assertion, or runner behavior
 change. Resolve the refreshed queue, run whitespace and fork-control checks,
@@ -479,14 +495,20 @@ after review; it never deletes patches, cases, or unrelated Podman objects.
 - The scheduled `master-sync.yml` service identity may fast-forward only the
   existing fork `master` ref; agents never invoke or dispatch it.
 - The manual `deb-packages.yml` service identity may create only its unique
-  draft/prerelease, package tag, and two validated tar assets. A failed attempt
-  validates its just-created release, deletes the exact tag first only while it
-  still targets the dispatched commit, verifies tag absence, and deletes that
-  immutable release ID last. A retry may apply the same tag-first/release-last
-  rollback to an exact draft left by an earlier failed attempt of the same
-  workflow run, but only after validating that attempt, its transaction marker,
-  assets, release ID, and unchanged tag target; published, tag-only, or
-  ambiguous state is preserved.
+  draft, ordinary release, package tag, and two validated tar assets. The
+  release title is exactly its Debian version and `prerelease` is false. A
+  failed attempt validates its just-created release, deletes the exact tag
+  first only while it still targets the dispatched commit, verifies tag
+  absence, and deletes that immutable release ID last. A retry may apply the
+  same tag-first/release-last rollback to an exact draft left by an earlier
+  failed attempt of the same workflow run, but only after validating that
+  attempt, its transaction marker, assets, release ID, and unchanged tag
+  target. After one ordinary release is verified, it may retain the three
+  newest exact owned DEB releases and delete each older exact owned release in
+  tag-first/release-ID-last order. An exact published release left by a failed
+  or cancelled prior attempt may resume only that retention transaction;
+  drafts, unrelated or manual releases, tag-only state, and ambiguous state
+  are preserved.
   Agents never invoke or dispatch it.
 - Never create, update, or close a pull request or change the default branch on
   the user's behalf from this workspace.
@@ -495,6 +517,6 @@ after review; it never deletes patches, cases, or unrelated Podman objects.
 - The operator reviews, signs if required, pushes `develop`, and later changes
   the fork's default branch.
 
-When handing off, show exact status, current master/develop commits, patch
-resolution, validation completed, remaining validation, and resolved
+When handing off, show exact status, embedded-source/master/develop commits,
+patch resolution, validation completed, remaining validation, and resolved
 operator-only commands. Do not claim results that exist only in an old log.

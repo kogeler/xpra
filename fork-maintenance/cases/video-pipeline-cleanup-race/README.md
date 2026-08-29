@@ -17,9 +17,9 @@ cleanup/suspend paths remain unchanged.
 - `xpra/server/window/video_compress.py`;
 - `tests/unittests/unit/server/window/video_compress_test.py`.
 
-It must apply to the current frozen fork-master source either after the earlier
+It must apply to the source embedded in current `develop`, either after the earlier
 active cases in `stacks/develop.toml` or as its standalone case. If a later
-fork-master refresh changes either boundary, refresh this patch from a staged
+operator-selected upstream refresh changes either boundary, refresh this patch from a staged
 isolated candidate; never edit its digest or path list by hand.
 
 ## Required validation
