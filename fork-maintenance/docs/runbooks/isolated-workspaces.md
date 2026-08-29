@@ -183,7 +183,9 @@ copyright notices, or documentation—with identical paths, modes, executable
 data, configuration, test assertions, and runner behavior—this is a
 non-semantic refresh. Resolve the queue and run whitespace plus fork-control
 checks, but do not rerun focused, native, full, or live jobs. Record that proof
-in the handoff. Any uncertainty uses the normal ladder below.
+in the handoff. A changed embedded source never qualifies: after an upstream
+rebase use the complete post-rebase ladder. Any uncertainty uses the normal
+ladder below.
 
 The Ubuntu runner independently freezes the same embedded source and selection.
 To prove the retained regression against clean production:

@@ -75,7 +75,9 @@ documentation-only patch refresh on the same embedded source. First verify by ex
 old/new applied-tree comparison that paths, modes, executable data,
 configuration, test assertions, runner behavior, and live assertions are
 unchanged, then run only resolution, whitespace, and fork-control checks and
-record the proof. Any semantic difference requires the declared live gates.
+record the proof. This exception cannot cross `develop-rebase`; every upstream
+rebase requires all five fixed positive live profiles. Any semantic difference
+on an unchanged base also requires the declared live gates.
 
 Every named live acceptance run requires one nonempty reviewed `CASE` or
 `STACK` selection. A clean-source diagnostic is not live acceptance and must

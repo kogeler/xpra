@@ -51,7 +51,9 @@ The handoff states:
 - exact embedded source commit;
 - ordered active cases and their current resolution;
 - all three clean quarantine reassessment results on this source when required;
-- focused, native, full, and live jobs actually completed on this base;
+- after every upstream rebase, the complete offline suite, production
+  tests-only controls, focused/native gates, all three full author-test legs,
+  and all five fixed positive live jobs actually completed on this base;
 - any required gates still outstanding;
 - whether local commits are signed as required.
 
