@@ -65,23 +65,30 @@ make -C fork-maintenance repo-status
 Do not initialize a nested checkout. If a remote is missing or has a different
 identity, stop for owner review rather than rewriting it automatically.
 
-## Fork-master refresh
+## Optional fork-master refresh
+
+The normal workspace, test, live, CI-reproduction, and publication paths use
+the unique source merge base already embedded in current `develop`. They do not
+fetch or compare live master refs, and an older fork/local master does not block
+them. The operator alone decides when to move that embedded base and begin a
+new patch-adaptation cycle; only that explicit decision activates the refresh
+steps below.
 
 The hosted `master-sync.yml` workflow normally fast-forwards
 `kogeler/xpra:master` from `Xpra-org/xpra:master` at 00:37 and 12:37 UTC. It
 does not update local refs or rebase `develop`. See
 [`master-sync.md`](master-sync.md).
 
-When the operator wants a fresh upstream attempt immediately before work rather
-than relying on the most recent scheduled run, they dispatch the same workflow
-from `develop` and wait for it to complete:
+When the operator chooses such a refresh and wants an immediate upstream-sync
+attempt rather than relying on the most recent scheduled run, they dispatch the
+same workflow from `develop` and wait for it to complete:
 
 ```bash
 gh workflow run master-sync.yml --repo kogeler/xpra --ref develop
 ```
 
-Agents never dispatch it. Local work independently fetches and verifies both
-master refs:
+Agents never dispatch it. The explicit local refresh then fetches and verifies
+both master refs:
 
 ```bash
 make -C fork-maintenance repo-sync
@@ -116,7 +123,7 @@ commit while the checkout is clean:
 git switch --no-track -c develop refs/remotes/origin/master
 ```
 
-Before host-worktree patch operations or publication, transfer later upstream
+Only after an operator decision to adopt a newer upstream base, transfer those
 commits by rebasing clean `develop` onto the verified local `master`:
 
 ```bash
@@ -152,13 +159,13 @@ the reviewed branch with the exact-SHA `--force-with-lease` procedure in
 `publish-develop.md`. Neither this automation nor an agent pushes the rewrite.
 
 When fork-control files are still uncommitted, do not switch or rebase the
-dirty checkout. Use `isolated-start-check` and the named workspace flow to
-audit and refresh existing cases against fetched fork master first. The clean
-rebase above remains required before the resulting control-plane change is
-committed or published.
+dirty checkout. Use `isolated-start-check` and the named workspace flow against
+the source already embedded in `develop`. A clean rebase is required only when
+the operator intentionally changes that source boundary, not before testing,
+editing, committing, or publishing the unchanged current base.
 
-After each completed rebase, reassess the single test-quarantine case on clean
-master in all three matrix modes before applying it. Follow
+After each explicitly selected rebase, reassess the single test-quarantine case
+on the new clean source in all three matrix modes before applying it. Follow
 `test-quarantine.md`; a newly green module must leave the quarantine in the
 same reviewed cycle.
 

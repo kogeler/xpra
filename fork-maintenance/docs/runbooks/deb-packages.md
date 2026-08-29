@@ -69,9 +69,17 @@ tar on stdout. The host publishes that stream atomically only after the
 container exits successfully, then validates its provenance, package set,
 sizes, and checksums. Each tar contains:
 
-- every generated Xpra `.deb` file (never container-only dependency shims);
+- every generated non-debug Xpra `.deb` file (never dbgsym packages or
+  container-only dependency shims);
 - `manifest.json`;
 - `SHA256SUMS`.
+
+The builder sets `DEB_BUILD_OPTIONS=parallel=<n> noautodbgsym`, the supported
+debhelper switch that prevents automatic debug-symbol packages. The container
+also refuses any unexpected `*-dbgsym_*.deb`, and the independent host
+validator rejects both a dbgsym filename and a control `Package:` ending in
+`-dbgsym`. Therefore a debug-symbol package cannot enter `manifest.json`,
+`SHA256SUMS`, either tar asset, or the release.
 
 The build forces `DPKG_DEB_COMPRESSOR_TYPE=xz` at level 6. The host validator
 parses each Debian ar archive, requires its exact `control.tar.xz` and
@@ -209,10 +217,12 @@ Before publishing a retried attempt, the target checks every earlier attempt of
 the same `GITHUB_RUN_ID`. It may delete only a draft whose earlier Actions
 attempt is completed with an exact failure conclusion and whose canonical
 embedded transaction matches the run, attempt, checkout, version, expected
-asset metadata, release identity, and unchanged tag target. A published release
-is immutable history; tag-only, changed, or ambiguous state fails closed. Exact
-recovery deletes and verifies the tag first, then deletes and verifies the
-immutable release ID last.
+asset metadata, release identity, and unchanged tag target. Exact draft recovery
+deletes and verifies the tag first, then deletes and verifies the immutable
+release ID last. If such a failed or cancelled attempt already published its
+exact ordinary release before it stopped, the retry does not publish a
+duplicate: it resumes the retention step described below. Other published,
+tag-only, changed, or ambiguous state fails closed.
 
 Publication then proves that the current unique release and tag are absent,
 using bounded authenticated pagination of
@@ -220,36 +230,60 @@ using bounded authenticated pagination of
 never queried through the published-only `/releases/tags/{tag}` endpoint. The
 listing stops after at most 100 pages and rejects duplicate immutable IDs or
 tag identities. The target writes a local preflight record and creates a draft
-prerelease with authenticated `POST /repos/kogeler/xpra/releases`, targeting the
-exact checkout SHA. It records and validates the immutable GitHub release ID
-directly from that response. Every later draft query, asset upload, publish
-`PATCH`, or release deletion addresses that recorded ID; the tag is inspected
-and removed separately as a Git ref. The target uploads exactly the two validated assets
+with `prerelease=false` through authenticated
+`POST /repos/kogeler/xpra/releases`, targeting the exact checkout SHA. It
+records and validates the immutable GitHub release ID directly from that
+response. Every later draft query, asset upload, publish `PATCH`, or release
+deletion addresses that recorded ID; the tag is inspected and removed
+separately as a Git ref. The target uploads exactly the two validated assets
 (`xpra-ubuntu-26.04-amd64-debs.tar` and
 `xpra-debian-13-amd64-debs.tar`), and verifies their remote sizes and SHA-256
-digests against that draft. It then publishes the draft and verifies the
-resulting tag still targets the checkout SHA. The tag format is
+digests against that draft. It then publishes the draft as an ordinary release,
+requires the displayed release title to be exactly the Debian version (for
+example `6.6-r42479-1`), verifies `prerelease=false`, and verifies the resulting
+tag still targets the checkout SHA. The tag format is
 `kogeler-deb-<debian-version>-run<run-id>-attempt<attempt>`; this unique package
-tag is the only remote ref the workflow may create. If a later step fails,
-rollback validates the exact release, deletes and verifies its tag first only
-while it still targets the expected commit, then deletes and verifies the
-immutable release ID last. A missing release with an extant tag or a changed
-tag fails closed. `SIGINT` or `SIGTERM` during publication enters this rollback
-path; a hard-killed attempt may leave only the exact draft recovered by a later
-retry as described above. If the create response is malformed, bounded release
-listing may recover only one exact draft with the expected repository, target,
-transaction, and assets; its discovered ID is journaled before the same ordered
-rollback. Duplicate or ambiguous matches fail closed. Agents do not invoke this
-hosted target locally.
+tag is the only remote ref the workflow may create.
+
+After the new release and tag are verified, the target scans the same complete,
+bounded authenticated release listing. It recognizes as retention candidates
+only ordinary releases with one canonical DEB transaction marker, the exact
+version title, expected repository/workflow identity, checkout target, package
+tag, and two asset sizes and SHA-256 digests. Candidates are ordered newest
+first by `published_at`, with the immutable release ID as a deterministic
+tie-breaker. The newest three are retained. Every older exact owned release is
+revalidated, then its exact unchanged tag is deleted and verified absent before
+its immutable release ID is deleted and verified absent. Drafts and unrelated
+or manual releases neither count toward the three nor become deletion targets.
+A malformed, changed, duplicate, or ambiguous marker-bearing release stops the
+transaction before further deletion.
+
+Retention is part of publication, not a best-effort follow-up. A normal error,
+`SIGINT`, or `SIGTERM` before it completes enters rollback for the newly created
+release. A hard kill after publication may leave the exact release and a partly
+completed retention pass; a later failed/cancelled-attempt retry revalidates
+that published release and resumes retention without creating another release.
+Deleting each expired release is itself retry-safe when its tag is already
+absent or the process stopped between tag and immutable-ID deletion.
+
+If another publication step fails, rollback validates the exact current
+release, deletes and verifies its tag first only while it still targets the
+expected commit, then deletes and verifies the immutable release ID last. A
+missing release with an extant tag or a changed tag fails closed. If the create
+response is malformed, bounded release listing may recover only one exact draft
+with the expected repository, target, transaction, and assets; its discovered
+ID is journaled before the same ordered rollback. Duplicate or ambiguous
+matches fail closed. Agents do not invoke this hosted target locally.
 
 Publication drafts and release staging are generated filesystem artifacts below
 `.artifacts/fork-maintenance/deb-packages/releases/run-<run-id>-attempt-<n>/`;
 after a successful publication the directory retains its two assets,
 `release-notes.md`, `publication.json`, and the two hidden distribution
 container ownership records for operator review. The publication record moves
-from `preflight` through the exact remote lifecycle. This tree is never tracked
-or removed by cycle cleanup; interrupted build staging remains for explicit
-operator review as well.
+from `preflight` through the exact remote lifecycle to `retention-complete` and
+records the expired transaction tags removed by that pass. This tree is never
+tracked or removed by cycle cleanup; interrupted build staging remains for
+explicit operator review as well.
 
 The workflow never runs display, render-node, live RGB, or hardware-H.264
 profiles. Those remain local physical acceptance gates.

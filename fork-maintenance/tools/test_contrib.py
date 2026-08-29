@@ -508,6 +508,13 @@ class IsolatedStartTest(unittest.TestCase):
             cwd=self.repo,
         )
         self.base = command("git", "rev-parse", "HEAD", cwd=self.repo)
+        command(
+            "git",
+            "update-ref",
+            "refs/remotes/origin/master",
+            self.base,
+            cwd=self.repo,
+        )
         control = self.repo / "fork-maintenance"
         control.mkdir()
         (control / "draft.txt").write_text("control\n", encoding="utf-8")
@@ -517,10 +524,7 @@ class IsolatedStartTest(unittest.TestCase):
 
     def test_allows_dirty_control_plane_without_touching_the_branch(self) -> None:
         status = command("git", "status", "--porcelain=v1", cwd=self.repo)
-        with (
-            patch.object(contrib, "verify_repo"),
-            patch.object(contrib, "sync_repo", return_value=self.base),
-        ):
+        with patch.object(contrib, "verify_repo"):
             state = contrib.isolated_start_check(self.repo)
         self.assertEqual(state.branch, "develop")
         self.assertEqual(state.head, self.base)
@@ -528,11 +532,40 @@ class IsolatedStartTest(unittest.TestCase):
         self.assertTrue(state.source_in_head)
         self.assertEqual(command("git", "status", "--porcelain=v1", cwd=self.repo), status)
 
+    def test_accepts_current_develop_when_cached_origin_master_is_newer(self) -> None:
+        tree = command("git", "rev-parse", "HEAD^{tree}", cwd=self.repo)
+        newer_master = command(
+            "git",
+            "commit-tree",
+            tree,
+            "-p",
+            self.base,
+            "-m",
+            "later upstream source",
+            cwd=self.repo,
+        )
+        command(
+            "git",
+            "update-ref",
+            "refs/remotes/origin/master",
+            newer_master,
+            cwd=self.repo,
+        )
+
+        with patch.object(contrib, "verify_repo"):
+            state = contrib.isolated_start_check(self.repo)
+
+        self.assertEqual(state.head, self.base)
+        self.assertEqual(state.source_commit, self.base)
+        self.assertEqual(
+            command("git", "rev-parse", "refs/remotes/origin/master", cwd=self.repo),
+            newer_master,
+        )
+
     def test_rejects_a_dirty_host_source_path(self) -> None:
         (self.repo / "source.py").write_text("VALUE = 2\n", encoding="utf-8")
         with (
             patch.object(contrib, "verify_repo"),
-            patch.object(contrib, "sync_repo", return_value=self.base),
             self.assertRaisesRegex(contrib.ContribError, "refuses host Xpra source changes"),
         ):
             contrib.isolated_start_check(self.repo)
@@ -541,12 +574,11 @@ class IsolatedStartTest(unittest.TestCase):
         (self.repo / "AGENTS.md.backup").write_text("not controlled\n", encoding="utf-8")
         with (
             patch.object(contrib, "verify_repo"),
-            patch.object(contrib, "sync_repo", return_value=self.base),
             self.assertRaisesRegex(contrib.ContribError, "refuses host Xpra source changes"),
         ):
             contrib.isolated_start_check(self.repo)
 
-    def test_rejects_multiple_fork_master_merge_bases(self) -> None:
+    def test_rejects_multiple_embedded_source_merge_bases(self) -> None:
         tree = command("git", "rev-parse", "HEAD^{tree}", cwd=self.repo)
         left = command(
             "git", "commit-tree", tree, "-p", self.base, "-m", "left", cwd=self.repo
@@ -579,6 +611,13 @@ class IsolatedStartTest(unittest.TestCase):
             cwd=self.repo,
         )
         command("git", "update-ref", "refs/heads/develop", develop, cwd=self.repo)
+        command(
+            "git",
+            "update-ref",
+            "refs/remotes/origin/master",
+            master,
+            cwd=self.repo,
+        )
 
         self.assertEqual(
             set(
@@ -590,7 +629,6 @@ class IsolatedStartTest(unittest.TestCase):
         )
         with (
             patch.object(contrib, "verify_repo"),
-            patch.object(contrib, "sync_repo", return_value=master),
             self.assertRaisesRegex(contrib.ContribError, "single usable history boundary"),
         ):
             contrib.isolated_start_check(self.repo)
@@ -617,7 +655,6 @@ class IsolatedStartTest(unittest.TestCase):
         )
         with (
             patch.object(contrib, "verify_repo"),
-            patch.object(contrib, "sync_repo", return_value=self.base),
             self.assertRaisesRegex(contrib.ContribError, "outside the patch queue"),
         ):
             contrib.isolated_start_check(self.repo)

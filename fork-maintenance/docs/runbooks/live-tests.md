@@ -25,16 +25,17 @@ make -C fork-maintenance workspace-create \
 make -C fork-maintenance workspace-remove WORKSPACE=live-preflight-01
 ```
 
-The runner fetches and freezes the exact equal live fork/canonical master commit
-and applies the selected case or stack in its build context; the examples use
-the complete `stacks/develop.toml` queue. The host develop source need not be
-patched.
+The runner freezes the unique source merge base already embedded in current
+`develop` and applies the selected case or stack in its build context; the
+examples use the complete `stacks/develop.toml` queue. It performs no fetch or
+live master comparison, and cached/upstream master freshness is not a live-test
+precondition. The host develop source need not be patched.
 
 Before publishing the main live owner, `live-start` first publishes inspectable
 `jobs/live/<RUN>.freeze-prelaunch.json`, then launches and durably publishes
 `jobs/live/<RUN>.freeze.json` for the separate input-freeze process. That
 process creates one private staging tree containing the content-verified
-fork-master source archive, a complete frozen harness, server and clean-client
+embedded-source archive, a complete frozen harness, server and clean-client
 selection snapshots with their resolutions, validated server/client build-
 context tar archives and tree digests, and a Zed archive when selected. A
 manifest and `SHA256SUMS` bind the complete input tree. Only after validation is
@@ -70,14 +71,14 @@ they do not use a separate `IMAGE_RUN`. A retry therefore uses a new live
 `RUN`, including any image-build work it triggers.
 
 Do not rerun a live profile solely for a proven comment, copyright, or
-documentation-only patch refresh on the same master. First verify by exact
+documentation-only patch refresh on the same embedded source. First verify by exact
 old/new applied-tree comparison that paths, modes, executable data,
 configuration, test assertions, runner behavior, and live assertions are
 unchanged, then run only resolution, whitespace, and fork-control checks and
 record the proof. Any semantic difference requires the declared live gates.
 
 Every named live acceptance run requires one nonempty reviewed `CASE` or
-`STACK` selection. A clean-master diagnostic is not live acceptance and must
+`STACK` selection. A clean-source diagnostic is not live acceptance and must
 use the isolated/unit diagnostic paths; it cannot publish a live `PASS`.
 
 The complete public positive set is exactly `live-rgb`, `live-h264`,

@@ -9,10 +9,11 @@ make -C fork-maintenance isolated-start-check
 ```
 
 The gate allows dirty fork-control files but rejects every host Xpra source or
-test change. It fetches and verifies equal live fork and canonical master refs,
-records the host branch and HEAD, and never switches, merges, rebases, resets,
-stashes, stages, or commits. Old logs and previous patch applicability are
-leads, not evidence about the newly recorded master commit.
+test change. It records the host branch, HEAD, and unique source merge base
+already embedded in current `develop`; it never fetches, queries moving master
+refs, switches, merges, rebases, resets, stashes, stages, or commits. Old logs
+and previous patch applicability are leads, not evidence about that recorded
+source commit.
 
 Read the current affected source, adjacent tests, recent maintainer-authored
 history, `CLAUDE.md`, `CONTRIBUTING.md`, the current test workflow, and lint
@@ -87,13 +88,13 @@ make -C fork-maintenance workspace-create \
 ```
 
 - `apply` means the stored patch remains forward-applicable;
-- `already-present` means current master contains that exact diff;
+- `already-present` means the embedded source contains that exact diff;
 - `diverged` means upstream changed the boundary and the full patch must be
   refreshed.
 
 For a claimed upstream replacement, map each original trigger, production
 path, state transition, and postcondition to current code. Then run the retained
-focused regression on clean master. Do not retire a patch from commit-message
+focused regression on the clean embedded source. Do not retire a patch from commit-message
 similarity alone.
 
 If existing tests do not observe the disputed path, improve the case-owned test

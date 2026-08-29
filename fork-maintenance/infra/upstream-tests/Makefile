@@ -18,13 +18,13 @@ PATCH_MODE ?= patched
 IMAGE_TAG_SUFFIX ?=
 SOURCE_REMOTE ?= origin
 SOURCE_COMMIT ?=
-VERIFY_LIVE_SOURCE ?= 1
 export XPRA_LAB_SELECTION := $(SELECTION)
 export XPRA_PATCH_MODE := $(PATCH_MODE)
 
 override SOURCE_REF := refs/remotes/$(SOURCE_REMOTE)/master
 override SOURCE_TIP_COMMIT := $(shell git -C "$(SOURCE_HOST)" rev-parse "$(SOURCE_REF)" 2>/dev/null)
-override BASE_COMMIT := $(if $(strip $(SOURCE_COMMIT)),$(strip $(SOURCE_COMMIT)),$(SOURCE_TIP_COMMIT))
+override EMBEDDED_COMMIT := $(shell git -C "$(SOURCE_HOST)" merge-base --all "$(SOURCE_REF)" HEAD 2>/dev/null)
+override BASE_COMMIT := $(if $(strip $(SOURCE_COMMIT)),$(strip $(SOURCE_COMMIT)),$(EMBEDDED_COMMIT))
 override SOURCE_SHORT := $(shell printf '%s' "$(BASE_COMMIT)" | cut -c1-12)
 override SOURCE_BUNDLE := $(SOURCE_BUNDLE_ROOT)/$(SOURCE_TIP_COMMIT)-$(SOURCE_REMOTE).bundle
 override WORKFLOW_SHA := $(shell git -C "$(SOURCE_HOST)" show "$(BASE_COMMIT):.github/workflows/test.yml" 2>/dev/null | sha256sum | awk '{print $$1}')
@@ -55,7 +55,7 @@ override RESOLVE_IMAGE = image_id=$$($(PODMAN) image inspect "$(IMAGE)" --format
 	test "$$($(PODMAN) image inspect "$$image_id" --format '{{index .Labels "io.xpra.lab.workflow"}}')" = "$(WORKFLOW_SHA)"
 
 .PHONY: help private-state-check private-state-tests inputs-check selection-check ci-policy-check \
-	source-check source-check-remote source-snapshot \
+	source-check source-snapshot \
 	image image-check ci-image ci image-background-start image-background-name-check \
 	image-background-status image-background-logs image-background-wait \
 	image-background-collect image-background-remove image-background-abort image-remove \
@@ -69,8 +69,8 @@ help:
 		'SELECTION=cases/<id> selects its case.toml and fix.patch' \
 		'SELECTION=stacks/<id> selects stacks/<id>.toml and its case series' \
 		'PATCH_MODE=patched applies all paths; tests-only applies retained tests; clean applies none' \
-		'make source-check-remote  Verify the selected cached master against its live remote' \
-		'make source-snapshot      Freeze the selected source history as a credential-free Git bundle' \
+		'make source-check         Verify the source boundary embedded in current develop' \
+		'make source-snapshot      Freeze that source history as a credential-free Git bundle' \
 		'make image                Verify the input-keyed, label-verified Ubuntu 26.04 image' \
 		'make ci XPRA_CI_TARGET=full' \
 		'                          Apply stacks/develop and run one selected CI test leg' \
@@ -112,9 +112,6 @@ inputs-check:
 	@case "$(SOURCE_REMOTE)" in upstream|origin) ;; \
 		*) printf 'invalid SOURCE_REMOTE: %s\n' "$(SOURCE_REMOTE)" >&2; exit 2 ;; \
 	esac
-	@case "$(VERIFY_LIVE_SOURCE)" in 0|1) ;; \
-		*) printf 'invalid VERIFY_LIVE_SOURCE: %s\n' "$(VERIFY_LIVE_SOURCE)" >&2; exit 2 ;; \
-	esac
 	@[[ "$(IMAGE_TAG_SUFFIX)" =~ ^(-[a-z0-9]+(-[a-z0-9]+)*)?$$ ]] || { \
 		printf 'invalid IMAGE_TAG_SUFFIX: %s\n' "$(IMAGE_TAG_SUFFIX)" >&2; exit 2; \
 	}
@@ -145,6 +142,7 @@ selection-check: inputs-check
 source-check: inputs-check
 	@test -d "$(SOURCE_HOST)/.git" || { printf 'missing Xpra fork checkout: %s\n' "$(SOURCE_HOST)" >&2; exit 2; }
 	@[[ "$(SOURCE_TIP_COMMIT)" =~ ^[0-9a-f]{40}$$ ]] || { printf 'invalid cached %s/master commit: %s\n' "$(SOURCE_REMOTE)" "$(SOURCE_TIP_COMMIT)" >&2; exit 2; }
+	@[[ "$(EMBEDDED_COMMIT)" =~ ^[0-9a-f]{40}$$ ]] || { printf 'current develop has no single embedded source boundary: %s\n' "$(EMBEDDED_COMMIT)" >&2; exit 2; }
 	@[[ "$(BASE_COMMIT)" =~ ^[0-9a-f]{40}$$ ]] || { printf 'invalid selected source commit: %s\n' "$(BASE_COMMIT)" >&2; exit 2; }
 	@[[ "$(WORKFLOW_SHA)" =~ ^[0-9a-f]{64}$$ ]] || { printf 'invalid workflow digest: %s\n' "$(WORKFLOW_SHA)" >&2; exit 2; }
 	@actual="$$(git -C "$(SOURCE_HOST)" remote get-url "$(SOURCE_REMOTE)")"; \
@@ -157,26 +155,17 @@ source-check: inputs-check
 	@git -C "$(SOURCE_HOST)" cat-file -e "$(BASE_COMMIT):.github/workflows/test.yml"
 	@git -C "$(SOURCE_HOST)" archive --format=tar "$(BASE_COMMIT)" >/dev/null
 	@test "$$(git -C "$(SOURCE_HOST)" rev-parse "$(SOURCE_REF)")" = "$(SOURCE_TIP_COMMIT)"
+	@test "$(BASE_COMMIT)" = "$(EMBEDDED_COMMIT)"
 	@git -C "$(SOURCE_HOST)" merge-base --is-ancestor "$(BASE_COMMIT)" "$(SOURCE_TIP_COMMIT)"
 	@test "$$(git -C "$(SOURCE_HOST)" show "$(BASE_COMMIT):.github/workflows/test.yml" | sha256sum | awk '{print $$1}')" = "$(WORKFLOW_SHA)"
 
-source-check-remote: source-check
-	@if test "$(VERIFY_LIVE_SOURCE)" = 1; then \
-		remote=$$(git -C "$(SOURCE_HOST)" ls-remote --heads "$(SOURCE_REMOTE)" refs/heads/master | awk '{print $$1}'); \
-		test -n "$$remote" && test "$(SOURCE_TIP_COMMIT)" = "$$remote" || { \
-			printf 'cached %s/master %s does not match live %s master %s\n' \
-				"$(SOURCE_REMOTE)" "$(SOURCE_TIP_COMMIT)" "$(SOURCE_REMOTE)" "$$remote" >&2; \
-			exit 2; \
-		}; \
-	fi
-
-source-snapshot: source-check-remote
+source-snapshot: source-check
 	@python3 "$(JOB)" source snapshot \
 		--source-host "$(SOURCE_HOST)" --source-ref "$(SOURCE_REF)" \
 		--source-head "$(SOURCE_TIP_COMMIT)" --source-remote "$(SOURCE_REMOTE)" \
 		--bundle "$(SOURCE_BUNDLE)"
 
-image image-check: source-check-remote inputs-check
+image image-check: source-check inputs-check
 	@$(PODMAN) image exists "$(IMAGE)" || { \
 		printf 'required image is missing: %s\n' "$(IMAGE)" >&2; \
 		printf '%s\n' 'run make image-background-start, then make image-background-wait' >&2; \
@@ -208,12 +197,12 @@ image-background-name-check:
 		printf 'invalid image background name: %s\n' "$${XPRA_LAB_IMAGE_BACKGROUND_NAME}" >&2; exit 2; \
 	}
 
-image-background-start: source-check-remote inputs-check image-background-name-check
+image-background-start: source-check inputs-check image-background-name-check
 	@python3 "$(JOB)" image start "$${XPRA_LAB_IMAGE_BACKGROUND_NAME}" \
 		--image "$(IMAGE)" --image-input-sha256 "$(IMAGE_INPUT_SHA)" \
 		--source "$(BASE_COMMIT)" --workflow-sha256 "$(WORKFLOW_SHA)"
 
-ci-image: source-check-remote inputs-check
+ci-image: source-check inputs-check
 	@python3 "$(JOB)" image ensure \
 		--image "$(IMAGE)" --image-input-sha256 "$(IMAGE_INPUT_SHA)" \
 		--source "$(BASE_COMMIT)" --workflow-sha256 "$(WORKFLOW_SHA)"
@@ -223,8 +212,8 @@ ci-policy-check: inputs-check
 		full|full-cython|full-no-compat) ;; \
 		*) printf 'invalid CI target: %s\n' "$${XPRA_CI_TARGET:-}" >&2; exit 2 ;; \
 	esac
-	@test "$(SOURCE_REMOTE):$(VERIFY_LIVE_SOURCE)" = origin:0 || { \
-		printf '%s\n' 'CI must use checkout origin/master without a live query' >&2; exit 2; \
+	@test "$(SOURCE_REMOTE)" = origin || { \
+		printf '%s\n' 'CI must use checkout origin/master only as the bundle history ref' >&2; exit 2; \
 	}
 	@test -n "$(SOURCE_COMMIT)" || { \
 		printf '%s\n' 'CI requires the source commit embedded in pushed develop' >&2; exit 2; \
