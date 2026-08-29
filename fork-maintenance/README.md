@@ -2,8 +2,9 @@
 
 This directory is the tracked patch queue and automation for
 `kogeler/xpra`. It lives inside the Xpra repository: the parent directory is
-the source tree, `master` is the periodically synchronized operational fork
-base, and `develop` carries this automation.
+the source tree, `master` is an operator-maintained upstream reference, and
+`develop` carries this automation plus the source boundary against which its
+current patch queue was adapted.
 
 ## Active queue
 
@@ -24,7 +25,7 @@ output is never stored here.
 fork-maintenance/
 ├── cases/                  atomic active patches
 ├── stacks/develop.toml     complete ordered queue
-├── infra/upstream-tests/   frozen-master Ubuntu test runner
+├── infra/upstream-tests/   embedded-source Ubuntu test runner
 ├── infra/live/             direct Xpra and physical-GPU runner
 ├── infra/deb-packages/     mount-free Ubuntu/Debian package builder
 ├── tools/container_payload.py  common validated Podman tar transport
@@ -68,13 +69,13 @@ make -C fork-maintenance workspace-create \
   WORKSPACE=wayland-audit-01 PATCH_MODE=patched
 ```
 
-The generated source is an exact detached copy of the freshly verified equal
-fork/canonical master commit below ignored `.artifacts/`. Edit and stage only
-there, then use `workspace-update` to export the complete patch and refreshed
-workspace provenance back through one transaction. The successful workspace
-remains current and can be edited, staged, and exported again. No command in
-this cycle switches the host branch or applies production changes to host
-`develop`.
+The generated source is an exact detached copy of the unique source merge base
+already embedded in current `develop`, below ignored `.artifacts/`. The gate
+does not fetch or compare moving master refs. Edit and stage only there, then
+use `workspace-update` to export the complete patch and refreshed workspace
+provenance back through one transaction. The successful workspace remains
+current and can be edited, staged, and exported again. No command in this cycle
+switches the host branch or applies production changes to host `develop`.
 
 See [`docs/runbooks/isolated-workspaces.md`](docs/runbooks/isolated-workspaces.md).
 
@@ -82,7 +83,13 @@ New cases also stay off the host source tree: create the draft, complete its
 human fields, then start its workspace with `PATCH_MODE=clean`. The workspace
 export derives the patch digest and path ownership.
 
-## Clean publication checks
+## Explicit upstream refresh
+
+The commands in this section are not prerequisites for investigation,
+workspace work, tests, live acceptance, CI reproduction, or publication of the
+unchanged current `develop` base. Run them only when the operator deliberately
+chooses to move the queue to a newer upstream commit and begin a new adaptation
+cycle.
 
 Run commands from the Xpra root:
 
@@ -92,11 +99,12 @@ make -C fork-maintenance repo-status
 make -C fork-maintenance repo-sync
 ```
 
-The scheduled workflow normally syncs remote fork `master` from upstream every
-12 hours. `repo-sync` fetches both master refs, verifies each against live
-GitHub state, and requires exact fork/canonical equality. If it reports a stale
-fork, only the operator may run the printed non-forced `gh repo sync` command
-and repeat `repo-sync`. After equality is proven, update the local mirror:
+The scheduled workflow may sync remote fork `master` from upstream.
+`repo-sync` fetches both master refs, verifies each against live GitHub state,
+and requires exact fork/canonical equality for this explicit refresh. If it
+reports a stale fork, only the operator may run the printed non-forced
+`gh repo sync` command and repeat `repo-sync`. After equality is proven, update
+the local mirror:
 
 ```bash
 make -C fork-maintenance master-update
@@ -106,17 +114,17 @@ make -C fork-maintenance patch-start-check
 make -C fork-maintenance stack-check STACK=develop
 ```
 
-Run the fetch/master/rebase sequence when preparing a clean host-worktree or
-publication cycle. Isolated work can begin directly with
-`isolated-start-check`, which performs the fork-master fetch without switching
-branches. Both local paths require live fork/upstream equality. Resolve every
-rebase conflict before `patch-start-check`. Never merge master or another
-upstream ref into `develop`.
+This sequence intentionally changes the source boundary embedded in `develop`.
+Resolve every rebase conflict before `patch-start-check`. Never merge master or
+another upstream ref into `develop`. Outside such an operator-selected refresh,
+start directly with `isolated-start-check`; it performs no fetch, requires no
+master freshness or equality, and tests the queue against its existing embedded
+source boundary.
 
 ## Host-worktree fallback
 
-Only after the clean publication start gate, a patch may be applied to clean
-`develop` for exceptional host integration diagnosis:
+Only during an explicit clean-host refresh or integration cycle may a patch be
+applied to clean `develop` for exceptional diagnosis:
 
 ```bash
 make -C fork-maintenance patch-apply CASE=wayland-initial-window-state
@@ -187,8 +195,8 @@ a live main owner is gone, `live-status` reports `phase=removing` or
 `phase=removed` only after validating that exact transaction and its retained
 evidence; `live-logs` likewise returns only the digest-bound final log.
 
-After every fork-master rebase, reassess the duty quarantine against clean
-master before running the patched matrix:
+After every explicitly selected upstream rebase, reassess the duty quarantine
+against its new clean source before running the patched matrix:
 
 ```bash
 make -C fork-maintenance test-start \
@@ -240,16 +248,25 @@ make -C fork-maintenance deb-remove RUN=packages-ubuntu-01
 
 Use `DISTRO=debian-13` and a different `RUN` for Debian. These amd64 builds need
 an x86-64 Podman host, network access, and sufficient disk space; packages are
-built unsigned with `dpkg-buildpackage -us -uc`. The manual-only
-`deb-packages.yml` workflow builds both validated tars from one frozen selection
-snapshot, stages and verifies a draft GitHub prerelease, then publishes its
-unique tag at the selected checkout. A rerun may reclaim only an exact orphan
-draft from an earlier failed attempt of that same hosted run. Drafts are created
-through authenticated REST and bound to the immutable release ID returned by
-that request; bounded paginated release listing, never the published-only tag
-lookup, proves absence or finds one exact recoverable draft. Rollback validates
-the exact release, deletes and verifies its unchanged tag first, and deletes the
-immutable release ID last; published, tag-only, or ambiguous state is preserved.
+build unsigned with `dpkg-buildpackage -us -uc`. Automatic dbgsym generation is
+disabled and debug-symbol packages are rejected before a tar can be accepted.
+The manual-only `deb-packages.yml` workflow builds both validated tars from one
+frozen selection snapshot, stages and verifies a draft with
+`prerelease=false`, then publishes an ordinary GitHub release whose title is
+exactly the Debian version, for example `6.6-r42479-1`. Its unique transaction
+tag targets the selected checkout. A rerun may reclaim only an exact orphan
+draft from an earlier failed attempt of that same hosted run. Drafts are
+created through authenticated REST and bound to the immutable release ID
+returned by that request; bounded paginated release listing, never the
+published-only tag lookup, proves absence or finds one exact recoverable draft.
+Rollback validates the exact release, deletes and verifies its unchanged tag
+first, and deletes the immutable release ID last. After publication, the same
+bounded listing selects canonical ordinary releases owned by the DEB workflow,
+keeps the three newest by publication time and immutable ID, and deletes every
+older owned release in that same tag-first/release-ID-last order. Drafts and
+unrelated or manual releases are excluded; changed or ambiguous owned state
+fails closed. A retry may resume retention from an exact published release left
+by a failed or cancelled prior attempt without creating a duplicate.
 See
 [`docs/runbooks/deb-packages.md`](docs/runbooks/deb-packages.md).
 
@@ -266,16 +283,17 @@ XPRA_CI_TARGET=full make -C fork-maintenance ci-upstream-tests
 The other values are `full-cython` and `full-no-compat`. Each target invocation
 applies `stacks/develop` before its one leg. The workflow contains no build or
 test implementation and never starts live/GPU profiles. Run `ci-layout-check`
-after every fork-master rebase so new or modified canonical workflows remain
-disabled exact renames.
+during every explicit upstream refresh so new or modified canonical workflows
+remain disabled exact renames.
 
 ## Master sync
 
 At 00:37 and 12:37 UTC, the separate hosted workflow invokes the guarded
 `ci-master-sync` Make target. It fast-forwards only `kogeler/xpra:master` from
 `Xpra-org/xpra:master`, never uses force, and never changes `develop`. It also
-supports manual operator dispatch. The operator later fetches fork master,
-updates local master, and manually rebases develop. See
+supports manual operator dispatch. When deliberately starting a new adaptation
+cycle, the operator later fetches fork master, updates local master, and
+manually rebases develop. See
 [`docs/runbooks/master-sync.md`](docs/runbooks/master-sync.md).
 
 ## Documentation
@@ -311,11 +329,17 @@ updates local master, and manually rebases develop. See
 No target creates a new content commit, pushes `develop`, creates a pull
 request, or changes the fork's default branch. The hosted-only
 `ci-master-sync` target may only fast-forward fork `master`. The hosted-only
-`ci-deb-release` target may create only its unique draft/prerelease, package tag,
-and two validated tar assets, with exact tag-first/release-last rollback of only
-its just-created release and a tag still targeting the dispatched commit on
-failure. A retry may also apply that ordered rollback to the exact draft/tag of
-an earlier failed attempt of that same hosted workflow run after validating its
-Actions and embedded transaction records. Published, tag-only, or ambiguous
-state is preserved. Agents invoke neither hosted mutation target. `develop-rebase` only
-replays existing local commits onto fetched fork master.
+`ci-deb-release` target may create only its unique draft, ordinary release with
+the exact Debian-version title, package tag, and two validated tar assets, with
+exact tag-first/release-last rollback of only its just-created release and a
+tag still targeting the dispatched commit on failure. A retry may also apply
+that ordered rollback to the exact draft/tag of an earlier failed attempt of
+that same hosted workflow run after validating its Actions and embedded
+transaction records. After successful publication it retains the three newest
+canonical owned DEB releases and removes older owned releases in exact
+tag-first/release-ID-last order. A failed or cancelled prior attempt with an
+exact published release may resume only that retention; unrelated or manual
+releases, drafts outside exact recovery, tag-only state, and ambiguous state
+are preserved. Agents invoke neither hosted mutation target.
+`develop-rebase` only replays existing local commits onto fetched fork master
+during an operator-selected upstream refresh.

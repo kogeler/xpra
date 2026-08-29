@@ -218,5 +218,70 @@ class PackagingShimTests(unittest.TestCase):
                     ["dpkg", "--install"],
                 ],
             )
+
+
+class PackageBuildTests(unittest.TestCase):
+    def test_disables_automatic_dbgsym_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            output.mkdir()
+            package = output / "xpra_6.6-r42479-1_amd64.deb"
+            package.write_bytes(b"deb")
+            build_environment: dict[str, str] = {}
+
+            def command(
+                argv: list[str],
+                **kwargs: object,
+            ) -> subprocess.CompletedProcess[str]:
+                if argv[:3] == ["git", "show", "-s"]:
+                    return subprocess.CompletedProcess(argv, 0, "1234567890\n", "")
+                if argv[0] == "dpkg-buildpackage":
+                    build_environment.update(kwargs["env"])  # type: ignore[arg-type]
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                raise AssertionError(argv)
+
+            with (
+                patch.object(builder, "SOURCE", source),
+                patch.object(builder, "PACKAGE_OUTPUT", output),
+                patch.object(builder, "run", side_effect=command),
+            ):
+                self.assertEqual(builder.build_packages("a" * 40), (package,))
+
+            self.assertIn(
+                "noautodbgsym",
+                build_environment["DEB_BUILD_OPTIONS"].split(),
+            )
+
+    def test_refuses_dbgsym_output_if_the_build_flag_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            output.mkdir()
+            (output / "xpra_6.6-r42479-1_amd64.deb").write_bytes(b"deb")
+            (output / "xpra-codecs-dbgsym_6.6-r42479-1_amd64.deb").write_bytes(
+                b"debug"
+            )
+
+            def command(
+                argv: list[str],
+                **_kwargs: object,
+            ) -> subprocess.CompletedProcess[str]:
+                stdout = "1234567890\n" if argv[:3] == ["git", "show", "-s"] else ""
+                return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+            with (
+                patch.object(builder, "SOURCE", source),
+                patch.object(builder, "PACKAGE_OUTPUT", output),
+                patch.object(builder, "run", side_effect=command),
+                self.assertRaisesRegex(builder.BuildFailure, "forbidden dbgsym"),
+            ):
+                builder.build_packages("a" * 40)
+
+
 if __name__ == "__main__":
     unittest.main()

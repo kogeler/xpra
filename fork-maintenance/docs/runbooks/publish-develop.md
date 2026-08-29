@@ -14,31 +14,30 @@ queue representation and automation only.
 Immediately before handoff:
 
 ```bash
-make -C fork-maintenance repo-sync
-make -C fork-maintenance master-update
 git switch develop
-make -C fork-maintenance develop-rebase
-make -C fork-maintenance patch-start-check
+make -C fork-maintenance isolated-start-check
 make -C fork-maintenance stack-check STACK=develop
 make -C fork-maintenance ci-layout-check
 make -C fork-maintenance develop-check
+base=$(git merge-base refs/remotes/origin/master HEAD)
 git status --short --branch
-git log --oneline --decorate master..develop
-git diff --stat master..develop
-git diff --check master..develop
+git log --oneline --decorate "$base"..develop
+git diff --stat "$base"..develop
+git diff --check "$base"..develop
 ```
 
-`repo-sync` fetches and verifies both live master refs and requires exact
-fork/canonical equality. If it reports a stale fork, only the operator may run
-the exact non-forced `gh repo sync` command printed by the gate and then repeat
-`repo-sync` before continuing this local gate.
+This gate uses the unique source merge base already embedded in current
+`develop`. It does not fetch, compare live master refs, require master
+freshness/equality, or rebase. A newer upstream tip is not a publication
+blocker for the already adapted queue; the operator owns the decision whether
+and when to begin a separate upstream-refresh cycle.
 
-`develop-check` requires current master as the linear base, rejects merge
+`develop-check` requires one embedded linear source boundary, rejects merge
 commits above it, and rejects committed Xpra source copies outside the patch
-queue. Review that the branch contains no results, reports, screenshots,
-status files, local paths, credentials, or publication drafts.
+queue. Review that the branch contains no results, reports, screenshots, status
+files, local paths, credentials, or publication drafts.
 
-`ci-layout-check` must show that every workflow from current fork master is a
+`ci-layout-check` must show that every workflow from the embedded source is a
 byte-identical disabled rename and that the only executable workflows are the
 full-SHA-pinned thin `develop` and `master-sync` callers plus the manual,
 branch-agnostic `deb-packages` caller. Resolve this boundary before push; an
@@ -49,8 +48,9 @@ inherited newly active upstream workflow is a publication blocker.
 The handoff states:
 
 - exact `master` and `develop` commits;
+- exact embedded source commit;
 - ordered active cases and their current resolution;
-- all three clean quarantine reassessment results on this rebased master;
+- all three clean quarantine reassessment results on this source when required;
 - focused, native, full, and live jobs actually completed on this base;
 - any required gates still outstanding;
 - whether local commits are signed as required.
@@ -81,9 +81,10 @@ publication its expected shape is:
 git push --set-upstream origin develop
 ```
 
-For later publication, the mandatory rebase normally rewrites the fork-only
-commits. Capture and verify the exact current remote SHA, then use an explicit
-lease for that one ref:
+For an ordinary later publication that did not rewrite published commits, use
+a normal fast-forward push. If and only if an operator-selected upstream
+refresh rebased already published fork-only commits, capture and verify the
+exact current remote SHA, then use an explicit lease for that one ref:
 
 ```bash
 expected_develop=$(git ls-remote --heads origin refs/heads/develop | awk '{print $1}')
@@ -116,8 +117,9 @@ fork's default branch, using GitHub UI or an equivalent command such as:
 gh repo edit kogeler/xpra --default-branch develop
 ```
 
-This does not change the role of `master`: it remains the protected fork mirror
-of canonical master. Recheck the repository setting read-only afterward. Do not
+This does not change the role of `master`: it remains the protected,
+operator-maintained fork reference and may lag canonical upstream between
+explicit refreshes. Recheck the repository setting read-only afterward. Do not
 delete master, change upstream's default, or repoint patch bases to develop.
 
 ## Upstream pull requests

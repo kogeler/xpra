@@ -44,20 +44,26 @@ whose final component is `master`; it never fetches, syncs, or depends on a
 current branch or remote name. It builds Ubuntu 26.04 and Debian 13 DEB tars
 through the common mount-free Podman transport from one frozen selection
 snapshot and one frozen source snapshot, validates both, stages and verifies
-one draft prerelease, then publishes its unique package tag at the dispatched
-checkout. Before a retried attempt publishes, it may remove only an exact draft
-and unchanged tag left by an earlier failed attempt of that same hosted run,
-after validating the Actions record and embedded release transaction. Recovery
-deletes and verifies the tag first, then deletes and verifies the immutable
-release ID last. Draft creation records that ID from the authenticated REST
-create response; absence and exact orphan recovery use bounded pagination of
-the release collection, never the published-only tag lookup. Published,
-tag-only, duplicate, or ambiguous state is preserved. See
+one draft with `prerelease=false`, then publishes an ordinary release whose
+displayed title is exactly the Debian version while its unique transaction tag
+targets the dispatched checkout. Before a retried attempt publishes, it may
+remove only an exact draft and unchanged tag left by an earlier failed attempt
+of that same hosted run, after validating the Actions record and embedded
+release transaction. Recovery deletes and verifies the tag first, then deletes
+and verifies the immutable release ID last. Draft creation records that ID from
+the authenticated REST create response; absence and exact orphan recovery use
+bounded pagination of the release collection, never the published-only tag
+lookup. After successful publication, the same listing keeps the three newest
+canonical ordinary DEB releases and deletes every older owned release in exact
+tag-first/release-ID-last order. A retry may resume retention from an exact
+published release left by a failed or cancelled prior attempt without creating
+a duplicate. Drafts and unrelated or manual releases are excluded; tag-only,
+duplicate, changed, or ambiguous state fails closed and is preserved. See
 [`deb-packages.md`](deb-packages.md).
 
 The hosted develop test entry point does not call `ci-layout-check`. GitHub has
-already selected this workflow, so the rebase/publication audit must never
-prevent the actual upstream tests from starting.
+already selected this workflow, so the publication audit must never prevent the
+actual upstream tests from starting.
 
 If CI stops in `ci-prepare` before `ci_target=` appears, treat it as a pre-test
 control-plane failure. After changing only that guard, run its narrow unit test
@@ -91,14 +97,13 @@ and labels. The foreground test selection uses exact
 `image-builds/.image-cache.lock`. Any interrupted marker-backed payload is
 recovered only by a later foreground invocation and blocks cycle cleanup.
 
-Before the operator rebases and publishes `develop`, the local workflow fetches
-both master refs, verifies each against live GitHub state, requires exact
-fork/canonical equality, and consumes that commit. The hosted job keeps the
-source commit already embedded in that push even if either live ref advances
-later. It does not add an `upstream` remote and never fetches, syncs, switches,
-merges, or rebases after `actions/checkout`. If publication used the wrong base,
-repair it in the operator workflow and push the corrected commit; CI cannot and
-must not rewrite it.
+The local publication audit and hosted job both keep the source commit already
+embedded in `develop`, even if a master ref advances later. Neither ordinary
+testing nor publication requires live fork/canonical equality or a new rebase.
+The hosted job does not add an `upstream` remote and never fetches, syncs,
+switches, merges, or rebases after `actions/checkout`. If the operator chooses
+to adapt the queue to a different upstream base, that is a separate local
+refresh cycle; CI cannot and must not select or rewrite the base.
 
 ## Disabled upstream workflows
 
@@ -107,12 +112,12 @@ logic and to let Git rename detection carry upstream changes across rebases,
 each canonical workflow is relocated without content changes to the same
 relative filename below `.github/upstream-workflows/`.
 
-After every rebase:
+During every explicit upstream-refresh rebase:
 
 1. resolve rename/modify conflicts by preserving the new upstream bytes at the
    disabled destination;
 2. relocate every newly added upstream `.yml` or `.yaml` workflow;
-3. remove a disabled file only when current fork master no longer contains its
+3. remove a disabled file only when the newly selected source no longer contains its
    source;
 4. leave only `develop.yml`, `master-sync.yml`, and `deb-packages.yml` in the
    executable directory;
@@ -123,9 +128,10 @@ make -C fork-maintenance ci-layout-check
 make -C fork-maintenance check
 ```
 
-`ci-layout-check` compares every disabled file byte-for-byte with current fork
-`origin/master`, rejects missing or extra files, and verifies all exact thin
-fork workflows. Never adapt or clean up the disabled copies; they are relocated
+`ci-layout-check` compares every disabled file byte-for-byte with the source
+boundary embedded in current `develop`, rejects missing or extra files, and
+verifies all exact thin fork workflows. It performs no fetch or freshness
+check. Never adapt or clean up the disabled copies; they are relocated
 canonical inputs, not fork templates.
 
 ## Action pins
@@ -168,9 +174,10 @@ lifecycle from `upstream-tests.md`; the CI foreground target is not durable
 local evidence.
 
 Do not invoke `ci-deb-release` as local reproduction: a successful call creates
-a remote tag and GitHub prerelease, while a failed publication may exercise its
-exact tag-first/release-last rollback. Reproduce each distribution with the
-named `deb-start` / `deb-wait` / `deb-remove` lifecycle instead.
+a remote tag and ordinary GitHub release and may delete older exact owned DEB
+releases under the three-release retention policy. A failed publication may
+exercise its exact tag-first/release-last rollback. Reproduce each distribution
+with the named `deb-start` / `deb-wait` / `deb-remove` lifecycle instead.
 
 ## No live tests
 

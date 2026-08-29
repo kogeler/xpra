@@ -80,20 +80,20 @@ help:
 		'make -C fork-maintenance check' \
 		'    Offline static and unit checks for the in-repository automation' \
 		'make -C fork-maintenance repo-sync' \
-		'    Fetch and verify equal live fork/canonical master refs' \
+		'    Explicit upstream refresh: fetch and verify equal fork/canonical master refs' \
 		'make -C fork-maintenance master-update' \
-		'    Fast-forward local master to fetched origin/master' \
+		'    Explicit upstream refresh: fast-forward local master to fetched origin/master' \
 		'make -C fork-maintenance develop-rebase' \
-		'    Rebase clean develop onto the verified equal local master; never merge' \
+		'    Explicit upstream refresh: rebase clean develop onto local master' \
 		'make -C fork-maintenance patch-start-check' \
-		'    Require equal fetched master refs and a completed linear develop rebase' \
+		'    Verify an explicitly selected sync/rebase cycle before host patch integration' \
 		'make -C fork-maintenance isolated-start-check' \
-		'    Freeze equal live fork/canonical master without changing develop source' \
+		'    Locate the source commit already embedded in current develop; no network access' \
 		'make -C fork-maintenance case-new CASE=short-behavior-name' \
 		'make -C fork-maintenance case-recover CASE=short-behavior-name' \
 		'    Create a draft case or recover exact interrupted create, update, or update-removal state' \
 		'make -C fork-maintenance workspace-create CASE=name WORKSPACE=unique-name' \
-		'    Export master and apply the selected case, or start a clean draft, below ignored .artifacts/' \
+		'    Export the embedded source and apply the case, or start a clean draft, below .artifacts/' \
 		'make -C fork-maintenance workspace-{status,diff,stage,update,remove} WORKSPACE=name' \
 		'    Inspect, refresh, or remove the exact isolated workspace' \
 		'make -C fork-maintenance workspace-recover WORKSPACE=name' \
@@ -102,7 +102,7 @@ help:
 		'make -C fork-maintenance cycle-clean CYCLE=cycle-name CONFIRM=printed-sha256' \
 		'    Review, then remove exact finalized cycle results and workspaces' \
 		'make -C fork-maintenance develop-check' \
-		'    Verify clean linear develop, current master base, queue, and ignore boundary' \
+		'    Verify clean linear develop, embedded source boundary, queue, and ignore boundary' \
 		'make -C fork-maintenance ci-layout-check' \
 		'    Verify byte-identical disabled upstream workflows and all thin fork workflows' \
 		'make -C fork-maintenance ci-master-sync' \
@@ -114,7 +114,7 @@ help:
 		'    Hosted manual workflow: build patched Ubuntu 26.04 and Debian 13 DEB tars and publish a release' \
 		'make -C fork-maintenance patch-check CASE=name' \
 		'make -C fork-maintenance stack-check STACK=develop' \
-		'    Resolve one patch or the active queue against current fork master' \
+		'    Resolve one patch or the active queue against the embedded source' \
 		'make -C fork-maintenance patch-apply CASE=name' \
 		'make -C fork-maintenance patch-update CASE=name' \
 		'make -C fork-maintenance patch-unapply CASE=name' \
@@ -124,7 +124,7 @@ help:
 		'    Apply or remove the complete queue in declared order' \
 		'make -C fork-maintenance test-start STACK=develop TARGET=focused RUN=unique-name' \
 		'make -C fork-maintenance test-wait RUN=unique-name' \
-		'    Run a durable frozen-master container test job' \
+		'    Run a durable embedded-source container test job' \
 		'make -C fork-maintenance test-abort RUN=unique-name' \
 		'    Discard only that owned uncollected running/lost or stale completed test job' \
 		'make -C fork-maintenance test-image-abort IMAGE_RUN=unique-name' \
@@ -219,8 +219,7 @@ ci-upstream-tests:
 		[[ "$$source_commit" =~ ^[0-9a-f]{40}$$ ]]; \
 		$(MAKE) --no-print-directory -C "$(UPSTREAM_TESTS)" ci \
 			SELECTION=stacks/develop PATCH_MODE=patched \
-			SOURCE_REMOTE=origin SOURCE_COMMIT="$$source_commit" \
-			VERIFY_LIVE_SOURCE=0
+			SOURCE_REMOTE=origin SOURCE_COMMIT="$$source_commit"
 
 ci-deb-release:
 	@$(CONTRIB) ci-deb-prepare
@@ -366,7 +365,7 @@ test-image-remove test-image-abort: image-run-name-check
 test-versions:
 	@$(MAKE) --no-print-directory -C "$(UPSTREAM_TESTS)" versions
 
-test-start: selector-check run-name-check test-target-check
+test-start: isolated-start-check selector-check run-name-check test-target-check
 	@$(MAKE) --no-print-directory -C "$(UPSTREAM_TESTS)" background-start \
 		SELECTION="$${XPRA_LAB_SELECTOR}" PATCH_MODE="$${XPRA_LAB_PATCH_MODE}" \
 		BACKGROUND_TARGET="$${XPRA_LAB_TARGET}" BACKGROUND_NAME="$${XPRA_LAB_RUN}"
@@ -380,7 +379,7 @@ test-quarantine-no-compat test-wayland test-libyuv test-full test-full-cython \
 test-full-no-compat:
 	@$(MAKE) --no-print-directory test-start TARGET="$(patsubst test-%,%,$@)"
 
-live-start: selector-check run-name-check live-options-check
+live-start: isolated-start-check selector-check run-name-check live-options-check
 	@set -- $(LIVE_JOB) start "$${XPRA_LAB_RUN}" \
 		--application "$${XPRA_LAB_APPLICATION}" \
 		--encoding "$${XPRA_LAB_ENCODING}" \

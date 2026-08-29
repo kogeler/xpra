@@ -2,19 +2,22 @@
 
 ## Purpose
 
-Remote `kogeler/xpra:master` is the periodically synchronized operational fork
-base. The thin `.github/workflows/master-sync.yml` workflow attempts to
+Remote `kogeler/xpra:master` is a periodically synchronized, operator-maintained
+upstream reference. The thin `.github/workflows/master-sync.yml` workflow attempts to
 fast-forward it from `Xpra-org/xpra:master` at 00:37 and 12:37 UTC and supports
 an operator-triggered `workflow_dispatch`. Equality with upstream is guaranteed
 by a successful sync run, not continuously between runs. The workflow updates
-only remote fork `master`; it never changes `develop` or any local branch.
+only remote fork `master`; it never changes `develop` or any local branch. Its
+freshness or equality with upstream is not a prerequisite for workspace work,
+tests, live acceptance, CI reproduction, or publication of current `develop`.
 
 GitHub evaluates scheduled workflows from the repository's default branch, so
 this workflow and its Make implementation remain committed on default
 `develop` even though the remote ref being synchronized is explicitly
 `refs/heads/master`. A default-branch change requires an immediate audit of
 this schedule. GitHub may delay scheduled jobs under load. The operator can use
-the manual launch below whenever a fresh sync attempt is wanted before work.
+the manual launch below when deliberately preparing a new upstream-adaptation
+cycle.
 
 ## Hosted boundary
 
@@ -57,13 +60,14 @@ operator from the command line:
 gh workflow run master-sync.yml --repo kogeler/xpra --ref develop
 ```
 
-Wait for that hosted run to finish, then fetch the fork master it produced:
+When this dispatch belongs to an explicit refresh cycle, wait for it to finish,
+then fetch the fork master it produced:
 
 ```bash
 make -C fork-maintenance repo-sync
 ```
 
-Agents never execute this dispatch. The ordinary local command fetches and
+Agents never execute this dispatch. This explicit-refresh command fetches and
 verifies both master refs and requires exact fork/canonical equality. If it
 still reports a stale fork, the operator may run the same non-forced
 `gh repo sync` command directly, then repeat `repo-sync`; an ahead or divergent
@@ -71,8 +75,9 @@ fork remains an owner-review boundary.
 
 ## Manual develop refresh
 
-Automatic master synchronization deliberately does not rebase `develop`. When
-the operator is ready for a reviewed fork-base refresh, use the normal runbook:
+Automatic master synchronization deliberately does not rebase or invalidate
+`develop`. When the operator is ready to move the embedded source boundary and
+adapt the queue to it, use:
 
 ```bash
 make -C fork-maintenance repo-sync
@@ -84,4 +89,6 @@ make -C fork-maintenance patch-start-check
 
 Resolve every rebase conflict, reassess the quarantine case, resolve the active
 queue, and run the required validation ladder before publishing the rewritten
-`develop` with an exact-SHA force-with-lease.
+`develop` with an exact-SHA force-with-lease. If the operator does not choose
+this refresh, current `develop` continues to be tested and published against
+its existing embedded source regardless of later master movement.
