@@ -8,6 +8,7 @@ override SOURCE_HOST := $(PROJECT_ROOT)
 override RUNNER_HOST := $(CURDIR)
 override PRIVATE_STATE := $(RUNNER_HOST)/private_state.py
 override JOB := $(RUNNER_HOST)/job.py
+override PAYLOAD_HELPER := $(LAB_ROOT)/tools/container_payload.py
 override STATE_ROOT := $(PROJECT_ROOT)/.artifacts/fork-maintenance/upstream-tests
 override LOG_DIR := $(STATE_ROOT)/logs
 override SOURCE_BUNDLE_ROOT := $(STATE_ROOT)/sources
@@ -15,7 +16,7 @@ override SOURCE_BUNDLE_ROOT := $(STATE_ROOT)/sources
 SELECTION ?= stacks/develop
 PATCH_MODE ?= patched
 IMAGE_TAG_SUFFIX ?=
-SOURCE_REMOTE ?= upstream
+SOURCE_REMOTE ?= origin
 SOURCE_COMMIT ?=
 VERIFY_LIVE_SOURCE ?= 1
 export XPRA_LAB_SELECTION := $(SELECTION)
@@ -27,7 +28,7 @@ override BASE_COMMIT := $(if $(strip $(SOURCE_COMMIT)),$(strip $(SOURCE_COMMIT))
 override SOURCE_SHORT := $(shell printf '%s' "$(BASE_COMMIT)" | cut -c1-12)
 override SOURCE_BUNDLE := $(SOURCE_BUNDLE_ROOT)/$(SOURCE_TIP_COMMIT)-$(SOURCE_REMOTE).bundle
 override WORKFLOW_SHA := $(shell git -C "$(SOURCE_HOST)" show "$(BASE_COMMIT):.github/workflows/test.yml" 2>/dev/null | sha256sum | awk '{print $$1}')
-override IMAGE_INPUT_SHA := $(shell { sha256sum .containerignore Containerfile entrypoint.sh selection.py 2>/dev/null; printf '%s\n' "$(WORKFLOW_SHA)"; } | sha256sum | awk '{print $$1}')
+override IMAGE_INPUT_SHA := $(shell { sha256sum .containerignore Containerfile entrypoint.sh selection.py 2>/dev/null; sha256sum "$(PAYLOAD_HELPER)" 2>/dev/null | sed 's|  .*|  container_payload.py|'; printf '%s\n' "$(WORKFLOW_SHA)"; } | sha256sum | awk '{print $$1}')
 override IMAGE_INPUT_SHORT := $(shell printf '%s' "$(IMAGE_INPUT_SHA)" | cut -c1-16)
 override RUNNER_SHA := $(shell python3 "$(JOB)" runner-sha 2>/dev/null)
 override IMAGE := localhost/xpra-lab-upstream-tests:ubuntu-26.04-$(IMAGE_INPUT_SHORT)$(IMAGE_TAG_SUFFIX)
@@ -47,20 +48,6 @@ override IMAGE_BUILD_ROOT := $(STATE_ROOT)/image-builds
 override IMAGE_BUILD_CONTEXT := $(IMAGE_BUILD_ROOT)/$(IMAGE_BACKGROUND_NAME)
 export XPRA_LAB_IMAGE_BACKGROUND_NAME := $(IMAGE_BACKGROUND_NAME)
 
-override RUN_ARGS := \
-	--userns keep-id:uid=1000,gid=1000 \
-	--user 1000:1000 \
-	--env XPRA_EXPECTED_SOURCE_COMMIT=$(BASE_COMMIT) \
-	--env XPRA_EXPECTED_SOURCE_HEAD=$(SOURCE_TIP_COMMIT) \
-	--env XPRA_EXPECTED_SOURCE_REF=$(SOURCE_REF) \
-	--env XPRA_EXPECTED_WORKFLOW_SHA=$(WORKFLOW_SHA) \
-	--env XPRA_LAB_SELECTION \
-	--env XPRA_PATCH_MODE \
-	--mount type=bind,src=$(SOURCE_BUNDLE),dst=/source.bundle,ro \
-	--mount type=bind,src=$(LAB_ROOT)/cases,dst=/lab-host/cases,ro \
-	--mount type=bind,src=$(LAB_ROOT)/stacks,dst=/lab-host/stacks,ro \
-	--volume $(CCACHE_VOLUME):/home/ubuntu/.cache/ccache:U
-override RUN := $(PODMAN) run --rm $(RUN_ARGS)
 override RESOLVE_IMAGE = image_id=$$($(PODMAN) image inspect "$(IMAGE)" --format '{{.Id}}'); \
 	[[ "$$image_id" =~ ^[0-9a-f]{64}$$ ]]; \
 	test "$$($(PODMAN) image inspect "$$image_id" --format '{{index .Labels "io.xpra.lab.image-builder"}}')" = true; \
@@ -73,7 +60,7 @@ override RESOLVE_IMAGE = image_id=$$($(PODMAN) image inspect "$(IMAGE)" --format
 	image-background-status image-background-logs image-background-wait \
 	image-background-collect image-background-remove image-background-abort image-remove \
 	versions patch-check focused quarantine quarantine-cython quarantine-no-compat \
-	wayland libyuv full full-cython full-no-compat run shell background-start background-name-check \
+	wayland libyuv full full-cython full-no-compat run background-start background-name-check \
 	background-status background-logs background-wait background-collect \
 	background-remove background-abort
 
@@ -84,7 +71,7 @@ help:
 		'PATCH_MODE=patched applies all paths; tests-only applies retained tests; clean applies none' \
 		'make source-check-remote  Verify the selected cached master against its live remote' \
 		'make source-snapshot      Freeze the selected source history as a credential-free Git bundle' \
-		'make image                Verify the content-tagged Ubuntu 26.04 image' \
+		'make image                Verify the input-keyed, label-verified Ubuntu 26.04 image' \
 		'make ci XPRA_CI_TARGET=full' \
 		'                          Apply stacks/develop and run one selected CI test leg' \
 		'make image-background-start IMAGE_BACKGROUND_NAME=unique-name' \
@@ -104,9 +91,8 @@ help:
 		'make background-start BACKGROUND_TARGET=full BACKGROUND_NAME=name' \
 		'make background-{status,logs,wait,collect,remove} BACKGROUND_NAME=name' \
 		'make background-abort BACKGROUND_NAME=name' \
-		'    Force-stop and remove only that owned unfinished container job' \
-		'XPRA_TEST_COMMAND="command" make run' \
-		'make shell                Open a shell in a fresh patched source snapshot'
+		'    Discard an owned uncollected running/lost or stale completed container job' \
+		'XPRA_TEST_COMMAND="command" make run'
 
 private-state-check:
 	@python3 "$(PRIVATE_STATE)" --project-root "$(PROJECT_ROOT)"
@@ -138,7 +124,7 @@ inputs-check:
 			printf 'runner input is missing or is a symlink: %s\n' "$$path" >&2; exit 2; \
 		}; \
 	done
-	@for input in Makefile private_state.py job.py ../../tools/background_job.py; do \
+	@for input in Makefile private_state.py job.py ../../tools/background_job.py ../../tools/container_payload.py; do \
 		path="$(RUNNER_HOST)/$$input"; \
 		test ! -L "$$path" && test -f "$$path" || { \
 			printf 'host runner input is missing or is a symlink: %s\n' "$$path" >&2; exit 2; \
@@ -185,30 +171,10 @@ source-check-remote: source-check
 	fi
 
 source-snapshot: source-check-remote
-	@if test -e "$(SOURCE_BUNDLE)" || test -L "$(SOURCE_BUNDLE)"; then \
-		test ! -L "$(SOURCE_BUNDLE)" && test -f "$(SOURCE_BUNDLE)" && test -O "$(SOURCE_BUNDLE)" || { \
-			printf 'untrusted source bundle: %s\n' "$(SOURCE_BUNDLE)" >&2; exit 2; \
-		}; \
-		test "$$(stat -c '%a:%h' "$(SOURCE_BUNDLE)")" = 600:1 || { \
-			printf 'unsafe source bundle mode or link count: %s\n' "$(SOURCE_BUNDLE)" >&2; exit 2; \
-		}; \
-	else \
-		set -e; umask 077; \
-		tmp_bundle=$$(mktemp "$(SOURCE_BUNDLE_ROOT)/.$(SOURCE_SHORT).XXXXXX"); \
-		trap 'rm -f "$$tmp_bundle"' EXIT; \
-		test "$$(git -C "$(SOURCE_HOST)" rev-parse "$(SOURCE_REF)")" = "$(SOURCE_TIP_COMMIT)"; \
-		git -C "$(SOURCE_HOST)" bundle create "$$tmp_bundle" "$(SOURCE_REF)"; \
-		chmod 0600 "$$tmp_bundle"; \
-		git -C "$(SOURCE_HOST)" bundle verify "$$tmp_bundle" >/dev/null; \
-		test "$$(git bundle list-heads "$$tmp_bundle")" = \
-			"$(SOURCE_TIP_COMMIT) $(SOURCE_REF)"; \
-		mv -T -n "$$tmp_bundle" "$(SOURCE_BUNDLE)"; \
-		if test -e "$$tmp_bundle"; then rm -f "$$tmp_bundle"; fi; \
-		trap - EXIT; \
-	fi
-	@git -C "$(SOURCE_HOST)" bundle verify "$(SOURCE_BUNDLE)" >/dev/null
-	@test "$$(git bundle list-heads "$(SOURCE_BUNDLE)")" = \
-		"$(SOURCE_TIP_COMMIT) $(SOURCE_REF)"
+	@python3 "$(JOB)" source snapshot \
+		--source-host "$(SOURCE_HOST)" --source-ref "$(SOURCE_REF)" \
+		--source-head "$(SOURCE_TIP_COMMIT)" --source-remote "$(SOURCE_REMOTE)" \
+		--bundle "$(SOURCE_BUNDLE)"
 
 image image-check: source-check-remote inputs-check
 	@$(PODMAN) image exists "$(IMAGE)" || { \
@@ -233,12 +199,9 @@ image image-check: source-check-remote inputs-check
 		}
 
 image-remove: image
-	@image_id=$$($(PODMAN) image inspect "$(IMAGE)" --format '{{.Id}}'); \
-		test -n "$$image_id"; \
-		test "$$($(PODMAN) image inspect "$$image_id" --format '{{index .Labels "io.xpra.lab.image-builder"}}')" = true; \
-		test "$$($(PODMAN) image inspect "$$image_id" --format '{{index .Labels "io.xpra.lab.image-input"}}')" = "$(IMAGE_INPUT_SHA)"; \
-		test "$$($(PODMAN) image inspect "$$image_id" --format '{{index .Labels "io.xpra.lab.workflow"}}')" = "$(WORKFLOW_SHA)"; \
-		$(PODMAN) image rm "$$image_id"
+	@python3 "$(JOB)" image cache-remove \
+		--image "$(IMAGE)" --image-input-sha256 "$(IMAGE_INPUT_SHA)" \
+		--source "$(BASE_COMMIT)" --workflow-sha256 "$(WORKFLOW_SHA)"
 
 image-background-name-check:
 	@[[ "$${XPRA_LAB_IMAGE_BACKGROUND_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$$ ]] || { \
@@ -272,16 +235,20 @@ ci-policy-check: inputs-check
 	@test "$${XPRA_PATCH_MODE}" = patched || { \
 		printf '%s\n' 'CI must apply the complete patch queue' >&2; exit 2; \
 	}
-	@embedded="$$(git -C "$(SOURCE_HOST)" merge-base "$(SOURCE_REF)" HEAD)"; \
+	@embedded="$$(git -C "$(SOURCE_HOST)" merge-base --all "$(SOURCE_REF)" HEAD)"; \
 		test "$$embedded" = "$(BASE_COMMIT)" || { \
 			printf 'CI source %s does not match pushed develop boundary %s\n' \
 				"$(BASE_COMMIT)" "$$embedded" >&2; exit 2; \
 		}
 
 ci: ci-policy-check selection-check source-snapshot ci-image
-	@set -e; target="$${XPRA_CI_TARGET}"; $(RESOLVE_IMAGE); \
+	@set -e; target="$${XPRA_CI_TARGET}"; \
 		printf 'ci_target=%s\n' "$$target"; \
-		$(RUN) "$$image_id" bash /opt/xpra-lab-upstream-tests/entrypoint.sh "$$target"
+		python3 "$(JOB)" test foreground --target "$$target" \
+			--selection "$${XPRA_LAB_SELECTION}" --patch-mode "$${XPRA_PATCH_MODE}" \
+			--image "$(IMAGE)" --image-input-sha256 "$(IMAGE_INPUT_SHA)" \
+			--source "$(BASE_COMMIT)" --source-head "$(SOURCE_TIP_COMMIT)" \
+			--source-remote "$(SOURCE_REMOTE)" --workflow-sha256 "$(WORKFLOW_SHA)"
 
 image-background-status image-background-logs image-background-wait \
 image-background-collect image-background-remove image-background-abort: image-background-name-check
@@ -289,22 +256,22 @@ image-background-collect image-background-remove image-background-abort: image-b
 		"$${XPRA_LAB_IMAGE_BACKGROUND_NAME}"
 
 versions patch-check focused quarantine quarantine-cython quarantine-no-compat \
-wayland libyuv full full-cython full-no-compat: selection-check source-snapshot image
-	@set -e; $(RESOLVE_IMAGE); \
-		$(RUN) "$$image_id" bash /opt/xpra-lab-upstream-tests/entrypoint.sh $@
+	wayland libyuv full full-cython full-no-compat: selection-check source-snapshot image
+	@python3 "$(JOB)" test foreground --target "$@" \
+		--selection "$${XPRA_LAB_SELECTION}" --patch-mode "$${XPRA_PATCH_MODE}" \
+		--image "$(IMAGE)" --image-input-sha256 "$(IMAGE_INPUT_SHA)" \
+		--source "$(BASE_COMMIT)" --source-head "$(SOURCE_TIP_COMMIT)" \
+		--source-remote "$(SOURCE_REMOTE)" --workflow-sha256 "$(WORKFLOW_SHA)"
 
 run: selection-check source-snapshot image
 	@test -n "$${XPRA_TEST_COMMAND:-}" || { \
 		printf '%s\n' 'usage: XPRA_TEST_COMMAND="command" make run' >&2; exit 2; \
 	}
-	@set -e; $(RESOLVE_IMAGE); \
-		$(PODMAN) run --rm $(RUN_ARGS) --env XPRA_TEST_COMMAND "$$image_id" \
-			bash /opt/xpra-lab-upstream-tests/entrypoint.sh run
-
-shell: selection-check source-snapshot image
-	@set -e; $(RESOLVE_IMAGE); \
-		$(PODMAN) run --rm -it $(RUN_ARGS) "$$image_id" \
-			bash /opt/xpra-lab-upstream-tests/entrypoint.sh shell
+	@python3 "$(JOB)" test foreground --target run \
+		--selection "$${XPRA_LAB_SELECTION}" --patch-mode "$${XPRA_PATCH_MODE}" \
+		--image "$(IMAGE)" --image-input-sha256 "$(IMAGE_INPUT_SHA)" \
+		--source "$(BASE_COMMIT)" --source-head "$(SOURCE_TIP_COMMIT)" \
+		--source-remote "$(SOURCE_REMOTE)" --workflow-sha256 "$(WORKFLOW_SHA)"
 
 background-start: selection-check source-snapshot image
 	@test "$(BASE_COMMIT)" = "$(SOURCE_TIP_COMMIT)" || { \
@@ -314,7 +281,8 @@ background-start: selection-check source-snapshot image
 		--target "$${XPRA_LAB_BACKGROUND_TARGET}" \
 		--selection "$${XPRA_LAB_SELECTION}" --patch-mode "$${XPRA_PATCH_MODE}" \
 		--image "$(IMAGE)" --image-input-sha256 "$(IMAGE_INPUT_SHA)" \
-		--source "$(BASE_COMMIT)" --source-remote "$(SOURCE_REMOTE)" \
+		--source "$(BASE_COMMIT)" --source-head "$(SOURCE_TIP_COMMIT)" \
+		--source-remote "$(SOURCE_REMOTE)" \
 		--workflow-sha256 "$(WORKFLOW_SHA)"
 
 background-name-check:

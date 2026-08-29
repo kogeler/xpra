@@ -2,7 +2,7 @@ schema = 1
 slug = "wayland-initial-window-state"
 title = "Select Wayland codecs from current frame state"
 commit_subject = "Select Wayland codecs from current frame state"
-patch_sha256 = "ed85fb181648f305bca07137a4992f28631a685751b2ae32577750ea55026475"
+patch_sha256 = "b8714f3ad803dfe1cb3cc1fab89fa8e3bb698dbaa04fbffaa55fa001bdd7608a"
 dependencies = []
 paths = [
   "tests/unittests/unit/server/window/initial_damage_test.py",

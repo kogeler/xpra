@@ -28,18 +28,20 @@ git diff --stat master..develop
 git diff --check master..develop
 ```
 
-`repo-sync` must prove live fork/canonical master equality. If it finds a new
-mismatch, only the operator runs the documented non-forced synchronization and
-the complete gate is repeated.
+`repo-sync` fetches and verifies both live master refs and requires exact
+fork/canonical equality. If it reports a stale fork, only the operator may run
+the exact non-forced `gh repo sync` command printed by the gate and then repeat
+`repo-sync` before continuing this local gate.
 
 `develop-check` requires current master as the linear base, rejects merge
 commits above it, and rejects committed Xpra source copies outside the patch
 queue. Review that the branch contains no results, reports, screenshots,
 status files, local paths, credentials, or publication drafts.
 
-`ci-layout-check` must show that every current upstream workflow is a
-byte-identical disabled rename and that the only executable workflow is the
-full-SHA-pinned thin `develop` caller. Resolve this boundary before push; an
+`ci-layout-check` must show that every workflow from current fork master is a
+byte-identical disabled rename and that the only executable workflows are the
+full-SHA-pinned thin `develop` and `master-sync` callers plus the manual,
+branch-agnostic `deb-packages` caller. Resolve this boundary before push; an
 inherited newly active upstream workflow is a publication blocker.
 
 ## Validation summary
@@ -114,9 +116,9 @@ fork's default branch, using GitHub UI or an equivalent command such as:
 gh repo edit kogeler/xpra --default-branch develop
 ```
 
-This does not change the role of `master`: it remains a protected mirror of
-upstream. Recheck the repository setting read-only afterward. Do not delete
-master, change upstream's default, or repoint patch bases to develop.
+This does not change the role of `master`: it remains the protected fork mirror
+of canonical master. Recheck the repository setting read-only afterward. Do not
+delete master, change upstream's default, or repoint patch bases to develop.
 
 ## Upstream pull requests
 

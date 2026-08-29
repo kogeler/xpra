@@ -17,7 +17,7 @@ entry maps exactly to one changed `tests/unittests/<module>.py` path.
 
 Before adding a module:
 
-1. freeze and record current canonical master with `isolated-start-check`;
+1. freeze and record current fork master with `isolated-start-check`;
 2. reproduce the module failure on clean master in every affected matrix leg;
 3. confirm that build/setup completed and that the failure belongs to the
    named module;
@@ -44,7 +44,7 @@ file is the exact module named by the manifest.
 
 ## Mandatory rebase reassessment
 
-After every upstream rebase and before applying the quarantine patch, run all
+After every fork-master rebase and before applying the quarantine patch, run all
 three gates against clean production and clean tests:
 
 ```bash

@@ -196,19 +196,22 @@ RUN apt-get update \
 
 COPY --from=server-build /opt/xpra-install/ /
 COPY interaction_fixture.py /opt/xpra-lab/interaction_fixture.py
+COPY container_payload.py /opt/xpra-lab/container_payload.py
 COPY start_hardware_fixture.sh /opt/xpra-lab/start_hardware_fixture.sh
 COPY start_zed.sh /opt/xpra-lab/start_zed.sh
 
 RUN test -d /usr/local/share/xpra/css \
+    && chmod 0644 /opt/xpra-lab/interaction_fixture.py \
     && chmod 0755 /opt/xpra-lab/start_hardware_fixture.sh \
     && chmod 0755 /opt/xpra-lab/start_zed.sh \
+    && chmod 0755 /opt/xpra-lab/container_payload.py \
     && xpra --version \
     && python3 -c 'from xpra.codecs.libva import decoder, encoder' \
     && python3 -c 'from xpra.codecs.libyuv import converter' \
     && python3 -c 'from xpra.wayland.server import compositor'
 
 RUN useradd --create-home --uid 1001 --shell /bin/bash lab \
-    && install -d -o lab -g lab -m 0700 /run/user/1001
+    && install -d -o lab -g lab -m 0700 /artifacts /run/user/1001
 
 ENV XDG_RUNTIME_DIR=/run/user/1001
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -216,6 +219,9 @@ ENV PYTHONUNBUFFERED=1
 
 USER lab
 WORKDIR /home/lab
+
+RUN test -r /opt/xpra-lab/interaction_fixture.py \
+    && python3 -c "open('/opt/xpra-lab/interaction_fixture.py', 'rb').read(1)"
 
 CMD ["sleep", "infinity"]
 
@@ -361,8 +367,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=client-build /opt/xpra-install/ /
+COPY container_payload.py /opt/xpra-lab/container_payload.py
 
 RUN test -d /usr/local/share/xpra/css \
+    && chmod 0755 /opt/xpra-lab/container_payload.py \
     && xpra --version \
     && python3 -c 'from xpra.codecs.libva import decoder, encoder' \
     && python3 -c 'from xpra.codecs.libyuv import converter' \
@@ -370,7 +378,7 @@ RUN test -d /usr/local/share/xpra/css \
         xvfb-run --auto-servernum python3 -c 'from xpra.client.gtk3 import client_base'
 
 RUN useradd --create-home --uid 1001 --shell /bin/bash lab \
-    && install -d -o lab -g lab -m 0700 /run/user/1001
+    && install -d -o lab -g lab -m 0700 /artifacts /run/user/1001
 
 ENV XDG_RUNTIME_DIR=/run/user/1001
 ENV PYTHONDONTWRITEBYTECODE=1

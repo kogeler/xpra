@@ -106,6 +106,7 @@ class QuarantineSelectionTest(unittest.TestCase):
                     'kind = "test-quarantine"',
                     f'patch_sha256 = "{digest}"',
                     "dependencies = []",
+                    'paths = ["tests/unittests/unit/client/broken_test.py"]',
                     "",
                     "[tests]",
                     'list = ["unit.client.broken_test"]',
@@ -150,6 +151,18 @@ class QuarantineSelectionTest(unittest.TestCase):
             encoding="utf-8",
         )
         with self.assertRaisesRegex(selection.SelectionError, "paths do not match"):
+            selection.load_selection(self.lab, "cases/upstream-test-quarantine")
+
+    def test_case_rejects_manifest_paths_that_differ_from_the_patch(self) -> None:
+        manifest = self.directory / "case.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                "tests/unittests/unit/client/broken_test.py",
+                "tests/unittests/unit/client/other_test.py",
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(selection.SelectionError, "manifest paths do not match"):
             selection.load_selection(self.lab, "cases/upstream-test-quarantine")
 
 

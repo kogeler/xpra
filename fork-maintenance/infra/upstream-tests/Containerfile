@@ -93,14 +93,19 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-RUN install -d /lab-host /lab-host/cases /lab-host/stacks /lab-host/verifications \
-    && install -d -o ubuntu -g ubuntu \
+RUN install -d -o ubuntu -g ubuntu \
         /work \
         /home/ubuntu/.cache \
         /home/ubuntu/.cache/ccache \
     && install -d -m 0700 -o ubuntu -g ubuntu /run/user/1000
 
-COPY --chown=ubuntu:ubuntu entrypoint.sh selection.py /opt/xpra-lab-upstream-tests/
+COPY --chown=ubuntu:ubuntu \
+    container_payload.py entrypoint.sh selection.py \
+    /opt/xpra-lab-upstream-tests/
+
+RUN mkfifo /opt/xpra-lab-upstream-tests/payload-ready.fifo \
+    && chown ubuntu:ubuntu /opt/xpra-lab-upstream-tests/payload-ready.fifo \
+    && chmod 0600 /opt/xpra-lab-upstream-tests/payload-ready.fifo
 
 ENV CCACHE_DIR=/home/ubuntu/.cache/ccache \
     GITHUB_ACTIONS=1 \

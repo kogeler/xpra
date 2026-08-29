@@ -1,50 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SOURCE=/source.bundle
-HOST_LAB=/lab-host
 HOST_RUNNER=/opt/xpra-lab-upstream-tests
-INPUTS=/work/inputs
+PAYLOAD_HELPER="$HOST_RUNNER/container_payload.py"
+INPUTS=/work/payload
+SOURCE="$INPUTS/source.bundle"
 SNAPSHOT_LAB="$INPUTS/lab"
 WORK=/work/xpra
 SOURCE_MIRROR=/work/source.git
-RESOLUTION=/work/inputs/selection-resolution.json
+RESOLUTION="$INPUTS/selection-resolution.json"
 
-snapshot_inputs() {
-    local selection_digest snapshot_digest
-    test ! -e "$INPUTS"
-    install -d -m 0700 "$INPUTS"
-    install -m 0755 "$HOST_RUNNER/entrypoint.sh" "$INPUTS/entrypoint.sh"
-    install -m 0755 "$HOST_RUNNER/selection.py" "$INPUTS/selection.py"
-
-    selection_digest=$(python3 "$HOST_RUNNER/selection.py" \
-        --lab-root "$HOST_LAB" \
-        --selection "${XPRA_LAB_SELECTION:?XPRA_LAB_SELECTION is required}" \
-        digest)
-    python3 "$HOST_RUNNER/selection.py" \
-        --lab-root "$HOST_LAB" \
-        --selection "$XPRA_LAB_SELECTION" \
-        snapshot \
-        --destination "$SNAPSHOT_LAB"
-    snapshot_digest=$(python3 "$INPUTS/selection.py" \
-        --lab-root "$SNAPSHOT_LAB" \
-        --selection "$XPRA_LAB_SELECTION" \
-        digest)
-    test "$selection_digest" = "$snapshot_digest"
-    if test -n "${XPRA_EXPECTED_SELECTION_SHA:-}"; then
-        [[ "$XPRA_EXPECTED_SELECTION_SHA" =~ ^[0-9a-f]{64}$ ]]
-        test "$selection_digest" = "$XPRA_EXPECTED_SELECTION_SHA"
-    fi
-    printf '%s\n' "$selection_digest" > "$INPUTS/selection.sha256"
-
-    exec env \
-        XPRA_RUNNER_INPUTS_READY=1 \
-        XPRA_SELECTION_DIGEST="$selection_digest" \
-        bash "$INPUTS/entrypoint.sh" "$@"
-}
-
-if test "${XPRA_RUNNER_INPUTS_READY:-0}" != 1; then
-    snapshot_inputs "$@"
+if test ! -e "$INPUTS"; then
+    python3 "$PAYLOAD_HELPER" extract --destination "$INPUTS"
 fi
 
 PATCH_MODE=${XPRA_PATCH_MODE:-patched}
@@ -53,10 +20,10 @@ EXPECTED_COMMIT=${XPRA_EXPECTED_SOURCE_COMMIT:-}
 EXPECTED_SOURCE_HEAD=${XPRA_EXPECTED_SOURCE_HEAD:-}
 EXPECTED_SOURCE_REF=${XPRA_EXPECTED_SOURCE_REF:-}
 EXPECTED_WORKFLOW_SHA=${XPRA_EXPECTED_WORKFLOW_SHA:-}
-SELECTION_DIGEST=${XPRA_SELECTION_DIGEST:-}
+SELECTION_DIGEST=${XPRA_EXPECTED_SELECTION_SHA:-}
 
 selection_tool() {
-    python3 "$INPUTS/selection.py" \
+    python3 "$HOST_RUNNER/selection.py" \
         --lab-root "$SNAPSHOT_LAB" \
         --selection "$SELECTION" \
         "$@"
@@ -91,6 +58,7 @@ validate_inputs() {
         return 2
     }
     test -f "$SOURCE" && test ! -L "$SOURCE"
+    test -d "$SNAPSHOT_LAB" && test ! -L "$SNAPSHOT_LAB"
     test "$(git bundle list-heads "$SOURCE")" = \
         "$EXPECTED_SOURCE_HEAD $EXPECTED_SOURCE_REF"
     selection_tool validate
@@ -135,7 +103,7 @@ PY
     gcc --version | head -n 1
     ld --version | head -n 1
     pkg-config --version
-    sha256sum "$INPUTS/entrypoint.sh" "$INPUTS/selection.py"
+    sha256sum "$HOST_RUNNER/entrypoint.sh" "$HOST_RUNNER/selection.py" "$PAYLOAD_HELPER"
     find "$SNAPSHOT_LAB" -type f -print0 | sort -z | xargs -0 sha256sum
     selection_tool gates | sed 's/^/selected_gate=/'
 
@@ -512,11 +480,6 @@ case "${1:-help}" in
         prepare_source
         cd "$WORK"
         bash -lc "${XPRA_TEST_COMMAND:?XPRA_TEST_COMMAND is required}"
-        ;;
-    shell)
-        prepare_source
-        cd "$WORK"
-        exec bash
         ;;
     *)
         printf 'unknown target: %s\n' "${1:-}" >&2
