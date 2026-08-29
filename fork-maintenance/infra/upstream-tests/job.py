@@ -1306,10 +1306,7 @@ def _test_start_locked(args: argparse.Namespace) -> int:
     try:
         created = command(
             argv,
-            pass_fds=(
-                int(args.lifecycle_lock_descriptor),
-                int(args.image_cache_lock_descriptor),
-            ),
+            pass_fds=(int(args.lifecycle_lock_descriptor),),
         ).stdout.strip()
         if not SHA256_RE.fullmatch(created):
             raise JobError("podman create returned an invalid container ID")
@@ -1341,10 +1338,7 @@ def _test_start_locked(args: argparse.Namespace) -> int:
         owner_published = True
         command(
             ["podman", "start", created],
-            pass_fds=(
-                int(args.lifecycle_lock_descriptor),
-                int(args.image_cache_lock_descriptor),
-            ),
+            pass_fds=(int(args.lifecycle_lock_descriptor),),
         )
         send_test_payload(created, args, selection_sha)
         remove_test_prelaunch(name)

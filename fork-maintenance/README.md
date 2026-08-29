@@ -208,6 +208,14 @@ Repeat for `quarantine-cython` and `quarantine-no-compat`. These gates are
 green only while each listed module is still non-green; a newly passing module
 must be removed or narrowed in the quarantine case.
 
+Every explicit upstream rebase then requires the complete current validation,
+even if every patch applied without a textual refresh: offline fork-control
+tests, tests-only controls for both production cases, patched focused and native
+gates, all three complete upstream workflow legs, and all five fixed positive
+live profiles. A new upstream-suite failure enters the single quarantine only
+after the exact module reproduces on the clean rebased source in the same mode;
+the clean quarantine gates and patched matrix are rerun after that change.
+
 After a whole prefixed work cycle is finalized and reviewed, delete its
 collected results and finalized workspaces through an exact two-phase plan:
 

@@ -280,8 +280,10 @@ retained DEB per-key image locks provide the same handoff guarantee. Their
 children inherit the open kernel lock. Live start holds its lifecycle lock from
 before freeze through main-owner publication; upstream test start holds both
 lifecycle and image-cache locks through create, start, and payload delivery.
-Create/start inherit both descriptors, while selection and payload streaming
-inherit the lifecycle descriptor. Each collected test, standalone-image, live,
+Create/start inherit only the lifecycle descriptor; the Python starter keeps
+the image-cache descriptor through payload delivery without leaking it to
+Podman's long-lived helpers. Selection and payload streaming inherit the
+lifecycle descriptor. Each collected test, standalone-image, live,
 or DEB remove target publishes its evidence-bound transaction before the first
 destructive step and reuses it for an idempotent retry after interruption.
 After a live main owner is gone, its exact schema-1 removal transaction alone
@@ -386,7 +388,11 @@ copyright notices, or documentation does not rerun Xpra focused, native, full,
 or live jobs. The embedded source, paths, modes, executable data, configuration, test
 assertions, and runner behavior must all be unchanged. Run resolution,
 whitespace, and fork-control checks and report the non-semantic proof. Any
-uncertainty falls back to the normal validation ladder.
+uncertainty falls back to the normal validation ladder. This exception is only
+for a patch/documentation refresh on an unchanged embedded source. It never
+applies after `develop-rebase`: a changed base requires every clean quarantine,
+fork-control, focused, native, full-matrix, and positive live gate even if the
+patch bytes did not need modification.
 
 When a run fails before entering an expensive test target, validate a fix to
 that pre-test guard with the narrow control-plane unit test and direct preflight

@@ -360,10 +360,16 @@ commit, use this clean sequence:
    master;
 7. run every clean quarantine gate and remove or narrow entries that no longer
    fail on this exact master;
-8. confirm that isolated run provenance and patch digests still bind this exact
-   master, apply the non-semantic exception below, or rerun the affected gates;
-9. run any remaining focused, native, full, and required live gates;
-10. run `develop-check` before handoff.
+8. run the complete offline fork-control suite and the tests-only control for
+   every production case, then review whether upstream replaced or narrowed any
+   patch behavior;
+9. run every patched focused and native gate, all three complete upstream test
+   legs (`full`, `full-cython`, and `full-no-compat`), and all five fixed positive
+   live profiles, even if the patches applied without textual changes;
+10. reproduce any newly failing author test on this exact clean master before
+    adding it to the single duty quarantine, then rerun its clean quarantine
+    gates and the complete patched matrix;
+11. run `develop-check` before handoff.
 
 This explicit sequence fetches both master refs and requires live
 fork/canonical equality. If step 2 reports a stale fork, the operator may run
@@ -378,13 +384,14 @@ above the embedded source boundary.
 Ordinary pre-commit investigation starts with `isolated-start-check`; its
 outputs are bound to the embedded source commit and patch digests. Old reports
 and previous successful resolution are not proof after an explicit base move
-or executable/test semantics change. A digest-only change may
-reuse the prior functional result solely under the non-semantic validation
-exception below. Do not delete an active patch merely because nearby upstream
-code looks equivalent. Review the exact production path and run the retained
-tests-only regression first. Once a patch is proven exactly present or fully
-replaced, remove it and update the stack in one reviewed change; do not create
-a tracked history archive.
+or executable/test semantics change. A digest-only patch refresh on an
+unchanged embedded source may reuse prior functional results solely under the
+non-semantic validation exception below. Moving the embedded source by rebase
+always invalidates prior functional acceptance. Do not delete an active patch
+merely because nearby upstream code looks equivalent. Review the exact
+production path and run the retained tests-only regression first. Once a patch
+is proven exactly present or fully replaced, remove it and update the stack in
+one reviewed change; do not create a tracked history archive.
 
 ## Source and runner provenance
 
@@ -419,8 +426,9 @@ The prelaunch record remains until the container is started and the complete
 source/selection payload is delivered through the readiness FIFO. The retained
 subsystem lifecycle lock is inherited across selection freezing, container
 creation and start, and payload streaming, so abort cannot reclaim an in-flight
-publisher. The matching image-cache lock is also inherited through container
-create/start and held by the starter through payload delivery.
+publisher. The Python starter holds the matching image-cache lock through
+immutable-ID handoff and payload delivery, but does not pass it to Podman's
+long-lived networking helper.
 
 Hosted foreground tests use deterministic
 `upstream-tests/.foreground-payload{,.owner.json}` staging under retained
@@ -429,7 +437,9 @@ recovers only that marker-owned partial before reuse; cycle cleanup treats a
 remaining payload or marker as active state. Upstream image creation,
 inspection/use handoff, and explicit cache removal are serialized by retained
 `upstream-tests/image-builds/.image-cache.lock`; Podman children inherit the
-open lock through the handoff.
+open lock only for image builds. A detached test starter holds the lock itself
+through the immutable-ID handoff without passing it to the test container's
+long-lived helpers.
 Exact cache removal takes the same lock and refuses any matching unresolved
 image-build or test prelaunch/owner. It may recognize an older valid source
 label only for cleanup, while still requiring the complete exact lab-label set,
@@ -692,7 +702,12 @@ runner behavior, and live assertions must remain unchanged. Refresh derived
 digests, resolve the current queue, run whitespace checks and the affected
 fork-control tests, and describe the proof at handoff. Do not spend container,
 native, full-matrix, or live resources on that refresh. If any condition is
-uncertain, the exception does not apply and the normal ladder is required.
+uncertain, the exception does not apply and the normal ladder is required. A
+`develop-rebase` necessarily changes the embedded source and therefore never
+qualifies: its acceptance always includes the complete fork-control suite,
+clean quarantine reassessment, production tests-only controls, patched focused
+and native gates, all three author-test legs, and all five fixed positive live
+profiles.
 
 Ordinary acceptance is green. A pre-existing failure outside the selected
 paths is investigated against canonical CI before any costly local clean
