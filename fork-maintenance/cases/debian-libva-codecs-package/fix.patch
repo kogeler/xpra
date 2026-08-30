@@ -1,0 +1,88 @@
+diff --git a/packaging/debian/xpra/not-installed b/packaging/debian/xpra/not-installed
+new file mode 100644
+index 0000000000000000000000000000000000000000..b53673f5813841c5db45dd8699484a0d7f588780
+--- /dev/null
++++ b/packaging/debian/xpra/not-installed
+@@ -0,0 +1,12 @@
++# Debian installs its package-specific xpra-server units through debhelper.
++lib/systemd/system/xpra.service
++lib/systemd/system/xpra.socket
++
++# The system encoder service has no Debian lifecycle integration yet.
++lib/systemd/system/xpra-encoder.service
++lib/systemd/system/xpra-encoder.socket
++
++# setup.py cannot resolve a versioned Wireshark plugin directory without the
++# optional Wireshark development environment and otherwise stages this at an
++# invalid top-level location.
++usr/xpra_dissector.lua
+diff --git a/packaging/debian/xpra/rules b/packaging/debian/xpra/rules
+index f39044e1b15c668614d3de21d84a8be04f86a266..9a6373818243538684fe79da058673a9db4e5dd0 100755
+--- a/packaging/debian/xpra/rules
++++ b/packaging/debian/xpra/rules
+@@ -22,6 +22,9 @@ override_dh_install:
+ 	dh_movefiles
+ 	dh_install
+ 
++override_dh_missing:
++	dh_missing --fail-missing
++
+ override_dh_auto_install:
+ 	python3 -B setup.py install --root=$(CURDIR)/debian/tmp --install-layout=deb $(BUILDOPTS)
+ 
+diff --git a/packaging/debian/xpra/xpra-codecs-extras.files b/packaging/debian/xpra/xpra-codecs-extras.files
+index e7f8fb25014d844d5faaff1d625032c7e7cdb837..eedc6db04133ef2bd4388920ea586a60269bc2be 100644
+--- a/packaging/debian/xpra/xpra-codecs-extras.files
++++ b/packaging/debian/xpra/xpra-codecs-extras.files
+@@ -1,4 +1,5 @@
+ usr/lib/python3*/*/xpra/codecs/avif
++usr/lib/python3*/*/xpra/codecs/de265
+ usr/lib/python3*/*/xpra/codecs/ffmpeg
+ usr/lib/python3*/*/xpra/codecs/x26?
+ usr/lib/python3*/*/xpra/codecs/pytorch
+diff --git a/packaging/debian/xpra/xpra-codecs.files b/packaging/debian/xpra/xpra-codecs.files
+index 85e0f6c7f945eac3afb9a231a6168a5ba1553126..4ceb16104c05cc06e5ed63bbaa808abedf3fc37e 100644
+--- a/packaging/debian/xpra/xpra-codecs.files
++++ b/packaging/debian/xpra/xpra-codecs.files
+@@ -1,14 +1,18 @@
++usr/lib/python3*/*/xpra/codecs/aom
+ usr/lib/python3*/*/xpra/codecs/dav1d
+ usr/lib/python3*/*/xpra/codecs/drm
+ usr/lib/python3*/*/xpra/codecs/evdi
+ usr/lib/python3*/*/xpra/codecs/jpeg
++usr/lib/python3*/*/xpra/codecs/jph
+ usr/lib/python3*/*/xpra/codecs/x264
+ usr/lib/python3*/*/xpra/codecs/openh264
++usr/lib/python3*/*/xpra/codecs/libva
+ usr/lib/python3*/*/xpra/codecs/libyuv
+ usr/lib/python3*/*/xpra/codecs/pipewire
+ usr/lib/python3*/*/xpra/codecs/v4l2
++usr/lib/python3*/*/xpra/codecs/vpl
+ usr/lib/python3*/*/xpra/codecs/vpx
+ usr/lib/python3*/*/xpra/codecs/webp
+ usr/lib/python3*/*/xpra/codecs/csc_cython
+ usr/lib/python3*/*/xpra/codecs/remote
+-usr/lib/python3*/*/xpra/codecs/h264_util.py
+\ No newline at end of file
++usr/lib/python3*/*/xpra/codecs/h264_util.py
+diff --git a/packaging/debian/xpra/xpra-common.files b/packaging/debian/xpra/xpra-common.files
+index 7f9ea7e66bdbb70bc6dc37473c3253020160d51f..adf79742acefa2ec4dbef6d8b71f31878903efa5 100644
+--- a/packaging/debian/xpra/xpra-common.files
++++ b/packaging/debian/xpra/xpra-common.files
+@@ -57,3 +57,4 @@ usr/lib/python3*/*/xpra/codecs/protocols.py
+ usr/lib/python3*/*/xpra/codecs/screenshot.py
+ usr/lib/python3*/*/xpra/codecs/video.py
+ usr/lib/python3*/*/xpra/codecs/vacommon.py
++usr/lib/python3*/*/xpra-*.egg-info
+diff --git a/packaging/debian/xpra/xpra-server.files b/packaging/debian/xpra/xpra-server.files
+index 051888df44bb2a1073dcd261ef468f622a31efd1..c0431a2b9f1dc2c1ed4ad1bd37f952319b1d0a43 100644
+--- a/packaging/debian/xpra/xpra-server.files
++++ b/packaging/debian/xpra/xpra-server.files
+@@ -10,6 +10,7 @@ usr/libexec/xpra/gnome-open
+ usr/libexec/xpra/gvfs-open
+ usr/libexec/xpra/auth_dialog
+ usr/libexec/xpra/daemonizer
++usr/libexec/xpra/xpra_weston_xvfb
+ #etc/default/xpra
+ usr/lib/tmpfiles.d/xpra.conf
+ usr/lib/sysusers.d/xpra.conf

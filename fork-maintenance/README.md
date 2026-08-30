@@ -12,7 +12,8 @@ The active patches are:
 
 1. `wayland-initial-window-state`;
 2. `video-pipeline-cleanup-race`;
-3. `upstream-test-quarantine` (test-only duty case).
+3. `debian-libva-codecs-package`;
+4. `upstream-test-quarantine` (test-only duty case).
 
 `stacks/develop.toml` applies them in integration order. `develop` here is the
 stable queue slug, not a requirement that every consumer run from the Git branch
@@ -271,9 +272,20 @@ make -C fork-maintenance deb-remove RUN=packages-ubuntu-01
 ```
 
 Use `DISTRO=debian-13` and a different `RUN` for Debian. These amd64 builds need
-an x86-64 Podman host, network access, and sufficient disk space; packages are
-built unsigned with `dpkg-buildpackage -us -uc`. Automatic dbgsym generation is
-disabled and debug-symbol packages are rejected before a tar can be accepted.
+an x86-64 Podman host, network access, and sufficient disk space. Build
+dependencies come only from the target Ubuntu or Debian archives: the builder
+does not enable the Xpra APT repository or install prebuilt Xpra packages. The
+packages are built from the frozen fork source and remain unsigned through
+`dpkg-buildpackage -us -uc`. Automatic dbgsym generation is disabled and
+debug-symbol packages are rejected before a tar can be accepted.
+The patched package sequence also enables `dh_missing --fail-missing`, so the
+complete staged install tree must be assigned to binary packages or to the
+small reviewed exclusion file. Before output, the builder inventories the
+actual DEBs, proves unique regular-file ownership, extracts the real
+`xpra-common` and `xpra-codecs`, imports the packaged libva encoder/decoder and
+libyuv converter, and checks their ELF-derived dependencies against the final
+`Depends`. The host independently parses the returned DEBs and repeats the
+package-set, module ownership, ABI, and dependency validation.
 The manual-only `deb-packages.yml` workflow builds both validated tars from one
 frozen selection snapshot, stages and verifies a draft with
 `prerelease=false`, then publishes an ordinary GitHub release whose title is

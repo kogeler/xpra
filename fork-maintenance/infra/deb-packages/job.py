@@ -102,6 +102,19 @@ RELEASE_TRANSACTION_PREFIX = "<!-- xpra-deb-transaction:"
 RELEASE_LIST_PAGE_SIZE = 100
 MAX_RELEASE_LIST_PAGES = 100
 RELEASE_RETENTION_COUNT = 3
+PYTHON_SITE_ROOT = PurePosixPath("usr/lib/python3/dist-packages")
+REQUIRED_NATIVE_CODEC_MODULES = (
+    "xpra.codecs.libva.decoder",
+    "xpra.codecs.libva.encoder",
+    "xpra.codecs.libyuv.converter",
+)
+REQUIRED_CODEC_DEPENDENCIES = frozenset({"libva-drm2", "libva2", "libyuv0"})
+FORBIDDEN_CODEC_DEPENDENCIES = frozenset(
+    {"xpra-codecs-amd", "xpra-codecs-extras", "xpra-codecs-nvidia"}
+)
+NATIVE_EXTENSION_ABI_RE = re.compile(
+    r"(?P<abi>cpython-[0-9]{2,3}-x86_64-linux-gnu)\.so"
+)
 
 
 class JobError(RuntimeError):
@@ -118,6 +131,17 @@ class PublishedRelease:
     published_at: datetime
     release_id: int
     tag: str
+    version: str
+
+
+@dataclass(frozen=True)
+class DebInspection:
+    """Control metadata and regular payload paths parsed from one DEB."""
+
+    architecture: str
+    depends: str
+    files: tuple[PurePosixPath, ...]
+    package: str
     version: str
 
 
@@ -1562,8 +1586,8 @@ def deb_archive_member_path(member: tarfile.TarInfo) -> PurePosixPath | None:
     return None
 
 
-def deb_control_fields(path: Path) -> dict[str, str]:
-    """Parse the required control fields from a Debian ar archive."""
+def inspect_deb(path: Path) -> DebInspection:
+    """Parse control metadata and regular payload paths from a Debian archive."""
     control_payload = b""
     debian_binary = b""
     data_member: tuple[int, int] | None = None
@@ -1612,6 +1636,7 @@ def deb_control_fields(path: Path) -> dict[str, str]:
         raise JobError(f"Debian ar members are not in canonical order: {path.name}")
     if debian_binary != b"2.0\n" or not control_payload or data_member is None:
         raise JobError(f"incomplete Debian package structure: {path.name}")
+    data_files: set[PurePosixPath] = set()
     try:
         validate_single_xz_stream(
             control_payload,
@@ -1748,6 +1773,7 @@ def deb_control_fields(path: Path) -> dict[str, str]:
                             f"Debian data member is too large: {path.name}:{name}"
                         )
                     if member.isfile():
+                        data_files.add(name)
                         expanded_bytes += member.size
                         if expanded_bytes > MAX_DEB_DATA_EXPANDED_BYTES:
                             raise JobError(
@@ -1805,7 +1831,8 @@ def deb_control_fields(path: Path) -> dict[str, str]:
                 raise JobError(f"Debian data archive has trailing data: {path.name}")
     except (EOFError, lzma.LZMAError, tarfile.TarError) as error:
         raise JobError(f"invalid Debian data archive: {path.name}") from error
-    fields: dict[str, str] = {}
+    control_fields: dict[str, str] = {}
+    current_field = ""
     paragraph_ended = False
     for line in control_text.splitlines():
         if not line:
@@ -1814,18 +1841,133 @@ def deb_control_fields(path: Path) -> dict[str, str]:
         if paragraph_ended:
             raise JobError(f"Debian package control has multiple paragraphs: {path.name}")
         if line[:1].isspace():
+            if not current_field:
+                raise JobError(f"Debian package control continuation is invalid: {path.name}")
+            control_fields[current_field] += " " + line.strip()
             continue
         key, separator, value = line.partition(":")
-        if separator and key in {"Package", "Version", "Architecture"}:
-            normalized = key.lower()
-            if normalized in fields:
-                raise JobError(f"duplicate Debian control field {key}: {path.name}")
-            fields[normalized] = value.strip()
+        if not separator or not key:
+            raise JobError(f"Debian package control field is invalid: {path.name}")
+        if key in control_fields:
+            raise JobError(f"duplicate Debian control field {key}: {path.name}")
+        control_fields[key] = value.strip()
+        current_field = key
+    fields = {
+        key.lower(): control_fields.get(key, "")
+        for key in ("Package", "Version", "Architecture")
+    }
     if set(fields) != {"package", "version", "architecture"} or any(
         not value or "\n" in value for value in fields.values()
     ):
         raise JobError(f"Debian package control fields are incomplete: {path.name}")
-    return fields
+    return DebInspection(
+        architecture=fields["architecture"],
+        depends=control_fields.get("Depends", ""),
+        files=tuple(sorted(data_files, key=str)),
+        package=fields["package"],
+        version=fields["version"],
+    )
+
+
+def deb_control_fields(path: Path) -> dict[str, str]:
+    """Return the required control fields after validating the complete DEB."""
+    inspection = inspect_deb(path)
+    return {
+        "architecture": inspection.architecture,
+        "package": inspection.package,
+        "version": inspection.version,
+    }
+
+
+def dependency_names(value: str) -> frozenset[str]:
+    """Return every package name from a resolved Debian dependency field."""
+    names: set[str] = set()
+    for group in value.split(","):
+        if not group.strip():
+            continue
+        for alternative in group.split("|"):
+            match = re.match(
+                r"\s*([a-z0-9][a-z0-9+.-]*)(?::[a-z0-9-]+)?(?:\s|\(|$)",
+                alternative,
+            )
+            if match is None:
+                raise JobError(f"invalid resolved Debian dependency: {alternative!r}")
+            names.add(match.group(1))
+    return frozenset(names)
+
+
+def native_module_candidates(
+    files: tuple[PurePosixPath, ...], module: str
+) -> tuple[tuple[str, PurePosixPath], ...]:
+    """Resolve one native Python module from a DEB payload inventory."""
+    module_path = PYTHON_SITE_ROOT.joinpath(*module.split("."))
+    prefix = f"{module_path.name}."
+    matches: list[tuple[str, PurePosixPath]] = []
+    for path in files:
+        if path.parent != module_path.parent or not path.name.startswith(prefix):
+            continue
+        match = NATIVE_EXTENSION_ABI_RE.fullmatch(path.name.removeprefix(prefix))
+        if match:
+            matches.append((match.group("abi"), path))
+    return tuple(matches)
+
+
+def validate_package_set(
+    inspections: tuple[DebInspection, ...],
+) -> dict[str, PurePosixPath]:
+    """Independently validate package ownership and native codec capability."""
+    packages: dict[str, DebInspection] = {}
+    owners: dict[PurePosixPath, str] = {}
+    for inspection in inspections:
+        if inspection.package in packages:
+            raise JobError(f"package tar contains duplicate Package: {inspection.package}")
+        packages[inspection.package] = inspection
+        for path in inspection.files:
+            previous = owners.setdefault(path, inspection.package)
+            if previous != inspection.package:
+                raise JobError(
+                    f"package tar payload overlaps at {path}: {previous}, {inspection.package}"
+                )
+    for required in ("xpra-common", "xpra-codecs"):
+        if required not in packages:
+            raise JobError(f"package tar is missing {required}")
+
+    bindings: dict[str, PurePosixPath] = {}
+    abis: set[str] = set()
+    for module in REQUIRED_NATIVE_CODEC_MODULES:
+        matches = tuple(
+            (inspection.package, abi, path)
+            for inspection in inspections
+            for abi, path in native_module_candidates(inspection.files, module)
+        )
+        if len(matches) != 1:
+            raise JobError(
+                f"required native module {module} is missing or ambiguous in the package tar"
+            )
+        package, abi, path = matches[0]
+        if package != "xpra-codecs":
+            raise JobError(
+                f"required native module {module} belongs to {package}, not xpra-codecs"
+            )
+        bindings[module] = path
+        abis.add(abi)
+    if len(abis) != 1:
+        raise JobError("required native codec modules use different Python ABIs")
+
+    dependencies = dependency_names(packages["xpra-codecs"].depends)
+    missing = sorted(REQUIRED_CODEC_DEPENDENCIES.difference(dependencies))
+    if missing:
+        raise JobError(
+            "xpra-codecs is missing native codec runtime dependencies: "
+            + ", ".join(missing)
+        )
+    forbidden = sorted(FORBIDDEN_CODEC_DEPENDENCIES.intersection(dependencies))
+    if forbidden:
+        raise JobError(
+            "xpra-codecs unexpectedly depends on vendor or extras packages: "
+            + ", ".join(forbidden)
+        )
+    return bindings
 
 
 def validation_paths(path: Path) -> tuple[Path, Path, Path]:
@@ -1980,6 +2122,7 @@ def validate_package_tar(path: Path, expected: argparse.Namespace) -> dict[str, 
             raise JobError("package manifest contains no DEB packages")
         names: set[str] = set()
         expected_checksums: list[str] = []
+        inspections: list[DebInspection] = []
         for entry in packages:
             if not isinstance(entry, dict):
                 raise JobError("package manifest entry is invalid")
@@ -2000,7 +2143,13 @@ def validate_package_tar(path: Path, expected: argparse.Namespace) -> dict[str, 
             digest = sha256_file(package)
             if entry.get("sha256") != digest or entry.get("size") != package.stat().st_size:
                 raise JobError(f"manifest DEB metadata does not match: {name}")
-            fields = deb_control_fields(package)
+            inspection = inspect_deb(package)
+            inspections.append(inspection)
+            fields = {
+                "architecture": inspection.architecture,
+                "package": inspection.package,
+                "version": inspection.version,
+            }
             if fields["package"].endswith("-dbgsym"):
                 raise JobError(f"debug-symbol DEB packages are forbidden: {name}")
             if (
@@ -2016,6 +2165,7 @@ def validate_package_tar(path: Path, expected: argparse.Namespace) -> dict[str, 
             ):
                 raise JobError(f"DEB control metadata does not match: {name}")
             expected_checksums.append(f"{digest}  {name}\n")
+        validate_package_set(tuple(inspections))
         archive_debs = {path.name for path in temporary.glob("*.deb")}
         if archive_debs != names:
             raise JobError("package tar DEB set does not exactly match its manifest")
