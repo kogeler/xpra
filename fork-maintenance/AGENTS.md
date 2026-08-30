@@ -193,6 +193,25 @@ to the exact tar device/inode/size. Named local scratch may be recovered only
 by validation, `deb-remove`, or `deb-abort`; hosted scratch remains in its
 release-attempt staging for review.
 
+The Debian package sequence uses `dh_missing --fail-missing`: every staged
+result must be assigned to one binary package or match the exact reviewed
+`packaging/debian/xpra/not-installed` set. Validation is package-set based, not
+a source-manifest text check. The builder inventories every actual DEB, rejects
+duplicate package identities and overlapping regular payload paths, resolves
+the required libva encoder, libva decoder, and libyuv converter to exactly one
+matching amd64 CPython ABI in ordinary `xpra-codecs`, then imports them from an
+extracted private package root. `dpkg-shlibdeps` over those packaged ELF objects
+must produce dependencies represented by the final `xpra-codecs` control data.
+The host independently parses the returned ar, control, and data archives and
+repeats ownership, ABI, and dependency validation. Do not replace this with a
+test for selected `.files` lines or trust the emitted manifest as package
+content authority.
+
+The builder resolves build dependencies only from the configured target
+Ubuntu or Debian archives. It does not enable the Xpra APT repository from the
+source tree, trust an Xpra repository signing key, or install prebuilt Xpra
+packages; the only Xpra program source is the frozen fork source payload.
+
 Hosted package publication creates its draft through authenticated REST and
 records the immutable release ID directly from that response. It never tries to
 discover a draft through the published-only tag endpoint. Current-tag absence,

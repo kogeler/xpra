@@ -26,6 +26,9 @@ from unittest.mock import ANY, patch
 import container_payload
 import job
 
+TEST_ABI = "cpython-314-x86_64-linux-gnu"
+TEST_DEPENDS = "xpra-common, libva2, libva-drm2, libyuv0"
+
 
 @contextmanager
 def unlocked():
@@ -159,13 +162,24 @@ def synthetic_deb(
     )
 
 
+def codec_data_entries(abi: str = TEST_ABI) -> dict[str, bytes]:
+    entries: dict[str, bytes] = {}
+    for module in job.REQUIRED_NATIVE_CODEC_MODULES:
+        module_path = job.PYTHON_SITE_ROOT.joinpath(*module.split("."))
+        extension = module_path.with_name(f"{module_path.name}.{abi}.so")
+        entries[f"./{extension}"] = module.encode()
+    entries["./usr/lib/python3/dist-packages/xpra/codecs/libva/__init__.py"] = b""
+    return entries
+
+
+def common_data_entries() -> dict[str, bytes]:
+    return {"./usr/lib/python3/dist-packages/xpra/__init__.py": b""}
+
+
 def package_manifest(
     args: argparse.Namespace,
-    package: Path,
-    *,
-    package_field: str = "xpra",
+    packages: tuple[tuple[Path, str], ...],
 ) -> dict[str, object]:
-    digest = job.sha256_file(package)
     return {
         "architecture": "amd64",
         "base_image_id": args.base_image_id,
@@ -180,10 +194,11 @@ def package_manifest(
                 "architecture": "amd64",
                 "name": package.name,
                 "package": package_field,
-                "sha256": digest,
+                "sha256": job.sha256_file(package),
                 "size": package.stat().st_size,
                 "version": "6.6-r42479-1",
             }
+            for package, package_field in packages
         ],
         "revision": 42479,
         "revision_first_parent_count": 37465,
@@ -199,31 +214,38 @@ def package_manifest(
     }
 
 
-def write_package_tar(
+def write_package_set_tar(
     root: Path,
     args: argparse.Namespace,
-    *,
-    package_name: str = "xpra_6.6-r42479-1_amd64.deb",
-    package_field: str = "xpra",
+    fixtures: tuple[tuple[str, str, dict[str, bytes], str], ...],
 ) -> Path:
-    package = root / package_name
-    package.write_bytes(
-        synthetic_deb(
-            control=(
+    packages: list[tuple[Path, str]] = []
+    for package_name, package_field, data_entries, depends in fixtures:
+        package = root / package_name
+        control = (
                 f"Package: {package_field}\n"
                 "Version: 6.6-r42479-1\n"
                 "Architecture: amd64\n"
-            ).encode()
+            + (f"Depends: {depends}\n" if depends else "")
+        ).encode()
+        package.write_bytes(
+            synthetic_deb(
+                control=control,
+                data=xz_tar(data_entries),
+            )
         )
-    )
+        packages.append((package, package_field))
     manifest = root / "manifest.json"
     manifest.write_text(
-        json.dumps(package_manifest(args, package, package_field=package_field)),
+        json.dumps(package_manifest(args, tuple(packages))),
         encoding="utf-8",
     )
     checksums = root / "SHA256SUMS"
     checksums.write_text(
-        f"{job.sha256_file(package)}  {package.name}\n",
+        "".join(
+            f"{job.sha256_file(package)}  {package.name}\n"
+            for package, _package_field in packages
+        ),
         encoding="ascii",
     )
     archive = Path(args.output)
@@ -232,12 +254,41 @@ def write_package_tar(
         stream,
         (
             container_payload.PayloadEntry(path, PurePosixPath(path.name))
-            for path in (checksums, manifest, package)
+            for path in (checksums, manifest, *(package for package, _field in packages))
         ),
     )
     archive.write_bytes(stream.getvalue())
     archive.chmod(0o600)
     return archive
+
+
+def write_package_tar(
+    root: Path,
+    args: argparse.Namespace,
+    *,
+    package_name: str = "xpra-codecs_6.6-r42479-1_amd64.deb",
+    package_field: str = "xpra-codecs",
+    data_entries: dict[str, bytes] | None = None,
+    depends: str = TEST_DEPENDS,
+) -> Path:
+    return write_package_set_tar(
+        root,
+        args,
+        (
+            (
+                package_name,
+                package_field,
+                codec_data_entries() if data_entries is None else data_entries,
+                depends,
+            ),
+            (
+                "xpra-common_6.6-r42479-1_amd64.deb",
+                "xpra-common",
+                common_data_entries(),
+                "python3",
+            ),
+        ),
+    )
 
 
 class DebianArchiveTests(unittest.TestCase):
@@ -250,7 +301,97 @@ class DebianArchiveTests(unittest.TestCase):
             validated = job.validate_package_tar(archive, args)
 
             self.assertEqual(validated["schema"], 2)
-            self.assertEqual(validated["packages"][0]["package"], "xpra")
+            self.assertEqual(validated["packages"][0]["package"], "xpra-codecs")
+
+    def test_rejects_incomplete_or_inconsistent_package_sets(self) -> None:
+        valid = codec_data_entries()
+        encoder = next(name for name in valid if "/encoder." in name)
+        decoder = next(name for name in valid if "/decoder." in name)
+        common = (
+            "xpra-common_6.6-r42479-1_amd64.deb",
+            "xpra-common",
+            common_data_entries(),
+            "python3",
+        )
+
+        def codec(
+            entries: dict[str, bytes], depends: str = TEST_DEPENDS
+        ) -> tuple[str, str, dict[str, bytes], str]:
+            return (
+                "xpra-codecs_6.6-r42479-1_amd64.deb",
+                "xpra-codecs",
+                entries,
+                depends,
+            )
+
+        without_libva = {name: data for name, data in valid.items() if "/libva/" not in name}
+        without_encoder = {name: data for name, data in valid.items() if name != encoder}
+        without_decoder = {name: data for name, data in valid.items() if name != decoder}
+        duplicate_encoder = dict(valid)
+        duplicate_encoder[
+            encoder.replace(TEST_ABI, "cpython-313-x86_64-linux-gnu")
+        ] = b"duplicate"
+        foreign_decoder = (
+            "xpra-codecs-extras_6.6-r42479-1_amd64.deb",
+            "xpra-codecs-extras",
+            {decoder: valid[decoder]},
+            "xpra-codecs",
+        )
+        overlapping_common = (
+            "xpra-codecs-extras_6.6-r42479-1_amd64.deb",
+            "xpra-codecs-extras",
+            common_data_entries(),
+            "xpra-common",
+        )
+        cases = (
+            (
+                "missing libva capability",
+                (codec(without_libva), common),
+                "xpra.codecs.libva.decoder is missing or ambiguous",
+            ),
+            (
+                "missing encoder",
+                (codec(without_encoder), common),
+                "xpra.codecs.libva.encoder is missing or ambiguous",
+            ),
+            (
+                "missing decoder",
+                (codec(without_decoder), common),
+                "xpra.codecs.libva.decoder is missing or ambiguous",
+            ),
+            (
+                "duplicate ABI extension",
+                (codec(duplicate_encoder), common),
+                "xpra.codecs.libva.encoder is missing or ambiguous",
+            ),
+            (
+                "foreign ownership",
+                (codec(without_decoder), foreign_decoder, common),
+                "belongs to xpra-codecs-extras",
+            ),
+            (
+                "overlapping payload",
+                (codec(valid), common, overlapping_common),
+                "payload overlaps",
+            ),
+            (
+                "missing linked dependency",
+                (codec(valid, "xpra-common, libva2, libyuv0"), common),
+                "libva-drm2",
+            ),
+            (
+                "vendor dependency",
+                (codec(valid, f"{TEST_DEPENDS}, xpra-codecs-nvidia"), common),
+                "vendor or extras",
+            ),
+        )
+        for label, fixtures, message in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                args = build_args(root)
+                archive = write_package_set_tar(root, args, fixtures)
+                with self.assertRaisesRegex(job.JobError, message):
+                    job.validate_package_tar(archive, args)
 
     def test_accepts_canonical_control_and_data_root_directories(self) -> None:
         control = (

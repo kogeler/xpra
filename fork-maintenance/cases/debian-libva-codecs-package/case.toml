@@ -1,0 +1,23 @@
+schema = 1
+slug = "debian-libva-codecs-package"
+kind = "production"
+title = "Package native libva codecs in xpra-codecs"
+commit_subject = "Package native libva codecs in xpra-codecs"
+patch_sha256 = "7dc0fb60a852ffa3adafdc224d918b62d599a475fca5e2e30048dbaf70bd2ed2"
+dependencies = []
+paths = [
+  "packaging/debian/xpra/not-installed",
+  "packaging/debian/xpra/rules",
+  "packaging/debian/xpra/xpra-codecs-extras.files",
+  "packaging/debian/xpra/xpra-codecs.files",
+  "packaging/debian/xpra/xpra-common.files",
+  "packaging/debian/xpra/xpra-server.files",
+]
+
+[tests]
+list = [
+  "unit.codecs.video_helper_test",
+]
+
+[evidence]
+required_gates = []

@@ -10,3 +10,5 @@
 /cases/**/.case.toml.*.restore
 /cases/**/.fix.patch.*.new
 /cases/**/.fix.patch.*.restore
+
+/tmp

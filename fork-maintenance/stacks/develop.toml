@@ -4,6 +4,7 @@ description = "The complete active downstream patch queue"
 series = [
   "wayland-initial-window-state",
   "video-pipeline-cleanup-race",
+  "debian-libva-codecs-package",
   "upstream-test-quarantine",
 ]
 

@@ -180,7 +180,8 @@ Only these active cases are retained:
 
 1. `wayland-initial-window-state`;
 2. `video-pipeline-cleanup-race`;
-3. `upstream-test-quarantine`.
+3. `debian-libva-codecs-package`;
+4. `upstream-test-quarantine`.
 
 ## Stack contract
 
@@ -519,8 +520,38 @@ whose filename or control package name identifies it as dbgsym. Such packages
 are neither retained in the tar nor publishable. The build forces
 xz-compressed Debian control and data members; the Python 3.11+ host validator
 streams and validates those exact members with a 256 MiB XZ decoder memory
-limit before accepting a tar. The
-input-keyed builder image cache is verified by its full input labels. Each
+limit before accepting a tar.
+
+The Debian packaging closes the complete staged-file ownership boundary with
+`dh_missing --fail-missing`. Every regular build result must belong to one
+binary package or match the exact reviewed `packaging/debian/xpra/not-installed`
+set. That exclusion contains only Debian-replaced generic systemd units, the
+unintegrated encoder service units, and the Wireshark dissector that cannot be
+placed correctly without the optional Wireshark build environment. Compiled
+codec trees, Python package metadata, and installed server helpers are never
+exclusions.
+
+Before emitting its tar, the builder reads the control and data archives of
+every actual DEB and rejects duplicate package names or overlapping regular
+payload ownership. It resolves the required libva encoder, libva decoder, and
+libyuv converter from that complete inventory, requires one matching amd64
+CPython ABI for each, and requires all three to belong to ordinary
+`xpra-codecs`. It then extracts the actual `xpra-common` and `xpra-codecs`
+packages into a private root, imports those modules with the distribution
+Python, and runs `dpkg-shlibdeps` on the packaged ELF objects. Every dynamically
+resolved library dependency must occur in the final `xpra-codecs` `Depends`,
+including `libva-drm2`, `libva2`, and `libyuv0`; the package must not depend on
+an Xpra vendor-specific or extras codec package. The host independently parses
+the returned Debian archives and repeats the package-set, payload ownership,
+module ABI, and dependency checks without trusting the builder manifest.
+
+The builder uses only the configured Ubuntu or Debian distribution archives
+for Debian build dependencies. It does not install the source tree's
+`xpra.sources`, trust an Xpra repository key, or consume prebuilt Xpra
+packages. Any dependency unavailable from the target distribution fails the
+build rather than silently adding another package source.
+
+The input-keyed builder image cache is verified by its full input labels. Each
 created package container executes the actual immutable image ID, and each
 accepted result records it. The result binds the checkout commit, selected
 master ref and commit, source commit, workflow digest, selection and resolution
