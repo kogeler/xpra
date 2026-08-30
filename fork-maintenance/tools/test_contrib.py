@@ -4564,6 +4564,7 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(
             set(cases),
             {
+                "debian-libva-codecs-package",
                 "upstream-test-quarantine",
                 "wayland-initial-window-state",
                 "video-pipeline-cleanup-race",
@@ -4579,6 +4580,7 @@ class ManifestTest(unittest.TestCase):
             (
                 "wayland-initial-window-state",
                 "video-pipeline-cleanup-race",
+                "debian-libva-codecs-package",
                 "upstream-test-quarantine",
             ),
         )
