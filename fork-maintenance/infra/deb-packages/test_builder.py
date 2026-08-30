@@ -9,7 +9,7 @@ import os
 import subprocess
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest.mock import patch
 
 import builder
@@ -145,40 +145,6 @@ class DebianTreeTests(unittest.TestCase):
                     builder.prepare_debian_tree("resolute", "6.6", 42479)
 
 
-class SigningKeyTests(unittest.TestCase):
-    def test_verifies_the_full_fingerprint_and_makes_the_key_apt_readable(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            keyring = Path(raw) / "xpra.asc"
-
-            def command(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-                if argv[0] == "curl":
-                    keyring.write_text("key", encoding="ascii")
-                    keyring.chmod(0o600)
-                    return subprocess.CompletedProcess(argv, 0, "", "")
-                fingerprint = builder.XPRA_SIGNING_KEY_FINGERPRINT
-                return subprocess.CompletedProcess(argv, 0, f"fpr:::::::::{fingerprint}:\n", "")
-
-            with patch.object(builder, "run", side_effect=command):
-                builder.install_signing_key(keyring)
-            self.assertEqual(keyring.stat().st_mode & 0o777, 0o644)
-
-    def test_rejects_an_unexpected_repository_key(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            keyring = Path(raw) / "xpra.asc"
-
-            def command(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-                if argv[0] == "curl":
-                    keyring.write_text("key", encoding="ascii")
-                    return subprocess.CompletedProcess(argv, 0, "", "")
-                return subprocess.CompletedProcess(argv, 0, f"fpr:::::::::{'0' * 40}:\n", "")
-
-            with (
-                patch.object(builder, "run", side_effect=command),
-                self.assertRaisesRegex(builder.BuildFailure, "unexpected Xpra"),
-            ):
-                builder.install_signing_key(keyring)
-
-
 class PackagingShimTests(unittest.TestCase):
     def test_builds_and_installs_the_two_upstream_dependency_shims(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -218,6 +184,154 @@ class PackagingShimTests(unittest.TestCase):
                     ["dpkg", "--install"],
                 ],
             )
+
+
+class PackageSetValidationTests(unittest.TestCase):
+    ABI = "cpython-314-x86_64-linux-gnu"
+
+    def native_path(self, module: str, abi: str | None = None) -> PurePosixPath:
+        module_path = builder.PYTHON_SITE_ROOT.joinpath(*module.split("."))
+        return module_path.with_name(f"{module_path.name}.{abi or self.ABI}.so")
+
+    def inspection(
+        self,
+        *,
+        package: str = "xpra-codecs",
+        files: tuple[PurePosixPath, ...] | None = None,
+        depends: str = "xpra-common, libva2, libva-drm2, libyuv0",
+    ) -> builder.DebInspection:
+        if files is None:
+            files = tuple(
+                self.native_path(module)
+                for module in builder.REQUIRED_NATIVE_CODEC_MODULES
+            )
+        return builder.DebInspection(
+            architecture="amd64",
+            depends=depends,
+            files=files,
+            package=package,
+            version="7.0-r42485-1",
+        )
+
+    def complete_set(self) -> tuple[builder.DebInspection, ...]:
+        return (
+            self.inspection(
+                package="xpra-common",
+                files=(builder.PYTHON_SITE_ROOT / "xpra/__init__.py",),
+                depends="python3",
+            ),
+            self.inspection(),
+        )
+
+    def test_accepts_complete_package_capability(self) -> None:
+        bindings = builder.validate_package_set(self.complete_set())
+        self.assertEqual(set(bindings), set(builder.REQUIRED_NATIVE_CODEC_MODULES))
+
+    def test_rejects_inconsistent_package_inventory(self) -> None:
+        common, codecs = self.complete_set()
+        encoder = self.native_path("xpra.codecs.libva.encoder")
+        decoder = self.native_path("xpra.codecs.libva.decoder")
+        without_libva = tuple(path for path in codecs.files if "/libva/" not in f"/{path}")
+        cases = (
+            ("missing common", (codecs,), "missing xpra-common"),
+            (
+                "duplicate package",
+                (common, codecs, self.inspection()),
+                "package name is duplicated",
+            ),
+            (
+                "overlapping payload",
+                (
+                    common,
+                    codecs,
+                    self.inspection(
+                        package="xpra-extra",
+                        files=(common.files[0],),
+                        depends="xpra-common",
+                    ),
+                ),
+                "packages overlap",
+            ),
+            (
+                "missing libva capability",
+                (common, self.inspection(files=without_libva)),
+                "xpra.codecs.libva.decoder is missing or ambiguous",
+            ),
+            (
+                "missing encoder",
+                (
+                    common,
+                    self.inspection(
+                        files=tuple(path for path in codecs.files if path != encoder)
+                    ),
+                ),
+                "xpra.codecs.libva.encoder is missing or ambiguous",
+            ),
+            (
+                "missing decoder",
+                (
+                    common,
+                    self.inspection(
+                        files=tuple(path for path in codecs.files if path != decoder)
+                    ),
+                ),
+                "xpra.codecs.libva.decoder is missing or ambiguous",
+            ),
+            (
+                "ambiguous ABI",
+                (
+                    common,
+                    self.inspection(
+                        files=(
+                            *codecs.files,
+                            self.native_path(
+                                "xpra.codecs.libva.encoder",
+                                "cpython-313-x86_64-linux-gnu",
+                            ),
+                        )
+                    ),
+                ),
+                "xpra.codecs.libva.encoder is missing or ambiguous",
+            ),
+            (
+                "wrong package",
+                (
+                    common,
+                    self.inspection(
+                        files=tuple(path for path in codecs.files if path != decoder)
+                    ),
+                    self.inspection(
+                        package="xpra-codecs-extras",
+                        files=(decoder,),
+                        depends="xpra-codecs",
+                    ),
+                ),
+                "belongs to xpra-codecs-extras",
+            ),
+            (
+                "missing linked dependency",
+                (common, self.inspection(depends="xpra-common, libva2, libyuv0")),
+                "libva-drm2",
+            ),
+            (
+                "vendor dependency",
+                (
+                    common,
+                    self.inspection(
+                        depends=(
+                            "xpra-common, libva2, libva-drm2, libyuv0, "
+                            "xpra-codecs-amd"
+                        )
+                    ),
+                ),
+                "vendor or extras",
+            ),
+        )
+        for label, inspections, message in cases:
+            with self.subTest(label=label), self.assertRaisesRegex(
+                builder.BuildFailure, message
+            ):
+                builder.validate_package_set(inspections)
 
 
 class PackageBuildTests(unittest.TestCase):

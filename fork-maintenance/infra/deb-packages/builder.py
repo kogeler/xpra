@@ -12,6 +12,9 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -34,11 +37,34 @@ DISTROS = {
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 ACTIVE_SELECTION = "stacks/develop"
-XPRA_SIGNING_KEY_FINGERPRINT = "B4993B57323148E37977E5D873254CAD17978FAF"
+PYTHON_SITE_ROOT = PurePosixPath("usr/lib/python3/dist-packages")
+REQUIRED_NATIVE_CODEC_MODULES = (
+    "xpra.codecs.libva.decoder",
+    "xpra.codecs.libva.encoder",
+    "xpra.codecs.libyuv.converter",
+)
+REQUIRED_CODEC_DEPENDENCIES = frozenset({"libva-drm2", "libva2", "libyuv0"})
+FORBIDDEN_CODEC_DEPENDENCIES = frozenset(
+    {"xpra-codecs-amd", "xpra-codecs-extras", "xpra-codecs-nvidia"}
+)
+NATIVE_EXTENSION_ABI_RE = re.compile(
+    r"(?P<abi>cpython-[0-9]{2,3}-x86_64-linux-gnu)\.so"
+)
 
 
 class BuildFailure(RuntimeError):
     """Raised when package inputs or output fail a provenance boundary."""
+
+
+@dataclass(frozen=True)
+class DebInspection:
+    """Control metadata and regular payload paths read from one built DEB."""
+
+    architecture: str
+    depends: str
+    files: tuple[PurePosixPath, ...]
+    package: str
+    version: str
 
 
 def log(message: str) -> None:
@@ -95,6 +121,242 @@ def sha256_file(path: Path) -> str:
         while block := stream.read(1024 * 1024):
             digest.update(block)
     return digest.hexdigest()
+
+
+def dependency_names(value: str) -> frozenset[str]:
+    """Return every package name from a resolved Debian dependency field."""
+    names: set[str] = set()
+    for group in value.split(","):
+        if not group.strip():
+            continue
+        for alternative in group.split("|"):
+            match = re.match(
+                r"\s*([a-z0-9][a-z0-9+.-]*)(?::[a-z0-9-]+)?(?:\s|\(|$)",
+                alternative,
+            )
+            if match is None:
+                raise BuildFailure(f"invalid resolved Debian dependency: {alternative!r}")
+            names.add(match.group(1))
+    return frozenset(names)
+
+
+def deb_payload_path(value: str) -> PurePosixPath:
+    while value.startswith("./"):
+        value = value[2:]
+    if not value:
+        raise BuildFailure("DEB data archive contains an empty payload path")
+    try:
+        return container_payload.archive_path(value)
+    except container_payload.PayloadError as error:
+        raise BuildFailure("DEB data archive contains an unsafe payload path") from error
+
+
+def inspect_deb(package: Path) -> DebInspection:
+    """Inspect actual control fields and regular files through dpkg-deb."""
+    fields = {
+        field.lower(): run(
+            ["dpkg-deb", "--field", str(package), field],
+            capture=True,
+        ).stdout.strip()
+        for field in ("Package", "Version", "Architecture", "Depends")
+    }
+    process = subprocess.Popen(
+        ["dpkg-deb", "--fsys-tarfile", str(package)],
+        stdout=subprocess.PIPE,
+        stderr=sys.stderr,
+    )
+    if process.stdout is None:
+        process.kill()
+        process.wait()
+        raise BuildFailure(f"cannot inspect DEB payload: {package.name}")
+    files: set[PurePosixPath] = set()
+    try:
+        with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
+            for member in archive:
+                if member.name in {".", "./"}:
+                    if not member.isdir():
+                        raise BuildFailure(
+                            f"DEB payload has an invalid root entry: {package.name}"
+                        )
+                    continue
+                path = deb_payload_path(member.name)
+                if member.isfile():
+                    if path in files:
+                        raise BuildFailure(
+                            f"DEB payload has a duplicate regular file: {package.name}:{path}"
+                        )
+                    files.add(path)
+    except (BuildFailure, tarfile.TarError, OSError):
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        process.stdout.close()
+    if process.wait() != 0:
+        raise BuildFailure(f"dpkg-deb could not expose the payload: {package.name}")
+    return DebInspection(
+        architecture=fields["architecture"],
+        depends=fields["depends"],
+        files=tuple(sorted(files, key=str)),
+        package=fields["package"],
+        version=fields["version"],
+    )
+
+
+def native_module_candidates(
+    files: tuple[PurePosixPath, ...], module: str
+) -> tuple[tuple[str, PurePosixPath], ...]:
+    """Resolve one native Python module from a DEB payload inventory."""
+    module_path = PYTHON_SITE_ROOT.joinpath(*module.split("."))
+    prefix = f"{module_path.name}."
+    matches: list[tuple[str, PurePosixPath]] = []
+    for path in files:
+        if path.parent != module_path.parent or not path.name.startswith(prefix):
+            continue
+        match = NATIVE_EXTENSION_ABI_RE.fullmatch(path.name.removeprefix(prefix))
+        if match:
+            matches.append((match.group("abi"), path))
+    return tuple(matches)
+
+
+def validate_package_set(
+    inspections: tuple[DebInspection, ...],
+) -> dict[str, PurePosixPath]:
+    """Validate package ownership and the complete native codec capability."""
+    packages: dict[str, DebInspection] = {}
+    owners: dict[PurePosixPath, str] = {}
+    for inspection in inspections:
+        if inspection.package in packages:
+            raise BuildFailure(f"built package name is duplicated: {inspection.package}")
+        packages[inspection.package] = inspection
+        for path in inspection.files:
+            previous = owners.setdefault(path, inspection.package)
+            if previous != inspection.package:
+                raise BuildFailure(
+                    f"built packages overlap at {path}: {previous}, {inspection.package}"
+                )
+    for required in ("xpra-common", "xpra-codecs"):
+        if required not in packages:
+            raise BuildFailure(f"built package set is missing {required}")
+
+    bindings: dict[str, PurePosixPath] = {}
+    abis: set[str] = set()
+    for module in REQUIRED_NATIVE_CODEC_MODULES:
+        matches = tuple(
+            (inspection.package, abi, path)
+            for inspection in inspections
+            for abi, path in native_module_candidates(inspection.files, module)
+        )
+        if len(matches) != 1:
+            raise BuildFailure(
+                f"required native module {module} is missing or ambiguous in the package set"
+            )
+        package, abi, path = matches[0]
+        if package != "xpra-codecs":
+            raise BuildFailure(
+                f"required native module {module} belongs to {package}, not xpra-codecs"
+            )
+        bindings[module] = path
+        abis.add(abi)
+    if len(abis) != 1:
+        raise BuildFailure("required native codec modules use different Python ABIs")
+
+    dependencies = dependency_names(packages["xpra-codecs"].depends)
+    missing = sorted(REQUIRED_CODEC_DEPENDENCIES.difference(dependencies))
+    if missing:
+        raise BuildFailure(
+            "xpra-codecs is missing native codec runtime dependencies: "
+            + ", ".join(missing)
+        )
+    forbidden = sorted(FORBIDDEN_CODEC_DEPENDENCIES.intersection(dependencies))
+    if forbidden:
+        raise BuildFailure(
+            "xpra-codecs unexpectedly depends on vendor or extras packages: "
+            + ", ".join(forbidden)
+        )
+    return bindings
+
+
+def validate_installed_codec_capability(
+    packages: tuple[Path, ...],
+    inspections: tuple[DebInspection, ...],
+    bindings: dict[str, PurePosixPath],
+) -> None:
+    """Extract actual core packages, import their modules, and audit ELF dependencies."""
+    package_paths = {
+        inspection.package: package
+        for package, inspection in zip(packages, inspections, strict=True)
+    }
+    with tempfile.TemporaryDirectory(prefix="xpra-deb-capability-", dir="/work") as raw:
+        root = Path(raw)
+        for name in ("xpra-common", "xpra-codecs"):
+            run(["dpkg-deb", "--extract", str(package_paths[name]), str(root)])
+        site_root = root / PYTHON_SITE_ROOT
+        script = """
+import importlib
+import json
+import sys
+from pathlib import Path
+
+site_root = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(site_root))
+observed = {}
+for name in sys.argv[2:]:
+    module = importlib.import_module(name)
+    path = Path(module.__file__).resolve()
+    if not path.is_relative_to(site_root):
+        raise SystemExit(f"module escaped extracted package root: {name}: {path}")
+    observed[name] = path.relative_to(site_root.parents[3]).as_posix()
+print(json.dumps(observed, sort_keys=True))
+"""
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        imported = json.loads(
+            run(
+                [
+                    "/usr/bin/python3",
+                    "-c",
+                    script,
+                    str(site_root),
+                    *REQUIRED_NATIVE_CODEC_MODULES,
+                ],
+                cwd=Path("/"),
+                capture=True,
+                env=environment,
+            ).stdout
+        )
+        expected = {name: str(path) for name, path in bindings.items()}
+        if imported != expected:
+            raise BuildFailure(
+                f"installed native codec imports do not match package ownership: {imported}"
+            )
+
+        dynamic = run(
+            [
+                "dpkg-shlibdeps",
+                "-O",
+                *(f"-e{root / path}" for path in bindings.values()),
+            ],
+            cwd=SOURCE,
+            capture=True,
+        ).stdout.splitlines()
+        resolved = tuple(
+            line.removeprefix("shlibs:Depends=")
+            for line in dynamic
+            if line.startswith("shlibs:Depends=")
+        )
+        if len(resolved) != 1:
+            raise BuildFailure("cannot resolve native codec ELF dependencies")
+        linked_dependencies = dependency_names(resolved[0])
+        declared_dependencies = dependency_names(
+            next(item.depends for item in inspections if item.package == "xpra-codecs")
+        )
+        missing = sorted(linked_dependencies.difference(declared_dependencies))
+        if missing:
+            raise BuildFailure(
+                "xpra-codecs omits dependencies resolved from its native codec ELF files: "
+                + ", ".join(missing)
+            )
 
 
 def selection_tree_sha256(root: Path) -> str:
@@ -365,33 +627,6 @@ def prepare_debian_tree(codename: str, base_version: str, revision: int) -> str:
     return f"{base_version}-r{revision}-1"
 
 
-def install_signing_key(keyring: Path = Path("/usr/share/keyrings/xpra.asc")) -> None:
-    run(
-        [
-            "curl",
-            "--fail",
-            "--location",
-            "--silent",
-            "--show-error",
-            "https://xpra.org/xpra.asc",
-            "--output",
-            str(keyring),
-        ]
-    )
-    key_data = run(
-        ["gpg", "--batch", "--show-keys", "--with-colons", str(keyring)],
-        capture=True,
-    ).stdout
-    fingerprints = tuple(
-        fields[9]
-        for line in key_data.splitlines()
-        if (fields := line.split(":"))[0] == "fpr" and len(fields) > 9
-    )
-    if fingerprints != (XPRA_SIGNING_KEY_FINGERPRINT,):
-        raise BuildFailure(f"unexpected Xpra repository signing key: {fingerprints}")
-    keyring.chmod(0o644)
-
-
 def install_packaging_shims() -> None:
     packages = BUILD_DEPENDENCIES
     packages.mkdir(mode=0o700)
@@ -408,12 +643,7 @@ def install_packaging_shims() -> None:
         run(["dpkg", "--install", str(package)])
 
 
-def install_build_dependencies(codename: str) -> None:
-    repository = SOURCE / "packaging" / "repos" / codename / "xpra.sources"
-    if repository.is_symlink() or not repository.is_file():
-        raise BuildFailure(f"Xpra repository definition is missing for {codename}")
-    shutil.copyfile(repository, "/etc/apt/sources.list.d/xpra.sources")
-    install_signing_key()
+def install_build_dependencies() -> None:
     run(["apt-get", "update"])
     install_packaging_shims()
     dependency_script = r"""
@@ -502,16 +732,17 @@ def emit_output(
     OUTPUT.mkdir(mode=0o700)
     copied: list[Path] = []
     package_manifest: list[dict[str, Any]] = []
+    inspections: list[DebInspection] = []
     for package in packages:
         destination = OUTPUT / package.name
         shutil.copyfile(package, destination)
         copied.append(destination)
+        inspection = inspect_deb(destination)
+        inspections.append(inspection)
         fields = {
-            field.lower(): run(
-                ["dpkg-deb", "--field", str(destination), field],
-                capture=True,
-            ).stdout.strip()
-            for field in ("Package", "Version", "Architecture")
+            "architecture": inspection.architecture,
+            "package": inspection.package,
+            "version": inspection.version,
         }
         if fields["package"].endswith("-dbgsym") or "-dbgsym_" in destination.name:
             raise BuildFailure(
@@ -531,6 +762,9 @@ def emit_output(
                 "size": destination.stat().st_size,
             }
         )
+    inspected = tuple(inspections)
+    bindings = validate_package_set(inspected)
+    validate_installed_codec_capability(tuple(copied), inspected, bindings)
     architecture = run(["dpkg", "--print-architecture"], capture=True).stdout.strip()
     manifest = {
         "architecture": architecture,
@@ -633,7 +867,7 @@ def main() -> int:
     debian_version = prepare_debian_tree(expected["codename"], base_version, revision)
     if not debian_version.startswith(f"{base_version}-r{revision}-"):
         raise BuildFailure("Debian version does not preserve the upstream revision scheme")
-    install_build_dependencies(expected["codename"])
+    install_build_dependencies()
     packages = build_packages(source_commit)
     emit_output(
         distro=distro,
