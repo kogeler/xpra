@@ -44,12 +44,18 @@ branch-agnostic source gate.
 The builder produces amd64 packages and requires an x86-64 host capable of
 running `linux/amd64` Podman containers. The host also needs Git, GNU Make,
 Python 3.11 or newer with `lzma`, Podman, network access to Docker Hub, Ubuntu
-or Debian APT mirrors, `xpra.org`, and PyPI, plus sufficient free disk space for
+or Debian APT mirrors, and PyPI, plus sufficient free disk space for
 two builder images, dependency caches, build trees, and output tars. Debian
 package tooling, including `dpkg-deb`, is installed and used only inside the
 builder container. GitHub's Ubuntu 26.04 hosted runner is the supported
 publication environment; verify the same host prerequisites before a local
 build.
+
+The builder deliberately does not enable the Xpra APT repository from the
+source tree. Build dependencies come only from the configured archive for the
+target Ubuntu or Debian release; the source payload is the frozen fork source,
+not a prebuilt Xpra package. Cython is upgraded from PyPI because the source
+build requires a newer compiler than the target distributions currently ship.
 
 ## Container transport
 
@@ -88,6 +94,42 @@ rejects an unexpected, duplicate, truncated, concatenated, trailing, or
 unreadable member before the outer tar is accepted. Control/data archive size,
 member count, member size, expanded content, and raw compressed bytes are
 bounded; each xz decoder uses a 256 MiB memory limit.
+
+## Complete package validation
+
+The downstream Debian patch runs `dh_missing --fail-missing`. This turns the
+whole `debian/tmp` install tree into a packaging boundary: every result must be
+owned by one binary package or listed in the exact reviewed
+`packaging/debian/xpra/not-installed` file. The exclusions are limited to the
+generic systemd units replaced by Debian's package-specific units, the encoder
+service units that have no Debian lifecycle integration, and the Wireshark
+dissector that cannot be installed correctly without the optional Wireshark
+build environment. Codec directories, Python package metadata, and server
+helpers are assigned to packages rather than excluded.
+
+The builder does not infer success from source manifest text. Before emit it
+inspects the control and data archives of every generated DEB and requires:
+
+- one unique control `Package` identity for every archive;
+- no regular payload path owned by two packages;
+- one ABI-compatible native module each for `xpra.codecs.libva.encoder`,
+  `xpra.codecs.libva.decoder`, and `xpra.codecs.libyuv.converter`;
+- all three modules in ordinary `xpra-codecs`, never an AMD, NVIDIA, or extras
+  package;
+- final `xpra-codecs` dependencies that include `libva-drm2`, `libva2`, and
+  `libyuv0`, with no dependency on a vendor-specific Xpra codec package.
+
+It then extracts the actual `xpra-common` and `xpra-codecs` DEBs into a private
+root and imports all three modules with the distribution's `/usr/bin/python3`.
+The loaded paths must be the files inventoried from those DEBs. Finally,
+`dpkg-shlibdeps` runs on the packaged ELF objects and every resolved library
+dependency must occur in the final control `Depends` field.
+
+After the package tar crosses stdout, the host independently parses every
+Debian ar/control/data archive and repeats the complete package inventory,
+payload ownership, module ABI, and dependency checks. It does not trust either
+the source `.files` manifests or the builder-generated `manifest.json` as proof
+of installed capability.
 
 ## Versioning
 

@@ -121,6 +121,7 @@ The currently retained active cases are:
 
 - `wayland-initial-window-state`;
 - `video-pipeline-cleanup-race`;
+- `debian-libva-codecs-package`;
 - `upstream-test-quarantine` (the single test-only duty case).
 
 The quarantine case is not a production fix. It may change only the exact
@@ -209,11 +210,24 @@ base, rejects downstream merge commits, and rejects downstream committed or
 dirty Xpra source. `stacks/develop` is the fixed queue slug, not a requirement
 that the selected revision be on a branch named `develop`. The amd64 builds
 require an x86-64 Podman host, network access, and sufficient disk space. They
-produce unsigned packages with `dpkg-buildpackage -us -uc`, force xz Debian
-members, disable automatic dbgsym generation with
+build only the frozen fork source and resolve build dependencies from the
+target Ubuntu or Debian archives. They do not enable the Xpra APT repository,
+trust its signing key, or consume prebuilt Xpra packages. They produce unsigned
+packages with `dpkg-buildpackage -us -uc`, force xz Debian members, disable
+automatic dbgsym generation with
 `DEB_BUILD_OPTIONS=noautodbgsym`, reject any debug-symbol package at both sides
 of the container boundary, and validate each xz stream with a 256 MiB decoder
-memory limit. They build separate Ubuntu 26.04 and Debian 13 tar assets, then
+memory limit. The patched Debian packaging uses `dh_missing --fail-missing`, so
+every staged build result must be assigned to one binary package or to the
+small exact reviewed `not-installed` set. Before emit, the builder inventories
+every actual DEB, rejects duplicate package identities and overlapping regular
+payload paths, extracts the real `xpra-common` and `xpra-codecs` packages, and
+imports the required libva and libyuv native modules with the distribution
+Python. It also runs `dpkg-shlibdeps` over those packaged ELF objects and proves
+that the resulting library dependencies are present in `xpra-codecs`. The host
+independently parses every returned DEB and repeats the package-set, module
+ownership, ABI, and dependency checks. They build separate Ubuntu 26.04 and
+Debian 13 tar assets, then
 stage a draft with `prerelease=false`, upload and verify exactly those two
 assets, and publish an ordinary release whose title is exactly the Debian
 version, for example `6.6-r42479-1`. Its unique transaction tag points at the
