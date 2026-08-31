@@ -160,6 +160,20 @@ The profile requires direct RGB transport, visible nonuniform pixels, real
 input response, ordered lifecycle, and complete owned-object cleanup. RGB must
 not silently become video.
 
+After the established Zed main-window pointer control, this profile also runs
+the native `xpra-empty-damage-fixture`. The fixture creates two independently
+forwarded `xdg_toplevel` surfaces, makes the second a child of the first, and
+waits for the runner to bind distinct GTK/X11 and Xpra server window IDs plus
+their current geometries. It then drives both surfaces through at least 60
+mapped frame callbacks followed by empty commits before the runner sends one
+real click to the child. Acceptance requires the GTK client, Xpra server, and
+the child's Wayland pointer listener to observe that input within three
+seconds, followed by clean destruction of both client and server windows and a
+zero fixture exit. The bounded JSON event stream, before/after server window
+inventories, per-window screenshots, and process logs are retained as
+`empty-damage.*`, `server-info-empty-damage-*.txt`, and
+`empty-damage-{parent,child}.*` in the normal scenario artifacts.
+
 ## Adaptive Wayland H.264
 
 The active queue's publication-grade graphics boundary uses frame-aware alpha
