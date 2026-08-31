@@ -55,8 +55,8 @@ WORKSPACE_FINGERPRINT_OWNER = "xpra-fork-workspace-fingerprint"
 WORKSPACE_REMOVE_OWNER = "xpra-fork-workspace-remove"
 CASE_CREATE_OWNER = "xpra-fork-case-create"
 CASE_UPDATE_OWNER = "xpra-fork-case-update"
-UPSTREAM_TEST_OWNER = "xpra-lab-upstream-tests"
-LIVE_JOB_OWNER = "xpra-lab-live-job"
+UPSTREAM_TEST_OWNER = "xpra-fork-maintenance-upstream-tests"
+LIVE_JOB_OWNER = "xpra-fork-maintenance-live-job"
 DEB_PACKAGE_OWNER = "xpra-deb-packages"
 DEB_SELECTION_OWNER = "xpra-deb-selection-cache"
 CYCLE_CLEAN_OWNER = "xpra-fork-cycle-cleanup"
@@ -5756,7 +5756,7 @@ def runtime_cycle_blockers(cycle: str) -> tuple[str, ...]:
                 "--all",
                 "--quiet",
                 "--filter",
-                f"label=io.xpra.lab.owner={owner}",
+                f"label=io.xpra.fork-maintenance.owner={owner}",
             ),
             check=False,
         )
@@ -5773,11 +5773,11 @@ def runtime_cycle_blockers(cycle: str) -> tuple[str, ...]:
                 container_name = str(item["Name"]).lstrip("/")
             except (IndexError, KeyError, TypeError, json.JSONDecodeError) as error:
                 fail(f"invalid Podman container inspection for {object_id}: {error}")
-            run_name = str(labels.get("io.xpra.lab.run-id", ""))
+            run_name = str(labels.get("io.xpra.fork-maintenance.run-id", ""))
             if owner == "live":
                 identity = run_name
             elif owner == DEB_PACKAGE_OWNER:
-                identity = str(labels.get("io.xpra.lab.run-name", ""))
+                identity = str(labels.get("io.xpra.fork-maintenance.run-name", ""))
             else:
                 identity = container_name
             if cycle_matches(identity, cycle):
@@ -5790,7 +5790,7 @@ def runtime_cycle_blockers(cycle: str) -> tuple[str, ...]:
             "ls",
             "--quiet",
             "--filter",
-            "label=io.xpra.lab.owner=live",
+            "label=io.xpra.fork-maintenance.owner=live",
         ),
         check=False,
     )
@@ -5806,7 +5806,7 @@ def runtime_cycle_blockers(cycle: str) -> tuple[str, ...]:
             labels = item.get("labels", item.get("Labels", {})) or {}
         except (IndexError, TypeError, json.JSONDecodeError) as error:
             fail(f"invalid Podman network inspection for {object_id}: {error}")
-        if cycle_matches(str(labels.get("io.xpra.lab.run-id", "")), cycle):
+        if cycle_matches(str(labels.get("io.xpra.fork-maintenance.run-id", "")), cycle):
             blockers.append(f"podman-network:{object_id}")
     return tuple(sorted(blockers))
 

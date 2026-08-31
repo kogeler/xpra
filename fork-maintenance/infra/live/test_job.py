@@ -18,7 +18,7 @@ from unittest.mock import ANY, Mock, patch
 LIVE_DIRECTORY = Path(__file__).resolve().parent
 
 JOB_SPEC = importlib.util.spec_from_file_location(
-    "xpra_lab_live_job", LIVE_DIRECTORY / "job.py"
+    "xpra_fork_maintenance_live_job", LIVE_DIRECTORY / "job.py"
 )
 if JOB_SPEC is None or JOB_SPEC.loader is None:
     raise RuntimeError("could not load live-job module")
@@ -30,7 +30,7 @@ finally:
     sys.path.pop(0)
 
 RUN_SPEC = importlib.util.spec_from_file_location(
-    "xpra_lab_live_run", LIVE_DIRECTORY / "run.py"
+    "xpra_fork_maintenance_live_run", LIVE_DIRECTORY / "run.py"
 )
 if RUN_SPEC is None or RUN_SPEC.loader is None:
     raise RuntimeError("could not load live runner module")
@@ -292,12 +292,12 @@ class LiveJobTest(unittest.TestCase):
                             ],
                             "id": "sha256:" + "1" * 64,
                             "labels": {
-                                "io.xpra.lab.context": provenance[
+                                "io.xpra.fork-maintenance.context": provenance[
                                     "client_context_sha256"
                                 ],
-                                "io.xpra.lab.owner": "live",
-                                "io.xpra.lab.role": "client-image",
-                                "io.xpra.lab.source": provenance["source_commit"],
+                                "io.xpra.fork-maintenance.owner": "live",
+                                "io.xpra.fork-maintenance.role": "client-image",
+                                "io.xpra.fork-maintenance.source": provenance["source_commit"],
                             },
                             "selection": "master",
                             "tag": "localhost/client:test",
@@ -308,12 +308,12 @@ class LiveJobTest(unittest.TestCase):
                             ],
                             "id": "sha256:" + "2" * 64,
                             "labels": {
-                                "io.xpra.lab.context": provenance[
+                                "io.xpra.fork-maintenance.context": provenance[
                                     "server_context_sha256"
                                 ],
-                                "io.xpra.lab.owner": "live",
-                                "io.xpra.lab.role": "server-image",
-                                "io.xpra.lab.source": provenance["source_commit"],
+                                "io.xpra.fork-maintenance.owner": "live",
+                                "io.xpra.fork-maintenance.role": "server-image",
+                                "io.xpra.fork-maintenance.source": provenance["source_commit"],
                             },
                             "selection": provenance["server_selection"],
                             "tag": "localhost/server:test",
@@ -397,7 +397,7 @@ class LiveJobTest(unittest.TestCase):
                 )
                 harness = Path(record["staging"]) / "inputs" / "harness"
                 for source in job.HARNESS_INPUTS:
-                    destination = harness / source.relative_to(job.LAB_ROOT)
+                    destination = harness / source.relative_to(job.MAINTENANCE_ROOT)
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_bytes(source.read_bytes())
             record["process"] = {"pid": 12345 + len(captured)}
@@ -435,7 +435,7 @@ class LiveJobTest(unittest.TestCase):
             Path(argv[2]),
             Path(provenance["path"])
             / "harness"
-            / job.RUNNER.relative_to(job.LAB_ROOT),
+            / job.RUNNER.relative_to(job.MAINTENANCE_ROOT),
         )
         self.assertEqual(argv[argv.index("--application") + 1], "hardware")
         self.assertEqual(argv[argv.index("--lifecycle") + 1], "application-exit")
@@ -446,7 +446,7 @@ class LiveJobTest(unittest.TestCase):
         self.assertIn("--bound-inputs", argv)
         self.assertNotIn("--zed-directory", argv)
         self.assertEqual(
-            captured[1]["environment"]["XPRA_LAB_JOB_ID"],
+            captured[1]["environment"]["XPRA_FORK_JOB_ID"],
             record["job_id"],
         )
 
@@ -478,7 +478,7 @@ class LiveJobTest(unittest.TestCase):
                 raise job.background_job.LaunchStateRetained("retained")
             harness = Path(record["staging"]) / "inputs" / "harness"
             for source in job.HARNESS_INPUTS:
-                destination = harness / source.relative_to(job.LAB_ROOT)
+                destination = harness / source.relative_to(job.MAINTENANCE_ROOT)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(source.read_bytes())
             record["process"] = {"pid": 12345}
@@ -547,7 +547,7 @@ class LiveJobTest(unittest.TestCase):
             self.assertEqual(job.start(args), 0)
         self.assertEqual(events, ["lock-enter", "start", "lock-exit"])
 
-    def test_current_image_validation_ignores_only_non_lab_labels(self) -> None:
+    def test_current_image_validation_ignores_only_non_maintenance_labels(self) -> None:
         images: dict[str, dict[str, object]] = {}
         inspections: list[subprocess.CompletedProcess[str]] = []
         for index, (name, role) in enumerate(
@@ -555,10 +555,10 @@ class LiveJobTest(unittest.TestCase):
         ):
             image_id = str(index) * 64
             labels = {
-                "io.xpra.lab.context": str(index + 2) * 64,
-                "io.xpra.lab.owner": "live",
-                "io.xpra.lab.role": role,
-                "io.xpra.lab.source": "a" * 40,
+                "io.xpra.fork-maintenance.context": str(index + 2) * 64,
+                "io.xpra.fork-maintenance.owner": "live",
+                "io.xpra.fork-maintenance.role": role,
+                "io.xpra.fork-maintenance.source": "a" * 40,
             }
             images[name] = {"id": image_id, "labels": labels}
             inspections.append(
@@ -581,7 +581,7 @@ class LiveJobTest(unittest.TestCase):
             self.assertTrue(job.current_image_validation({"images": images}))
 
         tampered = json.loads(inspections[0].stdout)
-        tampered[0]["Labels"]["io.xpra.lab.unexpected"] = "value"
+        tampered[0]["Labels"]["io.xpra.fork-maintenance.unexpected"] = "value"
         with patch.object(
             job,
             "command",
@@ -1063,8 +1063,8 @@ class LiveJobTest(unittest.TestCase):
             path.write_text("{}\n", encoding="utf-8")
             path.chmod(0o600)
         labels = {
-            "io.xpra.lab.owner": "live",
-            "io.xpra.lab.run-id": run,
+            "io.xpra.fork-maintenance.owner": "live",
+            "io.xpra.fork-maintenance.run-id": run,
         }
         ids = {
             "container": ["a" * 64],
@@ -1280,8 +1280,8 @@ class LiveJobTest(unittest.TestCase):
     def test_remove_rejects_mismatched_object_labels(self) -> None:
         run = "mismatch"
         labels = {
-            "io.xpra.lab.owner": "someone-else",
-            "io.xpra.lab.run-id": run,
+            "io.xpra.fork-maintenance.owner": "someone-else",
+            "io.xpra.fork-maintenance.run-id": run,
         }
         with (
             patch.object(
@@ -1292,8 +1292,8 @@ class LiveJobTest(unittest.TestCase):
                         "id": "a" * 64,
                         "kind": "container",
                         "labels": {
-                            "io.xpra.lab.owner": "live",
-                            "io.xpra.lab.run-id": run,
+                            "io.xpra.fork-maintenance.owner": "live",
+                            "io.xpra.fork-maintenance.run-id": run,
                         },
                         "name": "container",
                     }
@@ -1489,8 +1489,8 @@ class LiveJobTest(unittest.TestCase):
 
     def test_network_labels_accept_lowercase_podman_field(self) -> None:
         labels = {
-            "io.xpra.lab.owner": "live",
-            "io.xpra.lab.run-id": "lowercase-labels",
+            "io.xpra.fork-maintenance.owner": "live",
+            "io.xpra.fork-maintenance.run-id": "lowercase-labels",
         }
         argv = ["podman", "network", "inspect", "network-id"]
         with patch.object(
@@ -1507,8 +1507,8 @@ class LiveJobTest(unittest.TestCase):
         argv = ["podman", "network", "inspect", "network-id"]
         payload = [
             {
-                "Labels": {"io.xpra.lab.owner": "live"},
-                "labels": {"io.xpra.lab.owner": "someone-else"},
+                "Labels": {"io.xpra.fork-maintenance.owner": "live"},
+                "labels": {"io.xpra.fork-maintenance.owner": "someone-else"},
             }
         ]
         with (
@@ -1522,12 +1522,12 @@ class LiveJobTest(unittest.TestCase):
             job.podman_labels("network", "network-id")
 
 class LiveRunnerCleanupTest(unittest.TestCase):
-    def test_image_inspection_accepts_only_exact_lab_provenance(self) -> None:
+    def test_image_inspection_accepts_only_exact_maintenance_provenance(self) -> None:
         expected = {
-            "io.xpra.lab.context": "1" * 64,
-            "io.xpra.lab.owner": "live",
-            "io.xpra.lab.role": "server-image",
-            "io.xpra.lab.source": "2" * 40,
+            "io.xpra.fork-maintenance.context": "1" * 64,
+            "io.xpra.fork-maintenance.owner": "live",
+            "io.xpra.fork-maintenance.role": "server-image",
+            "io.xpra.fork-maintenance.source": "2" * 40,
         }
         inspection = {
             "Id": "sha256:" + "3" * 64,
@@ -1544,7 +1544,7 @@ class LiveRunnerCleanupTest(unittest.TestCase):
                 ["podman", "image", "inspect"], json.dumps([inspection])
             ),
         ):
-            observed = live_run.inspect_lab_image(
+            observed = live_run.inspect_maintenance_image(
                 "image",
                 role="server-image",
                 source_commit="2" * 40,
@@ -1552,7 +1552,7 @@ class LiveRunnerCleanupTest(unittest.TestCase):
             )
         self.assertEqual(observed["labels"], expected)
 
-        inspection["Labels"]["io.xpra.lab.unexpected"] = "value"
+        inspection["Labels"]["io.xpra.fork-maintenance.unexpected"] = "value"
         with (
             patch.object(
                 live_run,
@@ -1563,7 +1563,7 @@ class LiveRunnerCleanupTest(unittest.TestCase):
             ),
             self.assertRaisesRegex(live_run.LabFailure, "provenance labels"),
         ):
-            live_run.inspect_lab_image(
+            live_run.inspect_maintenance_image(
                 "image",
                 role="server-image",
                 source_commit="2" * 40,
@@ -2647,8 +2647,8 @@ class LiveRunnerCleanupTest(unittest.TestCase):
 
     def test_network_labels_accept_lowercase_podman_field(self) -> None:
         labels = {
-            "io.xpra.lab.owner": "live",
-            "io.xpra.lab.run-id": "lowercase-labels",
+            "io.xpra.fork-maintenance.owner": "live",
+            "io.xpra.fork-maintenance.run-id": "lowercase-labels",
         }
         argv = ["podman", "network", "inspect", "network-id"]
         with patch.object(
@@ -2668,8 +2668,8 @@ class LiveRunnerCleanupTest(unittest.TestCase):
         argv = ["podman", "network", "inspect", "network-id"]
         payload = [
             {
-                "Labels": {"io.xpra.lab.owner": "live"},
-                "labels": {"io.xpra.lab.owner": "someone-else"},
+                "Labels": {"io.xpra.fork-maintenance.owner": "live"},
+                "labels": {"io.xpra.fork-maintenance.owner": "someone-else"},
             }
         ]
         with (
@@ -2686,8 +2686,8 @@ class LiveRunnerCleanupTest(unittest.TestCase):
         name = "container-name"
         object_id = "a" * 64
         labels = {
-            "io.xpra.lab.owner": "live",
-            "io.xpra.lab.run-id": "cleanup-run",
+            "io.xpra.fork-maintenance.owner": "live",
+            "io.xpra.fork-maintenance.run-id": "cleanup-run",
         }
 
         def podman_command(
@@ -2723,8 +2723,8 @@ class LiveRunnerCleanupTest(unittest.TestCase):
         name = "container-name"
         object_id = "a" * 64
         labels = {
-            "io.xpra.lab.owner": "live",
-            "io.xpra.lab.run-id": "cleanup-run",
+            "io.xpra.fork-maintenance.owner": "live",
+            "io.xpra.fork-maintenance.run-id": "cleanup-run",
         }
 
         def podman_command(
@@ -3182,7 +3182,7 @@ class LiveTransportProfileTest(unittest.TestCase):
             "live-start: isolated-start-check selector-check run-name-check live-options-check",
             makefile,
         )
-        self.assertIn('--selection "$${XPRA_LAB_SELECTOR}"', makefile)
+        self.assertIn('--selection "$${XPRA_FORK_SELECTOR}"', makefile)
         self.assertNotIn("live-start: optional-selector-check", makefile)
 
     def test_runner_and_input_freeze_reject_a_clean_server_selection(self) -> None:
@@ -3454,12 +3454,12 @@ class LiveTransportProfileTest(unittest.TestCase):
 
     def test_hardware_application_uses_owned_multiwindow_fixture(self) -> None:
         command, titles, pid_file = live_run.application_contract("hardware")
-        self.assertEqual(command, "/opt/xpra-lab/start_hardware_fixture.sh")
+        self.assertEqual(command, "/opt/xpra-fork-maintenance/start_hardware_fixture.sh")
         self.assertEqual(titles, ("vkcube",))
         self.assertEqual(pid_file, "vkcube.pid")
 
         command, titles, pid_file = live_run.application_contract("opengl")
-        self.assertEqual(command, "/opt/xpra-lab/start_hardware_fixture.sh opengl")
+        self.assertEqual(command, "/opt/xpra-fork-maintenance/start_hardware_fixture.sh opengl")
         self.assertEqual(titles, ("glmark2",))
         self.assertEqual(pid_file, "opengl.pid")
         context_names = {path.name for path in live_run.BUILD_CONTEXT_INPUTS}
@@ -3470,7 +3470,7 @@ class LiveTransportProfileTest(unittest.TestCase):
         self.assertNotIn("xpra-live-scroll", source)
 
         command, titles, pid_file = live_run.application_contract("zed")
-        self.assertEqual(command, "/opt/xpra-lab/start_zed.sh")
+        self.assertEqual(command, "/opt/xpra-fork-maintenance/start_zed.sh")
         self.assertEqual(titles, ("empty project", "zed"))
         self.assertEqual(pid_file, "zed.pid")
 
@@ -3849,8 +3849,8 @@ class LiveTransportProfileTest(unittest.TestCase):
             "FROM docker.io/library/ubuntu:26.04 AS server\n",
             1,
         )[1].split("FROM docker.io/library/debian:13-slim AS client-build\n", 1)[0]
-        chmod = "chmod 0644 /opt/xpra-lab/interaction_fixture.py"
-        runtime_check = "test -r /opt/xpra-lab/interaction_fixture.py"
+        chmod = "chmod 0644 /opt/xpra-fork-maintenance/interaction_fixture.py"
+        runtime_check = "test -r /opt/xpra-fork-maintenance/interaction_fixture.py"
         self.assertIn(chmod, server_stage)
         self.assertIn(runtime_check, server_stage)
         self.assertIn("glmark2-wayland", server_stage)

@@ -11,7 +11,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY source /src/xpra
-COPY patches /tmp/xpra-lab-patches
+COPY patches /tmp/xpra-fork-maintenance-patches
 
 WORKDIR /src/xpra
 
@@ -21,16 +21,16 @@ RUN test -n "$XPRA_COMMIT" \
     && while IFS= read -r patch_name; do \
            test -z "$patch_name" && continue; \
            case "$patch_name" in \#*) continue ;; esac; \
-           test -f "/tmp/xpra-lab-patches/$patch_name"; \
-           git apply --reverse --check --whitespace=error-all "/tmp/xpra-lab-patches/$patch_name"; \
-       done < /tmp/xpra-lab-patches/already-present \
+           test -f "/tmp/xpra-fork-maintenance-patches/$patch_name"; \
+           git apply --reverse --check --whitespace=error-all "/tmp/xpra-fork-maintenance-patches/$patch_name"; \
+       done < /tmp/xpra-fork-maintenance-patches/already-present \
     && while IFS= read -r patch_name; do \
            test -z "$patch_name" && continue; \
            case "$patch_name" in \#*) continue ;; esac; \
-           test -f "/tmp/xpra-lab-patches/$patch_name"; \
-           git apply --check --whitespace=error-all "/tmp/xpra-lab-patches/$patch_name"; \
-           git apply --whitespace=error-all "/tmp/xpra-lab-patches/$patch_name"; \
-       done < /tmp/xpra-lab-patches/series
+           test -f "/tmp/xpra-fork-maintenance-patches/$patch_name"; \
+           git apply --check --whitespace=error-all "/tmp/xpra-fork-maintenance-patches/$patch_name"; \
+           git apply --whitespace=error-all "/tmp/xpra-fork-maintenance-patches/$patch_name"; \
+       done < /tmp/xpra-fork-maintenance-patches/series
 
 
 FROM xpra-source-base AS xpra-source
@@ -196,16 +196,16 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=server-build /opt/xpra-install/ /
-COPY interaction_fixture.py /opt/xpra-lab/interaction_fixture.py
-COPY container_payload.py /opt/xpra-lab/container_payload.py
-COPY start_hardware_fixture.sh /opt/xpra-lab/start_hardware_fixture.sh
-COPY start_zed.sh /opt/xpra-lab/start_zed.sh
+COPY interaction_fixture.py /opt/xpra-fork-maintenance/interaction_fixture.py
+COPY container_payload.py /opt/xpra-fork-maintenance/container_payload.py
+COPY start_hardware_fixture.sh /opt/xpra-fork-maintenance/start_hardware_fixture.sh
+COPY start_zed.sh /opt/xpra-fork-maintenance/start_zed.sh
 
 RUN test -d /usr/local/share/xpra/css \
-    && chmod 0644 /opt/xpra-lab/interaction_fixture.py \
-    && chmod 0755 /opt/xpra-lab/start_hardware_fixture.sh \
-    && chmod 0755 /opt/xpra-lab/start_zed.sh \
-    && chmod 0755 /opt/xpra-lab/container_payload.py \
+    && chmod 0644 /opt/xpra-fork-maintenance/interaction_fixture.py \
+    && chmod 0755 /opt/xpra-fork-maintenance/start_hardware_fixture.sh \
+    && chmod 0755 /opt/xpra-fork-maintenance/start_zed.sh \
+    && chmod 0755 /opt/xpra-fork-maintenance/container_payload.py \
     && xpra --version \
     && python3 -c 'from xpra.codecs.libva import decoder, encoder' \
     && python3 -c 'from xpra.codecs.libyuv import converter' \
@@ -221,8 +221,8 @@ ENV PYTHONUNBUFFERED=1
 USER lab
 WORKDIR /home/lab
 
-RUN test -r /opt/xpra-lab/interaction_fixture.py \
-    && python3 -c "open('/opt/xpra-lab/interaction_fixture.py', 'rb').read(1)"
+RUN test -r /opt/xpra-fork-maintenance/interaction_fixture.py \
+    && python3 -c "open('/opt/xpra-fork-maintenance/interaction_fixture.py', 'rb').read(1)"
 
 CMD ["sleep", "infinity"]
 
@@ -368,10 +368,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=client-build /opt/xpra-install/ /
-COPY container_payload.py /opt/xpra-lab/container_payload.py
+COPY container_payload.py /opt/xpra-fork-maintenance/container_payload.py
 
 RUN test -d /usr/local/share/xpra/css \
-    && chmod 0755 /opt/xpra-lab/container_payload.py \
+    && chmod 0755 /opt/xpra-fork-maintenance/container_payload.py \
     && xpra --version \
     && python3 -c 'from xpra.codecs.libva import decoder, encoder' \
     && python3 -c 'from xpra.codecs.libyuv import converter' \

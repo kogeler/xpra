@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HOST_RUNNER=/opt/xpra-lab-upstream-tests
+HOST_RUNNER=/opt/xpra-fork-maintenance/upstream-tests
 PAYLOAD_HELPER="$HOST_RUNNER/container_payload.py"
 INPUTS=/work/payload
 SOURCE="$INPUTS/source.bundle"
@@ -15,7 +15,7 @@ if test ! -e "$INPUTS"; then
 fi
 
 PATCH_MODE=${XPRA_PATCH_MODE:-patched}
-SELECTION=${XPRA_LAB_SELECTION:-}
+SELECTION=${XPRA_FORK_SELECTION:-}
 EXPECTED_COMMIT=${XPRA_EXPECTED_SOURCE_COMMIT:-}
 EXPECTED_SOURCE_HEAD=${XPRA_EXPECTED_SOURCE_HEAD:-}
 EXPECTED_SOURCE_REF=${XPRA_EXPECTED_SOURCE_REF:-}
