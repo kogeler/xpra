@@ -3,6 +3,7 @@ slug = "develop"
 description = "The complete active downstream patch queue"
 series = [
   "wayland-initial-window-state",
+  "wayland-empty-damage-throttle",
   "video-pipeline-cleanup-race",
   "debian-libva-codecs-package",
   "upstream-test-quarantine",

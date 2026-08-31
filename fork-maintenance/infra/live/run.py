@@ -74,10 +74,17 @@ INTERACTION_CLICKED_TITLE = "Xpra Hardware Interaction Clicked"
 INTERACTION_CLICK_MARKER = "/tmp/xpra-hardware-pointer-clicked"
 INTERACTION_KEY_MARKER = "/tmp/xpra-hardware-keyboard-escape"
 INTERACTION_READY_MARKER = "/tmp/xpra-hardware-interaction-ready"
+EMPTY_DAMAGE_PARENT_TITLE = "Xpra Empty Damage Parent"
+EMPTY_DAMAGE_CHILD_TITLE = "Xpra Empty Damage Child"
+EMPTY_DAMAGE_READY_MARKER = "/tmp/xpra-empty-damage-fixture-ready"
+EMPTY_DAMAGE_START_MARKER = "/tmp/xpra-empty-damage-pressure-start"
+EMPTY_DAMAGE_PRESSURE_MARKER = "/tmp/xpra-empty-damage-pressure-ready"
+EMPTY_DAMAGE_CLICK_MARKER = "/tmp/xpra-empty-damage-child-clicked"
 LEGACY_SOURCE_VARIANT_SELECTORS = {"master": ()}
 HARNESS_INPUTS = (
     INFRA_ROOT / ".containerignore",
     INFRA_ROOT / "Containerfile",
+    INFRA_ROOT / "empty_damage_fixture.c",
     INFRA_ROOT / "interaction_fixture.py",
     INFRA_ROOT / "job.py",
     LIVE_CONFIG_MODULE,
@@ -97,6 +104,7 @@ HARNESS_INPUTS = (
 BUILD_CONTEXT_INPUTS = (
     INFRA_ROOT / ".containerignore",
     INFRA_ROOT / "Containerfile",
+    INFRA_ROOT / "empty_damage_fixture.c",
     INFRA_ROOT / "interaction_fixture.py",
     INFRA_ROOT / "start_hardware_fixture.sh",
     INFRA_ROOT / "start_zed.sh",
@@ -245,6 +253,7 @@ SERVER_ARTIFACT_PATTERNS = (
     re.compile(r"vkcube\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"opengl\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"interaction\.(?:exit|pid|stderr|stdout)"),
+    re.compile(r"empty-damage\.(?:exit|pid|stderr|stdout)"),
 )
 CLIENT_ARTIFACT_PATTERNS = (
     re.compile(r"client(?:\..+|-va.*)"),
@@ -253,6 +262,7 @@ CLIENT_ARTIFACT_PATTERNS = (
     re.compile(r"xwayland-xdpyinfo\.txt"),
     re.compile(r"(?:xvfb|openbox|picom)\..+"),
     re.compile(r"(?:root|window|interaction)-.+"),
+    re.compile(r"empty-damage-.+"),
 )
 
 
@@ -2911,19 +2921,28 @@ grep -E 'libvulkan_radeon|libEGL_mesa|libGLX_mesa|radeonsi_dri|swrast_dri|libgal
     }
 
 
-def server_xpra_window_id(info_path: Path, title_patterns: tuple[str, ...]) -> int:
-    """Resolve one server window ID from its title in ``xpra info``."""
-    expected = {pattern.casefold() for pattern in title_patterns}
-    matches: list[int] = []
+def server_xpra_window_inventory(info_path: Path) -> dict[int, str]:
+    """Return the exact server window-title inventory from ``xpra info``."""
+    inventory: dict[int, str] = {}
     for line in info_path.read_text(encoding="utf-8", errors="replace").splitlines():
         key, separator, value = line.partition("=")
         match = re.fullmatch(r"windows\.([1-9][0-9]*)\.title", key)
-        if (
-            separator
-            and match
-            and any(pattern in value.casefold() for pattern in expected)
-        ):
-            matches.append(int(match.group(1)))
+        if separator and match:
+            window_id = int(match.group(1))
+            if window_id in inventory:
+                raise LabFailure(f"xpra info repeats window title for ID {window_id}")
+            inventory[window_id] = value
+    return inventory
+
+
+def server_xpra_window_id(info_path: Path, title_patterns: tuple[str, ...]) -> int:
+    """Resolve one server window ID from its title in ``xpra info``."""
+    expected = {pattern.casefold() for pattern in title_patterns}
+    matches = [
+        window_id
+        for window_id, title in server_xpra_window_inventory(info_path).items()
+        if any(pattern in title.casefold() for pattern in expected)
+    ]
     if len(matches) != 1:
         raise LabFailure(
             f"xpra info identified {len(matches)} windows for titles "
@@ -6565,6 +6584,443 @@ def exercise_interaction_fixture(
     }
 
 
+def load_empty_damage_fixture_events(path: Path) -> list[dict[str, Any]]:
+    """Parse the bounded JSON event stream emitted by the native fixture."""
+    ensure_private_regular_file(path)
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise LabFailure("empty-damage fixture event stream is unavailable") from error
+    if not raw or len(raw) > 64 * 1024 or b"\0" in raw:
+        raise LabFailure("empty-damage fixture event stream has an invalid size")
+    try:
+        lines = raw.decode("utf-8", errors="strict").splitlines()
+    except UnicodeDecodeError as error:
+        raise LabFailure("empty-damage fixture event stream is not UTF-8") from error
+    events: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise LabFailure("empty-damage fixture event stream is not JSON") from error
+        if not isinstance(event, dict) or not isinstance(event.get("event"), str):
+            raise LabFailure("empty-damage fixture event is invalid")
+        events.append(event)
+    return events
+
+
+def empty_damage_fixture_checks(evidence: dict[str, Any]) -> dict[str, bool]:
+    """Classify the generic second-toplevel live regression evidence."""
+    windows = evidence.get("windows") if isinstance(evidence, dict) else None
+    pressure = evidence.get("pressure") if isinstance(evidence, dict) else None
+    input_path = evidence.get("input_path") if isinstance(evidence, dict) else None
+    teardown = evidence.get("teardown") if isinstance(evidence, dict) else None
+    windows = windows if isinstance(windows, dict) else {}
+    pressure = pressure if isinstance(pressure, dict) else {}
+    input_path = input_path if isinstance(input_path, dict) else {}
+    teardown = teardown if isinstance(teardown, dict) else {}
+    parent_frames = _exact_int(pressure.get("parent_frames_at_marker"), positive=True)
+    child_frames = _exact_int(pressure.get("child_frames_at_marker"), positive=True)
+    return {
+        "secondary_toplevels_discovered": bool(
+            windows.get("client_ids_distinct")
+            and windows.get("server_ids_distinct")
+        ),
+        "secondary_toplevels_visible": bool(windows.get("visible_content")),
+        "empty_damage_pressure_active": bool(
+            pressure.get("marker")
+            and pressure.get("parent_mapped_empty_commit")
+            and pressure.get("child_mapped_empty_commit")
+            and parent_frames is not None
+            and child_frames is not None
+            and parent_frames >= 60
+            and child_frames >= 60
+        ),
+        "secondary_client_pointer_path": bool(
+            input_path.get("client_press_release")
+        ),
+        "secondary_server_pointer_path": bool(
+            input_path.get("server_child_focus")
+            and input_path.get("server_coordinates")
+            and input_path.get("server_press_release")
+        ),
+        "secondary_surface_pointer_path": bool(
+            input_path.get("fixture_child_release")
+            and input_path.get("fixture_coordinates")
+        ),
+        "secondary_pointer_response_bounded": bool(
+            evidence.get("clicked_within_deadline")
+        ),
+        "secondary_toplevel_teardown": bool(teardown.get("complete")),
+        "secondary_fixture_clean_exit": evidence.get("fixture_exit_status") == 0,
+    }
+
+
+def exercise_empty_damage_fixture(
+    server: str,
+    client: str,
+    directory: Path,
+) -> dict[str, Any]:
+    """Exercise a child toplevel while both fixture surfaces recycle empty commits."""
+    if find_window(client, (EMPTY_DAMAGE_PARENT_TITLE,)) is not None:
+        raise LabFailure("stale empty-damage parent window is visible")
+    if find_window(client, (EMPTY_DAMAGE_CHILD_TITLE,)) is not None:
+        raise LabFailure("stale empty-damage child window is visible")
+    server_log_start = container_artifact_size(server, "server.stderr")
+    marker_paths = " ".join(
+        shlex.quote(value)
+        for value in (
+            EMPTY_DAMAGE_READY_MARKER,
+            EMPTY_DAMAGE_START_MARKER,
+            EMPTY_DAMAGE_PRESSURE_MARKER,
+            EMPTY_DAMAGE_CLICK_MARKER,
+        )
+    )
+    launcher = (
+        f"umask 077; rm -f {marker_paths}; "
+        "/usr/local/bin/xpra-empty-damage-fixture "
+        ">/artifacts/empty-damage.stdout "
+        "2>/artifacts/empty-damage.stderr & "
+        "child=$!; printf '%s\\n' \"$child\" >/artifacts/empty-damage.pid; "
+        "wait \"$child\"; status=$?; "
+        "printf '%s\\n' \"$status\" >/artifacts/empty-damage.exit; "
+        "exit \"$status\""
+    )
+    podman_exec(server, ["bash", "-lc", launcher], detach=True)
+    pid_path = wait_for_container_artifact(
+        server,
+        directory,
+        "empty-damage.pid",
+        "empty-damage fixture PID publication",
+    )
+    pid_text = pid_path.read_text(encoding="ascii").strip()
+    if not re.fullmatch(r"[1-9][0-9]*", pid_text):
+        raise LabFailure("empty-damage fixture published an invalid PID")
+    fixture_pid = int(pid_text)
+
+    def fixture_ready() -> bool:
+        if not container_process_exists(server, fixture_pid):
+            raise LabFailure("empty-damage fixture exited before readiness")
+        return (
+            podman_exec(
+                server,
+                ["test", "-f", EMPTY_DAMAGE_READY_MARKER],
+                check=False,
+                announce=False,
+            ).returncode
+            == 0
+        )
+
+    wait_for("mapped empty-damage fixture toplevels", fixture_ready)
+    parent_window: tuple[str, str] | None = None
+    child_window: tuple[str, str] | None = None
+
+    def client_windows_ready() -> bool:
+        nonlocal parent_window, child_window
+        parent_window = find_window(client, (EMPTY_DAMAGE_PARENT_TITLE,))
+        child_window = find_window(client, (EMPTY_DAMAGE_CHILD_TITLE,))
+        return bool(
+            parent_window is not None
+            and child_window is not None
+            and parent_window[0] != child_window[0]
+        )
+
+    wait_for("forwarded empty-damage parent and child windows", client_windows_ready)
+    assert parent_window is not None and child_window is not None
+    parent_geometry = window_geometry(client, parent_window[0])
+    child_geometry = window_geometry(client, child_window[0])
+    capture_xwd(
+        client,
+        directory,
+        "empty-damage-parent.xwd",
+        window_id=parent_window[0],
+        announce=False,
+    )
+    parent_image = convert_xwd(directory, "empty-damage-parent")
+    capture_xwd(
+        client,
+        directory,
+        "empty-damage-child.xwd",
+        window_id=child_window[0],
+        announce=False,
+    )
+    child_image = convert_xwd(directory, "empty-damage-child")
+    server_info_before = directory / "server-info-empty-damage-before.txt"
+    write_command_output(
+        server,
+        ["xpra", "info", *command_cli_options("server", "info")],
+        server_info_before,
+    )
+    parent_wid = server_xpra_window_id(
+        server_info_before,
+        (EMPTY_DAMAGE_PARENT_TITLE,),
+    )
+    child_wid = server_xpra_window_id(
+        server_info_before,
+        (EMPTY_DAMAGE_CHILD_TITLE,),
+    )
+    if parent_wid == child_wid:
+        raise LabFailure("empty-damage fixture toplevels share one server window ID")
+
+    podman_exec(
+        server,
+        [
+            "sh",
+            "-c",
+            'umask 077; : > "$1"',
+            "empty-damage-pressure-start",
+            EMPTY_DAMAGE_START_MARKER,
+        ],
+    )
+
+    def pressure_ready() -> bool:
+        if not container_process_exists(server, fixture_pid):
+            raise LabFailure("empty-damage fixture exited before pressure readiness")
+        return (
+            podman_exec(
+                server,
+                ["test", "-f", EMPTY_DAMAGE_PRESSURE_MARKER],
+                check=False,
+                announce=False,
+            ).returncode
+            == 0
+        )
+
+    wait_for("sustained empty-damage frame callbacks", pressure_ready, timeout=5)
+    empty_commit_patterns = {
+        "parent": rf"commit wid {parent_wid} mapped=True,[^\n]*rects=\[\]",
+        "child": rf"commit wid {child_wid} mapped=True,[^\n]*rects=\[\]",
+    }
+    mapped_empty_commits = {
+        name: container_artifact_suffix_matches(
+            server,
+            "server.stderr",
+            server_log_start,
+            (pattern,),
+        )
+        for name, pattern in empty_commit_patterns.items()
+    }
+    if not all(mapped_empty_commits.values()):
+        raise LabFailure("empty-damage fixture did not reach mapped empty commits")
+
+    click_x = child_geometry["width"] // 2
+    click_y = child_geometry["height"] // 2
+    client_click_offset = container_artifact_size(client, "client.stdout")
+    server_click_offset = container_artifact_size(server, "server.stderr")
+    click_started = time.monotonic()
+    podman_exec(
+        client,
+        [
+            "env",
+            f"DISPLAY={CLIENT_DISPLAY}",
+            "xdotool",
+            "windowactivate",
+            "--sync",
+            child_window[0],
+            "mousemove",
+            "--sync",
+            "--window",
+            child_window[0],
+            str(click_x),
+            str(click_y),
+            "click",
+            "1",
+        ],
+    )
+    clicked = False
+    click_failure: str | None = None
+    try:
+        wait_for(
+            "empty-damage child pointer release",
+            lambda: (
+                podman_exec(
+                    server,
+                    ["test", "-f", EMPTY_DAMAGE_CLICK_MARKER],
+                    check=False,
+                    announce=False,
+                ).returncode
+                == 0
+            ),
+            timeout=3,
+        )
+        clicked = True
+    except LabFailure as error:
+        click_failure = str(error)
+    click_observed_after = round(time.monotonic() - click_started, 6)
+    if not clicked:
+        podman_exec(
+            server,
+            ["kill", "-TERM", str(fixture_pid)],
+            check=False,
+            announce=False,
+        )
+    fixture_exit_status = wait_for_process_exit(
+        server,
+        fixture_pid,
+        directory,
+        "empty-damage",
+        timeout=15,
+    )
+
+    def client_windows_absent() -> bool:
+        return (
+            find_window(client, (EMPTY_DAMAGE_PARENT_TITLE,)) is None
+            and find_window(client, (EMPTY_DAMAGE_CHILD_TITLE,)) is None
+        )
+
+    wait_for("empty-damage fixture window removal", client_windows_absent, timeout=15)
+    server_info_after = directory / "server-info-empty-damage-after.txt"
+    server_info_after_result = write_command_output(
+        server,
+        ["xpra", "info", *command_cli_options("server", "info")],
+        server_info_after,
+        check=False,
+    )
+    server_inventory_available = server_info_after_result.returncode == 0
+    after_inventory = (
+        server_xpra_window_inventory(server_info_after)
+        if server_inventory_available
+        else {}
+    )
+    input_path = {
+        "client_press_release": container_artifact_suffix_matches(
+            client,
+            "client.stdout",
+            client_click_offset,
+            (
+                rf"_button_action\(1,[^\n]+, True\) wid=0x{child_wid:x}",
+                rf"_button_action\(1,[^\n]+, False\) wid=0x{child_wid:x}",
+            ),
+        ),
+        "server_child_focus": container_artifact_suffix_matches(
+            server,
+            "server.stderr",
+            server_click_offset,
+            (re.escape(f"set_pointer_focus({child_wid},"),),
+        ),
+        "server_coordinates": container_artifact_suffix_matches(
+            server,
+            "server.stderr",
+            server_click_offset,
+            (re.escape(f"move_pointer({click_x}, {click_y},"),),
+        ),
+        "server_press_release": container_artifact_suffix_matches(
+            server,
+            "server.stderr",
+            server_click_offset,
+            (re.escape("click(1, True"), re.escape("click(1, False")),
+        ),
+    }
+    teardown = {
+        "client_windows_absent": client_windows_absent(),
+        "server_inventory_available": server_inventory_available,
+        "server_windows_absent": bool(
+            server_inventory_available
+            and parent_wid not in after_inventory
+            and child_wid not in after_inventory
+        ),
+        "client_destroy_logged": container_artifact_suffix_matches(
+            client,
+            "client.stdout",
+            client_click_offset,
+            (
+                re.escape(f"destroy_window({parent_wid}#x,"),
+                re.escape(f"destroy_window({child_wid}#x,"),
+            ),
+        ),
+        "server_destroy_logged": container_artifact_suffix_matches(
+            server,
+            "server.stderr",
+            server_click_offset,
+            (
+                re.escape(f"_emit(destroy, ({parent_wid},))"),
+                re.escape(f"_emit(destroy, ({child_wid},))"),
+            ),
+        ),
+    }
+    teardown["complete"] = all(teardown.values())
+    pull_container_artifacts(
+        server,
+        directory,
+        ("empty-damage.stdout", "empty-damage.stderr"),
+    )
+    events = load_empty_damage_fixture_events(directory / "empty-damage.stdout")
+    pressure_event = next(
+        (event for event in events if event.get("event") == "pressure-ready"),
+        None,
+    )
+    click_event = next(
+        (event for event in events if event.get("event") == "child-click"),
+        None,
+    )
+    click_event_x = click_event.get("x") if isinstance(click_event, dict) else None
+    click_event_y = click_event.get("y") if isinstance(click_event, dict) else None
+    input_path.update(
+        {
+            "fixture_child_release": click_event is not None,
+            "fixture_coordinates": bool(
+                isinstance(click_event_x, (int, float))
+                and isinstance(click_event_y, (int, float))
+                and abs(float(click_event_x) - click_x) <= 1
+                and abs(float(click_event_y) - click_y) <= 1
+            ),
+        }
+    )
+    evidence = {
+        "attempted": True,
+        "artifacts": {
+            "child_screenshot": "empty-damage-child.rgb.png",
+            "events": "empty-damage.stdout",
+            "parent_screenshot": "empty-damage-parent.rgb.png",
+            "server_info_after": server_info_after.name,
+            "server_info_after_returncode": server_info_after_result.returncode,
+            "server_info_before": server_info_before.name,
+            "stderr": "empty-damage.stderr",
+        },
+        "clicked_within_deadline": clicked,
+        "click_failure": click_failure,
+        "click_observed_after_seconds": click_observed_after,
+        "click_position": [click_x, click_y],
+        "fixture_exit_status": fixture_exit_status,
+        "input_path": input_path,
+        "pid": fixture_pid,
+        "pressure": {
+            "marker": pressure_event is not None,
+            "parent_frames_at_marker": (
+                pressure_event.get("parent_frames", 0) if pressure_event else 0
+            ),
+            "child_frames_at_marker": (
+                pressure_event.get("child_frames", 0) if pressure_event else 0
+            ),
+            "parent_mapped_empty_commit": mapped_empty_commits["parent"],
+            "child_mapped_empty_commit": mapped_empty_commits["child"],
+        },
+        "teardown": teardown,
+        "windows": {
+            "child": {
+                "client_geometry": child_geometry,
+                "client_id": child_window[0],
+                "client_title": child_window[1],
+                "server_id": child_wid,
+            },
+            "client_ids_distinct": parent_window[0] != child_window[0],
+            "parent": {
+                "client_geometry": parent_geometry,
+                "client_id": parent_window[0],
+                "client_title": parent_window[1],
+                "server_id": parent_wid,
+            },
+            "server_ids_distinct": parent_wid != child_wid,
+            "visible_content": bool(
+                parent_image["xwd"]["unique_rgb_colors"] > 1
+                and child_image["xwd"]["unique_rgb_colors"] > 1
+            ),
+        },
+    }
+    evidence["checks"] = empty_damage_fixture_checks(evidence)
+    return evidence
+
+
 def interaction_alpha_content_checks(
     interaction: dict[str, Any],
 ) -> dict[str, bool]:
@@ -7320,6 +7776,13 @@ def classify_boundaries(
             ),
             "pointer_changed_pixels": bool(interaction.get("pixels_changed")),
         }
+        if args.encoding == "rgb" and args.lifecycle == "application-exit":
+            secondary = interaction.get("empty_damage_fixture")
+            interaction_checks.update(
+                empty_damage_fixture_checks(
+                    secondary if isinstance(secondary, dict) else {}
+                )
+            )
     elif args.application in MULTIWINDOW_HARDWARE_APPLICATIONS | {"gtk"}:
         interaction_checks = {
             "pointer_marker_present": bool(interaction.get("pointer_marker_present")),
@@ -8008,6 +8471,12 @@ def run_scenario(
                     geometry,
                     directory,
                     interaction,
+                )
+            elif args.lifecycle == "application-exit":
+                interaction["empty_damage_fixture"] = exercise_empty_damage_fixture(
+                    server,
+                    client,
+                    directory,
                 )
         elif args.application in MULTIWINDOW_HARDWARE_APPLICATIONS | {"vkcube"}:
             application_activity["graphics_motion"] = capture_graphics_motion(
