@@ -179,9 +179,10 @@ its publication start gate. Derived fields are never edited by hand.
 Only these active cases are retained:
 
 1. `wayland-initial-window-state`;
-2. `video-pipeline-cleanup-race`;
-3. `debian-libva-codecs-package`;
-4. `upstream-test-quarantine`.
+2. `wayland-empty-damage-throttle`;
+3. `video-pipeline-cleanup-race`;
+4. `debian-libva-codecs-package`;
+5. `upstream-test-quarantine`.
 
 ## Stack contract
 

@@ -11,9 +11,10 @@ current patch queue was adapted.
 The active patches are:
 
 1. `wayland-initial-window-state`;
-2. `video-pipeline-cleanup-race`;
-3. `debian-libva-codecs-package`;
-4. `upstream-test-quarantine` (test-only duty case).
+2. `wayland-empty-damage-throttle`;
+3. `video-pipeline-cleanup-race`;
+4. `debian-libva-codecs-package`;
+5. `upstream-test-quarantine` (test-only duty case).
 
 `stacks/develop.toml` applies them in integration order. `develop` here is the
 stable queue slug, not a requirement that every consumer run from the Git branch

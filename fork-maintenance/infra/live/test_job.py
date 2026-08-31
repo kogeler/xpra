@@ -3441,6 +3441,53 @@ class LiveTransportProfileTest(unittest.TestCase):
                 ),
                 2,
             )
+            self.assertEqual(
+                live_run.server_xpra_window_inventory(info),
+                {
+                    1: "vkcube",
+                    2: "Xpra Hardware Interaction Ready on server",
+                },
+            )
+
+    def test_empty_damage_fixture_checks_fail_closed(self) -> None:
+        evidence = {
+            "clicked_within_deadline": True,
+            "fixture_exit_status": 0,
+            "input_path": {
+                "client_press_release": True,
+                "server_child_focus": True,
+                "server_coordinates": True,
+                "server_press_release": True,
+                "fixture_child_release": True,
+                "fixture_coordinates": True,
+            },
+            "pressure": {
+                "marker": True,
+                "parent_mapped_empty_commit": True,
+                "child_mapped_empty_commit": True,
+                "parent_frames_at_marker": 60,
+                "child_frames_at_marker": 61,
+            },
+            "teardown": {"complete": True},
+            "windows": {
+                "client_ids_distinct": True,
+                "server_ids_distinct": True,
+                "visible_content": True,
+            },
+        }
+        self.assertTrue(all(live_run.empty_damage_fixture_checks(evidence).values()))
+        evidence["clicked_within_deadline"] = False
+        self.assertFalse(
+            live_run.empty_damage_fixture_checks(evidence)[
+                "secondary_pointer_response_bounded"
+            ]
+        )
+        evidence["pressure"]["parent_frames_at_marker"] = "60"
+        self.assertFalse(
+            live_run.empty_damage_fixture_checks(evidence)[
+                "empty_damage_pressure_active"
+            ]
+        )
 
     def test_primary_server_window_id_is_resolved_once_before_frame_poll(self) -> None:
         source = (LIVE_DIRECTORY / "run.py").read_text(encoding="utf-8")
@@ -3473,6 +3520,40 @@ class LiveTransportProfileTest(unittest.TestCase):
         self.assertEqual(command, "/opt/xpra-fork-maintenance/start_zed.sh")
         self.assertEqual(titles, ("empty project", "zed"))
         self.assertEqual(pid_file, "zed.pid")
+        context_names = {path.name for path in live_run.BUILD_CONTEXT_INPUTS}
+        self.assertIn("empty_damage_fixture.c", context_names)
+
+    def test_empty_damage_fixture_is_generic_and_recycles_frame_callbacks(self) -> None:
+        source = (LIVE_DIRECTORY / "empty_damage_fixture.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('PARENT_TITLE "Xpra Empty Damage Parent"', source)
+        self.assertIn('CHILD_TITLE "Xpra Empty Damage Child"', source)
+        self.assertIn("xdg_toplevel_set_parent(window->toplevel, parent)", source)
+        self.assertIn("wl_surface_frame(window->surface)", source)
+        self.assertIn("intentionally an empty commit", source)
+        self.assertIn("wl_surface_commit(window->surface)", source)
+        self.assertIn("PRESSURE_FRAMES 60", source)
+        self.assertIn("WL_POINTER_BUTTON_STATE_RELEASED", source)
+        self.assertNotIn("Zed", source)
+
+    def test_server_image_builds_native_empty_damage_fixture(self) -> None:
+        source = (LIVE_DIRECTORY / "Containerfile").read_text(encoding="utf-8")
+        server_build = source.split(
+            "FROM docker.io/library/ubuntu:26.04 AS server-build\n",
+            1,
+        )[1].split("FROM docker.io/library/ubuntu:26.04 AS server\n", 1)[0]
+        server = source.split(
+            "FROM docker.io/library/ubuntu:26.04 AS server\n",
+            1,
+        )[1].split("FROM docker.io/library/debian:13-slim AS client-build\n", 1)[0]
+        self.assertIn("wayland-scanner client-header", server_build)
+        self.assertIn("/tmp/xpra-empty-damage-fixture.c", server_build)
+        self.assertIn(
+            "-o /opt/xpra-install/usr/local/bin/xpra-empty-damage-fixture",
+            server_build,
+        )
+        self.assertIn("test -x /usr/local/bin/xpra-empty-damage-fixture", server)
 
     def test_frame_alpha_states_are_parsed_and_bound_to_exact_windows(self) -> None:
         server_log = (
