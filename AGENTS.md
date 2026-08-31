@@ -120,6 +120,7 @@ paths, dependencies, tests, and required gates. The complete active queue is
 The currently retained active cases are:
 
 - `wayland-initial-window-state`;
+- `wayland-empty-damage-throttle`;
 - `video-pipeline-cleanup-race`;
 - `debian-libva-codecs-package`;
 - `upstream-test-quarantine` (the single test-only duty case).

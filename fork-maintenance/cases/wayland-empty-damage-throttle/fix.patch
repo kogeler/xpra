@@ -1,0 +1,210 @@
+diff --git a/tests/unittests/unit/wayland/window_test.py b/tests/unittests/unit/wayland/window_test.py
+index e047159aaf7649f342161a02c27840115be82ebd..802c45caf74d3721b1a5e637ebf2c6d993cec649 100644
+--- a/tests/unittests/unit/wayland/window_test.py
++++ b/tests/unittests/unit/wayland/window_test.py
+@@ -40,8 +40,25 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+         server.subsurface_info = {}
+         server.subsurface_facades = {}
+         server.window_sources.return_value = ()
++        server._empty_damage_ack_timer = 0
++        server._empty_damage_ack_windows = {}
++        server.timeout_add.return_value = 101
++        for name in (
++                "schedule_empty_damage_ack",
++                "acknowledge_empty_damage",
++                "cancel_empty_damage_ack",
++                "cancel_empty_damage_acks",
++        ):
++            method = getattr(WaylandWindowServer, name, None)
++            if method:
++                getattr(server, name).side_effect = lambda *args, method=method: method(server, *args)
+         return server
+ 
++    @staticmethod
++    def fire_empty_damage_timer(server):
++        callback = server.timeout_add.call_args.args[1]
++        return callback()
++
+     def test_mapped_empty_damage_acknowledges_after_subsurface_updates(self):
+         window = Mock()
+         server = self.make_server(window)
+@@ -65,6 +82,10 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+         window.acknowledge_changes.side_effect = check_subsurface_updates
+         WaylandWindowServer.commit(server, 7, True, (100, 80), (), [subsurface])
+ 
++        window.acknowledge_changes.assert_not_called()
++        server.timeout_add.assert_called_once()
++        self.assertGreater(server.timeout_add.call_args.args[0], 0)
++        self.assertFalse(self.fire_empty_damage_timer(server))
+         window.acknowledge_changes.assert_called_once_with()
+         server.refresh_window_area.assert_not_called()
+ 
+@@ -102,6 +123,66 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+         server.get_surface.assert_not_called()
+         server.refresh_window_area.assert_not_called()
+ 
++    def test_repeated_empty_damage_is_coalesced_without_recursive_acknowledgement(self):
++        window = Mock()
++        server = self.make_server(window)
++
++        def commit_again():
++            if window.acknowledge_changes.call_count < 5:
++                WaylandWindowServer.commit(server, 7, True, (100, 80), (), [])
++
++        window.acknowledge_changes.side_effect = commit_again
++        for _ in range(100):
++            WaylandWindowServer.commit(server, 7, True, (100, 80), (), [])
++
++        window.acknowledge_changes.assert_not_called()
++        server.timeout_add.assert_called_once()
++        self.assertFalse(self.fire_empty_damage_timer(server))
++        window.acknowledge_changes.assert_called_once_with()
++        self.assertEqual(server.timeout_add.call_count, 2)
++
++    def test_damage_cancels_pending_empty_acknowledgement(self):
++        window = Mock()
++        server = self.make_server(window)
++
++        WaylandWindowServer.commit(server, 7, True, (100, 80), (), [])
++        WaylandWindowServer.commit(server, 7, True, (100, 80), ((1, 2, 3, 4),), [])
++
++        server.source_remove.assert_called_once_with(101)
++        self.assertEqual(server._empty_damage_ack_timer, 0)
++        self.assertEqual(server._empty_damage_ack_windows, {})
++        window.acknowledge_changes.assert_not_called()
++        server.refresh_window_area.assert_called_once_with(
++            window, 1, 2, 3, 4, options={"damage": True, "more": False},
++        )
++
++    def test_unmap_one_window_preserves_other_pending_acknowledgement(self):
++        first = Mock()
++        second = Mock()
++        server = self.make_server(first)
++        server.get_window.side_effect = {7: first, 8: second}.get
++
++        WaylandWindowServer.commit(server, 7, True, (100, 80), (), [])
++        WaylandWindowServer.commit(server, 8, True, (100, 80), (), [])
++        WaylandWindowServer.unmap(server, 7)
++
++        server.source_remove.assert_not_called()
++        self.assertEqual(server._empty_damage_ack_windows, {8: second})
++        self.assertFalse(self.fire_empty_damage_timer(server))
++        first.acknowledge_changes.assert_not_called()
++        second.acknowledge_changes.assert_called_once_with()
++
++    def test_unmap_last_window_removes_the_pending_timer(self):
++        window = Mock()
++        server = self.make_server(window)
++
++        WaylandWindowServer.commit(server, 7, True, (100, 80), (), [])
++        WaylandWindowServer.unmap(server, 7)
++
++        server.source_remove.assert_called_once_with(101)
++        self.assertEqual(server._empty_damage_ack_timer, 0)
++        self.assertEqual(server._empty_damage_ack_windows, {})
++
+ 
+ class WaylandWindowServerConfigureTest(unittest.TestCase):
+ 
+diff --git a/xpra/wayland/server/subsystem/window.py b/xpra/wayland/server/subsystem/window.py
+index 991139776bcab9e4b2c80c50050424ab2a76eda4..d2714724855688e1a3c0ca4537a5e37542a551ce 100644
+--- a/xpra/wayland/server/subsystem/window.py
++++ b/xpra/wayland/server/subsystem/window.py
+@@ -26,6 +26,8 @@ from xpra.log import Logger
+ log = Logger("server", "wayland")
+ focuslog = Logger("server", "wayland", "focus")
+ 
++EMPTY_DAMAGE_FRAME_DELAY: Final = 16
++
+ # Per-surface signals connected on each new Surface in `new_surface`.
+ PER_SURFACE_EVENTS: Final[Sequence[str]] = (
+     "map", "unmap", "commit", "destroy",
+@@ -42,6 +44,7 @@ PER_SUBSURFACE_EVENTS: Final[Sequence[str]] = (
+ 
+ class WaylandWindowServer(WindowServer):
+     __slots__ = (
++        "_empty_damage_ack_timer", "_empty_damage_ack_windows",
+         "focused", "pending_popups", "pointer_focus", "subsurface_facades", "subsurface_info",
+         "toplevel_wid",
+     )
+@@ -52,6 +55,8 @@ class WaylandWindowServer(WindowServer):
+         self.pointer_focus = 0
+         self.toplevel_wid: dict[int, int] = {}
+         self.pending_popups: dict[int, tuple[int, Popup]] = {}
++        self._empty_damage_ack_timer = 0
++        self._empty_damage_ack_windows: dict[int, Window] = {}
+         # subsurface wid -> (parent_wid, offset_x, offset_y, logical_w, logical_h, native_w, native_h)
+         self.subsurface_info: dict[int, tuple[int, int, int, int, int, int, int]] = {}
+         # subsurface wid -> SubsurfaceWindow facade kept alive across the subsurface lifetime.
+@@ -63,6 +68,10 @@ class WaylandWindowServer(WindowServer):
+         compositor.connect("ssd", self.ssd)
+         compositor.connect("activate-request", self.activate_request)
+ 
++    def cleanup(self) -> None:
++        self.cancel_empty_damage_acks()
++        super().cleanup()
++
+     def get_surface(self, wid: int):
+         window = self.get_window(wid)
+         if not window:
+@@ -210,6 +219,7 @@ class WaylandWindowServer(WindowServer):
+         self.update_size(window, size)
+ 
+     def unmap(self, wid: int) -> None:
++        self.cancel_empty_damage_ack(wid)
+         window = self.get_window(wid)
+         if window:
+             window.set_property("iconic", True)
+@@ -256,14 +266,43 @@ class WaylandWindowServer(WindowServer):
+                 if sub_ws:
+                     sub_ws.update_geometry(wid, sx, sy, logical_w, logical_h, native_w, native_h)
+         if mapped and not rects:
+-            window.acknowledge_changes()
++            self.schedule_empty_damage_ack(wid, window)
+             return
++        self.cancel_empty_damage_ack(wid)
+         options = {"damage": True}
+         last = len(rects) - 1
+         for i, (x, y, w, h) in enumerate(rects):
+             options["more"] = i != last
+             self.refresh_window_area(window, x, y, w, h, options=options)
+ 
++    def schedule_empty_damage_ack(self, wid: int, window: Window) -> None:
++        self._empty_damage_ack_windows[wid] = window
++        if not self._empty_damage_ack_timer:
++            self._empty_damage_ack_timer = self.timeout_add(
++                EMPTY_DAMAGE_FRAME_DELAY,
++                self.acknowledge_empty_damage,
++            )
++
++    def acknowledge_empty_damage(self) -> bool:
++        self._empty_damage_ack_timer = 0
++        windows = tuple(self._empty_damage_ack_windows.items())
++        self._empty_damage_ack_windows.clear()
++        for wid, window in windows:
++            if self.get_window(wid) is window:
++                window.acknowledge_changes()
++        return False
++
++    def cancel_empty_damage_ack(self, wid: int) -> None:
++        self._empty_damage_ack_windows.pop(wid, None)
++        if not self._empty_damage_ack_windows:
++            self.cancel_empty_damage_acks()
++
++    def cancel_empty_damage_acks(self) -> None:
++        self._empty_damage_ack_windows.clear()
++        if self._empty_damage_ack_timer:
++            self.source_remove(self._empty_damage_ack_timer)
++            self._empty_damage_ack_timer = 0
++
+     def subsurface_image(self, wid: int, image: ImageWrapper,
+                          logical_w: int, logical_h: int, native_w: int, native_h: int) -> None:
+         info = self.subsurface_info.get(wid)
+@@ -365,6 +404,7 @@ class WaylandWindowServer(WindowServer):
+         self.destroy(wid)
+ 
+     def destroy(self, wid: int) -> None:
++        self.cancel_empty_damage_ack(wid)
+         # The wlroots xdg surface is being freed. Drop every server-side
+         # surface reference before delayed focus or encoder callbacks can use it.
+         if wid in self.subsurface_info:

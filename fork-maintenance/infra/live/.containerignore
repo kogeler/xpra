@@ -1,6 +1,7 @@
 *
 !Containerfile
 !container_payload.py
+!empty_damage_fixture.c
 !interaction_fixture.py
 !manifest.json
 !patches
