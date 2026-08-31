@@ -4566,6 +4566,7 @@ class ManifestTest(unittest.TestCase):
             {
                 "debian-libva-codecs-package",
                 "upstream-test-quarantine",
+                "wayland-empty-damage-throttle",
                 "wayland-initial-window-state",
                 "video-pipeline-cleanup-race",
             },
@@ -4579,6 +4580,7 @@ class ManifestTest(unittest.TestCase):
             stack.series,
             (
                 "wayland-initial-window-state",
+                "wayland-empty-damage-throttle",
                 "video-pipeline-cleanup-race",
                 "debian-libva-codecs-package",
                 "upstream-test-quarantine",

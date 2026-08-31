@@ -58,6 +58,7 @@ SELECTION_TOOL = MAINTENANCE_ROOT / "infra" / "upstream-tests" / "selection.py"
 HARNESS_INPUTS = (
     INFRA_ROOT / ".containerignore",
     INFRA_ROOT / "Containerfile",
+    INFRA_ROOT / "empty_damage_fixture.c",
     INFRA_ROOT / "interaction_fixture.py",
     INFRA_ROOT / "job.py",
     LIVE_CONFIG_MODULE,

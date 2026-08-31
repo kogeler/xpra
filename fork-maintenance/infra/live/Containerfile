@@ -73,8 +73,24 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=xpra-source /src/xpra /src/xpra
+COPY empty_damage_fixture.c /tmp/xpra-empty-damage-fixture.c
 
 WORKDIR /src/xpra
+
+RUN install -d /opt/xpra-install/usr/local/bin \
+    && wayland-scanner client-header \
+        /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
+        /tmp/xdg-shell-client-protocol.h \
+    && wayland-scanner private-code \
+        /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
+        /tmp/xdg-shell-protocol.c \
+    && cc -std=c11 -O2 -Wall -Wextra -Werror \
+        $(pkg-config --cflags wayland-client) \
+        -I/tmp \
+        /tmp/xpra-empty-damage-fixture.c \
+        /tmp/xdg-shell-protocol.c \
+        $(pkg-config --libs wayland-client) \
+        -o /opt/xpra-install/usr/local/bin/xpra-empty-damage-fixture
 
 RUN python3 setup.py install \
         --root=/opt/xpra-install \
@@ -209,7 +225,8 @@ RUN test -d /usr/local/share/xpra/css \
     && xpra --version \
     && python3 -c 'from xpra.codecs.libva import decoder, encoder' \
     && python3 -c 'from xpra.codecs.libyuv import converter' \
-    && python3 -c 'from xpra.wayland.server import compositor'
+    && python3 -c 'from xpra.wayland.server import compositor' \
+    && test -x /usr/local/bin/xpra-empty-damage-fixture
 
 RUN useradd --create-home --uid 1001 --shell /bin/bash lab \
     && install -d -o lab -g lab -m 0700 /artifacts /run/user/1001
@@ -222,7 +239,8 @@ USER lab
 WORKDIR /home/lab
 
 RUN test -r /opt/xpra-fork-maintenance/interaction_fixture.py \
-    && python3 -c "open('/opt/xpra-fork-maintenance/interaction_fixture.py', 'rb').read(1)"
+    && python3 -c "open('/opt/xpra-fork-maintenance/interaction_fixture.py', 'rb').read(1)" \
+    && test -x /usr/local/bin/xpra-empty-damage-fixture
 
 CMD ["sleep", "infinity"]
 
