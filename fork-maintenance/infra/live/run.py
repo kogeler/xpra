@@ -49,16 +49,16 @@ from profiles import (
 from xwd_to_png import decode_xwd, save_alpha_visualization
 
 INFRA_ROOT = Path(__file__).resolve().parent
-LAB_ROOT = INFRA_ROOT.parent.parent
-MAIN_REPOSITORY_ROOT = LAB_ROOT.parent
+MAINTENANCE_ROOT = INFRA_ROOT.parent.parent
+MAIN_REPOSITORY_ROOT = MAINTENANCE_ROOT.parent
 SOURCE_REPOSITORY = MAIN_REPOSITORY_ROOT
 SELECTION_TOOL = INFRA_ROOT.parent / "upstream-tests" / "selection.py"
-BACKGROUND_SUPERVISOR = LAB_ROOT / "tools" / "background_job.py"
-PAYLOAD_HELPER = LAB_ROOT / "tools" / "container_payload.py"
-PODMAN_POLICY = LAB_ROOT / "tools" / "podman_policy.py"
+BACKGROUND_SUPERVISOR = MAINTENANCE_ROOT / "tools" / "background_job.py"
+PAYLOAD_HELPER = MAINTENANCE_ROOT / "tools" / "container_payload.py"
+PODMAN_POLICY = MAINTENANCE_ROOT / "tools" / "podman_policy.py"
 LIVE_CONFIG_MODULE = INFRA_ROOT / "live_config.py"
-NETWORK_PROFILES_CONFIG = LAB_ROOT / "profiles.yml"
-LIVE_CLI_CONFIG = LAB_ROOT / "live-cli.yml"
+NETWORK_PROFILES_CONFIG = MAINTENANCE_ROOT / "profiles.yml"
+LIVE_CLI_CONFIG = MAINTENANCE_ROOT / "live-cli.yml"
 DEFAULT_STATE_ROOT = MAIN_REPOSITORY_ROOT / ".artifacts" / "fork-maintenance"
 DEFAULT_ZED_DIRECTORY = Path.home() / ".local" / "zed.app"
 DEFAULT_RENDER_NODE = Path("/dev/dri/renderD128")
@@ -102,7 +102,7 @@ BUILD_CONTEXT_INPUTS = (
     INFRA_ROOT / "start_zed.sh",
     PAYLOAD_HELPER,
 )
-CONTAINER_PAYLOAD = "/opt/xpra-lab/container_payload.py"
+CONTAINER_PAYLOAD = "/opt/xpra-fork-maintenance/container_payload.py"
 LIVE_CONTAINER_UID = 1001
 LIVE_CONTAINER_GID = 1001
 FRAME_LOG_CHUNK_BYTES = 256 * 1024
@@ -114,7 +114,7 @@ H264_MIN_FRAME_PIXEL_PERCENT = 99
 H264_MIN_MAIN_FRAMES = 10
 ZED_THEME_TOGGLE_CYCLES = 8
 ZED_THEME_TOGGLE_DELAY = 0.125
-LAB_LABEL_PREFIX = "io.xpra.lab."
+MAINTENANCE_LABEL_PREFIX = "io.xpra.fork-maintenance."
 CONTAINER_LOG_DELTA_PROBE = r"""
 import errno
 import json
@@ -273,13 +273,13 @@ class HardwareFixtureSpec:
 HARDWARE_FIXTURES = {
     "hardware": HardwareFixtureSpec(
         api="vulkan",
-        command="/opt/xpra-lab/start_hardware_fixture.sh",
+        command="/opt/xpra-fork-maintenance/start_hardware_fixture.sh",
         primary_name="vkcube",
         title_patterns=("vkcube",),
     ),
     "opengl": HardwareFixtureSpec(
         api="opengl",
-        command="/opt/xpra-lab/start_hardware_fixture.sh opengl",
+        command="/opt/xpra-fork-maintenance/start_hardware_fixture.sh opengl",
         primary_name="opengl",
         title_patterns=("glmark2",),
     ),
@@ -947,7 +947,7 @@ def send_zed_payload(
         raise LabFailure(str(error)) from error
 
 
-def inspect_lab_image(
+def inspect_maintenance_image(
     image: str,
     *,
     role: str,
@@ -965,22 +965,22 @@ def inspect_lab_image(
         config = inspection.get("Config")
         labels = config.get("Labels") if isinstance(config, dict) else None
     if not isinstance(labels, dict):
-        raise LabFailure(f"image has no Xpra lab provenance labels: {image}")
+        raise LabFailure(f"image has no fork-maintenance provenance labels: {image}")
     if not all(
         isinstance(key, str) and isinstance(value, str)
         for key, value in labels.items()
     ):
         raise LabFailure(f"image has invalid provenance labels: {image}")
     expected = {
-        "io.xpra.lab.context": context_digest,
-        "io.xpra.lab.owner": "live",
-        "io.xpra.lab.role": role,
-        "io.xpra.lab.source": source_commit,
+        "io.xpra.fork-maintenance.context": context_digest,
+        "io.xpra.fork-maintenance.owner": "live",
+        "io.xpra.fork-maintenance.role": role,
+        "io.xpra.fork-maintenance.source": source_commit,
     }
-    lab_labels = {
-        key: value for key, value in labels.items() if key.startswith(LAB_LABEL_PREFIX)
+    maintenance_labels = {
+        key: value for key, value in labels.items() if key.startswith(MAINTENANCE_LABEL_PREFIX)
     }
-    if lab_labels != expected:
+    if maintenance_labels != expected:
         raise LabFailure(
             f"image provenance labels do not match the frozen inputs for {image}: "
             f"expected {json.dumps(expected, sort_keys=True)}, "
@@ -991,7 +991,7 @@ def inspect_lab_image(
         r"(?:sha256:)?[0-9a-f]{64}", image_id
     ):
         raise LabFailure(f"image has no immutable identifier: {image}")
-    return {"id": image_id, "labels": lab_labels}
+    return {"id": image_id, "labels": maintenance_labels}
 
 
 def verify_container_image(container: str, expected_image_id: str) -> None:
@@ -1441,7 +1441,7 @@ def harness_sha256() -> str:
     for path in HARNESS_INPUTS:
         if path.is_symlink() or not path.is_file():
             raise LabFailure(f"live harness input is unavailable: {path}")
-        digest.update(path.relative_to(LAB_ROOT).as_posix().encode())
+        digest.update(path.relative_to(MAINTENANCE_ROOT).as_posix().encode())
         digest.update(b"\0")
         digest.update(bytes.fromhex(sha256_file(path)))
         digest.update(b"\0")
@@ -1451,7 +1451,7 @@ def harness_sha256() -> str:
 def harness_snapshot_sha256(root: Path) -> str:
     digest = hashlib.sha256()
     for source in HARNESS_INPUTS:
-        relative = source.relative_to(LAB_ROOT)
+        relative = source.relative_to(MAINTENANCE_ROOT)
         path = root / relative
         if path.is_symlink() or not path.is_file():
             raise LabFailure(f"frozen live harness input is unavailable: {relative}")
@@ -1478,7 +1478,7 @@ def selection_output(selector: str, action: str, *arguments: str) -> str:
             sys.executable,
             str(SELECTION_TOOL),
             "--lab-root",
-            str(LAB_ROOT),
+            str(MAINTENANCE_ROOT),
             "--selection",
             selector,
             action,
@@ -1500,7 +1500,7 @@ def selected_patch_paths(selector: str) -> tuple[Path, ...]:
             or ".." in relative.parts
         ):
             raise LabFailure(f"selection returned an unsafe patch path: {value!r}")
-        path = LAB_ROOT / relative
+        path = MAINTENANCE_ROOT / relative
         if path.is_symlink() or not path.is_file():
             raise LabFailure(f"selection patch is not a regular file: {relative}")
         paths.append(path)
@@ -1619,7 +1619,7 @@ def resolve_selection_at_source(
     expected_patches = [
         {
             "case": case_slug,
-            "patch": patch.relative_to(LAB_ROOT).as_posix(),
+            "patch": patch.relative_to(MAINTENANCE_ROOT).as_posix(),
             "patch_sha256": sha256_file(patch),
         }
         for case_slug, patch in zip(
@@ -1886,7 +1886,7 @@ def prepare_build_context(
                 series.append(destination_name)
             else:
                 already_present.append(destination_name)
-            patch_manifest[patch.relative_to(LAB_ROOT).as_posix()] = sha256_file(patch)
+            patch_manifest[patch.relative_to(MAINTENANCE_ROOT).as_posix()] = sha256_file(patch)
         dependency_entries = resolution["base_dependencies"]
         if not isinstance(dependency_entries, list):
             raise LabFailure("selection resolution base dependencies are invalid")
@@ -1900,7 +1900,7 @@ def prepare_build_context(
                 or relative.as_posix() != dependency_entry.get("patch")
             ):
                 raise LabFailure("selection resolution dependency path is unsafe")
-            patch = LAB_ROOT / relative
+            patch = MAINTENANCE_ROOT / relative
             if (
                 patch.is_symlink()
                 or not patch.is_file()
@@ -1925,7 +1925,7 @@ def prepare_build_context(
             "patches": patch_manifest,
             "patch_series": [
                 {
-                    "path": patch.relative_to(LAB_ROOT).as_posix(),
+                    "path": patch.relative_to(MAINTENANCE_ROOT).as_posix(),
                     "sha256": sha256_file(patch),
                 }
                 for patch in patches
@@ -2003,7 +2003,7 @@ def snapshot_patch_selection(
                 "digest": selection.digest,
                 "name": selection.name,
                 "patches": [
-                    path.relative_to(LAB_ROOT).as_posix() for path in selection.patches
+                    path.relative_to(MAINTENANCE_ROOT).as_posix() for path in selection.patches
                 ],
                 "resolution": context.resolution,
                 "selector_digests": dict(selection.selector_digests),
@@ -2041,7 +2041,7 @@ def snapshot_build_inputs(
     harness = inputs / "harness"
     harness.mkdir(parents=True)
     for source in HARNESS_INPUTS:
-        relative = source.relative_to(LAB_ROOT)
+        relative = source.relative_to(MAINTENANCE_ROOT)
         destination = harness / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
@@ -2113,8 +2113,8 @@ def snapshot_build_inputs(
         ],
         "client_selection_sha256": client_context.selection.digest,
         "harness": {
-            path.relative_to(LAB_ROOT).as_posix(): sha256_file(
-                harness / path.relative_to(LAB_ROOT)
+            path.relative_to(MAINTENANCE_ROOT).as_posix(): sha256_file(
+                harness / path.relative_to(MAINTENANCE_ROOT)
             )
             for path in HARNESS_INPUTS
         },
@@ -5518,7 +5518,7 @@ def h264_hardware_evidence(
 
 def application_contract(application: str) -> tuple[str, tuple[str, ...], str]:
     if application == "zed":
-        return "/opt/xpra-lab/start_zed.sh", ("empty project", "zed"), "zed.pid"
+        return "/opt/xpra-fork-maintenance/start_zed.sh", ("empty project", "zed"), "zed.pid"
     if application in MULTIWINDOW_HARDWARE_APPLICATIONS:
         fixture = hardware_fixture_spec(application)
         return fixture.command, fixture.title_patterns, fixture.pid_file
@@ -5529,7 +5529,7 @@ def application_contract(application: str) -> tuple[str, tuple[str, ...], str]:
             "",
         )
     return (
-        "python3 /opt/xpra-lab/interaction_fixture.py",
+        "python3 /opt/xpra-fork-maintenance/interaction_fixture.py",
         ("xpra hardware interaction ready",),
         "",
     )
@@ -7421,35 +7421,35 @@ def run_scenario(
     directory.mkdir(mode=0o700)
     ensure_private_directory(directory)
     suffix = uuid.uuid4().hex[:10]
-    network = f"xpra-lab-live-{suffix}"
-    server = f"xpra-lab-live-server-{suffix}"
-    client = f"xpra-lab-live-client-{suffix}"
+    network = f"xpra-fork-maintenance-live-{suffix}"
+    server = f"xpra-fork-maintenance-live-server-{suffix}"
+    client = f"xpra-fork-maintenance-live-client-{suffix}"
     containers: list[str] = []
     container_labels = {
         server: {
-            "io.xpra.lab.context": server_context_digest,
-            "io.xpra.lab.image-id": server_image_id,
-            "io.xpra.lab.owner": "live",
-            "io.xpra.lab.role": "server",
-            "io.xpra.lab.run-id": run_id,
-            "io.xpra.lab.scenario": scenario.name,
-            "io.xpra.lab.source": commit,
+            "io.xpra.fork-maintenance.context": server_context_digest,
+            "io.xpra.fork-maintenance.image-id": server_image_id,
+            "io.xpra.fork-maintenance.owner": "live",
+            "io.xpra.fork-maintenance.role": "server",
+            "io.xpra.fork-maintenance.run-id": run_id,
+            "io.xpra.fork-maintenance.scenario": scenario.name,
+            "io.xpra.fork-maintenance.source": commit,
         },
         client: {
-            "io.xpra.lab.context": client_context_digest,
-            "io.xpra.lab.image-id": client_image_id,
-            "io.xpra.lab.owner": "live",
-            "io.xpra.lab.role": "client",
-            "io.xpra.lab.run-id": run_id,
-            "io.xpra.lab.scenario": scenario.name,
-            "io.xpra.lab.source": commit,
+            "io.xpra.fork-maintenance.context": client_context_digest,
+            "io.xpra.fork-maintenance.image-id": client_image_id,
+            "io.xpra.fork-maintenance.owner": "live",
+            "io.xpra.fork-maintenance.role": "client",
+            "io.xpra.fork-maintenance.run-id": run_id,
+            "io.xpra.fork-maintenance.scenario": scenario.name,
+            "io.xpra.fork-maintenance.source": commit,
         },
     }
     network_labels = {
-        "io.xpra.lab.owner": "live",
-        "io.xpra.lab.role": "network",
-        "io.xpra.lab.run-id": run_id,
-        "io.xpra.lab.scenario": scenario.name,
+        "io.xpra.fork-maintenance.owner": "live",
+        "io.xpra.fork-maintenance.role": "network",
+        "io.xpra.fork-maintenance.run-id": run_id,
+        "io.xpra.fork-maintenance.scenario": scenario.name,
     }
     ledger_path = directory / "podman-objects.json"
     ledger: dict[str, Any] = {
@@ -7505,13 +7505,13 @@ def run_scenario(
                 "network",
                 "create",
                 "--label",
-                "io.xpra.lab.owner=live",
+                "io.xpra.fork-maintenance.owner=live",
                 "--label",
-                f"io.xpra.lab.run-id={run_id}",
+                f"io.xpra.fork-maintenance.run-id={run_id}",
                 "--label",
-                f"io.xpra.lab.scenario={scenario.name}",
+                f"io.xpra.fork-maintenance.scenario={scenario.name}",
                 "--label",
-                "io.xpra.lab.role=network",
+                "io.xpra.fork-maintenance.role=network",
                 network,
             ]
         )
@@ -7524,19 +7524,19 @@ def run_scenario(
             "--name",
             server,
             "--label",
-            "io.xpra.lab.owner=live",
+            "io.xpra.fork-maintenance.owner=live",
             "--label",
-            f"io.xpra.lab.run-id={run_id}",
+            f"io.xpra.fork-maintenance.run-id={run_id}",
             "--label",
-            f"io.xpra.lab.scenario={scenario.name}",
+            f"io.xpra.fork-maintenance.scenario={scenario.name}",
             "--label",
-            "io.xpra.lab.role=server",
+            "io.xpra.fork-maintenance.role=server",
             "--label",
-            f"io.xpra.lab.source={commit}",
+            f"io.xpra.fork-maintenance.source={commit}",
             "--label",
-            f"io.xpra.lab.context={server_context_digest}",
+            f"io.xpra.fork-maintenance.context={server_context_digest}",
             "--label",
-            f"io.xpra.lab.image-id={server_image_id}",
+            f"io.xpra.fork-maintenance.image-id={server_image_id}",
             "--network",
             network,
             "--network-alias",
@@ -7570,19 +7570,19 @@ def run_scenario(
             "--name",
             client,
             "--label",
-            "io.xpra.lab.owner=live",
+            "io.xpra.fork-maintenance.owner=live",
             "--label",
-            f"io.xpra.lab.run-id={run_id}",
+            f"io.xpra.fork-maintenance.run-id={run_id}",
             "--label",
-            f"io.xpra.lab.scenario={scenario.name}",
+            f"io.xpra.fork-maintenance.scenario={scenario.name}",
             "--label",
-            "io.xpra.lab.role=client",
+            "io.xpra.fork-maintenance.role=client",
             "--label",
-            f"io.xpra.lab.source={commit}",
+            f"io.xpra.fork-maintenance.source={commit}",
             "--label",
-            f"io.xpra.lab.context={client_context_digest}",
+            f"io.xpra.fork-maintenance.context={client_context_digest}",
             "--label",
-            f"io.xpra.lab.image-id={client_image_id}",
+            f"io.xpra.fork-maintenance.image-id={client_image_id}",
             "--network",
             network,
             *live_user_options(),
@@ -7684,7 +7684,7 @@ def run_scenario(
             f"--bind-tcp=0.0.0.0:{SERVER_PORT},auth=none",
             (
                 f"--session-name={args.application}-{args.encoding}-"
-                f"{args.h264_client_policy}-lab"
+                f"{args.h264_client_policy}-fork-maintenance"
             ),
             *static_cli_options("server", "lifecycle"),
             f"--start-child={child_command}",
@@ -8790,8 +8790,8 @@ def main() -> int:
     selection_tag = re.sub(r"[^a-z0-9_.-]+", "-", server_selection.name).strip("-")
     server_suffix = f"{commit[:12]}-{selection_tag}-{server_context_digest[:12]}"
     client_suffix = f"{commit[:12]}-master-{client_context_digest[:12]}"
-    server_image = f"localhost/xpra-lab-live-server:{server_suffix}"
-    client_image = f"localhost/xpra-lab-live-client:{client_suffix}"
+    server_image = f"localhost/xpra-fork-maintenance-live-server:{server_suffix}"
+    client_image = f"localhost/xpra-fork-maintenance-live-client:{client_suffix}"
     if not args.skip_build:
         for target, image, context in (
             ("server", server_image, server_context),
@@ -8807,13 +8807,13 @@ def main() -> int:
                 "--build-arg",
                 f"XPRA_SELECTION={context.selection.name}",
                 "--label",
-                "io.xpra.lab.owner=live",
+                "io.xpra.fork-maintenance.owner=live",
                 "--label",
-                f"io.xpra.lab.role={target}-image",
+                f"io.xpra.fork-maintenance.role={target}-image",
                 "--label",
-                f"io.xpra.lab.source={commit}",
+                f"io.xpra.fork-maintenance.source={commit}",
                 "--label",
-                f"io.xpra.lab.context={context.digest}",
+                f"io.xpra.fork-maintenance.context={context.digest}",
                 "--tag",
                 image,
                 "-",
@@ -8826,13 +8826,13 @@ def main() -> int:
         run(["podman", "image", "exists", server_image])
         run(["podman", "image", "exists", client_image])
     image_inspections = {
-        "server": inspect_lab_image(
+        "server": inspect_maintenance_image(
             server_image,
             role="server-image",
             source_commit=commit,
             context_digest=server_context_digest,
         ),
-        "client": inspect_lab_image(
+        "client": inspect_maintenance_image(
             client_image,
             role="client-image",
             source_commit=commit,
@@ -8864,7 +8864,7 @@ def main() -> int:
             "application": args.application,
             "encoding": args.encoding,
             "h264_client_policy": args.h264_client_policy,
-            "job_id": os.environ.get("XPRA_LAB_JOB_ID"),
+            "job_id": os.environ.get("XPRA_FORK_JOB_ID"),
             "lifecycle": args.lifecycle,
             "libva_driver": args.libva_driver,
             "network_profile": args.network_profile,

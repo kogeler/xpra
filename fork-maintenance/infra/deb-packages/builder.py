@@ -836,7 +836,7 @@ def main() -> int:
     builder_image_input_sha256 = required_environment(
         "XPRA_EXPECTED_BUILDER_IMAGE_INPUT_SHA", SHA256_RE
     )
-    selection = required_environment("XPRA_LAB_SELECTION")
+    selection = required_environment("XPRA_FORK_SELECTION")
     if selection != ACTIVE_SELECTION:
         raise BuildFailure(f"DEB builds require the complete {ACTIVE_SELECTION} queue")
     selection_cache_sha256 = required_environment(

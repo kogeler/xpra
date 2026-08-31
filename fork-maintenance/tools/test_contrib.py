@@ -3566,7 +3566,7 @@ class CycleCleanupTest(unittest.TestCase):
             contrib.canonical_json_bytes(
                 {
                     "kind": "input-freeze-prelaunch",
-                    "owner": "xpra-lab-live-job",
+                    "owner": "xpra-fork-maintenance-live-job",
                     "run": "audit-live-01",
                     "schema": 1,
                 }
@@ -3588,7 +3588,7 @@ class CycleCleanupTest(unittest.TestCase):
                 self.live_jobs / "live-race-live-01.freeze-prelaunch.json",
                 {
                     "kind": "input-freeze-prelaunch",
-                    "owner": "xpra-lab-live-job",
+                    "owner": "xpra-fork-maintenance-live-job",
                     "run": "live-race-live-01",
                     "schema": 1,
                 },

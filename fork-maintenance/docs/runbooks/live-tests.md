@@ -35,9 +35,10 @@ Both live containers run as UID/GID 1001 in
 `--userns=keep-id:uid=1001,gid=1001,size=2048`. The explicit bound was verified
 against the real Ubuntu 26.04 server and Debian 13 client images, including
 writes to `/artifacts`, `/home/lab`, and `/run/user/1001`. It prevents an idle
-or running lab pair from reserving the user's complete subordinate-ID range.
+or running live container pair from reserving the user's complete
+subordinate-ID range.
 Never replace it with `--userns=host`, omit `size`, or enlarge the host
-`/etc/subuid` or `/etc/subgid` allocation. A coexistence audit keeps both lab
+`/etc/subuid` or `/etc/subgid` allocation. A coexistence audit keeps both live
 containers alive while a separately owned `--userns=auto:size=2048` container
 is created and run, then removes only those explicitly labelled test objects.
 

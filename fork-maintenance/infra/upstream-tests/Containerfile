@@ -101,11 +101,11 @@ RUN install -d -o ubuntu -g ubuntu \
 
 COPY --chown=ubuntu:ubuntu \
     container_payload.py entrypoint.sh selection.py \
-    /opt/xpra-lab-upstream-tests/
+    /opt/xpra-fork-maintenance/upstream-tests/
 
-RUN mkfifo /opt/xpra-lab-upstream-tests/payload-ready.fifo \
-    && chown ubuntu:ubuntu /opt/xpra-lab-upstream-tests/payload-ready.fifo \
-    && chmod 0600 /opt/xpra-lab-upstream-tests/payload-ready.fifo
+RUN mkfifo /opt/xpra-fork-maintenance/upstream-tests/payload-ready.fifo \
+    && chown ubuntu:ubuntu /opt/xpra-fork-maintenance/upstream-tests/payload-ready.fifo \
+    && chmod 0600 /opt/xpra-fork-maintenance/upstream-tests/payload-ready.fifo
 
 ENV CCACHE_DIR=/home/ubuntu/.cache/ccache \
     GITHUB_ACTIONS=1 \

@@ -419,7 +419,7 @@ ignored paths, and unrelated working-tree state.
 A detached upstream-test start publishes
 `upstream-tests/runs/<RUN>.prelaunch.json` before `podman create`. That record
 binds the starter PID/start ticks, run UUID, payload path, immutable image ID,
-and complete expected lab labels. The final owner is published only after the
+and complete expected maintenance labels. The final owner is published only after the
 created container's immutable ID and labels match. An active starter cannot be
 aborted concurrently; once it is gone, the prelaunch record is sufficient to
 inspect and exact-reclaim only its orphaned container/payload state.
@@ -444,7 +444,7 @@ through the immutable-ID handoff without passing it to the test container's
 long-lived helpers.
 Exact cache removal takes the same lock and refuses any matching unresolved
 image-build or test prelaunch/owner. It may recognize an older valid source
-label only for cleanup, while still requiring the complete exact lab-label set,
+label only for cleanup, while still requiring the complete exact maintenance-label set,
 image input/workflow identity, and immutable image ID.
 
 A named standalone image start publishes
@@ -782,7 +782,7 @@ paths is investigated against canonical CI before any costly local clean
 control. It is never skipped, weakened, reconfigured, or fixed inside a
 production case. With explicit user scope, an exact current clean-source
 failure may be added only to the duty quarantine case and must then satisfy its
-reassessment gates. No exception is implied by old lab results.
+reassessment gates. No exception is implied by prior acceptance results.
 
 A failure before a downstream test target starts is a control-plane failure,
 not a failed Xpra test. When the change only removes or narrows that pre-test

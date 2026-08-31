@@ -13,9 +13,9 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
-LAB_ROOT = Path(__file__).resolve().parents[2]
-NETWORK_PROFILES_PATH = LAB_ROOT / "profiles.yml"
-LIVE_CLI_PATH = LAB_ROOT / "live-cli.yml"
+MAINTENANCE_ROOT = Path(__file__).resolve().parents[2]
+NETWORK_PROFILES_PATH = MAINTENANCE_ROOT / "profiles.yml"
+LIVE_CLI_PATH = MAINTENANCE_ROOT / "live-cli.yml"
 CONFIG_BYTES_LIMIT = 128 * 1024
 KEY_RE = re.compile(r"[a-z][a-z0-9_-]*")
 PROFILE_RE = re.compile(r"[a-z][a-z0-9_]*")
