@@ -8,7 +8,7 @@ from pathlib import Path
 import private_state
 
 MAKEFILE = Path(__file__).with_name("Makefile")
-LAB_MAKEFILE = Path(__file__).resolve().parents[2] / "Makefile"
+MAINTENANCE_MAKEFILE = Path(__file__).resolve().parents[2] / "Makefile"
 ENTRYPOINT = Path(__file__).with_name("entrypoint.sh")
 CONTRACT = Path(__file__).resolve().parents[2] / "CONTRACT.md"
 
@@ -198,7 +198,7 @@ class UpstreamMakeContractTest(unittest.TestCase):
             makefile,
         )
         self.assertIn('target="$${XPRA_CI_TARGET}"', makefile)
-        root_makefile = LAB_MAKEFILE.read_text(encoding="utf-8")
+        root_makefile = MAINTENANCE_MAKEFILE.read_text(encoding="utf-8")
         self.assertIn('SOURCE_COMMIT="$$source_commit"', root_makefile)
 
     def test_named_jobs_keep_the_embedded_base_after_cached_master_advances(self) -> None:
@@ -260,7 +260,7 @@ class UpstreamMakeContractTest(unittest.TestCase):
             image_abort_source.index("shutil.rmtree(image_context(name))"),
         )
         self.assertIn("completed image jobs must be collected", image_abort_source)
-        root_makefile = LAB_MAKEFILE.read_text(encoding="utf-8")
+        root_makefile = MAINTENANCE_MAKEFILE.read_text(encoding="utf-8")
         self.assertIn("test-abort", root_makefile)
         self.assertIn("test-image-abort", root_makefile)
 

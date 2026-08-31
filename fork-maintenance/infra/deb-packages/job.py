@@ -31,10 +31,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 RUNNER_ROOT = Path(__file__).resolve().parent
-LAB_ROOT = RUNNER_ROOT.parent.parent
-PROJECT_ROOT = LAB_ROOT.parent
-TOOLS_ROOT = LAB_ROOT / "tools"
-UPSTREAM_RUNNER = LAB_ROOT / "infra" / "upstream-tests"
+MAINTENANCE_ROOT = RUNNER_ROOT.parent.parent
+PROJECT_ROOT = MAINTENANCE_ROOT.parent
+TOOLS_ROOT = MAINTENANCE_ROOT / "tools"
+UPSTREAM_RUNNER = MAINTENANCE_ROOT / "infra" / "upstream-tests"
 sys.path.insert(0, str(TOOLS_ROOT))
 
 import background_job
@@ -304,7 +304,7 @@ def runner_sha256() -> str:
     for path in RUNNER_INPUTS:
         if path.is_symlink() or not path.is_file():
             raise JobError(f"runner input is unavailable: {path}")
-        digest.update(path.relative_to(LAB_ROOT).as_posix().encode())
+        digest.update(path.relative_to(MAINTENANCE_ROOT).as_posix().encode())
         digest.update(b"\0")
         digest.update(bytes.fromhex(sha256_file(path)))
         digest.update(b"\0")
@@ -844,11 +844,11 @@ def inspect_image(
     if labels is None and isinstance(item.get("Config"), dict):
         labels = item["Config"].get("Labels")
     expected = {
-        "io.xpra.lab.deb-builder": "true",
-        "io.xpra.lab.base-image-id": base_image_id,
-        "io.xpra.lab.distro": distro,
-        "io.xpra.lab.image-input": input_sha256,
-        "io.xpra.lab.owner": OWNER,
+        "io.xpra.fork-maintenance.deb-builder": "true",
+        "io.xpra.fork-maintenance.base-image-id": base_image_id,
+        "io.xpra.fork-maintenance.distro": distro,
+        "io.xpra.fork-maintenance.image-input": input_sha256,
+        "io.xpra.fork-maintenance.owner": OWNER,
     }
     if not SHA256_RE.fullmatch(image_id) or not isinstance(labels, dict):
         raise JobError(f"invalid DEB builder image metadata: {image}")
@@ -895,17 +895,17 @@ def ensure_image(distro: str) -> tuple[str, str, str, str]:
             "--build-arg",
             f"BASE_IMAGE=sha256:{base_image_id}",
             "--label",
-            f"io.xpra.lab.base-image-id={base_image_id}",
+            f"io.xpra.fork-maintenance.base-image-id={base_image_id}",
             "--label",
-            "io.xpra.lab.deb-builder=true",
+            "io.xpra.fork-maintenance.deb-builder=true",
             "--label",
-            f"io.xpra.lab.distro={distro}",
+            f"io.xpra.fork-maintenance.distro={distro}",
             "--label",
-            f"io.xpra.lab.image-build-id={build_id}",
+            f"io.xpra.fork-maintenance.image-build-id={build_id}",
             "--label",
-            f"io.xpra.lab.image-input={input_sha256}",
+            f"io.xpra.fork-maintenance.image-input={input_sha256}",
             "--label",
-            f"io.xpra.lab.owner={OWNER}",
+            f"io.xpra.fork-maintenance.owner={OWNER}",
             "--tag",
             image,
             "--file",
@@ -920,12 +920,12 @@ def ensure_image(distro: str) -> tuple[str, str, str, str]:
         image_id = inspect_image(image, distro, input_sha256, base_image_id)
         item = json.loads(command(["podman", "image", "inspect", image_id]).stdout)[0]
         labels = item.get("Labels") or item.get("Config", {}).get("Labels", {})
-        if labels.get("io.xpra.lab.image-build-id") != build_id:
+        if labels.get("io.xpra.fork-maintenance.image-build-id") != build_id:
             raise JobError("DEB builder image build identity does not match")
         return image, image_id, input_sha256, base_image_id
 
 
-def selection_digest(selection: str, lab_root: Path = LAB_ROOT) -> str:
+def selection_digest(selection: str, lab_root: Path = MAINTENANCE_ROOT) -> str:
     value = command(
         [
             sys.executable,
@@ -1287,7 +1287,7 @@ def freeze_selection_cache_locked(
                 sys.executable,
                 str(SELECTION_TOOL),
                 "--lab-root",
-                str(LAB_ROOT),
+                str(MAINTENANCE_ROOT),
                 "--selection",
                 selection,
                 "snapshot",
@@ -1451,14 +1451,14 @@ def validate_build_arguments(args: argparse.Namespace) -> None:
 
 def container_labels(container_name: str, args: argparse.Namespace) -> dict[str, str]:
     return {
-        "io.xpra.lab.build-id": args.build_id,
-        "io.xpra.lab.deb-build": "true",
-        "io.xpra.lab.distro": args.distro,
-        "io.xpra.lab.owner": OWNER,
-        "io.xpra.lab.run-name": container_name.removeprefix("xpra-deb-"),
-        "io.xpra.lab.selection": args.selection,
-        "io.xpra.lab.selection-cache": args.selection_cache_sha256,
-        "io.xpra.lab.source": args.source,
+        "io.xpra.fork-maintenance.build-id": args.build_id,
+        "io.xpra.fork-maintenance.deb-build": "true",
+        "io.xpra.fork-maintenance.distro": args.distro,
+        "io.xpra.fork-maintenance.owner": OWNER,
+        "io.xpra.fork-maintenance.run-name": container_name.removeprefix("xpra-deb-"),
+        "io.xpra.fork-maintenance.selection": args.selection,
+        "io.xpra.fork-maintenance.selection-cache": args.selection_cache_sha256,
+        "io.xpra.fork-maintenance.source": args.source,
     }
 
 
@@ -2217,7 +2217,7 @@ def build_distribution(args: argparse.Namespace) -> dict[str, Any]:
         "XPRA_EXPECTED_SOURCE_REF": args.source_ref,
         "XPRA_EXPECTED_SOURCE_REF_COMMIT": args.source_ref_commit,
         "XPRA_EXPECTED_WORKFLOW_SHA": args.workflow_sha256,
-        "XPRA_LAB_SELECTION": args.selection,
+        "XPRA_FORK_SELECTION": args.selection,
     }
     for key, value in environment.items():
         argv.extend(("--env", f"{key}={value}"))

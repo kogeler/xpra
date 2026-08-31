@@ -38,21 +38,21 @@ ZED_DIRECTORY ?=
 ALLOW_PATH_CHANGE ?= 0
 
 SELECTOR = $(if $(strip $(CASE)),cases/$(strip $(CASE)),$(if $(strip $(STACK)),stacks/$(strip $(STACK))))
-export XPRA_LAB_CASE := $(CASE)
-export XPRA_LAB_STACK := $(STACK)
-export XPRA_LAB_RUN := $(RUN)
-export XPRA_LAB_IMAGE_RUN := $(IMAGE_RUN)
-export XPRA_LAB_TARGET := $(TARGET)
-export XPRA_LAB_PATCH_MODE := $(PATCH_MODE)
-export XPRA_LAB_ENCODING := $(ENCODING)
-export XPRA_LAB_H264_CLIENT_POLICY := $(H264_CLIENT_POLICY)
-export XPRA_LAB_ALPHA_SCENARIOS := $(ALPHA_SCENARIOS)
-export XPRA_LAB_APPLICATION := $(APPLICATION)
-export XPRA_LAB_LIFECYCLE := $(LIFECYCLE)
-export XPRA_LAB_NETWORK_PROFILE := $(NETWORK_PROFILE)
-export XPRA_LAB_RENDER_NODE := $(RENDER_NODE)
-export XPRA_LAB_ZED_DIRECTORY := $(ZED_DIRECTORY)
-export XPRA_LAB_SELECTOR := $(SELECTOR)
+export XPRA_FORK_CASE := $(CASE)
+export XPRA_FORK_STACK := $(STACK)
+export XPRA_FORK_RUN := $(RUN)
+export XPRA_FORK_IMAGE_RUN := $(IMAGE_RUN)
+export XPRA_FORK_TARGET := $(TARGET)
+export XPRA_FORK_PATCH_MODE := $(PATCH_MODE)
+export XPRA_FORK_ENCODING := $(ENCODING)
+export XPRA_FORK_H264_CLIENT_POLICY := $(H264_CLIENT_POLICY)
+export XPRA_FORK_ALPHA_SCENARIOS := $(ALPHA_SCENARIOS)
+export XPRA_FORK_APPLICATION := $(APPLICATION)
+export XPRA_FORK_LIFECYCLE := $(LIFECYCLE)
+export XPRA_FORK_NETWORK_PROFILE := $(NETWORK_PROFILE)
+export XPRA_FORK_RENDER_NODE := $(RENDER_NODE)
+export XPRA_FORK_ZED_DIRECTORY := $(ZED_DIRECTORY)
+export XPRA_FORK_SELECTOR := $(SELECTOR)
 
 AUTOMATION_PYTHON := $(shell find tools infra cases -type f -name '*.py' -print 2>/dev/null | sort)
 AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_zed.sh \
@@ -238,53 +238,53 @@ develop-check:
 	@$(CONTRIB) develop-check
 
 case-name-check:
-	@[[ "$${XPRA_LAB_CASE}" =~ ^[a-z0-9]+(-[a-z0-9]+)*$$ ]] || { \
+	@[[ "$${XPRA_FORK_CASE}" =~ ^[a-z0-9]+(-[a-z0-9]+)*$$ ]] || { \
 		printf 'CASE must be a lowercase behavior slug\n' >&2; exit 2; \
 	}
 
 stack-name-check:
-	@[[ "$${XPRA_LAB_STACK}" =~ ^[a-z0-9]+(-[a-z0-9]+)*$$ ]] || { \
+	@[[ "$${XPRA_FORK_STACK}" =~ ^[a-z0-9]+(-[a-z0-9]+)*$$ ]] || { \
 		printf 'STACK must be a lowercase behavior slug\n' >&2; exit 2; \
 	}
 
 selector-check:
-	@case "$${XPRA_LAB_CASE:+case}:$${XPRA_LAB_STACK:+stack}" in \
+	@case "$${XPRA_FORK_CASE:+case}:$${XPRA_FORK_STACK:+stack}" in \
 		case:|:stack) ;; \
 		*) printf 'set exactly one of CASE or STACK\n' >&2; exit 2 ;; \
 	esac
 	@$(PYTHON) infra/upstream-tests/selection.py \
-		--lab-root "$(AUTOMATION_ROOT)" --selection "$${XPRA_LAB_SELECTOR}" validate
+		--lab-root "$(AUTOMATION_ROOT)" --selection "$${XPRA_FORK_SELECTOR}" validate
 
 workspace-selector-check:
-	@case "$${XPRA_LAB_CASE:+case}:$${XPRA_LAB_STACK:+stack}" in \
+	@case "$${XPRA_FORK_CASE:+case}:$${XPRA_FORK_STACK:+stack}" in \
 		case:|:stack) ;; \
 		*) printf 'set exactly one of CASE or STACK\n' >&2; exit 2 ;; \
 	esac
-	@[[ "$${XPRA_LAB_SELECTOR}" =~ ^(cases|stacks)/[a-z0-9]+(-[a-z0-9]+)*$$ ]] || { \
-		printf 'invalid workspace selector: %s\n' "$${XPRA_LAB_SELECTOR}" >&2; exit 2; \
+	@[[ "$${XPRA_FORK_SELECTOR}" =~ ^(cases|stacks)/[a-z0-9]+(-[a-z0-9]+)*$$ ]] || { \
+		printf 'invalid workspace selector: %s\n' "$${XPRA_FORK_SELECTOR}" >&2; exit 2; \
 	}
 
 optional-selector-check:
-	@case "$${XPRA_LAB_CASE:+case}:$${XPRA_LAB_STACK:+stack}" in \
+	@case "$${XPRA_FORK_CASE:+case}:$${XPRA_FORK_STACK:+stack}" in \
 		:|case:|:stack) ;; \
 		*) printf 'set at most one of CASE or STACK\n' >&2; exit 2 ;; \
 	esac
-	@if [[ -n "$${XPRA_LAB_SELECTOR}" ]]; then \
+	@if [[ -n "$${XPRA_FORK_SELECTOR}" ]]; then \
 		$(PYTHON) infra/upstream-tests/selection.py \
-			--lab-root "$(AUTOMATION_ROOT)" --selection "$${XPRA_LAB_SELECTOR}" validate; \
+			--lab-root "$(AUTOMATION_ROOT)" --selection "$${XPRA_FORK_SELECTOR}" validate; \
 	fi
 
 case-new: case-name-check
-	@$(CONTRIB) case-new "$${XPRA_LAB_CASE}"
+	@$(CONTRIB) case-new "$${XPRA_FORK_CASE}"
 
 case-recover: case-name-check
-	@$(CONTRIB) case-recover "$${XPRA_LAB_CASE}"
+	@$(CONTRIB) case-recover "$${XPRA_FORK_CASE}"
 
 patch-check patch-apply patch-unapply: case-name-check
-	@$(CONTRIB) $@ "$${XPRA_LAB_CASE}"
+	@$(CONTRIB) $@ "$${XPRA_FORK_CASE}"
 
 patch-update: case-name-check
-	@set -- $(CONTRIB) patch-update "$${XPRA_LAB_CASE}"; \
+	@set -- $(CONTRIB) patch-update "$${XPRA_FORK_CASE}"; \
 	case "$(ALLOW_PATH_CHANGE)" in \
 		0) ;; \
 		1) set -- "$$@" --allow-path-change ;; \
@@ -293,7 +293,7 @@ patch-update: case-name-check
 	"$$@"
 
 stack-check stack-apply stack-unapply: stack-name-check
-	@$(CONTRIB) $@ "$${XPRA_LAB_STACK}"
+	@$(CONTRIB) $@ "$${XPRA_FORK_STACK}"
 
 workspace-name-check:
 	@[[ "$(WORKSPACE)" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$$ ]] || { \
@@ -301,7 +301,7 @@ workspace-name-check:
 	}
 
 workspace-create: workspace-selector-check workspace-name-check
-	@$(CONTRIB) workspace-create "$(WORKSPACE)" "$${XPRA_LAB_SELECTOR}" \
+	@$(CONTRIB) workspace-create "$(WORKSPACE)" "$${XPRA_FORK_SELECTOR}" \
 		--patch-mode "$(PATCH_MODE)"
 
 workspace-status workspace-diff workspace-remove workspace-recover: workspace-name-check
@@ -331,29 +331,29 @@ cycle-clean: cycle-name-check
 	@$(CONTRIB) cycle-clean "$(CYCLE)" --confirm "$(CONFIRM)"
 
 run-name-check:
-	@[[ "$${XPRA_LAB_RUN}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$$ ]] || { \
+	@[[ "$${XPRA_FORK_RUN}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$$ ]] || { \
 		printf 'RUN must contain only letters, digits, dot, underscore, and dash\n' >&2; exit 2; \
 	}
 
 image-run-name-check:
-	@[[ "$${XPRA_LAB_IMAGE_RUN}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$$ ]] || { \
+	@[[ "$${XPRA_FORK_IMAGE_RUN}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$$ ]] || { \
 		printf 'IMAGE_RUN must contain only letters, digits, dot, underscore, and dash\n' >&2; exit 2; \
 	}
 
 test-target-check:
-	@case "$${XPRA_LAB_TARGET}" in \
+	@case "$${XPRA_FORK_TARGET}" in \
 		versions|patch-check|focused|quarantine|quarantine-cython|quarantine-no-compat|wayland|libyuv|full|full-cython|full-no-compat) ;; \
-		*) printf 'unsupported TARGET: %s\n' "$${XPRA_LAB_TARGET}" >&2; exit 2 ;; \
+		*) printf 'unsupported TARGET: %s\n' "$${XPRA_FORK_TARGET}" >&2; exit 2 ;; \
 	esac
-	@case "$${XPRA_LAB_PATCH_MODE}" in clean|tests-only|patched) ;; \
+	@case "$${XPRA_FORK_PATCH_MODE}" in clean|tests-only|patched) ;; \
 		*) printf 'PATCH_MODE must be clean, tests-only, or patched\n' >&2; exit 2 ;; \
 	esac
 
 live-options-check:
 	@$(PYTHON) infra/live/profiles.py \
-		"$${XPRA_LAB_APPLICATION}" "$${XPRA_LAB_LIFECYCLE}" \
-		"$${XPRA_LAB_ENCODING}" "$${XPRA_LAB_H264_CLIENT_POLICY}" \
-		"$${XPRA_LAB_ALPHA_SCENARIOS}" "$${XPRA_LAB_NETWORK_PROFILE}"
+		"$${XPRA_FORK_APPLICATION}" "$${XPRA_FORK_LIFECYCLE}" \
+		"$${XPRA_FORK_ENCODING}" "$${XPRA_FORK_H264_CLIENT_POLICY}" \
+		"$${XPRA_FORK_ALPHA_SCENARIOS}" "$${XPRA_FORK_NETWORK_PROFILE}"
 
 live-profile-list:
 	@$(LIVE_CONFIG) list-profiles
@@ -370,7 +370,7 @@ test-image-start test-image-status test-image-logs test-image-wait test-image-co
 test-image-remove test-image-abort: image-run-name-check
 	@$(MAKE) --no-print-directory -C "$(UPSTREAM_TESTS)" \
 		image-background-$(patsubst test-image-%,%,$@) \
-		IMAGE_BACKGROUND_NAME="$${XPRA_LAB_IMAGE_RUN}" \
+		IMAGE_BACKGROUND_NAME="$${XPRA_FORK_IMAGE_RUN}" \
 		IMAGE_TAG_SUFFIX="$(IMAGE_TAG_SUFFIX)"
 
 test-versions:
@@ -378,12 +378,12 @@ test-versions:
 
 test-start: isolated-start-check selector-check run-name-check test-target-check
 	@$(MAKE) --no-print-directory -C "$(UPSTREAM_TESTS)" background-start \
-		SELECTION="$${XPRA_LAB_SELECTOR}" PATCH_MODE="$${XPRA_LAB_PATCH_MODE}" \
-		BACKGROUND_TARGET="$${XPRA_LAB_TARGET}" BACKGROUND_NAME="$${XPRA_LAB_RUN}"
+		SELECTION="$${XPRA_FORK_SELECTOR}" PATCH_MODE="$${XPRA_FORK_PATCH_MODE}" \
+		BACKGROUND_TARGET="$${XPRA_FORK_TARGET}" BACKGROUND_NAME="$${XPRA_FORK_RUN}"
 
 test-status test-logs test-wait test-collect test-remove test-abort: run-name-check
 	@$(MAKE) --no-print-directory -C "$(UPSTREAM_TESTS)" \
-		background-$(patsubst test-%,%,$@) BACKGROUND_NAME="$${XPRA_LAB_RUN}"
+		background-$(patsubst test-%,%,$@) BACKGROUND_NAME="$${XPRA_FORK_RUN}"
 
 test-patch-check test-focused test-quarantine test-quarantine-cython \
 test-quarantine-no-compat test-wayland test-libyuv test-full test-full-cython \
@@ -391,20 +391,20 @@ test-full-no-compat:
 	@$(MAKE) --no-print-directory test-start TARGET="$(patsubst test-%,%,$@)"
 
 live-start: isolated-start-check selector-check run-name-check live-options-check
-	@set -- $(LIVE_JOB) start "$${XPRA_LAB_RUN}" \
-		--application "$${XPRA_LAB_APPLICATION}" \
-		--encoding "$${XPRA_LAB_ENCODING}" \
-		--h264-client-policy "$${XPRA_LAB_H264_CLIENT_POLICY}" \
-		--lifecycle "$${XPRA_LAB_LIFECYCLE}" \
-		--alpha-scenarios "$${XPRA_LAB_ALPHA_SCENARIOS}" \
-		--network-profile "$${XPRA_LAB_NETWORK_PROFILE}" \
-		--selection "$${XPRA_LAB_SELECTOR}"; \
-	if [[ -n "$${XPRA_LAB_RENDER_NODE}" ]]; then set -- "$$@" --render-node "$${XPRA_LAB_RENDER_NODE}"; fi; \
-	if [[ -n "$${XPRA_LAB_ZED_DIRECTORY}" ]]; then set -- "$$@" --zed-directory "$${XPRA_LAB_ZED_DIRECTORY}"; fi; \
+	@set -- $(LIVE_JOB) start "$${XPRA_FORK_RUN}" \
+		--application "$${XPRA_FORK_APPLICATION}" \
+		--encoding "$${XPRA_FORK_ENCODING}" \
+		--h264-client-policy "$${XPRA_FORK_H264_CLIENT_POLICY}" \
+		--lifecycle "$${XPRA_FORK_LIFECYCLE}" \
+		--alpha-scenarios "$${XPRA_FORK_ALPHA_SCENARIOS}" \
+		--network-profile "$${XPRA_FORK_NETWORK_PROFILE}" \
+		--selection "$${XPRA_FORK_SELECTOR}"; \
+	if [[ -n "$${XPRA_FORK_RENDER_NODE}" ]]; then set -- "$$@" --render-node "$${XPRA_FORK_RENDER_NODE}"; fi; \
+	if [[ -n "$${XPRA_FORK_ZED_DIRECTORY}" ]]; then set -- "$$@" --zed-directory "$${XPRA_FORK_ZED_DIRECTORY}"; fi; \
 	"$$@"
 
 live-status live-logs live-wait live-collect live-remove live-abort: run-name-check
-	@$(LIVE_JOB) $(patsubst live-%,%,$@) "$${XPRA_LAB_RUN}"
+	@$(LIVE_JOB) $(patsubst live-%,%,$@) "$${XPRA_FORK_RUN}"
 
 live-rgb:
 	@$(MAKE) --no-print-directory live-start \
@@ -444,9 +444,9 @@ deb-policy-check:
 
 deb-start: deb-policy-check run-name-check
 	@$(MAKE) --no-print-directory -C "$(DEB_PACKAGES)" start \
-		RUN="$${XPRA_LAB_RUN}" DISTRO="$(DISTRO)" \
+		RUN="$${XPRA_FORK_RUN}" DISTRO="$(DISTRO)" \
 		SELECTION=stacks/develop
 
 deb-status deb-logs deb-wait deb-collect deb-remove deb-abort: run-name-check
 	@$(MAKE) --no-print-directory -C "$(DEB_PACKAGES)" \
-		$(patsubst deb-%,%,$@) RUN="$${XPRA_LAB_RUN}"
+		$(patsubst deb-%,%,$@) RUN="$${XPRA_FORK_RUN}"

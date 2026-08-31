@@ -255,15 +255,15 @@ class CiImageTest(unittest.TestCase):
             source=args.source,
         )
 
-    def test_image_identity_requires_the_complete_exact_lab_provenance(self) -> None:
+    def test_image_identity_requires_complete_exact_maintenance_provenance(self) -> None:
         args = image_args()
         build_run = "12345678-1234-4abc-8def-123456789abc"
         labels = {
-            "io.xpra.lab.image-builder": "true",
-            "io.xpra.lab.image-build-run-id": build_run,
-            "io.xpra.lab.image-input": args.image_input_sha256,
-            "io.xpra.lab.source": args.source,
-            "io.xpra.lab.workflow": args.workflow_sha256,
+            "io.xpra.fork-maintenance.image-builder": "true",
+            "io.xpra.fork-maintenance.image-build-run-id": build_run,
+            "io.xpra.fork-maintenance.image-input": args.image_input_sha256,
+            "io.xpra.fork-maintenance.source": args.source,
+            "io.xpra.fork-maintenance.workflow": args.workflow_sha256,
             "org.opencontainers.image.base.name": "ubuntu:26.04",
         }
         inspection = {
@@ -281,8 +281,8 @@ class CiImageTest(unittest.TestCase):
                 "4" * 64,
             )
             for key, value in (
-                ("io.xpra.lab.source", "5" * 40),
-                ("io.xpra.lab.unexpected", "value"),
+                ("io.xpra.fork-maintenance.source", "5" * 40),
+                ("io.xpra.fork-maintenance.unexpected", "value"),
             ):
                 with self.subTest(key=key), self.assertRaises(job.JobError):
                     inspection["Labels"] = {**labels, key: value}
@@ -294,7 +294,7 @@ class CiImageTest(unittest.TestCase):
                     )
             inspection["Labels"] = {
                 **labels,
-                "io.xpra.lab.source": "5" * 40,
+                "io.xpra.fork-maintenance.source": "5" * 40,
             }
             self.assertEqual(
                 job.removable_image_identity(
@@ -630,7 +630,7 @@ class CiImageTest(unittest.TestCase):
                         "5" * 64,
                         {
                             **job.built_image_labels(record),
-                            "io.xpra.lab.unexpected": "value",
+                            "io.xpra.fork-maintenance.unexpected": "value",
                         },
                     ),
                 ),
@@ -1027,10 +1027,10 @@ class BackgroundContainerTest(unittest.TestCase):
                 "image_id": "6" * 64,
                 "kind": "test-prelaunch",
                 "labels": {
-                    "io.xpra.lab.image-id": "6" * 64,
-                    "io.xpra.lab.owner": job.OWNER,
-                    "io.xpra.lab.run-id": "12345678-1234-4abc-8def-123456789abc",
-                    "io.xpra.lab.upstream-test": "true",
+                    "io.xpra.fork-maintenance.image-id": "6" * 64,
+                    "io.xpra.fork-maintenance.owner": job.OWNER,
+                    "io.xpra.fork-maintenance.run-id": "12345678-1234-4abc-8def-123456789abc",
+                    "io.xpra.fork-maintenance.upstream-test": "true",
                 },
                 "name": name,
                 "owner": job.OWNER,
@@ -1068,15 +1068,15 @@ class BackgroundContainerTest(unittest.TestCase):
         record = {
             "image_id": "6" * 64,
             "labels": {
-                "io.xpra.lab.image-id": "6" * 64,
-                "io.xpra.lab.owner": job.OWNER,
-                "io.xpra.lab.run-id": "12345678-1234-4abc-8def-123456789abc",
-                "io.xpra.lab.upstream-test": "true",
+                "io.xpra.fork-maintenance.image-id": "6" * 64,
+                "io.xpra.fork-maintenance.owner": job.OWNER,
+                "io.xpra.fork-maintenance.run-id": "12345678-1234-4abc-8def-123456789abc",
+                "io.xpra.fork-maintenance.upstream-test": "true",
             },
             "name": name,
         }
         item = {
-            "Config": {"Labels": {"io.xpra.lab.owner": "someone-else"}},
+            "Config": {"Labels": {"io.xpra.fork-maintenance.owner": "someone-else"}},
             "Id": "5" * 64,
             "Image": "sha256:" + "6" * 64,
             "Name": "/" + name,
@@ -1097,13 +1097,13 @@ class BackgroundContainerTest(unittest.TestCase):
     ) -> None:
         name = "inherited-image-labels"
         expected = {
-            "io.xpra.lab.image-id": "6" * 64,
-            "io.xpra.lab.image-input": "7" * 64,
-            "io.xpra.lab.owner": job.OWNER,
-            "io.xpra.lab.run-id": "12345678-1234-4abc-8def-123456789abc",
-            "io.xpra.lab.source": "8" * 40,
-            "io.xpra.lab.upstream-test": "true",
-            "io.xpra.lab.workflow": "9" * 64,
+            "io.xpra.fork-maintenance.image-id": "6" * 64,
+            "io.xpra.fork-maintenance.image-input": "7" * 64,
+            "io.xpra.fork-maintenance.owner": job.OWNER,
+            "io.xpra.fork-maintenance.run-id": "12345678-1234-4abc-8def-123456789abc",
+            "io.xpra.fork-maintenance.source": "8" * 40,
+            "io.xpra.fork-maintenance.upstream-test": "true",
+            "io.xpra.fork-maintenance.workflow": "9" * 64,
         }
         record = {
             "image_id": "6" * 64,
@@ -1111,8 +1111,8 @@ class BackgroundContainerTest(unittest.TestCase):
             "name": name,
         }
         inherited = {
-            "io.xpra.lab.image-builder": "true",
-            "io.xpra.lab.image-build-run-id": "87654321-4321-4abc-8def-123456789abc",
+            "io.xpra.fork-maintenance.image-builder": "true",
+            "io.xpra.fork-maintenance.image-build-run-id": "87654321-4321-4abc-8def-123456789abc",
         }
         item = {
             "Config": {
@@ -1130,9 +1130,9 @@ class BackgroundContainerTest(unittest.TestCase):
             "Id": "sha256:" + "6" * 64,
             "Labels": {
                 **inherited,
-                "io.xpra.lab.image-input": expected["io.xpra.lab.image-input"],
-                "io.xpra.lab.source": expected["io.xpra.lab.source"],
-                "io.xpra.lab.workflow": expected["io.xpra.lab.workflow"],
+                "io.xpra.fork-maintenance.image-input": expected["io.xpra.fork-maintenance.image-input"],
+                "io.xpra.fork-maintenance.source": expected["io.xpra.fork-maintenance.source"],
+                "io.xpra.fork-maintenance.workflow": expected["io.xpra.fork-maintenance.workflow"],
                 "org.opencontainers.image.title": "ubuntu",
             },
         }
@@ -1142,13 +1142,13 @@ class BackgroundContainerTest(unittest.TestCase):
             patch.object(job, "inspect_json", side_effect=(item, image, item)),
         ):
             self.assertEqual(job.prelaunch_container_id(record), "5" * 64)
-            item["Config"]["Labels"]["io.xpra.lab.unexpected"] = "value"
+            item["Config"]["Labels"]["io.xpra.fork-maintenance.unexpected"] = "value"
             with self.assertRaisesRegex(
                 job.JobError, "does not match prelaunch ownership"
             ):
                 job.prelaunch_container_id(record)
-        item["Config"]["Labels"].pop("io.xpra.lab.unexpected")
-        image["Labels"]["io.xpra.lab.image-build-run-id"] = (
+        item["Config"]["Labels"].pop("io.xpra.fork-maintenance.unexpected")
+        image["Labels"]["io.xpra.fork-maintenance.image-build-run-id"] = (
             "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
         )
         with (

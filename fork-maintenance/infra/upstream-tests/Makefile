@@ -2,13 +2,13 @@ SHELL := /bin/bash
 .NOTPARALLEL:
 
 override PODMAN := podman
-override LAB_ROOT := $(abspath $(CURDIR)/../..)
-override PROJECT_ROOT := $(abspath $(LAB_ROOT)/..)
+override MAINTENANCE_ROOT := $(abspath $(CURDIR)/../..)
+override PROJECT_ROOT := $(abspath $(MAINTENANCE_ROOT)/..)
 override SOURCE_HOST := $(PROJECT_ROOT)
 override RUNNER_HOST := $(CURDIR)
 override PRIVATE_STATE := $(RUNNER_HOST)/private_state.py
 override JOB := $(RUNNER_HOST)/job.py
-override PAYLOAD_HELPER := $(LAB_ROOT)/tools/container_payload.py
+override PAYLOAD_HELPER := $(MAINTENANCE_ROOT)/tools/container_payload.py
 override STATE_ROOT := $(PROJECT_ROOT)/.artifacts/fork-maintenance/upstream-tests
 override LOG_DIR := $(STATE_ROOT)/logs
 override SOURCE_BUNDLE_ROOT := $(STATE_ROOT)/sources
@@ -18,7 +18,7 @@ PATCH_MODE ?= patched
 IMAGE_TAG_SUFFIX ?=
 SOURCE_REMOTE ?= origin
 SOURCE_COMMIT ?=
-export XPRA_LAB_SELECTION := $(SELECTION)
+export XPRA_FORK_SELECTION := $(SELECTION)
 export XPRA_PATCH_MODE := $(PATCH_MODE)
 
 override SOURCE_REF := refs/remotes/$(SOURCE_REMOTE)/master
@@ -31,28 +31,28 @@ override WORKFLOW_SHA := $(shell git -C "$(SOURCE_HOST)" show "$(BASE_COMMIT):.g
 override IMAGE_INPUT_SHA := $(shell { sha256sum .containerignore Containerfile entrypoint.sh selection.py 2>/dev/null; sha256sum "$(PAYLOAD_HELPER)" 2>/dev/null | sed 's|  .*|  container_payload.py|'; printf '%s\n' "$(WORKFLOW_SHA)"; } | sha256sum | awk '{print $$1}')
 override IMAGE_INPUT_SHORT := $(shell printf '%s' "$(IMAGE_INPUT_SHA)" | cut -c1-16)
 override RUNNER_SHA := $(shell python3 "$(JOB)" runner-sha 2>/dev/null)
-override IMAGE := localhost/xpra-lab-upstream-tests:ubuntu-26.04-$(IMAGE_INPUT_SHORT)$(IMAGE_TAG_SUFFIX)
-override CCACHE_VOLUME := xpra-lab-upstream-ccache
-override OWNER_ID := xpra-lab-upstream-tests
+override IMAGE := localhost/xpra-fork-maintenance-upstream-tests:ubuntu-26.04-$(IMAGE_INPUT_SHORT)$(IMAGE_TAG_SUFFIX)
+override CCACHE_VOLUME := xpra-fork-maintenance-upstream-ccache
+override OWNER_ID := xpra-fork-maintenance-upstream-tests
 
 override SELECTION_NAME := $(subst /,-,$(SELECTION))
 BACKGROUND_TARGET ?= full
 BACKGROUND_NAME ?= $(SOURCE_SHORT)-$(SELECTION_NAME)-$(PATCH_MODE)-$(BACKGROUND_TARGET)
 override BACKGROUND_RECORD_ROOT := $(STATE_ROOT)/runs
 override BACKGROUND_RECORD := $(BACKGROUND_RECORD_ROOT)/$(BACKGROUND_NAME).owner
-export XPRA_LAB_BACKGROUND_TARGET := $(BACKGROUND_TARGET)
-export XPRA_LAB_BACKGROUND_NAME := $(BACKGROUND_NAME)
+export XPRA_FORK_BACKGROUND_TARGET := $(BACKGROUND_TARGET)
+export XPRA_FORK_BACKGROUND_NAME := $(BACKGROUND_NAME)
 
 IMAGE_BACKGROUND_NAME ?=
 override IMAGE_BUILD_ROOT := $(STATE_ROOT)/image-builds
 override IMAGE_BUILD_CONTEXT := $(IMAGE_BUILD_ROOT)/$(IMAGE_BACKGROUND_NAME)
-export XPRA_LAB_IMAGE_BACKGROUND_NAME := $(IMAGE_BACKGROUND_NAME)
+export XPRA_FORK_IMAGE_BACKGROUND_NAME := $(IMAGE_BACKGROUND_NAME)
 
 override RESOLVE_IMAGE = image_id=$$($(PODMAN) image inspect "$(IMAGE)" --format '{{.Id}}'); \
 	[[ "$$image_id" =~ ^[0-9a-f]{64}$$ ]]; \
-	test "$$($(PODMAN) image inspect "$$image_id" --format '{{index .Labels "io.xpra.lab.image-builder"}}')" = true; \
-	test "$$($(PODMAN) image inspect "$$image_id" --format '{{index .Labels "io.xpra.lab.image-input"}}')" = "$(IMAGE_INPUT_SHA)"; \
-	test "$$($(PODMAN) image inspect "$$image_id" --format '{{index .Labels "io.xpra.lab.workflow"}}')" = "$(WORKFLOW_SHA)"
+	test "$$($(PODMAN) image inspect "$$image_id" --format '{{index .Labels "io.xpra.fork-maintenance.image-builder"}}')" = true; \
+	test "$$($(PODMAN) image inspect "$$image_id" --format '{{index .Labels "io.xpra.fork-maintenance.image-input"}}')" = "$(IMAGE_INPUT_SHA)"; \
+	test "$$($(PODMAN) image inspect "$$image_id" --format '{{index .Labels "io.xpra.fork-maintenance.workflow"}}')" = "$(WORKFLOW_SHA)"
 
 .PHONY: help private-state-check private-state-tests inputs-check selection-check ci-policy-check \
 	source-check source-snapshot \
@@ -77,7 +77,7 @@ help:
 		'make image-background-start IMAGE_BACKGROUND_NAME=unique-name' \
 		'    Build a missing image as a durable owned process job' \
 		'make image-background-{status,logs,wait,collect,remove,abort} IMAGE_BACKGROUND_NAME=name' \
-		'make image-remove            Remove only the exact verified lab image' \
+		'make image-remove            Remove only the exact verified upstream-test image' \
 		'make patch-check          Apply and whitespace-check the selection' \
 		'make focused              Build and run the selected regression tests' \
 		'make quarantine           Confirm declared failures on clean baseline' \
@@ -135,8 +135,8 @@ inputs-check:
 
 selection-check: inputs-check
 	@python3 "$(RUNNER_HOST)/selection.py" \
-		--lab-root "$(LAB_ROOT)" \
-		--selection "$${XPRA_LAB_SELECTION}" \
+		--lab-root "$(MAINTENANCE_ROOT)" \
+		--selection "$${XPRA_FORK_SELECTION}" \
 		validate
 
 source-check: inputs-check
@@ -172,11 +172,11 @@ image image-check: source-check inputs-check
 		exit 2; \
 	}
 	@builder=$$($(PODMAN) image inspect "$(IMAGE)" \
-		--format '{{index .Labels "io.xpra.lab.image-builder"}}'); \
+		--format '{{index .Labels "io.xpra.fork-maintenance.image-builder"}}'); \
 		actual=$$($(PODMAN) image inspect "$(IMAGE)" \
-			--format '{{index .Labels "io.xpra.lab.image-input"}}'); \
+			--format '{{index .Labels "io.xpra.fork-maintenance.image-input"}}'); \
 		workflow=$$($(PODMAN) image inspect "$(IMAGE)" \
-			--format '{{index .Labels "io.xpra.lab.workflow"}}'); \
+			--format '{{index .Labels "io.xpra.fork-maintenance.workflow"}}'); \
 		test "$$builder" = true || { \
 			printf 'image builder label mismatch for %s\n' "$(IMAGE)" >&2; exit 2; \
 		}; \
@@ -193,12 +193,12 @@ image-remove: image
 		--source "$(BASE_COMMIT)" --workflow-sha256 "$(WORKFLOW_SHA)"
 
 image-background-name-check:
-	@[[ "$${XPRA_LAB_IMAGE_BACKGROUND_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$$ ]] || { \
-		printf 'invalid image background name: %s\n' "$${XPRA_LAB_IMAGE_BACKGROUND_NAME}" >&2; exit 2; \
+	@[[ "$${XPRA_FORK_IMAGE_BACKGROUND_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$$ ]] || { \
+		printf 'invalid image background name: %s\n' "$${XPRA_FORK_IMAGE_BACKGROUND_NAME}" >&2; exit 2; \
 	}
 
 image-background-start: source-check inputs-check image-background-name-check
-	@python3 "$(JOB)" image start "$${XPRA_LAB_IMAGE_BACKGROUND_NAME}" \
+	@python3 "$(JOB)" image start "$${XPRA_FORK_IMAGE_BACKGROUND_NAME}" \
 		--image "$(IMAGE)" --image-input-sha256 "$(IMAGE_INPUT_SHA)" \
 		--source "$(BASE_COMMIT)" --workflow-sha256 "$(WORKFLOW_SHA)"
 
@@ -218,7 +218,7 @@ ci-policy-check: inputs-check
 	@test -n "$(SOURCE_COMMIT)" || { \
 		printf '%s\n' 'CI requires the source commit embedded in pushed develop' >&2; exit 2; \
 	}
-	@test "$${XPRA_LAB_SELECTION}" = stacks/develop || { \
+	@test "$${XPRA_FORK_SELECTION}" = stacks/develop || { \
 		printf '%s\n' 'CI must run the complete stacks/develop queue' >&2; exit 2; \
 	}
 	@test "$${XPRA_PATCH_MODE}" = patched || { \
@@ -234,7 +234,7 @@ ci: ci-policy-check selection-check source-snapshot ci-image
 	@set -e; target="$${XPRA_CI_TARGET}"; \
 		printf 'ci_target=%s\n' "$$target"; \
 		python3 "$(JOB)" test foreground --target "$$target" \
-			--selection "$${XPRA_LAB_SELECTION}" --patch-mode "$${XPRA_PATCH_MODE}" \
+			--selection "$${XPRA_FORK_SELECTION}" --patch-mode "$${XPRA_PATCH_MODE}" \
 			--image "$(IMAGE)" --image-input-sha256 "$(IMAGE_INPUT_SHA)" \
 			--source "$(BASE_COMMIT)" --source-head "$(SOURCE_TIP_COMMIT)" \
 			--source-remote "$(SOURCE_REMOTE)" --workflow-sha256 "$(WORKFLOW_SHA)"
@@ -242,12 +242,12 @@ ci: ci-policy-check selection-check source-snapshot ci-image
 image-background-status image-background-logs image-background-wait \
 image-background-collect image-background-remove image-background-abort: image-background-name-check
 	@python3 "$(JOB)" image $(patsubst image-background-%,%,$@) \
-		"$${XPRA_LAB_IMAGE_BACKGROUND_NAME}"
+		"$${XPRA_FORK_IMAGE_BACKGROUND_NAME}"
 
 versions patch-check focused quarantine quarantine-cython quarantine-no-compat \
 	wayland libyuv full full-cython full-no-compat: selection-check source-snapshot image
 	@python3 "$(JOB)" test foreground --target "$@" \
-		--selection "$${XPRA_LAB_SELECTION}" --patch-mode "$${XPRA_PATCH_MODE}" \
+		--selection "$${XPRA_FORK_SELECTION}" --patch-mode "$${XPRA_PATCH_MODE}" \
 		--image "$(IMAGE)" --image-input-sha256 "$(IMAGE_INPUT_SHA)" \
 		--source "$(BASE_COMMIT)" --source-head "$(SOURCE_TIP_COMMIT)" \
 		--source-remote "$(SOURCE_REMOTE)" --workflow-sha256 "$(WORKFLOW_SHA)"
@@ -257,26 +257,26 @@ run: selection-check source-snapshot image
 		printf '%s\n' 'usage: XPRA_TEST_COMMAND="command" make run' >&2; exit 2; \
 	}
 	@python3 "$(JOB)" test foreground --target run \
-		--selection "$${XPRA_LAB_SELECTION}" --patch-mode "$${XPRA_PATCH_MODE}" \
+		--selection "$${XPRA_FORK_SELECTION}" --patch-mode "$${XPRA_PATCH_MODE}" \
 		--image "$(IMAGE)" --image-input-sha256 "$(IMAGE_INPUT_SHA)" \
 		--source "$(BASE_COMMIT)" --source-head "$(SOURCE_TIP_COMMIT)" \
 		--source-remote "$(SOURCE_REMOTE)" --workflow-sha256 "$(WORKFLOW_SHA)"
 
 background-start: selection-check source-snapshot image
-	@python3 "$(JOB)" test start "$${XPRA_LAB_BACKGROUND_NAME}" \
-		--target "$${XPRA_LAB_BACKGROUND_TARGET}" \
-		--selection "$${XPRA_LAB_SELECTION}" --patch-mode "$${XPRA_PATCH_MODE}" \
+	@python3 "$(JOB)" test start "$${XPRA_FORK_BACKGROUND_NAME}" \
+		--target "$${XPRA_FORK_BACKGROUND_TARGET}" \
+		--selection "$${XPRA_FORK_SELECTION}" --patch-mode "$${XPRA_PATCH_MODE}" \
 		--image "$(IMAGE)" --image-input-sha256 "$(IMAGE_INPUT_SHA)" \
 		--source "$(BASE_COMMIT)" --source-head "$(SOURCE_TIP_COMMIT)" \
 		--source-remote "$(SOURCE_REMOTE)" \
 		--workflow-sha256 "$(WORKFLOW_SHA)"
 
 background-name-check:
-	@[[ "$${XPRA_LAB_BACKGROUND_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$$ ]] || { \
-		printf 'invalid background name: %s\n' "$${XPRA_LAB_BACKGROUND_NAME}" >&2; exit 2; \
+	@[[ "$${XPRA_FORK_BACKGROUND_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$$ ]] || { \
+		printf 'invalid background name: %s\n' "$${XPRA_FORK_BACKGROUND_NAME}" >&2; exit 2; \
 	}
 
 background-status background-logs background-wait background-collect \
 background-remove background-abort: background-name-check
 	@python3 "$(JOB)" test $(patsubst background-%,%,$@) \
-		"$${XPRA_LAB_BACKGROUND_NAME}"
+		"$${XPRA_FORK_BACKGROUND_NAME}"
