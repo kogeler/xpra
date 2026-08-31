@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and freeze an atomic Xpra lab case or ordered integration stack."""
+"""Validate and freeze an atomic fork-maintenance case or integration stack."""
 
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provide deterministic pointer and keyboard evidence for the Xpra lab."""
+"""Provide deterministic pointer and keyboard evidence for Xpra live tests."""
 
 from __future__ import annotations
 

@@ -2,8 +2,8 @@ SHELL := /bin/bash
 .SHELLFLAGS := -euo pipefail -c
 
 override RUNNER_ROOT := $(CURDIR)
-override LAB_ROOT := $(abspath $(RUNNER_ROOT)/../..)
-override PROJECT_ROOT := $(abspath $(LAB_ROOT)/..)
+override MAINTENANCE_ROOT := $(abspath $(RUNNER_ROOT)/../..)
+override PROJECT_ROOT := $(abspath $(MAINTENANCE_ROOT)/..)
 override JOB := $(RUNNER_ROOT)/job.py
 override STATE_ROOT := $(PROJECT_ROOT)/.artifacts/fork-maintenance/deb-packages
 
@@ -24,7 +24,7 @@ help:
 
 check:
 	@python3 -m py_compile builder.py job.py
-	@PYTHONPATH="$(LAB_ROOT)/tools" python3 -m unittest -v test_builder.py test_job.py
+	@PYTHONPATH="$(MAINTENANCE_ROOT)/tools" python3 -m unittest -v test_builder.py test_job.py
 
 source-snapshot:
 	@python3 "$(JOB)" source-snapshot

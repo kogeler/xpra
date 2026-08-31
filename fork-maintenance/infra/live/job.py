@@ -35,9 +35,9 @@ from profiles import (
 )
 
 INFRA_ROOT = Path(__file__).resolve().parent
-LAB_ROOT = INFRA_ROOT.parent.parent
-PROJECT_ROOT = LAB_ROOT.parent
-TOOLS_ROOT = LAB_ROOT / "tools"
+MAINTENANCE_ROOT = INFRA_ROOT.parent.parent
+PROJECT_ROOT = MAINTENANCE_ROOT.parent
+TOOLS_ROOT = MAINTENANCE_ROOT / "tools"
 sys.path.insert(0, str(TOOLS_ROOT))
 
 import background_job
@@ -52,9 +52,9 @@ BACKGROUND_SUPERVISOR = TOOLS_ROOT / "background_job.py"
 PAYLOAD_HELPER = TOOLS_ROOT / "container_payload.py"
 PODMAN_POLICY = TOOLS_ROOT / "podman_policy.py"
 LIVE_CONFIG_MODULE = INFRA_ROOT / "live_config.py"
-NETWORK_PROFILES_CONFIG = LAB_ROOT / "profiles.yml"
-LIVE_CLI_CONFIG = LAB_ROOT / "live-cli.yml"
-SELECTION_TOOL = LAB_ROOT / "infra" / "upstream-tests" / "selection.py"
+NETWORK_PROFILES_CONFIG = MAINTENANCE_ROOT / "profiles.yml"
+LIVE_CLI_CONFIG = MAINTENANCE_ROOT / "live-cli.yml"
+SELECTION_TOOL = MAINTENANCE_ROOT / "infra" / "upstream-tests" / "selection.py"
 HARNESS_INPUTS = (
     INFRA_ROOT / ".containerignore",
     INFRA_ROOT / "Containerfile",
@@ -81,13 +81,13 @@ RESULT_ROOT = STATE_ROOT / "live-results"
 VENV_ROOT = STATE_ROOT / "venvs"
 REQUIREMENTS = INFRA_ROOT / "requirements.txt"
 PILLOW_VERSION = "12.1.1"
-OWNER = "xpra-lab-live-job"
+OWNER = "xpra-fork-maintenance-live-job"
 RETIRED_RECORD_POLICIES = {"mixed-hardware"}
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 SELECTOR_RE = re.compile(r"(?:cases|stacks)/[a-z0-9]+(?:-[a-z0-9]+)*")
-LAB_LABEL_PREFIX = "io.xpra.lab."
+MAINTENANCE_LABEL_PREFIX = "io.xpra.fork-maintenance."
 
 
 class JobError(RuntimeError):
@@ -147,7 +147,7 @@ def harness_sha256() -> str:
     for path in HARNESS_INPUTS:
         if path.is_symlink() or not path.is_file():
             raise JobError(f"live harness input is unavailable: {path}")
-        digest.update(path.relative_to(LAB_ROOT).as_posix().encode())
+        digest.update(path.relative_to(MAINTENANCE_ROOT).as_posix().encode())
         digest.update(b"\0")
         digest.update(bytes.fromhex(sha256_file(path)))
         digest.update(b"\0")
@@ -665,7 +665,7 @@ def validate_selector(selector: str | None) -> None:
             sys.executable,
             str(SELECTION_TOOL),
             "--lab-root",
-            str(LAB_ROOT),
+            str(MAINTENANCE_ROOT),
             "--selection",
             selector,
             "validate",
@@ -826,9 +826,9 @@ def record_is_current(record: dict[str, Any]) -> bool:
 def podman_ids(kind: str, run: str) -> list[str]:
     filters = [
         "--filter",
-        "label=io.xpra.lab.owner=live",
+        "label=io.xpra.fork-maintenance.owner=live",
         "--filter",
-        f"label=io.xpra.lab.run-id={run}",
+        f"label=io.xpra.fork-maintenance.run-id={run}",
         "--quiet",
     ]
     if kind == "container":
@@ -889,8 +889,8 @@ def owned_objects(run: str) -> dict[str, list[str]]:
 def verify_owned_object(kind: str, object_id: str, run: str) -> None:
     labels = podman_labels(kind, object_id)
     expected = {
-        "io.xpra.lab.owner": "live",
-        "io.xpra.lab.run-id": run,
+        "io.xpra.fork-maintenance.owner": "live",
+        "io.xpra.fork-maintenance.run-id": run,
     }
     if any(labels.get(key) != value for key, value in expected.items()):
         raise JobError(f"refusing unowned {kind}: {object_id}")
@@ -930,10 +930,10 @@ def object_ledger_entries(run: str) -> list[dict[str, Any]]:
                 or not isinstance(immutable_id, str)
                 or (immutable_id and not SHA256_RE.fullmatch(immutable_id))
                 or not isinstance(labels, dict)
-                or labels.get("io.xpra.lab.owner") != "live"
-                or labels.get("io.xpra.lab.run-id") != run
-                or labels.get("io.xpra.lab.scenario") != scenario
-                or labels.get("io.xpra.lab.role") != expected_role
+                or labels.get("io.xpra.fork-maintenance.owner") != "live"
+                or labels.get("io.xpra.fork-maintenance.run-id") != run
+                or labels.get("io.xpra.fork-maintenance.scenario") != scenario
+                or labels.get("io.xpra.fork-maintenance.role") != expected_role
                 or not all(isinstance(key, str) and isinstance(value, str) for key, value in labels.items())
             ):
                 raise JobError(f"live Podman ledger entry is invalid: {ledger_path}")
@@ -1614,7 +1614,7 @@ def _start_locked(args: argparse.Namespace, run: str) -> int:
         if args.selection:
             argv.extend(("--selection", args.selection))
         environment = dict(os.environ)
-        environment["XPRA_LAB_JOB_ID"] = job_id
+        environment["XPRA_FORK_JOB_ID"] = job_id
         try:
             owned = background_job.launch(
                 owner_path=record_path(run),
@@ -1874,10 +1874,10 @@ def image_provenance_validation(
         ):
             return False
         expected_labels = {
-            "io.xpra.lab.context": values["context"],
-            "io.xpra.lab.owner": "live",
-            "io.xpra.lab.role": values["role"],
-            "io.xpra.lab.source": source_commit,
+            "io.xpra.fork-maintenance.context": values["context"],
+            "io.xpra.fork-maintenance.owner": "live",
+            "io.xpra.fork-maintenance.role": values["role"],
+            "io.xpra.fork-maintenance.source": source_commit,
         }
         if labels != expected_labels:
             return False
@@ -1917,13 +1917,13 @@ def current_image_validation(payload: dict[str, Any]) -> bool:
             for key, value in actual_labels.items()
         ):
             return False
-        actual_lab_labels = {
+        actual_maintenance_labels = {
             key: value
             for key, value in actual_labels.items()
-            if key.startswith(LAB_LABEL_PREFIX)
+            if key.startswith(MAINTENANCE_LABEL_PREFIX)
         }
         normalize = lambda value: str(value).removeprefix("sha256:")
-        if normalize(actual_id) != normalize(image_id) or actual_lab_labels != labels:
+        if normalize(actual_id) != normalize(image_id) or actual_maintenance_labels != labels:
             return False
     return True
 
@@ -2311,7 +2311,7 @@ def remove_owned_objects(run: str) -> None:
                 else {
                     key: value
                     for key, value in labels.items()
-                    if key.startswith("io.xpra.lab.")
+                    if key.startswith("io.xpra.fork-maintenance.")
                 }
                 == entry["labels"]
             )

@@ -1164,7 +1164,7 @@ class ContainerBoundaryTests(unittest.TestCase):
             inspection = completed(
                 [],
                 stdout=json.dumps(
-                    [{"Labels": {"io.xpra.lab.image-build-id": str(build_id)}}]
+                    [{"Labels": {"io.xpra.fork-maintenance.image-build-id": str(build_id)}}]
                 ),
             )
             with (
@@ -2255,7 +2255,7 @@ class SelectionCacheTests(unittest.TestCase):
             selection_root = root / "selections"
             selection_root.mkdir(mode=0o700)
             with (
-                patch.object(job, "LAB_ROOT", lab_root),
+                patch.object(job, "MAINTENANCE_ROOT", lab_root),
                 patch.object(job, "SELECTION_ROOT", selection_root),
                 patch.object(job, "prepare_state"),
                 patch.object(
@@ -2287,7 +2287,7 @@ class SelectionCacheTests(unittest.TestCase):
             selection_root = root / "selections"
             selection_root.mkdir(mode=0o700)
             with (
-                patch.object(job, "LAB_ROOT", lab_root),
+                patch.object(job, "MAINTENANCE_ROOT", lab_root),
                 patch.object(job, "SELECTION_ROOT", selection_root),
                 patch.object(job, "prepare_state"),
                 patch.object(
@@ -2366,7 +2366,7 @@ class SelectionCacheTests(unittest.TestCase):
                 return result
 
             with (
-                patch.object(job, "LAB_ROOT", lab_root),
+                patch.object(job, "MAINTENANCE_ROOT", lab_root),
                 patch.object(job, "SELECTION_ROOT", selection_root),
                 patch.object(job, "prepare_state"),
                 patch.object(
@@ -2388,7 +2388,7 @@ class SelectionCacheTests(unittest.TestCase):
             selection_root = root / "selections"
             selection_root.mkdir(mode=0o700)
             with (
-                patch.object(job, "LAB_ROOT", lab_root),
+                patch.object(job, "MAINTENANCE_ROOT", lab_root),
                 patch.object(job, "SELECTION_ROOT", selection_root),
                 patch.object(job, "prepare_state"),
                 patch.object(
