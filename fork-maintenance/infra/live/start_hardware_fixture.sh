@@ -72,7 +72,7 @@ primary_pid=$!
 printf '%s\n' "$primary_pid" > "/artifacts/$primary_name.pid"
 
 env -u DISPLAY GDK_BACKEND=wayland \
-    python3 /opt/xpra-lab/interaction_fixture.py \
+    python3 /opt/xpra-fork-maintenance/interaction_fixture.py \
     > /artifacts/interaction.stdout 2> /artifacts/interaction.stderr &
 interaction_pid=$!
 printf '%s\n' "$interaction_pid" > /artifacts/interaction.pid

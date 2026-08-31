@@ -21,9 +21,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 RUNNER_ROOT = Path(__file__).resolve().parent
-LAB_ROOT = RUNNER_ROOT.parent.parent
-PROJECT_ROOT = LAB_ROOT.parent
-TOOLS_ROOT = LAB_ROOT / "tools"
+MAINTENANCE_ROOT = RUNNER_ROOT.parent.parent
+PROJECT_ROOT = MAINTENANCE_ROOT.parent
+TOOLS_ROOT = MAINTENANCE_ROOT / "tools"
 sys.path.insert(0, str(TOOLS_ROOT))
 
 import background_job
@@ -35,9 +35,9 @@ LOG_ROOT = STATE_ROOT / "logs"
 RUN_ROOT = STATE_ROOT / "runs"
 IMAGE_BUILD_ROOT = STATE_ROOT / "image-builds"
 SOURCE_ROOT = STATE_ROOT / "sources"
-OWNER = "xpra-lab-upstream-tests"
+OWNER = "xpra-fork-maintenance-upstream-tests"
 IMAGE_OWNER = OWNER
-CCACHE_VOLUME = "xpra-lab-upstream-ccache"
+CCACHE_VOLUME = "xpra-fork-maintenance-upstream-ccache"
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
@@ -76,7 +76,7 @@ IMAGE_CONTEXT_INPUTS = {
     "entrypoint.sh": RUNNER_ROOT / "entrypoint.sh",
     "selection.py": RUNNER_ROOT / "selection.py",
 }
-CONTAINER_RUNNER = "/opt/xpra-lab-upstream-tests"
+CONTAINER_RUNNER = "/opt/xpra-fork-maintenance/upstream-tests"
 CONTAINER_PAYLOAD = f"{CONTAINER_RUNNER}/container_payload.py"
 CONTAINER_INPUTS = "/work/payload"
 CONTAINER_NOTIFY_FIFO = f"{CONTAINER_RUNNER}/payload-ready.fifo"
@@ -130,7 +130,7 @@ def runner_sha256() -> str:
     for path in RUNNER_INPUTS:
         if path.is_symlink() or not path.is_file():
             raise JobError(f"runner input is unavailable: {path}")
-        digest.update(path.relative_to(LAB_ROOT).as_posix().encode())
+        digest.update(path.relative_to(MAINTENANCE_ROOT).as_posix().encode())
         digest.update(b"\0")
         digest.update(bytes.fromhex(sha256_file(path)))
         digest.update(b"\0")
@@ -589,7 +589,7 @@ def load_remove_transaction(name: str, kind: str, owner_path: Path) -> dict[str,
 def selection_digest(
     selection: str,
     *,
-    lab_root: Path = LAB_ROOT,
+    lab_root: Path = MAINTENANCE_ROOT,
     pass_fds: tuple[int, ...] = (),
 ) -> str:
     result = command(
@@ -660,7 +660,7 @@ def test_payload(
                     sys.executable,
                     str(RUNNER_ROOT / "selection.py"),
                     "--lab-root",
-                    str(LAB_ROOT),
+                    str(MAINTENANCE_ROOT),
                     "--selection",
                     selection,
                     "snapshot",
@@ -710,7 +710,7 @@ def payload_environment(args: argparse.Namespace, selection_sha256: str) -> list
         "--env",
         f"XPRA_EXPECTED_WORKFLOW_SHA={args.workflow_sha256}",
         "--env",
-        f"XPRA_LAB_SELECTION={args.selection}",
+        f"XPRA_FORK_SELECTION={args.selection}",
         "--env",
         f"XPRA_PATCH_MODE={args.patch_mode}",
         "--env",
@@ -798,20 +798,20 @@ def image_identity(
     if not SHA256_RE.fullmatch(image_id) or not isinstance(labels, dict):
         raise JobError(f"invalid owned image metadata: {image}")
     expected = {
-        "io.xpra.lab.image-builder": "true",
-        "io.xpra.lab.image-input": image_input,
-        "io.xpra.lab.source": source,
-        "io.xpra.lab.workflow": workflow,
+        "io.xpra.fork-maintenance.image-builder": "true",
+        "io.xpra.fork-maintenance.image-input": image_input,
+        "io.xpra.fork-maintenance.source": source,
+        "io.xpra.fork-maintenance.workflow": workflow,
     }
-    actual_build_run = str(labels.get("io.xpra.lab.image-build-run-id", ""))
+    actual_build_run = str(labels.get("io.xpra.fork-maintenance.image-build-run-id", ""))
     if build_run_id is None:
         if not UUID4_RE.fullmatch(actual_build_run):
             raise JobError(f"image has an invalid build-run label: {image}")
-        expected["io.xpra.lab.image-build-run-id"] = actual_build_run
+        expected["io.xpra.fork-maintenance.image-build-run-id"] = actual_build_run
     else:
-        expected["io.xpra.lab.image-build-run-id"] = build_run_id
+        expected["io.xpra.fork-maintenance.image-build-run-id"] = build_run_id
     actual_labels = {str(key): str(value) for key, value in labels.items()}
-    if not exact_lab_labels(actual_labels, expected):
+    if not exact_maintenance_labels(actual_labels, expected):
         raise JobError(f"image ownership labels do not match: {image}")
     return image_id
 
@@ -828,18 +828,18 @@ def removable_image_identity(image: str, image_input: str, workflow: str) -> str
     if not SHA256_RE.fullmatch(image_id) or not isinstance(labels, dict):
         raise JobError(f"invalid owned image metadata: {image}")
     actual_labels = {str(key): str(value) for key, value in labels.items()}
-    source = actual_labels.get("io.xpra.lab.source", "")
-    build_run = actual_labels.get("io.xpra.lab.image-build-run-id", "")
+    source = actual_labels.get("io.xpra.fork-maintenance.source", "")
+    build_run = actual_labels.get("io.xpra.fork-maintenance.image-build-run-id", "")
     if not COMMIT_RE.fullmatch(source) or not UUID4_RE.fullmatch(build_run):
         raise JobError(f"image has invalid removal provenance: {image}")
     expected = {
-        "io.xpra.lab.image-builder": "true",
-        "io.xpra.lab.image-build-run-id": build_run,
-        "io.xpra.lab.image-input": image_input,
-        "io.xpra.lab.source": source,
-        "io.xpra.lab.workflow": workflow,
+        "io.xpra.fork-maintenance.image-builder": "true",
+        "io.xpra.fork-maintenance.image-build-run-id": build_run,
+        "io.xpra.fork-maintenance.image-input": image_input,
+        "io.xpra.fork-maintenance.source": source,
+        "io.xpra.fork-maintenance.workflow": workflow,
     }
-    if not exact_lab_labels(actual_labels, expected):
+    if not exact_maintenance_labels(actual_labels, expected):
         raise JobError(f"image ownership labels do not match: {image}")
     return image_id
 
@@ -853,26 +853,26 @@ def test_labels(
     selection_sha256: str,
 ) -> dict[str, str]:
     return {
-        "io.xpra.lab.upstream-test": "true",
-        "io.xpra.lab.owner": OWNER,
-        "io.xpra.lab.run-id": run_id,
-        "io.xpra.lab.target": args.target,
-        "io.xpra.lab.selection": args.selection,
-        "io.xpra.lab.selection-sha256": selection_sha256,
-        "io.xpra.lab.patch-mode": args.patch_mode,
-        "io.xpra.lab.source": args.source,
-        "io.xpra.lab.source-head": args.source_head,
-        "io.xpra.lab.source-remote": args.source_remote,
-        "io.xpra.lab.workflow": args.workflow_sha256,
-        "io.xpra.lab.runner": runner_digest,
-        "io.xpra.lab.image-id": image_id,
-        "io.xpra.lab.image-input": args.image_input_sha256,
+        "io.xpra.fork-maintenance.upstream-test": "true",
+        "io.xpra.fork-maintenance.owner": OWNER,
+        "io.xpra.fork-maintenance.run-id": run_id,
+        "io.xpra.fork-maintenance.target": args.target,
+        "io.xpra.fork-maintenance.selection": args.selection,
+        "io.xpra.fork-maintenance.selection-sha256": selection_sha256,
+        "io.xpra.fork-maintenance.patch-mode": args.patch_mode,
+        "io.xpra.fork-maintenance.source": args.source,
+        "io.xpra.fork-maintenance.source-head": args.source_head,
+        "io.xpra.fork-maintenance.source-remote": args.source_remote,
+        "io.xpra.fork-maintenance.workflow": args.workflow_sha256,
+        "io.xpra.fork-maintenance.runner": runner_digest,
+        "io.xpra.fork-maintenance.image-id": image_id,
+        "io.xpra.fork-maintenance.image-input": args.image_input_sha256,
     }
 
 
-def exact_lab_labels(actual: dict[str, str], expected: dict[str, str]) -> bool:
+def exact_maintenance_labels(actual: dict[str, str], expected: dict[str, str]) -> bool:
     return {
-        key: value for key, value in actual.items() if key.startswith("io.xpra.lab.")
+        key: value for key, value in actual.items() if key.startswith("io.xpra.fork-maintenance.")
     } == expected
 
 
@@ -880,23 +880,23 @@ def exact_test_container_labels(
     actual: dict[str, str], expected: dict[str, str], image_id: str
 ) -> bool:
     """Include only the two labels that Podman inherits from the owned image."""
-    image_build_run = actual.get("io.xpra.lab.image-build-run-id", "")
+    image_build_run = actual.get("io.xpra.fork-maintenance.image-build-run-id", "")
     if (
-        actual.get("io.xpra.lab.image-builder") != "true"
+        actual.get("io.xpra.fork-maintenance.image-builder") != "true"
         or not UUID4_RE.fullmatch(image_build_run)
     ):
         return False
     complete = {
         **expected,
-        "io.xpra.lab.image-builder": "true",
-        "io.xpra.lab.image-build-run-id": image_build_run,
+        "io.xpra.fork-maintenance.image-builder": "true",
+        "io.xpra.fork-maintenance.image-build-run-id": image_build_run,
     }
-    if not exact_lab_labels(actual, complete):
+    if not exact_maintenance_labels(actual, complete):
         return False
     required = {
-        "io.xpra.lab.image-input",
-        "io.xpra.lab.source",
-        "io.xpra.lab.workflow",
+        "io.xpra.fork-maintenance.image-input",
+        "io.xpra.fork-maintenance.source",
+        "io.xpra.fork-maintenance.workflow",
     }
     if not required.issubset(expected):
         return False
@@ -909,13 +909,13 @@ def exact_test_container_labels(
         return False
     image_labels = {str(key): str(value) for key, value in labels.items()}
     image_expected = {
-        "io.xpra.lab.image-builder": "true",
-        "io.xpra.lab.image-build-run-id": image_build_run,
-        "io.xpra.lab.image-input": expected["io.xpra.lab.image-input"],
-        "io.xpra.lab.source": expected["io.xpra.lab.source"],
-        "io.xpra.lab.workflow": expected["io.xpra.lab.workflow"],
+        "io.xpra.fork-maintenance.image-builder": "true",
+        "io.xpra.fork-maintenance.image-build-run-id": image_build_run,
+        "io.xpra.fork-maintenance.image-input": expected["io.xpra.fork-maintenance.image-input"],
+        "io.xpra.fork-maintenance.source": expected["io.xpra.fork-maintenance.source"],
+        "io.xpra.fork-maintenance.workflow": expected["io.xpra.fork-maintenance.workflow"],
     }
-    return exact_lab_labels(image_labels, image_expected)
+    return exact_maintenance_labels(image_labels, image_expected)
 
 
 def load_test_prelaunch(name: str) -> dict[str, Any]:
@@ -957,49 +957,49 @@ def load_test_prelaunch(name: str) -> dict[str, Any]:
         raise JobError("test prelaunch ownership has an invalid image")
     labels = record.get("labels")
     expected_label_keys = {
-        "io.xpra.lab.image-id",
-        "io.xpra.lab.image-input",
-        "io.xpra.lab.owner",
-        "io.xpra.lab.patch-mode",
-        "io.xpra.lab.run-id",
-        "io.xpra.lab.runner",
-        "io.xpra.lab.selection",
-        "io.xpra.lab.selection-sha256",
-        "io.xpra.lab.source",
-        "io.xpra.lab.source-head",
-        "io.xpra.lab.source-remote",
-        "io.xpra.lab.target",
-        "io.xpra.lab.upstream-test",
-        "io.xpra.lab.workflow",
+        "io.xpra.fork-maintenance.image-id",
+        "io.xpra.fork-maintenance.image-input",
+        "io.xpra.fork-maintenance.owner",
+        "io.xpra.fork-maintenance.patch-mode",
+        "io.xpra.fork-maintenance.run-id",
+        "io.xpra.fork-maintenance.runner",
+        "io.xpra.fork-maintenance.selection",
+        "io.xpra.fork-maintenance.selection-sha256",
+        "io.xpra.fork-maintenance.source",
+        "io.xpra.fork-maintenance.source-head",
+        "io.xpra.fork-maintenance.source-remote",
+        "io.xpra.fork-maintenance.target",
+        "io.xpra.fork-maintenance.upstream-test",
+        "io.xpra.fork-maintenance.workflow",
     }
     if (
         not isinstance(labels, dict)
         or set(labels) != expected_label_keys
-        or labels.get("io.xpra.lab.owner") != OWNER
-        or labels.get("io.xpra.lab.upstream-test") != "true"
-        or labels.get("io.xpra.lab.run-id") != record["run_id"]
-        or labels.get("io.xpra.lab.image-id") != record["image_id"]
+        or labels.get("io.xpra.fork-maintenance.owner") != OWNER
+        or labels.get("io.xpra.fork-maintenance.upstream-test") != "true"
+        or labels.get("io.xpra.fork-maintenance.run-id") != record["run_id"]
+        or labels.get("io.xpra.fork-maintenance.image-id") != record["image_id"]
         or not all(isinstance(key, str) and isinstance(value, str) for key, value in labels.items())
     ):
         raise JobError("test prelaunch ownership has invalid labels")
     if (
-        labels["io.xpra.lab.target"] not in TARGETS
-        or labels["io.xpra.lab.patch-mode"] not in {"clean", "tests-only", "patched"}
-        or not SELECTOR_RE.fullmatch(labels["io.xpra.lab.selection"])
-        or labels["io.xpra.lab.source-remote"] not in SOURCE_REMOTES
-        or not COMMIT_RE.fullmatch(labels["io.xpra.lab.source"])
-        or not COMMIT_RE.fullmatch(labels["io.xpra.lab.source-head"])
+        labels["io.xpra.fork-maintenance.target"] not in TARGETS
+        or labels["io.xpra.fork-maintenance.patch-mode"] not in {"clean", "tests-only", "patched"}
+        or not SELECTOR_RE.fullmatch(labels["io.xpra.fork-maintenance.selection"])
+        or labels["io.xpra.fork-maintenance.source-remote"] not in SOURCE_REMOTES
+        or not COMMIT_RE.fullmatch(labels["io.xpra.fork-maintenance.source"])
+        or not COMMIT_RE.fullmatch(labels["io.xpra.fork-maintenance.source-head"])
         or any(
             not SHA256_RE.fullmatch(labels[key])
             for key in (
-                "io.xpra.lab.image-id",
-                "io.xpra.lab.image-input",
-                "io.xpra.lab.runner",
-                "io.xpra.lab.selection-sha256",
-                "io.xpra.lab.workflow",
+                "io.xpra.fork-maintenance.image-id",
+                "io.xpra.fork-maintenance.image-input",
+                "io.xpra.fork-maintenance.runner",
+                "io.xpra.fork-maintenance.selection-sha256",
+                "io.xpra.fork-maintenance.workflow",
             )
         )
-        or labels["io.xpra.lab.runner"] != record["runner_sha256"]
+        or labels["io.xpra.fork-maintenance.runner"] != record["runner_sha256"]
     ):
         raise JobError("test prelaunch ownership has invalid label values")
     process = record.get("process")
@@ -1130,20 +1130,20 @@ def load_test_record(name: str, *, require_current: bool = True) -> dict[str, st
 
 def test_record_labels(record: dict[str, str]) -> dict[str, str]:
     return {
-        "io.xpra.lab.upstream-test": "true",
-        "io.xpra.lab.owner": record["owner"],
-        "io.xpra.lab.run-id": record["run_id"],
-        "io.xpra.lab.target": record["target"],
-        "io.xpra.lab.selection": record["selection"],
-        "io.xpra.lab.selection-sha256": record["selection_sha256"],
-        "io.xpra.lab.patch-mode": record["patch_mode"],
-        "io.xpra.lab.source": record["source"],
-        "io.xpra.lab.source-head": record["source_head"],
-        "io.xpra.lab.source-remote": record["source_remote"],
-        "io.xpra.lab.workflow": record["workflow_sha256"],
-        "io.xpra.lab.runner": record["runner_sha256"],
-        "io.xpra.lab.image-id": record["image_id"],
-        "io.xpra.lab.image-input": record["image_input_sha256"],
+        "io.xpra.fork-maintenance.upstream-test": "true",
+        "io.xpra.fork-maintenance.owner": record["owner"],
+        "io.xpra.fork-maintenance.run-id": record["run_id"],
+        "io.xpra.fork-maintenance.target": record["target"],
+        "io.xpra.fork-maintenance.selection": record["selection"],
+        "io.xpra.fork-maintenance.selection-sha256": record["selection_sha256"],
+        "io.xpra.fork-maintenance.patch-mode": record["patch_mode"],
+        "io.xpra.fork-maintenance.source": record["source"],
+        "io.xpra.fork-maintenance.source-head": record["source_head"],
+        "io.xpra.fork-maintenance.source-remote": record["source_remote"],
+        "io.xpra.fork-maintenance.workflow": record["workflow_sha256"],
+        "io.xpra.fork-maintenance.runner": record["runner_sha256"],
+        "io.xpra.fork-maintenance.image-id": record["image_id"],
+        "io.xpra.fork-maintenance.image-input": record["image_input_sha256"],
     }
 
 
@@ -1841,15 +1841,15 @@ def image_build_argv(
         "build",
         "--pull=always",
         "--label",
-        "io.xpra.lab.image-builder=true",
+        "io.xpra.fork-maintenance.image-builder=true",
         "--label",
-        f"io.xpra.lab.image-build-run-id={job_id}",
+        f"io.xpra.fork-maintenance.image-build-run-id={job_id}",
         "--label",
-        f"io.xpra.lab.image-input={args.image_input_sha256}",
+        f"io.xpra.fork-maintenance.image-input={args.image_input_sha256}",
         "--label",
-        f"io.xpra.lab.source={args.source}",
+        f"io.xpra.fork-maintenance.source={args.source}",
         "--label",
-        f"io.xpra.lab.workflow={args.workflow_sha256}",
+        f"io.xpra.fork-maintenance.workflow={args.workflow_sha256}",
         "-t",
         args.image,
         "-f",
@@ -1864,11 +1864,11 @@ def image_build_argv(
 def built_image_labels(record: dict[str, Any]) -> dict[str, str]:
     """Return the complete downstream label set for one owned build."""
     return {
-        "io.xpra.lab.image-builder": "true",
-        "io.xpra.lab.image-build-run-id": str(record["job_id"]),
-        "io.xpra.lab.image-input": str(record["input_sha256"]),
-        "io.xpra.lab.source": str(record["source"]),
-        "io.xpra.lab.workflow": str(record["workflow_sha256"]),
+        "io.xpra.fork-maintenance.image-builder": "true",
+        "io.xpra.fork-maintenance.image-build-run-id": str(record["job_id"]),
+        "io.xpra.fork-maintenance.image-input": str(record["input_sha256"]),
+        "io.xpra.fork-maintenance.source": str(record["source"]),
+        "io.xpra.fork-maintenance.workflow": str(record["workflow_sha256"]),
     }
 
 
@@ -2038,7 +2038,7 @@ def _image_start_locked(args: argparse.Namespace) -> int:
         "bash",
         "-c",
         'set -e; "$@"; chmod 0600 image.iid',
-        "xpra-lab-image-build",
+        "xpra-fork-maintenance-image-build",
         *stream_argv,
     ]
     try:
@@ -2150,7 +2150,7 @@ def _image_collect_locked(args: argparse.Namespace, name: str) -> int:
     ensure_private_regular(runtime_log)
     log_payload = runtime_log.read_bytes()
     image_ok, image_id, labels = inspect_built_image(record, normalize_iid=True)
-    labels_ok = image_ok and exact_lab_labels(labels, built_image_labels(record))
+    labels_ok = image_ok and exact_maintenance_labels(labels, built_image_labels(record))
     exit_code = state["exit_code"]
     finished = str(state.get("finished_at", ""))
     validation_ok = (
@@ -2171,8 +2171,8 @@ def _image_collect_locked(args: argparse.Namespace, name: str) -> int:
         "iid_ok": int(bool(image_id)),
         "image_exists": int(image_ok),
         "image_id": image_id,
-        "image_builder": labels.get("io.xpra.lab.image-builder", ""),
-        "image_input_sha256": labels.get("io.xpra.lab.image-input", ""),
+        "image_builder": labels.get("io.xpra.fork-maintenance.image-builder", ""),
+        "image_input_sha256": labels.get("io.xpra.fork-maintenance.image-input", ""),
         "source": record["source"],
         "workflow_sha256": record["workflow_sha256"],
         "runner_sha256": record["runner_sha256"],
@@ -2348,7 +2348,7 @@ def image_abort(args: argparse.Namespace) -> int:
         with image_cache_lock():
             image_ok, image_id, labels = inspect_built_image(record, normalize_iid=True)
             if image_ok:
-                if not exact_lab_labels(labels, built_image_labels(record)):
+                if not exact_maintenance_labels(labels, built_image_labels(record)):
                     raise JobError("refusing image whose build ownership labels do not match")
                 command(["podman", "image", "rm", image_id])
             partial_log.unlink(missing_ok=True)
