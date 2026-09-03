@@ -185,11 +185,21 @@ class CiImageTest(unittest.TestCase):
 
     def test_make_cache_remove_delegates_to_the_locked_job_helper(self) -> None:
         makefile = (job.RUNNER_ROOT / "Makefile").read_text(encoding="utf-8")
-        recipe = makefile.split("image-remove: image", 1)[1].split(
+        recipe = makefile.split("image-remove: source-check inputs-check", 1)[1].split(
             "\nimage-background-name-check:", 1
         )[0]
         self.assertIn('"$(JOB)" image cache-remove', recipe)
         self.assertNotIn("$(PODMAN) image rm", recipe)
+
+    def test_make_image_check_uses_the_exact_job_helper(self) -> None:
+        makefile = (job.RUNNER_ROOT / "Makefile").read_text(encoding="utf-8")
+        recipe = makefile.split("image image-check: source-check inputs-check", 1)[1].split(
+            "\nimage-remove:", 1
+        )[0]
+        self.assertIn('"$(JOB)" image check', recipe)
+        self.assertIn('--source "$(BASE_COMMIT)"', recipe)
+        self.assertNotIn("$(PODMAN) image inspect", recipe)
+        self.assertNotIn("RESOLVE_IMAGE", makefile)
 
     def test_cache_remove_refuses_unresolved_image_and_test_owners(self) -> None:
         image = "localhost/xpra-ci:test"
@@ -255,6 +265,58 @@ class CiImageTest(unittest.TestCase):
             source=args.source,
         )
 
+    def test_check_uses_the_exact_current_source_under_the_cache_lock(self) -> None:
+        args = image_args()
+        cache_lock = Mock()
+        cache_lock.__enter__ = Mock(return_value=43)
+        cache_lock.__exit__ = Mock(return_value=False)
+        with (
+            patch.object(job, "prepare_state") as prepare,
+            patch.object(job, "image_cache_lock", return_value=cache_lock),
+            patch.object(
+                job,
+                "command",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ) as command,
+            patch.object(job, "image_identity", return_value="4" * 64) as identity,
+        ):
+            self.assertEqual(job.image_check(args), 0)
+
+        prepare.assert_called_once_with()
+        cache_lock.__enter__.assert_called_once_with()
+        cache_lock.__exit__.assert_called_once()
+        command.assert_called_once_with(
+            ["podman", "image", "exists", args.image],
+            check=False,
+        )
+        identity.assert_called_once_with(
+            args.image,
+            args.image_input_sha256,
+            args.workflow_sha256,
+            source=args.source,
+        )
+
+    def test_check_distinguishes_a_missing_image_from_an_inspection_error(self) -> None:
+        args = image_args()
+        for returncode, message in (
+            (1, "required image is missing"),
+            (2, "cannot inspect image name"),
+        ):
+            with (
+                self.subTest(returncode=returncode),
+                patch.object(job, "prepare_state"),
+                patch.object(job, "image_cache_lock", return_value=nullcontext()),
+                patch.object(
+                    job,
+                    "command",
+                    return_value=subprocess.CompletedProcess([], returncode, "", ""),
+                ),
+                patch.object(job, "image_identity") as identity,
+                self.assertRaisesRegex(job.JobError, message),
+            ):
+                job.image_check(args)
+            identity.assert_not_called()
+
     def test_image_identity_requires_complete_exact_maintenance_provenance(self) -> None:
         args = image_args()
         build_run = "12345678-1234-4abc-8def-123456789abc"
@@ -296,14 +358,104 @@ class CiImageTest(unittest.TestCase):
                 **labels,
                 "io.xpra.fork-maintenance.source": "5" * 40,
             }
-            self.assertEqual(
-                job.removable_image_identity(
-                    args.image,
-                    args.image_input_sha256,
-                    args.workflow_sha256,
+            with patch.object(job, "require_removable_image_source") as source_check:
+                self.assertEqual(
+                    job.removable_image_identity(
+                        args.image,
+                        args.image_input_sha256,
+                        args.workflow_sha256,
+                        current_source=args.source,
+                    ),
+                    "4" * 64,
+                )
+            source_check.assert_called_once_with("5" * 40, args.source)
+
+    def test_removable_source_must_exist_and_ancestor_or_equal_current(self) -> None:
+        cached = "2" * 40
+        current = "3" * 40
+
+        def accepted(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.assertEqual(kwargs, {"cwd": job.PROJECT_ROOT, "check": False})
+            self.assertIn(argv[:2], (["git", "cat-file"], ["git", "merge-base"]))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with patch.object(job, "command", side_effect=accepted) as command:
+            job.require_removable_image_source(cached, current)
+        self.assertEqual(
+            command.call_args_list,
+            [
+                call(
+                    ["git", "cat-file", "-e", f"{cached}^{{commit}}"],
+                    cwd=job.PROJECT_ROOT,
+                    check=False,
                 ),
-                "4" * 64,
-            )
+                call(
+                    ["git", "cat-file", "-e", f"{current}^{{commit}}"],
+                    cwd=job.PROJECT_ROOT,
+                    check=False,
+                ),
+                call(
+                    ["git", "merge-base", "--is-ancestor", cached, current],
+                    cwd=job.PROJECT_ROOT,
+                    check=False,
+                ),
+            ],
+        )
+
+        with patch.object(job, "command", side_effect=accepted):
+            job.require_removable_image_source(current, current)
+
+    def test_removable_source_rejects_unknown_unrelated_and_future_commits(self) -> None:
+        cached = "2" * 40
+        current = "3" * 40
+        success = subprocess.CompletedProcess([], 0, "", "")
+        missing = subprocess.CompletedProcess([], 128, "", "")
+        not_ancestor = subprocess.CompletedProcess([], 1, "", "")
+
+        with (
+            patch.object(job, "command", side_effect=(missing,)),
+            self.assertRaisesRegex(job.JobError, "cached removal source.*existing commit"),
+        ):
+            job.require_removable_image_source(cached, current)
+
+        for label in ("unrelated", "future"):
+            with (
+                self.subTest(label=label),
+                patch.object(job, "command", side_effect=(success, success, not_ancestor)),
+                self.assertRaisesRegex(job.JobError, "not an ancestor"),
+            ):
+                job.require_removable_image_source(cached, current)
+
+    def test_cache_remove_uses_current_source_and_removes_the_exact_image_id(self) -> None:
+        args = image_args()
+        image_id = "4" * 64
+        cache_lock = Mock()
+        cache_lock.__enter__ = Mock(return_value=43)
+        cache_lock.__exit__ = Mock(return_value=False)
+        with (
+            patch.object(job, "prepare_state") as prepare,
+            patch.object(job, "image_cache_lock", return_value=cache_lock),
+            patch.object(job, "removable_image_identity", return_value=image_id) as identity,
+            patch.object(job, "require_image_cache_unleased") as unleased,
+            patch.object(
+                job,
+                "command",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ) as command,
+        ):
+            self.assertEqual(job.image_cache_remove(args), 0)
+
+        prepare.assert_called_once_with()
+        identity.assert_called_once_with(
+            args.image,
+            args.image_input_sha256,
+            args.workflow_sha256,
+            current_source=args.source,
+        )
+        unleased.assert_called_once_with(args.image, image_id)
+        command.assert_called_once_with(["podman", "image", "rm", image_id])
+        cache_lock.__enter__.assert_called_once_with()
+        cache_lock.__exit__.assert_called_once()
 
     def test_ensure_streams_inputs_without_a_crash_leaking_context(self) -> None:
         args = image_args()
@@ -1434,6 +1586,137 @@ class BackgroundContainerTest(unittest.TestCase):
             status = publish.call_args.args[1]
             self.assertEqual(status["validation_ok"], 0)
             self.assertEqual(status["result"], "failed")
+
+
+class QuarantineEntrypointTest(unittest.TestCase):
+    @staticmethod
+    def validator_source() -> str:
+        entrypoint = (job.RUNNER_ROOT / "entrypoint.sh").read_text(encoding="utf-8")
+        marker = "<<'QUARANTINE_SUMMARY_PY'\n"
+        return entrypoint.split(marker, 1)[1].split("\nQUARANTINE_SUMMARY_PY", 1)[0]
+
+    def validate(
+        self,
+        summary: str,
+        *expected: str,
+        module_count: int = 2,
+        gate: str = "quarantine-cython",
+    ) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as raw:
+            summary_path = Path(raw) / "summary.log"
+            summary_path.write_text(summary, encoding="utf-8")
+            return subprocess.run(
+                [
+                    sys.executable,
+                    "-",
+                    str(summary_path),
+                    gate,
+                    str(module_count),
+                    *expected,
+                ],
+                input=self.validator_source(),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    def test_runner_uses_union_for_paths_and_gate_subset_only_for_skip_fail(self) -> None:
+        entrypoint = (job.RUNNER_ROOT / "entrypoint.sh").read_text(encoding="utf-8")
+        function = entrypoint.split("run_quarantine() {", 1)[1].split(
+            "\n}\n\ncase ",
+            1,
+        )[0]
+        self.assertIn(
+            "if ! quarantined_output=$(selection_tool quarantined-tests); then",
+            function,
+        )
+        self.assertIn(
+            'if ! expected_output=$(selection_tool quarantined-tests --gate "$gate"); then',
+            function,
+        )
+        self.assertIn('mapfile -t quarantined <<<"$quarantined_output"', function)
+        self.assertIn('mapfile -t expected <<<"$expected_output"', function)
+        self.assertIn('for module in "${expected[@]}"; do\n        skip_args+=', function)
+        self.assertIn('for module in "${quarantined[@]}"; do\n        test_paths+=', function)
+
+    def test_mixed_leg_requires_one_failure_and_one_success(self) -> None:
+        summary = """test summary:
+  successful tests: 0
+  failed tests: 1
+test summary:
+  successful tests: 1
+  failed tests: 0
+  ignored failures: 1
+    - unit.client.broken_test (exit code=1)
+"""
+        result = self.validate(summary, "unit.client.broken_test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            "quarantine gate quarantine-cython confirmed failures: "
+            "unit.client.broken_test\n",
+        )
+
+    def test_leg_with_no_expected_failure_requires_every_module_to_pass(self) -> None:
+        summary = """test summary:
+  successful tests: 2
+  failed tests: 0
+"""
+        result = self.validate(summary)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("confirmed failures: <none>", result.stdout)
+
+    def test_expected_failure_that_passes_is_stale(self) -> None:
+        summary = """test summary:
+  successful tests: 2
+  failed tests: 0
+"""
+        result = self.validate(summary, "unit.client.broken_test")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected 1 successful modules, observed 2", result.stderr)
+
+    def test_unignored_failure_or_skipped_module_is_contamination(self) -> None:
+        summaries = (
+            """test summary:
+  successful tests: 0
+  failed tests: 1
+  ignored failures: 1
+    - unit.client.broken_test (exit code=1)
+""",
+            """test summary:
+  successful tests: 0
+  failed tests: 0
+  ignored failures: 1
+    - unit.client.broken_test (exit code=1)
+  skipped tests: 1
+    - unit.client.green_test
+""",
+        )
+        for summary in summaries:
+            with self.subTest(summary=summary):
+                result = self.validate(summary, "unit.client.broken_test")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("is contaminated", result.stderr)
+
+    def test_ignored_failure_names_and_format_are_exact(self) -> None:
+        summaries = (
+            """test summary:
+  successful tests: 1
+  failed tests: 0
+  ignored failures: 1
+    - unit.client.other_test (exit code=1)
+""",
+            """test summary:
+  successful tests: 1
+  failed tests: 0
+  ignored failures: 1
+    - malformed ignored result
+""",
+        )
+        for summary in summaries:
+            with self.subTest(summary=summary):
+                result = self.validate(summary, "unit.client.broken_test")
+                self.assertNotEqual(result.returncode, 0)
 
 
 class MainTest(unittest.TestCase):

@@ -53,8 +53,22 @@ Only an operator decision to begin a new upstream adaptation cycle activates
 may instruct the operator to perform the documented non-forced remote sync;
 agents never run that mutation. Those explicit refresh commands are never a
 prerequisite for examining, editing, or testing the current `develop` queue.
-The canonical selected-case decision and queue-wide revalidation procedure is
+The single agent entry point for the canonical **Autonomous Upstream Refresh
+and Full Queue Adaptation** procedure is:
+
+```text
+Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+```
+
+This is an agent directive, not a Make target. Its complete queue-wide
+procedure is
 [`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md).
+`PRIMARY_CASE` selects only the first and most detailed semantic review; every
+active production case, the quarantine, control plane, both package builds,
+and the complete test/live ladder remain in scope. The runbook derives its own
+unique cycle identifier and self-corrects any in-scope procedural or harness
+defect without restarting expensive evidence whose frozen semantic inputs are
+unchanged.
 
 That explicit runbook begins by normalizing `develop`: when non-ignored
 changes exist, the agent exhaustively reviews them and creates one local
@@ -120,8 +134,12 @@ All known upstream-only test failures belong in
 `upstream-test-quarantine`, never in a production case. A quarantine addition
 requires a clean-source reproduction in every affected matrix leg. After each
 explicitly selected upstream rebase, run the three clean `quarantine*` gates
-before applying that case; a newly green module makes the quarantine stale and
-must be removed or narrowed before the patched full matrix is accepted.
+before applying that case. Every gate runs the complete ordered module union:
+its exact gate-specific assignment must be the ignored-failure set, while the
+complement must pass without skips. A newly green assigned module makes that
+leg assignment stale; remove the module and its patch path only after it has no
+remaining failing-leg assignment. Resolve every stale or newly failing leg
+before the patched full matrix is accepted.
 
 When upstream absorbs a patch exactly, the resolver reports
 `already-present`. Removing it from the active queue still requires a current
@@ -450,8 +468,9 @@ for a patch/documentation refresh on an unchanged embedded source. It never
 applies after `develop-rebase`: a changed base requires every clean quarantine,
 fork-control, tests-only clean control or documented no-test semantic
 substitute, patched focused/native gate, durable package boundary on the
-resulting stack, full-matrix leg, and positive live gate even if the patch bytes
-did not need modification.
+resulting stack, full-matrix leg, every production case's declared live gate
+with its atomic case selection, and all seven positive live gates with the
+complete stack selection even if the patch bytes did not need modification.
 
 When a run fails before entering an expensive test target, validate a fix to
 that pre-test guard with the narrow control-plane unit test and direct preflight

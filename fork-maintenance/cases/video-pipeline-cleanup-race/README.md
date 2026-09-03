@@ -25,8 +25,18 @@ isolated candidate; never edit its digest or path list by hand.
 ## Required validation
 
 Run the focused cleanup module first, then all three upstream unit-test legs.
+This case deliberately declares no atomic live gate. Both fixed hardware
+profiles require the dynamic per-window frame-alpha state log introduced by
+the separate `wayland-initial-window-state` case; the bounded saved-packet
+evidence consumes that state. Applying only this cleanup patch cannot produce
+that mandatory evidence, so assigning either profile to
+`CASE=video-pipeline-cleanup-race` would create an impossible gate or tempt the
+runner to weaken a fixed profile. The cleanup code and its focused regression
+remain independently selectable; its real codec-lifetime boundary is owned by
+the complete queue where the related frame-state behavior is present.
+
 Because the change affects live hardware codec lifetime, the complete
-`develop` stack also requires both fixed adaptive-alpha/default Wayland
+`develop` stack requires both fixed adaptive-alpha/default Wayland
 hardware-H.264 profiles: one with a title-bound Vulkan `vkcube` primary and one
 with a title-bound native-Wayland `glmark2-wayland` `jellyfish` primary. Each has an initial
 `BGRX`/`RGBX` snapshot and dynamic opaque frame-state proof. Startup layout and

@@ -33,7 +33,16 @@ SHA-256 of `selection.json`, which also binds the exact private `lab/` tree
 digest. Every build owner and successful manifest records both digests plus the
 absolute `selection_state` (`selection.json`) and `selection_snapshot` (`lab/`)
 paths. Reuse requires revalidating the exact entry set, modes, tree digest, and
-semantic queue digest.
+semantic queue digest. Inventory and lifecycle recovery must also survive a
+later manifest-parser change: every historical cache still has its complete
+private path, metadata digest, and tree digest revalidated, but only a cache
+whose recorded selection digest equals the current queue digest is replayed
+through the current semantic parser and eligible for reuse. A historical cache
+which uses older manifest vocabulary is retained and remains ineligible; never
+delete or rewrite it to make a new package run start. Persisted prelaunch,
+owner, abort, and removal records use the same structural validation so their
+exact cleanup remains possible, while every new build, payload transfer, and
+collection replays current semantics before acceptance.
 
 `develop` in `stacks/develop` is the stable queue slug. It does not require the
 checked-out revision to be on a branch of that name and does not weaken the

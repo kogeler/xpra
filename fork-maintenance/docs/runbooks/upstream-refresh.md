@@ -1,12 +1,38 @@
-# Rebase Develop And Reassess One Case
+# Autonomous Upstream Refresh and Full Queue Adaptation
+
+## Single agent entry point
+
+Give an agent this exact directive, replacing the placeholder with any active
+production-case slug:
+
+```text
+Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+```
+
+`autonomous-upstream-refresh` is an agent workflow name, not a shell command or
+Make target. The directive is the complete invocation of this runbook. It
+explicitly chooses the current fork `master` as the next source boundary,
+authorizes the queue-wide keep/adapt/retire decisions and in-scope repairs
+defined below, and requires the agent to continue through the complete
+validation and uncommitted handoff. Do not ask the operator to repeat the base
+choice, provide a `CYCLE`, expand scope for another active case, or separately
+confirm the one preservation commit.
+
+`PRIMARY_CASE` controls review order and depth only. It does not limit patch,
+quarantine, control-plane, package, or validation scope. The agent derives one
+never-reused lowercase `CYCLE` prefix from the current UTC date/time and a
+recognizable primary-slug fragment, verifies that no runtime or workspace
+identity already uses it, and records it before the first lifecycle operation.
+Use enough time precision or append a numeric suffix to prove uniqueness; do
+not ask the operator to name one.
 
 ## Purpose
 
-This is the canonical end-to-end runbook for an operator-selected upstream
-refresh. Use it when the operator has synchronized `kogeler/xpra:master` from
-`Xpra-org/xpra:master`, has explicitly chosen that newer fork-master commit as
-the next source boundary, and has named one production case for detailed
-reassessment.
+This is the canonical autonomous end-to-end runbook for an operator-selected
+upstream refresh. Use it after the operator has synchronized
+`kogeler/xpra:master` from `Xpra-org/xpra:master` and wants the agent to move
+the complete maintained queue to that current fork-master boundary. The
+invocation above is that explicit choice.
 
 The agent may fetch and verify both master refs, fast-forward the local
 `master`, and rebase local `develop` onto that verified fork `master`. The agent
@@ -14,31 +40,31 @@ must not dispatch the hosted sync workflow, run `gh repo sync`, push or
 force-push a ref, or change the default branch. A remote mismatch returns the
 workflow to the operator; it is not repaired locally.
 
-Naming one primary case does not limit post-rebase acceptance to that case.
-Moving the embedded source invalidates every previous functional result, so the
-complete queue must resolve and pass every available tests-only control,
-focused/native tests, three full upstream legs, case-specific package
-boundaries, and all seven live profiles. The primary case receives the deeper
-semantic keep/adapt/retire review described below.
+Moving the embedded source invalidates every previous functional result. The
+agent therefore reads and semantically reassesses every active production
+patch in its current surrounding source, gives each case an explicit
+keep/adapt/retire conclusion, reassesses the quarantine duty, resolves the
+complete queue, and passes every available tests-only control, focused/native
+test, both real distribution package builds, all three full upstream legs,
+every declared atomic case live gate, and all seven stack live profiles. The
+primary case is reviewed first and receives the most detailed written mapping;
+every other case still receives the same correctness and retirement decision.
 
-This document describes the workflow but does not itself authorize a refresh.
-A task must explicitly choose the new base. Once the operator tells an agent to
-execute this runbook, that invocation authorizes one local preservation commit
-at the very beginning when legitimate non-ignored changes already exist. The
-agent makes that one start commit without another confirmation. It does not
-authorize any later content commit: every adaptation, retirement, quarantine,
-CI, documentation, or runner result produced by the refresh remains
+Invoking this runbook authorizes one local preservation commit at the very
+beginning when legitimate non-ignored changes already exist. The agent makes
+that one start commit without another confirmation. It does not authorize any
+later content commit: every adaptation, retirement, quarantine, CI,
+documentation, runner, or runbook result produced by the refresh remains
 uncommitted for operator review.
 
 ## Inputs and reading
 
-Choose before starting:
-
-- `CASE`: one production slug currently selected by `stacks/develop.toml`;
-- `CYCLE`: one never-reused lowercase prefix for every `RUN`, `IMAGE_RUN`, and
-  `WORKSPACE` created by this refresh;
-- the operator's confirmation that remote fork `master` was synchronized and
-  that this refresh should move `develop` now.
+The invocation supplies `PRIMARY_CASE`, which must be one production slug in
+the pre-refresh `stacks/develop.toml`. Derive `CYCLE` as specified by the single
+entry point and use it for every `RUN`, `IMAGE_RUN`, and `WORKSPACE` created by
+this refresh. The directive itself confirms that this refresh should move
+`develop` to the current verified fork `master`; there are no additional
+required inputs.
 
 Replace placeholders such as `<case>` and `<cycle>` in every example; never
 pass the angle brackets literally.
@@ -49,12 +75,13 @@ Read completely before changing anything:
 2. `fork-maintenance/CONTRACT.md` and this runbook;
 3. `stacks/develop.toml` and every active `cases/<id>/case.toml` and
    `README.md`;
-4. the selected case's complete `fix.patch`, plus every patch and surrounding
-   source boundary which overlaps its owned paths;
+4. every active case's complete `fix.patch`, including the quarantine patch,
+   plus the complete surrounding source, callers, tests, and overlapping
+   patches for all owned paths;
 5. `CLAUDE.md`, `CONTRIBUTING.md`, `.github/upstream-workflows/test.yml`, and
    `pyproject.toml`;
 6. the current source, adjacent tests, and recent maintainer-authored history
-   for every selected production path;
+   for every active production path and quarantine-owned test module;
 7. [`bootstrap.md`](bootstrap.md),
    [`isolated-workspaces.md`](isolated-workspaces.md),
    [`patch-cycle.md`](patch-cycle.md),
@@ -78,9 +105,9 @@ If the retained artifact inventory contains an owner from the retired
 classifying it. Current lifecycle readers intentionally have no compatibility
 mode for that namespace.
 
-If `<case>` is `upstream-test-quarantine`, use `test-quarantine.md`; it is a
-temporary test duty, not a production behavior eligible for the decision tree
-below.
+The primary slug cannot be `upstream-test-quarantine`: it is a temporary test
+duty, not a production behavior. The duty is nevertheless always in scope and
+is reassessed through `test-quarantine.md`.
 
 ## One start commit and the clean boundary
 
@@ -158,9 +185,9 @@ Record in the handoff notes, without creating a tracked evidence file:
   one was required, otherwise the pre-preservation commit);
 - old embedded source merge base;
 - local and cached fork-master commits;
-- selected case patch SHA-256 and complete stack resolution digest;
+- every active case patch SHA-256 and the complete stack resolution digest;
 - current branch/status;
-- the chosen case and cycle identifiers.
+- the primary case and derived cycle identifiers.
 
 Use commands which do not change refs or tracked source, and require exactly
 one old embedded source commit. Fork-control checks may update only ignored
@@ -186,6 +213,7 @@ else
   test "$result" -eq 1
   printf '%s\n' 'local_master=<missing>'
 fi
+# Repeat for every slug printed by the active stack listing.
 sha256sum fork-maintenance/cases/<case>/fix.patch
 make -C fork-maintenance list
 make -C fork-maintenance repo-status
@@ -405,10 +433,13 @@ Maintenance-labelled images and the upstream ccache volume are reusable
 caches rather than active runtime. Inspect and retain current-namespace cache
 objects, and let the owning image/cache checks validate their exact complete
 labels and immutable identity when they are next selected; a malformed or
-unattributed maintenance cache stops the refresh. Do not delete a valid cache
-merely because its source label predates the rebase. Apply the stricter exact
-absence/foreign-image exception below to every legacy-labelled image or volume
-selected from the unfiltered listings.
+unattributed maintenance cache stops the refresh. Do not delete a cache merely
+because its source label predates the rebase during this inventory phase: the
+current-source image preflight below is the authority for whether it can be
+used. That preflight may classify an otherwise exact old-source image for
+explicit locked removal and rebuild. Apply the stricter exact absence/foreign-
+image exception below to every legacy-labelled image or volume selected from
+the unfiltered listings.
 
 Derive each candidate identifier only from its canonical path shape: for DEB
 and image-build `owner.json`, the run name is the validated parent directory,
@@ -546,7 +577,9 @@ this checkout. Fetch and verify the result:
 make -C fork-maintenance repo-sync
 ```
 
-`repo-sync` must prove that cached and live `origin/master` and
+The public target rechecks clean porcelain and the `develop` branch before its
+first fetch, so an omitted preservation step fails before either cached ref can
+move. `repo-sync` must then prove that cached and live `origin/master` and
 `upstream/master` are all the same commit. If the fork is stale, ahead,
 divergent, missing, or moves during verification, stop. Return the refresh to
 the operator, who owns the hosted master-sync workflow, then repeat this gate
@@ -632,10 +665,14 @@ image or starting any test. Keep it uncommitted as a refresh result; subsequent
 case work must use isolated workspaces and must not require a clean host or a
 second content commit.
 
-## Queue-wide consequence and scope stops
+## Autonomous queue-wide authority and self-correction
 
-An upstream rebase is not a single-patch operation even when one case is the
-primary question. Before complete-stack heavy tests:
+An upstream rebase is never a single-patch operation. The invocation expressly
+authorizes the agent to inspect, retain, adapt, narrow, or retire every active
+production case; update the quarantine duty; and repair the fork control,
+tests, runners, documentation, and runbook needed to complete this refresh.
+The primary case is only the first and most detailed review. Before
+complete-stack heavy tests:
 
 - every active case must be `apply` or exact `already-present` against the new
   source;
@@ -644,17 +681,36 @@ primary question. Before complete-stack heavy tests:
 - any changed upstream workflow boundary must be reconciled;
 - no applied production source may remain in host `develop`.
 
-If an unrelated case diverges and the task authorizes only the named case,
-stop and request expanded queue-adaptation scope. Do not silently change an
-unrelated production patch and do not run the expensive final matrix on an
-unresolvable stack.
+If any case diverges, its clean control passes, skips, or no longer observes its
+claimed defect, perform the complete semantic mapping and keep/adapt/retire
+analysis below for that case in this same pass. Do not request scope expansion,
+preserve a potentially redundant or vacuous patch merely because it still
+applies, or run the expensive final matrix on an unresolved stack.
 
-The same scope stop applies when an unrelated production case's clean control
-now passes, skips, or no longer observes its claimed defect. That result makes
-the case's necessity part of the refresh decision: repeat the semantic mapping
-and keep/adapt/retire analysis for that case under explicit authority before
-the full or live matrix. Do not preserve a potentially redundant or vacuous
-patch merely because it still applies.
+When execution exposes an in-scope error or omission in this runbook, a related
+contract, control-plane implementation, test, live/package harness, or case
+documentation, repair it immediately and add or update the narrow regression
+which proves the correction. Keep those changes with the other uncommitted
+refresh results and continue the same runbook pass; do not restart the process
+from its first step merely because the written procedure changed.
+
+Maintain a current external run ledger of the exact source, case, selection,
+runner, image-input, command, and result identities. Reuse an already valid
+expensive result only while every semantic input which can affect it remains
+identical. Rerun the narrow preflight after a pre-test guard repair, and rerun
+an expensive payload only when its frozen source, applied patch or selection,
+image inputs, entrypoint, test command/assertions, runner, scenario, or
+acceptance behavior changed. A comments-only or documentation-only correction
+does not invalidate an otherwise exact result. If uncertainty remains, treat
+the result as invalid and rerun its gate with a new identity.
+
+Stop and return to the operator only for a boundary the directive cannot safely
+authorize: an unequal or divergent live fork master requiring remote mutation;
+unsafe, secret, unexplained, or externally owned local state; an unresolved
+semantic choice where a correct implementation cannot be established; or a
+mandatory physical/resource boundary which is genuinely unavailable. Report
+the exact blocker and all completed current evidence. Ordinary difficulty, a
+non-primary case change, or a repair to this runbook is not a scope stop.
 
 Every applicable or diverged case is inspected and updated one at a time in an
 isolated workspace, even while reviewed fork-control results are uncommitted.
@@ -665,8 +721,8 @@ possible.
 
 ## Prepare the test image and reassess quarantine
 
-Do this before adapting the selected production case. The quarantine must
-resolve before its named clean gates can start. If its old patch is `diverged`,
+Do this before adapting production cases. The quarantine must resolve before
+its named clean gates can start. If its old patch is `diverged`,
 use the isolated reconstruction flow below to preserve only the still-required
 declared test-module changes, publish that complete candidate, and then return
 here. If current upstream makes the correct candidate empty, retire the duty
@@ -679,9 +735,25 @@ Now verify the input-keyed upstream-test image:
 make -C fork-maintenance test-image
 ```
 
-If and only if the expected image is missing, build it through its named
-lifecycle, inspect the collected status and log, verify the resulting cache
-entry, and remove only the transient build ownership:
+The check uses the same exact Python ownership verifier as test startup,
+including the current source label, build-run UUID, complete maintenance label
+set, input digest, and workflow digest. It must not be a weaker shell-only
+label probe. If the image is absent, build it through its named lifecycle. If
+the tag instead names an otherwise exact owned image whose sole mismatch is an
+older source label, the removal target must prove that label names an existing
+Git commit which is an ancestor of the current embedded source. Only then remove
+that cache through the locked
+`test-image-cache-remove` target, require `test-image` to report absence, and
+then use the same named build lifecycle. Any other provenance mismatch is a
+hard stop; do not remove or overwrite it.
+
+```bash
+make -C fork-maintenance test-image-cache-remove
+make -C fork-maintenance test-image
+```
+
+For the absent-image branch, inspect the collected status and log, verify the
+resulting cache entry, and remove only the transient build ownership:
 
 ```bash
 make -C fork-maintenance test-image-start \
@@ -697,9 +769,9 @@ make -C fork-maintenance test-image-remove \
   IMAGE_RUN=<cycle>-upstream-image-01
 ```
 
-Any failure other than absence of the expected digest-keyed image requires
-diagnosis; do not overwrite or delete an unverified cache entry. Follow
-[`bootstrap.md`](bootstrap.md) for recovery and abort paths.
+Any failure other than absence or the exact stale-source classification above
+requires diagnosis; do not overwrite or delete an unverified cache entry.
+Follow [`bootstrap.md`](bootstrap.md) for recovery and abort paths.
 Any later change to the image inputs or embedded upstream workflow changes the
 image key; repeat this verification/build lifecycle before the next test.
 
@@ -719,10 +791,15 @@ make -C fork-maintenance test-start \
 ```
 
 Wait for, inspect, and remove each job through the matching `test-*` lifecycle.
-These gates are inverted: success means the exact declared module set still
-fails after a successful build. A listed module which becomes green makes the
-quarantine stale and must be removed or narrowed, after which all three clean
-gates run again.
+Each gate runs the complete quarantine module union. Success means its exact
+gate-specific subset is the ordered ignored-failure set, every complement
+module passes, and there are no unignored failures or skipped modules. An
+assigned module which becomes green makes that assignment stale; a complement
+failure requires current clean-source diagnosis and an exact new assignment.
+The autonomous invocation already authorizes that queue-wide duty update.
+Update the case through the atomic admission sequence in
+[`test-quarantine.md`](test-quarantine.md), then run all three clean gates
+again.
 
 If any duty module remains, prove that the current quarantine patch itself
 applies and its focused module selection is valid:
@@ -753,11 +830,15 @@ the isolated applicable/reconstruction flows without touching the host source
 or index. The complete `check` and `stack-check` remain mandatory after every
 case resolves; do not claim them early while the queue is still divergent.
 
-## Reassess the selected case semantically
+## Reassess every production case semantically
 
-Applicability is not a necessity decision. For the old and new source commits,
-inspect the selected manifest paths and relevant upstream history. Build an
-explicit map of:
+Applicability is not a necessity decision. Enumerate every production case
+from the recorded pre-refresh queue, then account for every case still present
+after any retirement or ownership migration. Review the primary case first and
+record its map in greatest detail, but apply the same decision bar to all
+cases. For the old and new source commits, inspect each manifest's paths,
+complete patch, surrounding callers/tests, overlapping queue changes, and
+relevant upstream history. Build an explicit map for every case of:
 
 | Question | Required evidence |
 | --- | --- |
@@ -774,11 +855,17 @@ commit subjects, prior logs, or similarity of function names. Review adjacent
 callers and tests, not just changed lines. An upstream commit message saying it
 fixed the same symptom is a lead, never retirement evidence.
 
+Complete this map and choose a provisional decision for every production case
+before entering complete-stack validation. Apply the appropriate refresh,
+reconstruction, or retirement section below to each case in stack order after
+the primary review, and update the ledger after every exported or retired
+candidate. A case which still applies textually is not exempt from this review.
+
 ### Establish the clean control or documented substitute
 
 `PATCH_MODE=tests-only` and `PATCH_MODE=clean` still validate the complete
-selected case patch before starting a container. Do not invoke either command
-while the selected case is `diverged` or `ambiguous`. For `diverged`, first
+case patch before starting a container. Do not invoke either command while
+that case is `diverged` or `ambiguous`. For `diverged`, first
 reconstruct and publish a nonempty current candidate as described below, then
 return to this control. If upstream appears to have replaced the behavior so
 completely that the correct candidate is empty, `patch-update` cannot publish
@@ -912,8 +999,10 @@ completed independent case with no dependencies whose current patch is
 provably neither forward- nor reverse-applicable. It binds the old patch,
 manifest, path set, selection, and source identities, copies clean embedded
 source, and applies no old patch. If the diverged case has dependencies, stop
-and first design a dependency-aware atomic boundary instead of bypassing the
-guard or reconstructing it against an incomplete source:
+that reconstruction attempt and implement a dependency-aware atomic boundary
+with its fork-control tests before continuing the same pass; never bypass the
+guard or reconstruct against an incomplete source. If a safe ownership model
+cannot be established, report that exact semantic blocker rather than guessing:
 
 ```bash
 make -C fork-maintenance isolated-start-check
@@ -981,14 +1070,15 @@ There is no automatic `case-retire` target. In one reviewed content change:
 5. record the upstream replacement and old/new source commits in the external
    handoff, never a tracked evidence archive or an automatic result commit.
 
-Deletion is a material decision. If the refresh task did not explicitly
-authorize keep/adapt/retire changes, stop after presenting the proof and ask
-for that authority.
+Deletion is a material decision, but the autonomous invocation explicitly
+authorizes it when the complete semantic map and durable replacement evidence
+satisfy this section. Keep the retirement uncommitted for operator review; do
+not ask for a separate scope expansion or commit it.
 
 The current `wayland-client-keymap-sync` case has an additional hard retirement
 boundary. Its versioned `tests/live-wayland-keyboard.json` scenario is the sole
 input for `live-wayland-keyboard`, and both the runner and job provenance
-currently require that input to be owned by one selected case. Removing the
+currently require that input to be owned by one exact case selection. Removing the
 case as-is makes the mandatory stack-wide keyboard gate fail before Xpra starts.
 Before retiring it, migrate the scenario to durable neutral ownership or add an
 equivalent generic manifest-declared mechanism, then update the runner,
@@ -1015,10 +1105,10 @@ git diff --check
 ```
 
 For every retained or adapted case, also run its individual
-`patch-check CASE=<slug>`. For a retired primary case, that command must fail
+`patch-check CASE=<slug>`. For every retired case, that command must fail
 because the case no longer exists; instead, search all current manifests,
 stack files, Make targets, and active-case documentation for stale references
-to its slug. The expected read-only check is:
+to its slug. The expected read-only check, repeated for each retired slug, is:
 
 ```bash
 rg -n --fixed-strings '<case>' \
@@ -1030,21 +1120,26 @@ Exit status 1 with no output is the expected no-match result; any other nonzero
 status is an error. Review every match; no current active reference may remain.
 
 Repeat the tests-only focused control for every production case in the current
-stack which owns tests, not only the primary case. For a case with no retained
-test path, record that the tests-only control is unavailable, perform its
-documented semantic inspection of clean upstream, and prove the durable real
-boundary against the complete resulting stack. Do not invoke the unsupported
-`PATCH_MODE=clean TARGET=focused` combination. If any non-primary clean control
-passes, skips, or ceases to reproduce the exact retained regression, stop this
-validation phase and apply the queue-wide scope rule above before continuing.
-Apply the same stop when a no-test case's semantic inspection indicates that
-upstream may now replace its behavior; it also requires an explicitly scoped
-keep/adapt/retire reassessment before package, full, or live acceptance.
+stack which owns tests. Also repeat every
+native/subsystem target declared by such a case in `PATCH_MODE=tests-only`;
+these are available clean controls after every rebase, not only when retirement
+is already expected. Give each case/target pair a distinct `RUN`, inspect its
+exact expected regression, and remove it through the ordinary lifecycle. For a
+case with no retained test path, record that the tests-only control is
+unavailable, perform its documented semantic inspection of clean upstream, and
+prove the durable real boundary against the complete resulting stack. Do not
+invoke the unsupported `PATCH_MODE=clean TARGET=focused` combination or a
+native target absent from that case's manifest. If any clean control passes,
+skips, or ceases to reproduce the exact retained regression, return to that
+case's already-authorized semantic keep/adapt/retire analysis before
+continuing. Do the same when a no-test case's semantic inspection indicates
+that upstream may now replace its behavior. Do not proceed to package, full,
+or live acceptance until every such decision is resolved.
 
 For every retained or adapted production case, run its individual focused
 selection with the complete patch. Enumerate the current stack and give every
-case a distinct `RUN`; do not substitute the primary case alone or infer
-atomic self-sufficiency from the later stack result:
+case a distinct `RUN`; do not infer atomic self-sufficiency from the later
+stack result:
 
 ```bash
 make -C fork-maintenance test-start \
@@ -1111,6 +1206,13 @@ cleanup.
 Start each leg with a distinct run identity; they may execute concurrently when
 resources allow:
 
+Only the detached test payloads run concurrently. Collection, abort, and
+removal are terminal lifecycle transitions protected by one retained lock, so
+run each `test-wait` / review / `test-remove` sequence serially in the order
+shown. Do not launch concurrent `test-wait` commands: the extra collectors are
+expected to fail closed with `collection or abort is already active`, which is
+not test evidence and does not require rerunning an already unchanged payload.
+
 ```bash
 make -C fork-maintenance test-start \
   STACK=develop PATCH_MODE=patched TARGET=full \
@@ -1140,13 +1242,14 @@ make -C fork-maintenance test-remove RUN=<cycle>-full-no-compat-01
 ```
 
 Review every status and complete log before its exact remove command. A foreign
-failure is not fixed or skipped in the selected production case. First
-reproduce its module on the exact clean source in the same leg and follow
-`test-quarantine.md` when the user authorizes that scope.
+failure is not fixed or skipped in whichever production case happened to be
+under review. First reproduce its module on the exact clean source in the same
+leg and follow the already-authorized queue-wide quarantine procedure in
+`test-quarantine.md`.
 
 ### Live preflight
 
-Before the first selected-case or stack live gate, create and verify the
+Before the first case-declared or stack live gate, create and verify the
 hash-locked analysis environment, inspect the host boundary, and prove that the
 complete resulting stack can be materialized in an isolated workspace:
 
@@ -1164,16 +1267,32 @@ make -C fork-maintenance workspace-remove \
 Do not start a live wrapper if this preflight fails. `doctor` reports optional
 hardware and input-path availability, but a selected live gate which requires
 one of those paths still fails closed when it is unavailable. Reuse this
-verified environment for the selected-case gate and the seven stack profiles;
+verified environment for all case-declared gates and the seven stack profiles;
 do not recreate it between otherwise unchanged runs.
 
-### Selected-case real boundary
+### Case-declared real boundaries
 
-Only after all three full legs pass, run each live gate declared by a retained
-or adapted case with `CASE=<case>`. After retirement, omit that patched-case
-run: the corresponding gate in the resulting stack-wide seven-profile matrix
-is the replacement proof, subject to the keyboard scenario-ownership boundary
-above. Current manifest-to-Make mappings are:
+Only after all three full legs pass, enumerate every retained or adapted
+production case and run every live gate in its `required_gates` with that exact
+`CASE=<case>` selection. If two cases
+declare the same gate, run it once for each case: the atomic selections prove
+different patch boundaries. A case with an empty list contributes no live run
+here. After retirement, omit that retired case's patched run: the corresponding
+gate in the resulting stack-wide seven-profile matrix is the replacement
+proof, subject to the keyboard scenario-ownership boundary above. Current
+manifest-to-Make mappings are:
+
+A case may declare a gate only when its exact `CASE=<case>` selection can
+satisfy the fixed positive profile without another active patch. A real
+boundary which necessarily consumes behavior or diagnostics owned by another
+case belongs to the complete stack instead: leave that case's
+`required_gates` empty, name the stack-owned boundary in its README, and retain
+the gate in `stacks/develop.toml`. Do not run the impossible atomic selection,
+add a case-name branch to the runner, or weaken the profile after it fails.
+The current `video-pipeline-cleanup-race` case is the concrete example: its
+cleanup regression is standalone, but both hardware profiles consume dynamic
+frame-alpha evidence owned by `wayland-initial-window-state`, so those live
+boundaries remain mandatory only in the complete-stack matrix below.
 
 | Manifest gate | Make wrapper |
 | --- | --- |
@@ -1182,17 +1301,35 @@ above. Current manifest-to-Make mappings are:
 | `live-wayland-h264-hardware` | `live-xpra-hardware` |
 | `live-wayland-opengl-h264-hardware` | `live-xpra-opengl-hardware` |
 
-Use `live-wait`, inspect the report/log, and `live-remove` for every run. After
-each remove, repeat `live-status` and require its retained removal transaction
-to report `phase=removed`; `live-logs` remains available through that validated
-transaction. An empty `required_gates` list does not erase a package or
-subsystem boundary stated by the case README.
+For every enumerated case/gate pair, substitute the wrapper from the table and
+use a run name containing both the case and gate so duplicate gate declarations
+cannot overwrite or masquerade as one another:
 
-If a Debian-packaging case was present in the recorded pre-refresh queue,
-whether it is retained, adapted, or retired, run both real package builds and
-their independent package/import validation. Also run them whenever any
-selected/current case or case README owns a package boundary, even if its
-manifest has no package gate:
+```bash
+make -C fork-maintenance <live-wrapper> \
+  CASE=<case> RUN=<cycle>-<case>-<manifest-gate>-01
+make -C fork-maintenance live-wait \
+  RUN=<cycle>-<case>-<manifest-gate>-01
+make -C fork-maintenance live-status \
+  RUN=<cycle>-<case>-<manifest-gate>-01
+make -C fork-maintenance live-logs \
+  RUN=<cycle>-<case>-<manifest-gate>-01
+make -C fork-maintenance live-remove \
+  RUN=<cycle>-<case>-<manifest-gate>-01
+make -C fork-maintenance live-status \
+  RUN=<cycle>-<case>-<manifest-gate>-01
+```
+
+Inspect the complete report/log before removal. The post-remove status must use
+the retained removal transaction and report `phase=removed`; `live-logs`
+remains available through that validated transaction. An empty
+`required_gates` list does not erase a package or subsystem boundary stated by
+the case README.
+
+Run both real package builds and their independent package/import validation
+for every autonomous refresh, regardless of whether the Debian-packaging case
+is retained, adapted, or retired. They are an unconditional post-rebase
+boundary, not a focused unit-test substitute:
 
 ```bash
 make -C fork-maintenance deb-start \
@@ -1218,6 +1355,16 @@ candidate stack, the same two builds are the durable package-boundary proof for
 the proposed upstream replacement. The ordinary codec unit test is not a
 substitute in either branch.
 
+An older retained selection snapshot may use manifest vocabulary which the
+current resolver no longer accepts. The package start must still validate that
+historical cache's private metadata and exact tree, but it must semantically
+replay and reuse only a cache whose selection digest equals the current stack.
+Do not delete or edit an old cache to bypass this guard. If discovery of an
+unrelated historical cache blocks before `<RUN>.prelaunch.json` exists, repair
+the cache-inventory compatibility boundary and its lifecycle tests, verify that
+the failed name owns no RUN artifacts, and restart the package gate once with a
+fresh RUN name.
+
 ### All seven positive live profiles
 
 Using the already verified live preflight above, run all seven wrappers
@@ -1232,6 +1379,7 @@ make -C fork-maintenance live-wait RUN=<cycle>-live-rgb-01
 make -C fork-maintenance live-status RUN=<cycle>-live-rgb-01
 make -C fork-maintenance live-logs RUN=<cycle>-live-rgb-01
 make -C fork-maintenance live-remove RUN=<cycle>-live-rgb-01
+make -C fork-maintenance live-status RUN=<cycle>-live-rgb-01
 
 make -C fork-maintenance live-h264 \
   STACK=develop RUN=<cycle>-live-h264-01
@@ -1239,6 +1387,7 @@ make -C fork-maintenance live-wait RUN=<cycle>-live-h264-01
 make -C fork-maintenance live-status RUN=<cycle>-live-h264-01
 make -C fork-maintenance live-logs RUN=<cycle>-live-h264-01
 make -C fork-maintenance live-remove RUN=<cycle>-live-h264-01
+make -C fork-maintenance live-status RUN=<cycle>-live-h264-01
 
 make -C fork-maintenance live-xpra-detach \
   STACK=develop RUN=<cycle>-live-detach-01
@@ -1246,6 +1395,7 @@ make -C fork-maintenance live-wait RUN=<cycle>-live-detach-01
 make -C fork-maintenance live-status RUN=<cycle>-live-detach-01
 make -C fork-maintenance live-logs RUN=<cycle>-live-detach-01
 make -C fork-maintenance live-remove RUN=<cycle>-live-detach-01
+make -C fork-maintenance live-status RUN=<cycle>-live-detach-01
 
 make -C fork-maintenance live-xpra-transport-loss \
   STACK=develop RUN=<cycle>-live-transport-loss-01
@@ -1256,6 +1406,8 @@ make -C fork-maintenance live-status \
 make -C fork-maintenance live-logs \
   RUN=<cycle>-live-transport-loss-01
 make -C fork-maintenance live-remove \
+  RUN=<cycle>-live-transport-loss-01
+make -C fork-maintenance live-status \
   RUN=<cycle>-live-transport-loss-01
 
 make -C fork-maintenance live-wayland-keyboard \
@@ -1268,6 +1420,8 @@ make -C fork-maintenance live-logs \
   RUN=<cycle>-live-wayland-keyboard-01
 make -C fork-maintenance live-remove \
   RUN=<cycle>-live-wayland-keyboard-01
+make -C fork-maintenance live-status \
+  RUN=<cycle>-live-wayland-keyboard-01
 
 make -C fork-maintenance live-xpra-hardware \
   STACK=develop RUN=<cycle>-live-hardware-01
@@ -1275,6 +1429,7 @@ make -C fork-maintenance live-wait RUN=<cycle>-live-hardware-01
 make -C fork-maintenance live-status RUN=<cycle>-live-hardware-01
 make -C fork-maintenance live-logs RUN=<cycle>-live-hardware-01
 make -C fork-maintenance live-remove RUN=<cycle>-live-hardware-01
+make -C fork-maintenance live-status RUN=<cycle>-live-hardware-01
 
 make -C fork-maintenance live-xpra-opengl-hardware \
   STACK=develop RUN=<cycle>-live-opengl-hardware-01
@@ -1286,6 +1441,8 @@ make -C fork-maintenance live-logs \
   RUN=<cycle>-live-opengl-hardware-01
 make -C fork-maintenance live-remove \
   RUN=<cycle>-live-opengl-hardware-01
+make -C fork-maintenance live-status \
+  RUN=<cycle>-live-opengl-hardware-01
 ```
 
 Every live result must be a positive application/transport/hardware result with
@@ -1293,8 +1450,21 @@ its exact lifecycle and cleanup evidence. Missing hardware, application input,
 or a valid environment leaves the refresh incomplete; it is not converted to a
 skip. Never signal an owned job or call destructive Podman commands directly;
 use only `test-*`, `live-*`, `test-image-*`, and `deb-*` lifecycle targets.
-After each `live-remove` shown above, repeat `live-status` for that exact `RUN`
-and require `phase=removed` before proceeding to the next profile.
+Each post-remove `live-status` shown above must report `phase=removed` before
+proceeding to the next profile.
+
+For detach and transport loss, review the three identical fixture-owned
+application identity snapshots (capture, post-disconnect, and pre-termination),
+their exact Python/script argv, PID, procfs start ticks, and command-line
+digest. Require the same three snapshots for the server identity, with its PID
+equal to `server_pid` and distinct from the fixture PID. The termination record
+must bind both unchanged identities and both pidfds; its one in-container probe
+must reject an exited or zombie server, double-snapshot both processes, poll
+the server pidfd immediately before sending `SIGTERM` only through the fixture
+pidfd, then observe the exact fixture gone and only afterward the exact server
+gone. Plain survival booleans or a process-name match are invalid: the Xpra
+server argv itself contains the `--start-child` command and therefore matches
+a naive `pgrep --full interaction_fixture.py` search.
 
 ## Final audit and uncommitted handoff
 
@@ -1308,12 +1478,12 @@ git diff --check
 git status --short --branch
 ```
 
-For a retained or adapted primary case, precede this block with
-`make -C fork-maintenance patch-check CASE=<case>`. For a retired case, record
-the reviewed `rg` no-stale-reference result and the successful resulting-stack
-resolution instead.
+Precede this block with `make -C fork-maintenance patch-check CASE=<case>` for
+every retained or adapted case. For every retired case, record the reviewed
+`rg` no-stale-reference result and the successful resulting-stack resolution
+instead.
 
-If the resulting checkout is already clean—for example, the selected case was
+If the resulting checkout is already clean—for example, every case was
 retained unchanged and the rebase needed no new control-plane repair—run the
 final branch gate now:
 
@@ -1332,11 +1502,12 @@ The handoff must state:
 - old and new fork-master/source/develop commits;
 - the sole automatic start-commit SHA, or that the checkout began clean;
 - rewritten commit range and any rebase conflict resolutions;
-- selected case's old/new patch digests and keep/adapt/retire conclusion;
-- semantic mapping and every available clean-control result, or the documented
-  no-test semantic evidence;
-- status of every other case and the quarantine;
-- focused/native, package, full-leg, and seven live run identities/results;
+- each case's old/new patch digests, semantic map, available clean-control or
+  documented no-test evidence, and keep/adapt/retire conclusion, with the
+  primary case recorded in greatest detail;
+- quarantine reassessment and any assignment changes;
+- focused/native, package, full-leg, every atomic case-live, and seven stack-live
+  run identities/results;
 - any incomplete gate or missing authority;
 - the exact final staged, unstaged, and untracked status and why
   `develop-check` is outstanding when the result is dirty;

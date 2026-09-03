@@ -66,6 +66,33 @@ class MasterSyncTest(unittest.TestCase):
         )
         verify.assert_called_once_with(repo)
 
+    def test_public_repo_sync_rejects_dirty_develop_before_fetch(self) -> None:
+        repo = Path("/tmp/xpra-fork")
+        with (
+            patch.object(contrib, "current_branch", return_value="develop"),
+            patch.object(
+                contrib,
+                "require_clean",
+                side_effect=contrib.ContribError("repository has local changes"),
+            ),
+            patch.object(contrib, "sync_repo") as sync,
+            self.assertRaisesRegex(contrib.ContribError, "local changes"),
+        ):
+            contrib.repo_sync(repo)
+        sync.assert_not_called()
+
+    def test_public_repo_sync_rejects_wrong_branch_before_fetch(self) -> None:
+        repo = Path("/tmp/xpra-fork")
+        with (
+            patch.object(contrib, "current_branch", return_value="master"),
+            patch.object(contrib, "require_clean") as require_clean,
+            patch.object(contrib, "sync_repo") as sync,
+            self.assertRaisesRegex(contrib.ContribError, "requires the develop branch"),
+        ):
+            contrib.repo_sync(repo)
+        require_clean.assert_not_called()
+        sync.assert_not_called()
+
     def test_live_fork_verification_accepts_the_fetched_commit(self) -> None:
         repo = Path("/tmp/xpra-fork")
         fork = "1" * 40
@@ -1340,9 +1367,192 @@ class IsolatedWorkspaceTest(unittest.TestCase):
             )
         return contrib.validate_case_update_transaction(self.repo, self.case.slug)
 
+    @staticmethod
+    def rewrite_case_update_record(
+        path: Path,
+        *,
+        quarantine_path_transition: bool | None,
+    ) -> dict[str, object]:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if quarantine_path_transition is None:
+            payload.pop("quarantine_path_transition", None)
+        else:
+            payload["quarantine_path_transition"] = quarantine_path_transition
+        path.write_bytes(contrib.canonical_json_bytes(payload))
+        return payload
+
+    def make_case_update_transaction_legacy(
+        self,
+        transaction: contrib.CaseUpdateTransaction,
+    ) -> contrib.CaseUpdateTransaction:
+        self.rewrite_case_update_record(
+            transaction.owner,
+            quarantine_path_transition=None,
+        )
+        self.rewrite_case_update_record(
+            transaction.directory / "transaction.json",
+            quarantine_path_transition=None,
+        )
+        return contrib.validate_case_update_transaction(self.repo, self.case.slug)
+
     def assert_no_tracked_case_staging(self, directory: Path | None = None) -> None:
         selected = self.case_dir if directory is None else directory
         self.assertFalse(any(path.name.startswith(".") for path in selected.iterdir()))
+
+    def create_quarantine_transition_workspace(
+        self,
+        name: str,
+    ) -> tuple[contrib.Workspace, bytes, bytes]:
+        self.case_dir = self.case_dir.parent / contrib.TEST_QUARANTINE_SLUG
+        self.case_dir.mkdir()
+        (self.case_dir / "README.md").write_text(
+            "# Sample quarantine\n",
+            encoding="utf-8",
+        )
+        old_patch = b"""diff --git a/tests/unittests/unit/legacy_test.py b/tests/unittests/unit/legacy_test.py
+new file mode 100644
+--- /dev/null
++++ b/tests/unittests/unit/legacy_test.py
+@@ -0,0 +1 @@
++VALUE = "legacy"
+"""
+        old_digest = hashlib.sha256(old_patch).hexdigest()
+        old_manifest = f"""schema = 1
+slug = "upstream-test-quarantine"
+kind = "test-quarantine"
+title = "Sample quarantine"
+commit_subject = "Sample quarantine"
+patch_sha256 = "{old_digest}"
+dependencies = []
+paths = [
+  "tests/unittests/unit/legacy_test.py",
+]
+
+[tests]
+list = [
+  "unit.legacy_test",
+]
+
+[quarantine]
+modules = [
+  "unit.legacy_test",
+]
+
+[quarantine.gates]
+quarantine = ["unit.legacy_test"]
+quarantine-cython = ["unit.legacy_test"]
+quarantine-no-compat = ["unit.legacy_test"]
+
+[evidence]
+required_gates = ["quarantine", "quarantine-cython", "quarantine-no-compat"]
+"""
+        (self.case_dir / "fix.patch").write_bytes(old_patch)
+        (self.case_dir / "case.toml").write_text(old_manifest, encoding="utf-8")
+        self.case = contrib.load_case(self.case_dir)
+        self.resolution = {
+            "schema": 1,
+            "source_commit": self.base,
+            "selection": "cases/upstream-test-quarantine",
+            "selection_sha256": "1" * 64,
+            "declared_cases": ["upstream-test-quarantine"],
+            "base_dependencies": [],
+            "patches": [
+                {
+                    "case": "upstream-test-quarantine",
+                    "patch": "cases/upstream-test-quarantine/fix.patch",
+                    "patch_sha256": self.case.patch_sha256,
+                    "status": "apply",
+                }
+            ],
+            "applied_cases": ["upstream-test-quarantine"],
+            "already_present_cases": [],
+            "resolution_sha256": "2" * 64,
+        }
+        start, selected, resolution, _case = self.mocks(self.case)
+        with start, selected, resolution:
+            workspace = contrib.create_workspace(
+                self.repo,
+                name,
+                "cases/upstream-test-quarantine",
+                "patched",
+            )
+
+        mixed_manifest = f"""schema = 1
+slug = "upstream-test-quarantine"
+kind = "test-quarantine"
+title = "Sample quarantine"
+commit_subject = "Sample quarantine"
+patch_sha256 = "{old_digest}"
+dependencies = []
+paths = [
+  "tests/unittests/unit/legacy_test.py",
+]
+
+[tests]
+list = [
+  "unit.legacy_test",
+  "unit.cython_only_test",
+]
+
+[quarantine]
+modules = [
+  "unit.legacy_test",
+  "unit.cython_only_test",
+]
+
+[quarantine.gates]
+quarantine = ["unit.legacy_test"]
+quarantine-cython = ["unit.legacy_test", "unit.cython_only_test"]
+quarantine-no-compat = ["unit.legacy_test"]
+
+[evidence]
+required_gates = ["quarantine", "quarantine-cython", "quarantine-no-compat"]
+"""
+        self.case.manifest.write_text(mixed_manifest, encoding="utf-8")
+        return workspace, old_patch, mixed_manifest.encode()
+
+    @staticmethod
+    def add_cython_quarantine_candidate(workspace: contrib.Workspace) -> Path:
+        path = workspace.source / "tests" / "unittests" / "unit" / "cython_only_test.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('VALUE = "cython"\n', encoding="utf-8")
+        return path
+
+    def final_quarantine_resolution(
+        self,
+        workspace: contrib.Workspace,
+    ) -> tuple[bytes, dict[str, object]]:
+        patch_bytes = contrib.git(
+            workspace.source,
+            "diff",
+            "--cached",
+            "--binary",
+            "--full-index",
+            workspace.base_tree,
+            "--",
+            text=False,
+        ).stdout
+        self.assertIsInstance(patch_bytes, bytes)
+        patch_digest = hashlib.sha256(patch_bytes).hexdigest()
+        return patch_bytes, {
+            "schema": 1,
+            "source_commit": workspace.source_commit,
+            "selection": workspace.selection,
+            "selection_sha256": "3" * 64,
+            "declared_cases": ["upstream-test-quarantine"],
+            "base_dependencies": [],
+            "patches": [
+                {
+                    "case": "upstream-test-quarantine",
+                    "patch": "cases/upstream-test-quarantine/fix.patch",
+                    "patch_sha256": patch_digest,
+                    "status": "apply",
+                }
+            ],
+            "applied_cases": ["upstream-test-quarantine"],
+            "already_present_cases": [],
+            "resolution_sha256": "4" * 64,
+        }
 
     def test_recovery_interfaces_are_visible_in_make_help(self) -> None:
         output = command(
@@ -1464,6 +1674,187 @@ class IsolatedWorkspaceTest(unittest.TestCase):
         self.assertFalse((workspace.source / "fork-maintenance").exists())
         self.assertEqual(command("git", "branch", "--show-current", cwd=self.repo), "develop")
         self.assertEqual(command("git", "rev-parse", "HEAD", cwd=self.repo), self.head)
+
+    def test_quarantine_path_transition_requires_explicit_admission(self) -> None:
+        workspace, old_patch, _old_manifest = self.create_quarantine_transition_workspace(
+            "quarantine-admission-01"
+        )
+        self.add_cython_quarantine_candidate(workspace)
+
+        with patch.object(contrib, "CASES_ROOT", self.case_dir.parent):
+            with self.assertRaisesRegex(contrib.ContribError, "paths must exactly match"):
+                contrib.stage_workspace(self.repo, workspace.name)
+            self.assertEqual(
+                contrib.stage_workspace(
+                    self.repo,
+                    workspace.name,
+                    allow_path_change=True,
+                ),
+                (
+                    "tests/unittests/unit/cython_only_test.py",
+                    "tests/unittests/unit/legacy_test.py",
+                ),
+            )
+
+        self.assertEqual(self.case.patch.read_bytes(), old_patch)
+        self.assertEqual(
+            contrib.patch_paths(self.case.patch),
+            ("tests/unittests/unit/legacy_test.py",),
+        )
+
+    def test_quarantine_path_transition_rejects_a_nonunion_candidate(self) -> None:
+        workspace, _old_patch, _old_manifest = self.create_quarantine_transition_workspace(
+            "quarantine-paths-01"
+        )
+        self.add_cython_quarantine_candidate(workspace)
+        unexpected = workspace.source / "tests" / "unittests" / "unit" / "unexpected_test.py"
+        unexpected.write_text("VALUE = 'unexpected'\n", encoding="utf-8")
+
+        with (
+            patch.object(contrib, "CASES_ROOT", self.case_dir.parent),
+            self.assertRaisesRegex(contrib.ContribError, "do not match modules"),
+        ):
+            contrib.stage_workspace(
+                self.repo,
+                workspace.name,
+                allow_path_change=True,
+            )
+
+    def test_quarantine_transition_recovery_publishes_one_exact_new_pair(self) -> None:
+        workspace, old_patch, old_manifest = self.create_quarantine_transition_workspace(
+            "quarantine-recovery-01"
+        )
+        self.add_cython_quarantine_candidate(workspace)
+        with patch.object(contrib, "CASES_ROOT", self.case_dir.parent):
+            contrib.stage_workspace(
+                self.repo,
+                workspace.name,
+                allow_path_change=True,
+            )
+        patch_bytes, resolution = self.final_quarantine_resolution(workspace)
+
+        with (
+            patch.object(contrib, "CASES_ROOT", self.case_dir.parent),
+            patch.object(contrib, "selection_resolution", return_value=resolution),
+            patch.object(
+                contrib,
+                "complete_case_update_transaction",
+                side_effect=RuntimeError("simulated quarantine transition crash"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "simulated quarantine transition crash"),
+        ):
+            contrib.update_case_from_workspace(
+                self.repo,
+                workspace.name,
+                allow_path_change=True,
+            )
+
+        transaction = contrib.validate_case_update_transaction(self.repo, self.case.slug)
+        entries = {entry.key: entry for entry in transaction.entries}
+        self.assertEqual(entries["case-patch"].old_payload.read_bytes(), old_patch)
+        self.assertEqual(entries["case-manifest"].old_payload.read_bytes(), old_manifest)
+        self.assertEqual(entries["case-patch"].new_payload.read_bytes(), patch_bytes)
+        contrib.publish_case_update_entry(transaction, entries["case-patch"])
+        self.assertEqual(self.case.patch.read_bytes(), patch_bytes)
+        self.assertEqual(self.case.manifest.read_bytes(), old_manifest)
+
+        with patch.object(contrib, "CASES_ROOT", self.case_dir.parent):
+            contrib.recover_case_creation(self.repo, self.case.slug)
+
+        updated = contrib.load_case(self.case_dir)
+        expected_paths = (
+            "tests/unittests/unit/cython_only_test.py",
+            "tests/unittests/unit/legacy_test.py",
+        )
+        self.assertEqual(tuple(sorted(updated.paths)), expected_paths)
+        self.assertEqual(contrib.patch_paths(updated.patch), expected_paths)
+        self.assertEqual(updated.patch_sha256, hashlib.sha256(patch_bytes).hexdigest())
+        self.assertEqual(
+            contrib.quarantine_module_paths(updated.quarantined_tests),
+            expected_paths,
+        )
+        recovered_workspace = contrib.load_workspace(self.repo, workspace.name)
+        recovered_resolution = json.loads(
+            contrib.workspace_resolution_path(recovered_workspace.directory).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(recovered_workspace.patch_mode, "patched")
+        self.assertEqual(
+            recovered_resolution["patches"][0]["patch_sha256"],
+            updated.patch_sha256,
+        )
+        self.assertFalse(transaction.directory.exists())
+        self.assertFalse(transaction.owner.exists())
+
+    def test_quarantine_transition_owner_only_recovery_uses_durable_authority(self) -> None:
+        workspace, _old_patch, _old_manifest = self.create_quarantine_transition_workspace(
+            "quarantine-owner-only-01"
+        )
+        _transaction, owner = contrib.case_update_paths(self.repo, self.case.slug)
+        contrib.publish_private_json(
+            owner,
+            contrib.case_update_owner_payload(
+                self.repo,
+                self.case.slug,
+                workspace.name,
+                str(contrib.uuid.uuid4()),
+                True,
+            ),
+            "test quarantine transition owner",
+        )
+
+        with patch.object(contrib, "CASES_ROOT", self.case_dir.parent):
+            recovered = contrib.recover_case_creation(self.repo, self.case.slug)
+
+        self.assertEqual(recovered, (owner,))
+        self.assertFalse(owner.exists())
+        transitioned = contrib.load_case(
+            self.case_dir,
+            allow_quarantine_path_transition=True,
+        )
+        self.assertTrue(contrib.is_quarantine_path_transition(transitioned))
+
+    def test_quarantine_transition_failed_candidate_aborts_exactly(self) -> None:
+        workspace, _old_patch, _old_manifest = self.create_quarantine_transition_workspace(
+            "quarantine-candidate-abort-01"
+        )
+        self.add_cython_quarantine_candidate(workspace)
+        with patch.object(contrib, "CASES_ROOT", self.case_dir.parent):
+            contrib.stage_workspace(
+                self.repo,
+                workspace.name,
+                allow_path_change=True,
+            )
+
+        transaction, owner = contrib.case_update_paths(self.repo, self.case.slug)
+        staging, removal = contrib.case_update_removal_paths(self.repo, self.case.slug)
+        with (
+            patch.object(contrib, "CASES_ROOT", self.case_dir.parent),
+            patch.object(
+                contrib,
+                "workspace_update_payloads",
+                side_effect=RuntimeError("simulated transition candidate failure"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "simulated transition candidate failure"),
+        ):
+            contrib.update_case_from_workspace(
+                self.repo,
+                workspace.name,
+                allow_path_change=True,
+            )
+
+        self.assertFalse(
+            any(
+                path.exists() or path.is_symlink()
+                for path in (transaction, owner, staging, removal)
+            )
+        )
+        transitioned = contrib.load_case(
+            self.case_dir,
+            allow_quarantine_path_transition=True,
+        )
+        self.assertTrue(contrib.is_quarantine_path_transition(transitioned))
 
     def test_workspace_status_reports_current_host_identity(self) -> None:
         start, selected, resolution, _case = self.mocks()
@@ -1881,6 +2272,12 @@ class IsolatedWorkspaceTest(unittest.TestCase):
         self.assertEqual(contrib.load_workspace(self.repo, workspace.name).patch_mode, "reconstruct")
 
     def test_reconstruct_accepts_a_completed_quarantine_case(self) -> None:
+        self.case_dir = self.case_dir.parent / contrib.TEST_QUARANTINE_SLUG
+        self.case_dir.mkdir()
+        (self.case_dir / "README.md").write_text(
+            "# Sample quarantine\n",
+            encoding="utf-8",
+        )
         patch_bytes = (
             b"diff --git a/tests/unittests/unit/sample_test.py "
             b"b/tests/unittests/unit/sample_test.py\n"
@@ -1891,7 +2288,7 @@ class IsolatedWorkspaceTest(unittest.TestCase):
             b"+replacement\n"
         )
         manifest = """schema = 1
-slug = "sample-case"
+slug = "upstream-test-quarantine"
 kind = "test-quarantine"
 title = "Sample"
 commit_subject = "Sample"
@@ -1905,6 +2302,11 @@ list = ["unit.sample_test"]
 [quarantine]
 modules = ["unit.sample_test"]
 
+[quarantine.gates]
+quarantine = ["unit.sample_test"]
+quarantine-cython = ["unit.sample_test"]
+quarantine-no-compat = ["unit.sample_test"]
+
 [evidence]
 required_gates = ["quarantine", "quarantine-cython", "quarantine-no-compat"]
 """
@@ -1912,8 +2314,8 @@ required_gates = ["quarantine", "quarantine-cython", "quarantine-no-compat"]
             'patch_sha256 = "placeholder"',
             f'patch_sha256 = "{hashlib.sha256(patch_bytes).hexdigest()}"',
         )
-        self.case.patch.write_bytes(patch_bytes)
-        self.case.manifest.write_text(manifest, encoding="utf-8")
+        (self.case_dir / "fix.patch").write_bytes(patch_bytes)
+        (self.case_dir / "case.toml").write_text(manifest, encoding="utf-8")
         case = contrib.load_case(self.case_dir)
         start, selected, _resolution, _case = self.mocks(case)
 
@@ -1921,7 +2323,7 @@ required_gates = ["quarantine", "quarantine-cython", "quarantine-no-compat"]
             workspace = contrib.create_workspace(
                 self.repo,
                 "reconstruct-quarantine-01",
-                "cases/sample-case",
+                "cases/upstream-test-quarantine",
                 "reconstruct",
             )
 
@@ -2450,6 +2852,295 @@ required_gates = ["quarantine", "quarantine-cython", "quarantine-no-compat"]
         self.assertFalse(owner.exists())
         self.assert_no_tracked_case_staging()
 
+    def test_legacy_case_update_owner_only_recovery_is_exact(self) -> None:
+        _transaction, owner = contrib.case_update_paths(self.repo, self.case.slug)
+        payload = contrib.case_update_owner_payload(
+            self.repo,
+            self.case.slug,
+            "",
+            "12345678-1234-4abc-8def-123456789abc",
+        )
+        payload.pop("quarantine_path_transition")
+        contrib.publish_private_json(owner, payload, "test legacy case update owner")
+
+        validated = contrib.validate_case_update_owner(self.repo, self.case.slug)
+        self.assertNotIn("quarantine_path_transition", validated)
+        self.assertFalse(contrib.case_update_quarantine_path_transition(validated))
+        self.assertEqual(
+            contrib.recover_case_creation(self.repo, self.case.slug),
+            (owner,),
+        )
+        self.assertFalse(owner.exists())
+
+    def test_legacy_case_update_transaction_recovery_is_exact(self) -> None:
+        transaction = self.make_case_update_transaction_legacy(
+            self.leave_case_update_transaction()
+        )
+        marker = json.loads(
+            (transaction.directory / "transaction.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("quarantine_path_transition", marker)
+
+        staging, removal = contrib.case_update_removal_paths(
+            self.repo,
+            self.case.slug,
+        )
+        self.assertEqual(
+            contrib.recover_case_creation(self.repo, self.case.slug),
+            (staging, removal, transaction.owner),
+        )
+        self.assertIn("+newer", self.case.patch.read_text(encoding="utf-8"))
+        self.assertFalse(transaction.directory.exists())
+        self.assertFalse(transaction.owner.exists())
+
+    def test_legacy_case_update_removal_phase_recovery_is_exact(self) -> None:
+        transaction = self.make_case_update_transaction_legacy(
+            self.leave_case_update_transaction()
+        )
+        for entry in transaction.entries:
+            contrib.publish_case_update_entry(transaction, entry)
+        payload = contrib.publish_case_update_remove_transaction(
+            self.repo,
+            self.case.slug,
+            "complete",
+        )
+        self.assertNotIn("quarantine_path_transition", payload)
+
+        staging, removal = contrib.case_update_removal_paths(
+            self.repo,
+            self.case.slug,
+        )
+        contrib.container_payload.rename_no_replace(transaction.directory, staging)
+        contrib.shutil.rmtree(staging)
+        transaction.owner.unlink()
+
+        self.assertEqual(
+            contrib.recover_case_creation(self.repo, self.case.slug),
+            (removal,),
+        )
+        self.assertFalse(removal.exists())
+        self.assertIn("+newer", self.case.patch.read_text(encoding="utf-8"))
+
+    def test_legacy_case_update_records_require_the_exact_former_field_sets(self) -> None:
+        _transaction, owner = contrib.case_update_paths(self.repo, self.case.slug)
+        payload = contrib.case_update_owner_payload(
+            self.repo,
+            self.case.slug,
+            "",
+            "12345678-1234-4abc-8def-123456789abc",
+        )
+        payload.pop("quarantine_path_transition")
+        payload["unexpected"] = False
+        contrib.publish_private_json(owner, payload, "test incomplete legacy owner")
+
+        with self.assertRaisesRegex(contrib.ContribError, "owner is inconsistent"):
+            contrib.validate_case_update_owner(self.repo, self.case.slug)
+
+        payload.pop("unexpected")
+        payload.pop("policy")
+        owner.write_bytes(contrib.canonical_json_bytes(payload))
+        with self.assertRaisesRegex(contrib.ContribError, "owner is inconsistent"):
+            contrib.validate_case_update_owner(self.repo, self.case.slug)
+
+    def test_current_case_update_owner_transition_field_must_be_boolean(self) -> None:
+        _transaction, owner = contrib.case_update_paths(self.repo, self.case.slug)
+        payload = contrib.case_update_owner_payload(
+            self.repo,
+            self.case.slug,
+            "",
+            "12345678-1234-4abc-8def-123456789abc",
+        )
+        contrib.publish_private_json(owner, payload, "test invalid current owner")
+
+        for invalid in (0, "false"):
+            with self.subTest(invalid=invalid):
+                payload["quarantine_path_transition"] = invalid
+                owner.write_bytes(contrib.canonical_json_bytes(payload))
+                with self.assertRaisesRegex(
+                    contrib.ContribError,
+                    "invalid quarantine transition",
+                ):
+                    contrib.validate_case_update_owner(self.repo, self.case.slug)
+
+    def test_case_update_transaction_rejects_mixed_legacy_and_current_records(self) -> None:
+        transaction = self.leave_case_update_transaction()
+        marker = transaction.directory / "transaction.json"
+        current_owner = json.loads(transaction.owner.read_text(encoding="utf-8"))
+        current_marker = json.loads(marker.read_text(encoding="utf-8"))
+
+        self.rewrite_case_update_record(
+            marker,
+            quarantine_path_transition=None,
+        )
+        with self.assertRaisesRegex(contrib.ContribError, "unexpected schema"):
+            contrib.validate_case_update_transaction(self.repo, self.case.slug)
+
+        marker.write_bytes(contrib.canonical_json_bytes(current_marker))
+        self.rewrite_case_update_record(
+            transaction.owner,
+            quarantine_path_transition=None,
+        )
+        with self.assertRaisesRegex(contrib.ContribError, "unexpected schema"):
+            contrib.validate_case_update_transaction(self.repo, self.case.slug)
+
+        legacy_marker = current_marker.copy()
+        legacy_marker.pop("quarantine_path_transition")
+        legacy_marker["unexpected"] = False
+        marker.write_bytes(contrib.canonical_json_bytes(legacy_marker))
+        with self.assertRaisesRegex(contrib.ContribError, "unexpected schema"):
+            contrib.validate_case_update_transaction(self.repo, self.case.slug)
+
+        legacy_marker.pop("unexpected")
+        legacy_marker.pop("policy")
+        marker.write_bytes(contrib.canonical_json_bytes(legacy_marker))
+        with self.assertRaisesRegex(contrib.ContribError, "unexpected schema"):
+            contrib.validate_case_update_transaction(self.repo, self.case.slug)
+        transaction.owner.write_bytes(contrib.canonical_json_bytes(current_owner))
+
+    def test_case_update_removal_rejects_mixed_legacy_and_current_records(self) -> None:
+        transaction = self.leave_case_update_transaction()
+        for entry in transaction.entries:
+            contrib.publish_case_update_entry(transaction, entry)
+        contrib.publish_case_update_remove_transaction(
+            self.repo,
+            self.case.slug,
+            "complete",
+        )
+        _staging, removal = contrib.case_update_removal_paths(
+            self.repo,
+            self.case.slug,
+        )
+        current_removal = json.loads(removal.read_text(encoding="utf-8"))
+
+        self.rewrite_case_update_record(
+            removal,
+            quarantine_path_transition=None,
+        )
+        with self.assertRaisesRegex(
+            contrib.ContribError,
+            "removal owner digest is inconsistent",
+        ):
+            contrib.validate_case_update_remove_transaction(self.repo, self.case.slug)
+
+        self.rewrite_case_update_record(
+            transaction.owner,
+            quarantine_path_transition=None,
+        )
+        self.rewrite_case_update_record(
+            transaction.directory / "transaction.json",
+            quarantine_path_transition=None,
+        )
+        current_removal["owner_sha256"] = contrib.sha256_file(transaction.owner)
+        current_removal["fingerprint"] = contrib.secure_tree_fingerprint(
+            transaction.directory
+        )
+        removal.write_bytes(contrib.canonical_json_bytes(current_removal))
+        with self.assertRaisesRegex(
+            contrib.ContribError,
+            "removal owner digest is inconsistent",
+        ):
+            contrib.validate_case_update_remove_transaction(self.repo, self.case.slug)
+
+        current_removal.pop("quarantine_path_transition")
+        current_removal["unexpected"] = False
+        removal.write_bytes(contrib.canonical_json_bytes(current_removal))
+        with self.assertRaisesRegex(contrib.ContribError, "removal phase is inconsistent"):
+            contrib.validate_case_update_remove_transaction(self.repo, self.case.slug)
+
+        current_removal.pop("unexpected")
+        current_removal.pop("policy")
+        removal.write_bytes(contrib.canonical_json_bytes(current_removal))
+        with self.assertRaisesRegex(contrib.ContribError, "removal phase is inconsistent"):
+            contrib.validate_case_update_remove_transaction(self.repo, self.case.slug)
+
+    def test_current_phase_only_removal_transition_field_must_be_boolean(self) -> None:
+        transaction = self.leave_case_update_transaction()
+        for entry in transaction.entries:
+            contrib.publish_case_update_entry(transaction, entry)
+        payload = contrib.publish_case_update_remove_transaction(
+            self.repo,
+            self.case.slug,
+            "complete",
+        )
+        staging, removal = contrib.case_update_removal_paths(
+            self.repo,
+            self.case.slug,
+        )
+        contrib.container_payload.rename_no_replace(transaction.directory, staging)
+        contrib.shutil.rmtree(staging)
+        transaction.owner.unlink()
+
+        for invalid in (0, "false"):
+            with self.subTest(invalid=invalid):
+                payload["quarantine_path_transition"] = invalid
+                removal.write_bytes(contrib.canonical_json_bytes(payload))
+                with self.assertRaisesRegex(
+                    contrib.ContribError,
+                    "removal phase identity is invalid",
+                ):
+                    contrib.validate_case_update_remove_transaction(
+                        self.repo,
+                        self.case.slug,
+                    )
+
+    def test_current_phase_only_removal_cannot_be_downgraded_to_legacy(self) -> None:
+        transaction = self.leave_case_update_transaction()
+        for entry in transaction.entries:
+            contrib.publish_case_update_entry(transaction, entry)
+        payload = contrib.publish_case_update_remove_transaction(
+            self.repo,
+            self.case.slug,
+            "complete",
+        )
+        staging, removal = contrib.case_update_removal_paths(
+            self.repo,
+            self.case.slug,
+        )
+        contrib.container_payload.rename_no_replace(transaction.directory, staging)
+        contrib.shutil.rmtree(staging)
+        transaction.owner.unlink()
+
+        payload.pop("quarantine_path_transition")
+        removal.write_bytes(contrib.canonical_json_bytes(payload))
+        with self.assertRaisesRegex(
+            contrib.ContribError,
+            "removal owner digest is inconsistent",
+        ):
+            contrib.validate_case_update_remove_transaction(
+                self.repo,
+                self.case.slug,
+            )
+
+    def test_legacy_phase_only_removal_cannot_be_upgraded_to_current(self) -> None:
+        transaction = self.make_case_update_transaction_legacy(
+            self.leave_case_update_transaction()
+        )
+        for entry in transaction.entries:
+            contrib.publish_case_update_entry(transaction, entry)
+        payload = contrib.publish_case_update_remove_transaction(
+            self.repo,
+            self.case.slug,
+            "complete",
+        )
+        staging, removal = contrib.case_update_removal_paths(
+            self.repo,
+            self.case.slug,
+        )
+        contrib.container_payload.rename_no_replace(transaction.directory, staging)
+        contrib.shutil.rmtree(staging)
+        transaction.owner.unlink()
+
+        payload["quarantine_path_transition"] = False
+        removal.write_bytes(contrib.canonical_json_bytes(payload))
+        with self.assertRaisesRegex(
+            contrib.ContribError,
+            "removal owner digest is inconsistent",
+        ):
+            contrib.validate_case_update_remove_transaction(
+                self.repo,
+                self.case.slug,
+            )
+
     def test_case_update_recovery_refuses_tampered_marker_payload_and_target(self) -> None:
         transaction = self.leave_case_update_transaction()
         marker = transaction.directory / "transaction.json"
@@ -2971,6 +3662,18 @@ required_gates = []
         self.assertFalse(any(path.name.startswith(f".{slug}.") for path in cases_root.iterdir()))
         staging = contrib.case_staging_root(self.repo)
         self.assertEqual(tuple(staging.iterdir()), ())
+
+    def test_scaffold_preserves_the_reserved_quarantine_identity(self) -> None:
+        cases_root = self.repo / "fork-maintenance" / "cases"
+        with patch.object(contrib, "CASES_ROOT", cases_root):
+            target = contrib.scaffold_case(
+                self.repo,
+                contrib.TEST_QUARANTINE_SLUG,
+            )
+
+        draft = contrib.load_draft_case(target)
+        self.assertEqual(draft.slug, contrib.TEST_QUARANTINE_SLUG)
+        self.assertEqual(draft.kind, "test-quarantine")
 
     def test_cleanup_refuses_a_workspace_changed_after_planning(self) -> None:
         start, selected, resolution, _case = self.mocks()
@@ -5024,6 +5727,30 @@ class CycleCleanupTest(unittest.TestCase):
         self.assertTrue(image_lock.exists())
         self.assertTrue(legacy.exists())
 
+    def test_cleanup_does_not_reparse_an_incompatible_historical_deb_cache(
+        self,
+    ) -> None:
+        self.collected_result("audit-focused-01")
+        cache, historical_sha256 = self.retained_deb_selection_cache()
+        active_sha256 = "c" * 64
+        self.assertNotEqual(historical_sha256, active_sha256)
+        with patch.object(
+            contrib,
+            "deb_selection_semantic_digest",
+            return_value=active_sha256,
+        ) as semantic_digest:
+            plan = contrib.build_cleanup_plan(
+                self.repo,
+                "audit",
+                inspect_runtime=False,
+            )
+        semantic_digest.assert_called_once_with(contrib.AUTOMATION_ROOT)
+        self.assertTrue(cache.exists())
+        self.assertEqual(
+            contrib.remove_cleanup_plan(self.repo, plan, plan.digest),
+            3,
+        )
+
     def test_cleanup_rejects_tampered_retained_deb_selection_cache(self) -> None:
         self.collected_result("audit-focused-01")
         cache, selection_sha256 = self.retained_deb_selection_cache()
@@ -5197,6 +5924,294 @@ class CycleCleanupTest(unittest.TestCase):
             contrib.secure_tree_fingerprint(tree)
 
 
+class QuarantineManifestValidationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.case_dir = Path(self.temporary.name) / contrib.TEST_QUARANTINE_SLUG
+        self.case_dir.mkdir()
+        (self.case_dir / "README.md").write_text("# quarantine\n", encoding="utf-8")
+        self.patch_bytes = b"""diff --git a/tests/unittests/unit/client/broken_test.py b/tests/unittests/unit/client/broken_test.py
+--- a/tests/unittests/unit/client/broken_test.py
++++ b/tests/unittests/unit/client/broken_test.py
+@@ -1 +1,2 @@
++# quarantined
+ VALUE = 1
+diff --git a/tests/unittests/unit/client/cython_only_test.py b/tests/unittests/unit/client/cython_only_test.py
+--- a/tests/unittests/unit/client/cython_only_test.py
++++ b/tests/unittests/unit/client/cython_only_test.py
+@@ -1 +1,2 @@
++# cython-only quarantine
+ VALUE = 2
+"""
+        (self.case_dir / "fix.patch").write_bytes(self.patch_bytes)
+        self.manifest = f"""schema = 1
+slug = "upstream-test-quarantine"
+kind = "test-quarantine"
+title = "Sample quarantine"
+commit_subject = "Sample quarantine"
+patch_sha256 = "{hashlib.sha256(self.patch_bytes).hexdigest()}"
+dependencies = []
+paths = [
+  "tests/unittests/unit/client/broken_test.py",
+  "tests/unittests/unit/client/cython_only_test.py",
+]
+
+[tests]
+list = [
+  "unit.client.broken_test",
+  "unit.client.cython_only_test",
+]
+
+[quarantine]
+modules = [
+  "unit.client.broken_test",
+  "unit.client.cython_only_test",
+]
+
+[quarantine.gates]
+quarantine = ["unit.client.broken_test"]
+quarantine-cython = [
+  "unit.client.broken_test",
+  "unit.client.cython_only_test",
+]
+quarantine-no-compat = ["unit.client.broken_test"]
+
+[evidence]
+required_gates = ["quarantine", "quarantine-cython", "quarantine-no-compat"]
+"""
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write_manifest(self, text: str | None = None) -> None:
+        (self.case_dir / "case.toml").write_text(
+            self.manifest if text is None else text,
+            encoding="utf-8",
+        )
+
+    def write_mixed_transition(self) -> tuple[bytes, str]:
+        old_patch = self.patch_bytes.split(
+            b"diff --git a/tests/unittests/unit/client/cython_only_test.py",
+            1,
+        )[0]
+        self.assertNotEqual(old_patch, self.patch_bytes)
+        mixed = contrib.updated_manifest_text(
+            self.manifest,
+            digest=hashlib.sha256(old_patch).hexdigest(),
+            paths=("tests/unittests/unit/client/broken_test.py",),
+            draft=False,
+        )
+        (self.case_dir / "fix.patch").write_bytes(old_patch)
+        self.write_manifest(mixed)
+        return old_patch, mixed
+
+    def test_loads_union_and_exact_gate_assignments(self) -> None:
+        self.write_manifest()
+        case = contrib.load_case(self.case_dir)
+        self.assertEqual(
+            case.quarantined_tests,
+            ("unit.client.broken_test", "unit.client.cython_only_test"),
+        )
+        self.assertEqual(
+            dict(case.quarantined_tests_by_gate),
+            {
+                "quarantine": ("unit.client.broken_test",),
+                "quarantine-cython": (
+                    "unit.client.broken_test",
+                    "unit.client.cython_only_test",
+                ),
+                "quarantine-no-compat": ("unit.client.broken_test",),
+            },
+        )
+
+    def test_rejects_missing_or_reordered_gate_assignments(self) -> None:
+        invalid = (
+            self.manifest.replace(
+                'quarantine-no-compat = ["unit.client.broken_test"]\n',
+                "",
+            ),
+            self.manifest.replace(
+                'quarantine-cython = [\n'
+                '  "unit.client.broken_test",\n'
+                '  "unit.client.cython_only_test",\n'
+                "]\n",
+                'quarantine-cython = [\n'
+                '  "unit.client.cython_only_test",\n'
+                '  "unit.client.broken_test",\n'
+                "]\n",
+            ),
+        )
+        for manifest in invalid:
+            with self.subTest(manifest=manifest):
+                self.write_manifest(manifest)
+                with self.assertRaises(contrib.ContribError):
+                    contrib.load_case(self.case_dir)
+
+    def test_rejects_the_old_modules_only_schema(self) -> None:
+        prefix, remainder = self.manifest.split("\n[quarantine.gates]\n", 1)
+        _gate_table, evidence = remainder.split("\n[evidence]\n", 1)
+        self.write_manifest(prefix + "\n[evidence]\n" + evidence)
+
+        with self.assertRaisesRegex(contrib.ContribError, "modules and gates"):
+            contrib.load_case(self.case_dir)
+
+    def test_rejects_duplicate_or_foreign_gate_assignments(self) -> None:
+        invalid = (
+            self.manifest.replace(
+                'quarantine = ["unit.client.broken_test"]',
+                'quarantine = ["unit.client.broken_test", "unit.client.broken_test"]',
+                1,
+            ),
+            self.manifest.replace(
+                'quarantine = ["unit.client.broken_test"]',
+                'quarantine = ["unit.client.foreign_test"]',
+                1,
+            ),
+        )
+        errors = ("unique unit", "is not a subset")
+        for manifest, error in zip(invalid, errors, strict=True):
+            with self.subTest(error=error):
+                self.write_manifest(manifest)
+                with self.assertRaisesRegex(contrib.ContribError, error):
+                    contrib.load_case(self.case_dir)
+
+    def test_transition_is_strict_by_default_and_keeps_old_patch_exact(self) -> None:
+        old_patch, _mixed = self.write_mixed_transition()
+
+        with self.assertRaisesRegex(contrib.ContribError, "paths must exactly match"):
+            contrib.load_case(self.case_dir)
+        case = contrib.load_case(
+            self.case_dir,
+            allow_quarantine_path_transition=True,
+        )
+
+        self.assertEqual(case.patch.read_bytes(), old_patch)
+        self.assertEqual(
+            case.paths,
+            ("tests/unittests/unit/client/broken_test.py",),
+        )
+        self.assertEqual(contrib.patch_paths(case.patch), tuple(sorted(case.paths)))
+        self.assertEqual(case.patch_sha256, hashlib.sha256(old_patch).hexdigest())
+        self.assertEqual(
+            contrib.quarantine_module_paths(case.quarantined_tests),
+            (
+                "tests/unittests/unit/client/broken_test.py",
+                "tests/unittests/unit/client/cython_only_test.py",
+            ),
+        )
+
+    def test_transition_does_not_relax_patch_digest_or_declared_paths(self) -> None:
+        old_patch, mixed = self.write_mixed_transition()
+        old_digest = hashlib.sha256(old_patch).hexdigest()
+        invalid = (
+            mixed.replace(
+                f'patch_sha256 = "{old_digest}"',
+                f'patch_sha256 = "{"0" * 64}"',
+                1,
+            ),
+            mixed.replace(
+                '  "tests/unittests/unit/client/broken_test.py",\n',
+                '  "tests/unittests/unit/client/other_test.py",\n',
+                1,
+            ),
+        )
+        errors = ("fix.patch does not match patch_sha256", "paths do not match fix.patch")
+        for manifest, error in zip(invalid, errors, strict=True):
+            with self.subTest(error=error):
+                self.write_manifest(manifest)
+                with self.assertRaisesRegex(contrib.ContribError, error):
+                    contrib.load_case(
+                        self.case_dir,
+                        allow_quarantine_path_transition=True,
+                    )
+
+    def test_transition_relaxation_never_admits_a_production_case(self) -> None:
+        manifest = self.manifest.replace(
+            'kind = "test-quarantine"',
+            'kind = "production"',
+            1,
+        )
+        self.write_manifest(manifest)
+
+        with self.assertRaisesRegex(contrib.ContribError, "must use kind='test-quarantine'"):
+            contrib.load_case(
+                self.case_dir,
+                allow_quarantine_path_transition=True,
+            )
+
+    def test_test_quarantine_kind_is_rejected_for_every_other_slug(self) -> None:
+        foreign = self.case_dir.parent / "production-case"
+        self.case_dir.rename(foreign)
+        self.case_dir = foreign
+        self.manifest = self.manifest.replace(
+            'slug = "upstream-test-quarantine"',
+            'slug = "production-case"',
+            1,
+        )
+        self.write_manifest()
+
+        with self.assertRaisesRegex(contrib.ContribError, "only 'upstream-test-quarantine'"):
+            contrib.load_case(
+                self.case_dir,
+                allow_quarantine_path_transition=True,
+            )
+
+    def test_test_quarantine_identity_is_also_pinned_for_drafts(self) -> None:
+        draft = self.case_dir.parent / "foreign-draft"
+        draft.mkdir()
+        (draft / "README.md").write_text("# draft\n", encoding="utf-8")
+        (draft / "fix.patch").write_bytes(b"")
+        (draft / "case.toml").write_text(
+            """schema = 1
+draft = true
+slug = "foreign-draft"
+kind = "test-quarantine"
+dependencies = []
+""",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(contrib.ContribError, "only 'upstream-test-quarantine'"):
+            contrib.load_draft_case(draft)
+
+        (self.case_dir / "case.toml").write_text(
+            """schema = 1
+draft = true
+slug = "upstream-test-quarantine"
+kind = "production"
+dependencies = []
+""",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(contrib.ContribError, "must use kind='test-quarantine'"):
+            contrib.load_draft_case(self.case_dir)
+
+    def test_transition_authority_rejects_an_already_strict_case(self) -> None:
+        self.write_manifest()
+
+        with self.assertRaisesRegex(contrib.ContribError, "stale quarantine"):
+            contrib.validate_published_case(
+                self.case_dir.name,
+                self.case_dir,
+                allow_quarantine_path_transition=True,
+            )
+
+    def test_transition_get_case_still_validates_every_sibling_case(self) -> None:
+        self.write_mixed_transition()
+        invalid = self.case_dir.parent / "broken-case"
+        invalid.mkdir()
+        (invalid / "case.toml").write_text("schema = 0\n", encoding="utf-8")
+
+        with (
+            patch.object(contrib, "CASES_ROOT", self.case_dir.parent),
+            self.assertRaisesRegex(contrib.ContribError, "unsupported"),
+        ):
+            contrib.get_case(
+                self.case_dir.name,
+                allow_quarantine_path_transition=True,
+            )
+
+
 class ManifestTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -5217,11 +6232,24 @@ class ManifestTest(unittest.TestCase):
                 "video-pipeline-cleanup-race",
             },
         )
-        self.assertEqual(cases["upstream-test-quarantine"].kind, "test-quarantine")
+        quarantine = cases["upstream-test-quarantine"]
+        self.assertEqual(quarantine.kind, "test-quarantine")
+        self.assertEqual(
+            dict(quarantine.quarantined_tests_by_gate),
+            {
+                "quarantine": ("unit.client.x11_client_paint_test",),
+                "quarantine-cython": (
+                    "unit.client.x11_client_paint_test",
+                    "unit.client.record_test",
+                ),
+                "quarantine-no-compat": ("unit.client.x11_client_paint_test",),
+            },
+        )
         self.assertEqual(contrib.load_drafts(), {})
 
     def test_develop_stack_is_the_complete_active_queue(self) -> None:
-        stack = contrib.load_stacks(contrib.load_cases())["develop"]
+        cases = contrib.load_cases()
+        stack = contrib.load_stacks(cases)["develop"]
         self.assertEqual(
             stack.series,
             (
@@ -5233,6 +6261,23 @@ class ManifestTest(unittest.TestCase):
                 "upstream-test-quarantine",
             ),
         )
+
+    def test_video_cleanup_live_boundary_is_stack_owned(self) -> None:
+        cases = contrib.load_cases()
+        stack = contrib.load_stacks(cases)["develop"]
+        self.assertEqual(cases["video-pipeline-cleanup-race"].required_gates, ())
+        self.assertEqual(
+            cases["wayland-initial-window-state"].required_gates,
+            (
+                "live-wayland-h264-hardware",
+                "live-wayland-opengl-h264-hardware",
+            ),
+        )
+        for gate in (
+            "live-wayland-h264-hardware",
+            "live-wayland-opengl-h264-hardware",
+        ):
+            self.assertIn(gate, stack.tests)
 
     def test_each_patch_resolves_against_cached_fork_master(self) -> None:
         for slug in contrib.load_cases():
