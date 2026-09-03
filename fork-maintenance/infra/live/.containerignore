@@ -9,4 +9,7 @@
 !source
 !source/**
 !start_hardware_fixture.sh
+!start_wayland_keyboard_fixture.sh
 !start_zed.sh
+!wayland_keyboard_fixture.py
+!xkb_xtest_driver.c

@@ -74,7 +74,7 @@ shell code:
 make -C fork-maintenance live-profile-list
 ```
 
-Pass any name returned above to any of the six public live wrappers:
+Pass any name returned above to any of the seven public live wrappers:
 
 ```bash
 make -C fork-maintenance live-h264 \
@@ -131,7 +131,7 @@ old/new applied-tree comparison that paths, modes, executable data,
 configuration, test assertions, runner behavior, and live assertions are
 unchanged, then run only resolution, whitespace, and fork-control checks and
 record the proof. This exception cannot cross `develop-rebase`; every upstream
-rebase requires all six fixed positive live profiles. Any semantic difference
+rebase requires all seven fixed positive live profiles. Any semantic difference
 on an unchanged base also requires the declared live gates.
 
 Every named live acceptance run requires one nonempty reviewed `CASE` or
@@ -140,10 +140,63 @@ use the isolated/unit diagnostic paths; it cannot publish a live `PASS`.
 
 The complete public positive set is exactly `live-rgb`, `live-h264`,
 `live-xpra-detach`, `live-xpra-transport-loss`, `live-xpra-hardware`, and
-`live-xpra-opengl-hardware`. Fail-closed unit fixtures prove that invalid
-evidence is rejected; every named live target itself must prove its intended
-Xpra behavior and finish positive. Their acceptance dimensions are fixed;
+`live-xpra-opengl-hardware`, plus `live-wayland-keyboard`. Fail-closed unit
+fixtures prove that invalid evidence is rejected; every named live target
+itself must prove its intended Xpra behavior and finish positive. Their
+acceptance dimensions are fixed;
 `NETWORK_PROFILE` is the orthogonal client-only tuning overlay described above.
+
+## Native-Wayland client keymap synchronization
+
+Run the keyboard case independently; do not substitute `live-rgb`, whose Zed
+scenario intentionally exercises the unrelated empty-damage case:
+
+```bash
+make -C fork-maintenance live-wayland-keyboard \
+  CASE=wayland-client-keymap-sync RUN=wayland-keyboard-01
+make -C fork-maintenance live-wait RUN=wayland-keyboard-01
+make -C fork-maintenance live-remove RUN=wayland-keyboard-01
+```
+
+The selected case must provide exactly one
+`tests/live-wayland-keyboard.json`. Input freeze validates and binds its exact
+schema, digest, two distinct structured RMLVO configurations, aligned
+layout/variant groups, options, one unchanged numeric physical keycode, and an
+ordered expected character for every group. These values are scenario data;
+the runner and production code contain no language or country choices.
+
+The clean maintained client uses `setxkbmap` on its actual X11 display. The
+bound scenario first uses model `pc104` with four ordered groups
+(`us,fr,ru,ara`), then replaces it with model `pc105` and `ge,am,us,fr`
+without reconnecting. Across both maximum-sized maps, one physical key
+exercises Latin, Cyrillic, Arabic, Georgian, and Armenian Unicode text. For
+each phase, the runner verifies the queried RMLVO values and
+requires the clean client's nested `keymap-changed` packet to receive, install,
+and explicitly accept the expected hash in that exact order. A preceding
+legacy `layout-changed` application or an identical-only structured result
+cannot satisfy this proof. The runner also records `xpra info`, which must expose
+the exact effective RMLVO, group count, and final exercised group with no
+rejected configuration; a generic application marker from `layout-changed`
+cannot satisfy this boundary.
+The native driver focuses the forwarded fixture window, locks each real XKB
+group, and uses XTEST for one complete physical press/release pair. It never
+types text, pastes, constructs an Xpra packet, or sends Unicode directly.
+For every injection the report freezes and reparses a bounded `client.stdout`
+interval with exactly one clean-Xpra-client `key-action` press and release,
+matching the driver's keycode, group, keysym, name, and Unicode string, and the
+fixture's exact internal Xpra window ID. The driver's XTEST success booleans
+cannot substitute for these client observations.
+
+The native-Wayland fixture is an ordinary focused `Gtk.Entry`. It receives no
+scenario or expected string and emits only bounded ordered JSON events with its
+actual UTF-8 buffer. Acceptance binds every client injection to the exact
+group-aware server resolution and wlroots device press/release, then requires
+the entry's complete cumulative text with no missing, extra, duplicate, or
+reordered event. The replacement map is installed while the same client and server
+processes and the same established TCP connection remain active. The fixture
+must close through the forwarded window, exit zero, and drive the normal
+application-exit lifecycle. A plausible packet-only report without the entry
+observations fails closed.
 
 ## RGB control
 

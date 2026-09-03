@@ -12,7 +12,7 @@ from live_config import (
     network_profile_names,
 )
 
-APPLICATIONS = ("zed", "hardware", "opengl", "vkcube", "gtk")
+APPLICATIONS = ("zed", "hardware", "opengl", "vkcube", "gtk", "keyboard")
 LIFECYCLES = ("application-exit", "detach", "transport-loss")
 ENCODINGS = ("rgb", "h264")
 H264_ACCEPTANCE_POLICIES = ("strict", "adaptive-alpha")
@@ -27,6 +27,7 @@ LIVE_ACCEPTANCE_PROFILES = frozenset(
         ("gtk", "transport-loss", "rgb", "strict", "default"),
         ("hardware", "application-exit", "h264", "adaptive-alpha", "default"),
         ("opengl", "application-exit", "h264", "adaptive-alpha", "default"),
+        ("keyboard", "application-exit", "rgb", "strict", "default"),
     }
 )
 DEFAULT_NETWORK_PROFILE = load_network_profiles()[0]

@@ -192,7 +192,7 @@ libyuv_smoke_test() {
 }
 
 check_focused_native_modules() {
-    local xpra_dir converter events display output smoke_mode smoke_test
+    local xpra_dir converter events display keyboard output smoke_mode smoke_test
     xpra_dir=$(installed_xpra_dir)
     test -n "$xpra_dir"
     cd "$WORK/tests/unittests"
@@ -212,20 +212,22 @@ PY
             --patch-mode "$smoke_mode"
     fi
 
-    if selection_has_case wayland-initial-window-state; then
+    if selection_tool gates | grep -Fx wayland >/dev/null; then
         events=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'events*.so' -print -quit)
         display=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'display*.so' -print -quit)
+        keyboard=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'keyboard*.so' -print -quit)
         check_elf "$events"
         check_elf "$display"
-        output=$(ldd -r "$events" "$display" 2>&1 || true)
+        check_elf "$keyboard"
+        output=$(ldd -r "$events" "$display" "$keyboard" 2>&1 || true)
         printf '%s\n' "$output"
         if grep -E 'not found|undefined symbol: (wl_list_insert|wl_list_remove|wl_display_flush_clients)' <<<"$output"; then
             return 2
         fi
         PYTHONPATH=".:${xpra_dir%/xpra}" python3 - <<'PY'
-from xpra.wayland.server import display, events
+from xpra.wayland.server import display, events, keyboard
 
-print(display, events)
+print(display, events, keyboard)
 PY
     fi
 }
@@ -258,8 +260,8 @@ run_focused() {
     if selection_tool gates | grep -Fx libyuv >/dev/null; then
         extra_args+=' --with-csc_libyuv --with-argb'
     fi
-    if selection_has_case wayland-initial-window-state; then
-        extra_args+=' --with-wayland_server'
+    if selection_tool gates | grep -Fx wayland >/dev/null; then
+        extra_args+=' --with-keyboard --with-wayland_server'
     fi
     cd "$WORK"
     CFLAGS='-O0 -g0' \
@@ -272,24 +274,21 @@ run_focused() {
 
 run_wayland() {
     require_gate wayland
-    selection_has_case wayland-initial-window-state || {
-        printf 'selection %s declares wayland without its owning case\n' "$SELECTION" >&2
-        return 2
-    }
     prepare_source
     cd "$WORK"
     CFLAGS='-O0 -g0' \
     CXXFLAGS='-O0 -g0' \
-    EXTRA_ARGS='--minimal --with-modules --with-server --with-wayland_server' \
+    EXTRA_ARGS='--minimal --with-modules --with-server --with-keyboard --with-wayland_server' \
         python3 setup.py unittests unit/wayland/linkage_test.py
 
-    local xpra_dir events display output
+    local xpra_dir events display keyboard output
     xpra_dir=$(installed_xpra_dir)
     events=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'events*.so' -print -quit)
     display=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'display*.so' -print -quit)
-    test -n "$events" && test -n "$display"
-    readelf -d "$events" "$display" | grep -E 'File:|NEEDED.*libwayland-server\.so\.0'
-    output=$(ldd -r "$events" "$display" 2>&1 || true)
+    keyboard=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'keyboard*.so' -print -quit)
+    test -n "$events" && test -n "$display" && test -n "$keyboard"
+    readelf -d "$events" "$display" "$keyboard" | grep -E 'File:|NEEDED.*libwayland-server\.so\.0'
+    output=$(ldd -r "$events" "$display" "$keyboard" 2>&1 || true)
     printf '%s\n' "$output"
     if grep -E 'not found|undefined symbol: (wl_list_insert|wl_list_remove|wl_display_flush_clients)' <<<"$output"; then
         return 2
