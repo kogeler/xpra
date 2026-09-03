@@ -120,6 +120,7 @@ paths, dependencies, tests, and required gates. The complete active queue is
 The currently retained active cases are:
 
 - `wayland-initial-window-state`;
+- `wayland-client-keymap-sync`;
 - `wayland-empty-damage-throttle`;
 - `video-pipeline-cleanup-race`;
 - `debian-libva-codecs-package`;
@@ -349,11 +350,12 @@ software renderer, and produce changing nonuniform client frames. This
 complements the Vulkan gate; neither is a substitute for the other.
 
 The only named positive live profiles are Zed RGB, adaptive-alpha Zed H.264,
-RGB detach, RGB transport-loss fault injection, multi-window Vulkan hardware,
-and multi-window OpenGL hardware. Their Make wrappers fix every acceptance
-dimension and require a nonempty reviewed case or stack selection. The
+RGB detach, RGB transport-loss fault injection, native-Wayland client-keymap
+input, multi-window Vulkan hardware, and multi-window OpenGL hardware. Their
+Make wrappers fix every acceptance dimension and require a nonempty reviewed
+case or stack selection. The
 orthogonal client-only `NETWORK_PROFILE` is loaded from
-`fork-maintenance/profiles.yml`; its YAML default is used for the normal six
+`fork-maintenance/profiles.yml`; its YAML default is used for the normal seven
 gates. Static Xpra arguments come only from `fork-maintenance/live-cli.yml`.
 Neither YAML value set may be duplicated in Python, Make, or unit-test
 assertions. A clean-source or picture-fallback diagnostic cannot publish live
@@ -387,7 +389,7 @@ change. Resolve the refreshed queue, run whitespace and fork-control checks,
 and state the proof in the handoff; do not launch focused, native, full, or live
 jobs. This exception never applies after `develop-rebase`: every explicit
 upstream rebase requires the clean quarantine reassessment, all fork-control,
-focused, native, and three full upstream legs, plus all six positive live
+focused, native, and three full upstream legs, plus all seven positive live
 profiles, even when every retained patch applies without textual changes. Any
 uncertainty or semantic change uses the normal ladder.
 

@@ -55,7 +55,8 @@ export XPRA_FORK_ZED_DIRECTORY := $(ZED_DIRECTORY)
 export XPRA_FORK_SELECTOR := $(SELECTOR)
 
 AUTOMATION_PYTHON := $(shell find tools infra cases -type f -name '*.py' -print 2>/dev/null | sort)
-AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_zed.sh \
+AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_wayland_keyboard_fixture.sh \
+	infra/live/start_zed.sh \
 	infra/upstream-tests/entrypoint.sh
 
 .PHONY: help check lint contributor-tests clean artifact-boundary doctor \
@@ -76,7 +77,7 @@ AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_zed.sh
 	test-full test-full-cython test-full-no-compat \
 	live-profile-list live-start live-status live-logs live-wait live-collect live-remove live-abort \
 	live-rgb live-h264 live-xpra-detach live-xpra-transport-loss live-xpra-hardware \
-	live-xpra-opengl-hardware \
+	live-xpra-opengl-hardware live-wayland-keyboard \
 	deb-start deb-status deb-logs deb-wait deb-collect deb-remove deb-abort
 
 help:
@@ -435,6 +436,11 @@ live-xpra-opengl-hardware:
 	@$(MAKE) --no-print-directory live-start \
 		APPLICATION=opengl LIFECYCLE=application-exit ENCODING=h264 \
 		H264_CLIENT_POLICY=adaptive-alpha ALPHA_SCENARIOS=default
+
+live-wayland-keyboard:
+	@$(MAKE) --no-print-directory live-start \
+		APPLICATION=keyboard LIFECYCLE=application-exit ENCODING=rgb \
+		H264_CLIENT_POLICY=strict ALPHA_SCENARIOS=default
 
 deb-policy-check:
 	@test -z "$(CASE)" && test "$(STACK)" = develop || { \

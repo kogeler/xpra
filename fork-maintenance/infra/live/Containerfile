@@ -213,13 +213,17 @@ RUN apt-get update \
 
 COPY --from=server-build /opt/xpra-install/ /
 COPY interaction_fixture.py /opt/xpra-fork-maintenance/interaction_fixture.py
+COPY wayland_keyboard_fixture.py /opt/xpra-fork-maintenance/wayland_keyboard_fixture.py
 COPY container_payload.py /opt/xpra-fork-maintenance/container_payload.py
 COPY start_hardware_fixture.sh /opt/xpra-fork-maintenance/start_hardware_fixture.sh
+COPY start_wayland_keyboard_fixture.sh /opt/xpra-fork-maintenance/start_wayland_keyboard_fixture.sh
 COPY start_zed.sh /opt/xpra-fork-maintenance/start_zed.sh
 
 RUN test -d /usr/local/share/xpra/css \
     && chmod 0644 /opt/xpra-fork-maintenance/interaction_fixture.py \
+    && chmod 0644 /opt/xpra-fork-maintenance/wayland_keyboard_fixture.py \
     && chmod 0755 /opt/xpra-fork-maintenance/start_hardware_fixture.sh \
+    && chmod 0755 /opt/xpra-fork-maintenance/start_wayland_keyboard_fixture.sh \
     && chmod 0755 /opt/xpra-fork-maintenance/start_zed.sh \
     && chmod 0755 /opt/xpra-fork-maintenance/container_payload.py \
     && xpra --version \
@@ -240,6 +244,8 @@ WORKDIR /home/lab
 
 RUN test -r /opt/xpra-fork-maintenance/interaction_fixture.py \
     && python3 -c "open('/opt/xpra-fork-maintenance/interaction_fixture.py', 'rb').read(1)" \
+    && test -r /opt/xpra-fork-maintenance/wayland_keyboard_fixture.py \
+    && test -x /opt/xpra-fork-maintenance/start_wayland_keyboard_fixture.sh \
     && test -x /usr/local/bin/xpra-empty-damage-fixture
 
 CMD ["sleep", "infinity"]
@@ -281,8 +287,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=xpra-source /src/xpra /src/xpra
+COPY xkb_xtest_driver.c /tmp/xpra-xkb-xtest-driver.c
 
 WORKDIR /src/xpra
+
+RUN install -d /opt/xpra-install/usr/local/bin \
+    && cc -std=c11 -O2 -Wall -Wextra -Werror \
+        /tmp/xpra-xkb-xtest-driver.c \
+        $(pkg-config --cflags --libs x11 xtst) \
+        -o /opt/xpra-install/usr/local/bin/xpra-xkb-xtest-driver
 
 RUN python3 setup.py install \
         --root=/opt/xpra-install \
@@ -394,7 +407,8 @@ RUN test -d /usr/local/share/xpra/css \
     && python3 -c 'from xpra.codecs.libva import decoder, encoder' \
     && python3 -c 'from xpra.codecs.libyuv import converter' \
     && XPRA_RESOURCES_DIR=/usr/local/share/xpra \
-        xvfb-run --auto-servernum python3 -c 'from xpra.client.gtk3 import client_base'
+        xvfb-run --auto-servernum python3 -c 'from xpra.client.gtk3 import client_base' \
+    && test -x /usr/local/bin/xpra-xkb-xtest-driver
 
 RUN useradd --create-home --uid 1001 --shell /bin/bash lab \
     && install -d -o lab -g lab -m 0700 /artifacts /run/user/1001

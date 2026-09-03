@@ -58,7 +58,7 @@ The handoff states:
 - all three clean quarantine reassessment results on this source when required;
 - after every upstream rebase, the complete offline suite, production
   tests-only controls, focused/native gates, all three full author-test legs,
-  and all six fixed positive live jobs actually completed on this base;
+  and all seven fixed positive live jobs actually completed on this base;
 - any required gates still outstanding;
 - whether local commits are signed as required.
 
