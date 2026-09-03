@@ -4358,9 +4358,16 @@ class LiveTransportProfileTest(unittest.TestCase):
         self.assertIn("start_wayland_keyboard_fixture.sh", containerfile)
         self.assertIn("wayland_keyboard_fixture.py", containerfile)
 
-    def test_empty_damage_fixture_checks_fail_closed(self) -> None:
-        evidence = {
+    @staticmethod
+    def passing_empty_damage_evidence() -> dict[str, object]:
+        evidence: dict[str, object] = {
+            "click_failure": None,
+            "click_observed_after_seconds": 0.25,
+            "click_position": [130, 80],
             "clicked_within_deadline": True,
+            "events": copy.deepcopy(
+                LiveTransportProfileTest.passing_empty_damage_events()
+            ),
             "fixture_exit_status": 0,
             "input_path": {
                 "client_press_release": True,
@@ -4377,26 +4384,375 @@ class LiveTransportProfileTest(unittest.TestCase):
                 "parent_frames_at_marker": 60,
                 "child_frames_at_marker": 61,
             },
-            "teardown": {"complete": True},
+            "teardown": {
+                "client_destroy_logged": True,
+                "client_windows_absent": True,
+                "complete": True,
+                "server_destroy_logged": True,
+                "server_inventory_available": True,
+                "server_windows_absent": True,
+            },
             "windows": {
                 "client_ids_distinct": True,
                 "server_ids_distinct": True,
                 "visible_content": True,
             },
         }
-        self.assertTrue(all(live_run.empty_damage_fixture_checks(evidence).values()))
-        evidence["clicked_within_deadline"] = False
-        self.assertFalse(
-            live_run.empty_damage_fixture_checks(evidence)[
+        return evidence
+
+    @staticmethod
+    def passing_empty_damage_events() -> list[dict[str, object]]:
+        return [
+            {
+                "child_frames": 0,
+                "event": "ready",
+                "monotonic_seconds": 10.0,
+                "parent_frames": 0,
+            },
+            {
+                "child_frames": 61,
+                "event": "pressure-ready",
+                "monotonic_seconds": 20.0,
+                "parent_frames": 60,
+            },
+            {
+                "event": "child-click",
+                "monotonic_seconds": 30.0,
+                "x": 130.0,
+                "y": 80.0,
+            },
+            {
+                "child_frames": 63,
+                "event": "exit",
+                # The C fixture records microsecond-resolution floats. Adjacent
+                # events may therefore have the same rounded timestamp.
+                "monotonic_seconds": 30.0,
+                "parent_frames": 62,
+            },
+        ]
+
+    @staticmethod
+    def mutate_nested(
+        value: dict[str, object],
+        path: tuple[str, ...],
+        replacement: object,
+    ) -> None:
+        parent: dict[str, object] = value
+        for key in path[:-1]:
+            child = parent[key]
+            assert isinstance(child, dict)
+            parent = child
+        parent[path[-1]] = replacement
+
+    @staticmethod
+    def remove_nested(value: dict[str, object], path: tuple[str, ...]) -> None:
+        parent: dict[str, object] = value
+        for key in path[:-1]:
+            child = parent[key]
+            assert isinstance(child, dict)
+            parent = child
+        del parent[path[-1]]
+
+    def test_empty_damage_complete_evidence_and_event_stream_pass(self) -> None:
+        evidence = self.passing_empty_damage_evidence()
+        checks = live_run.empty_damage_fixture_checks(evidence)
+        self.assertTrue(all(checks.values()), checks)
+        self.assertTrue(checks["secondary_fixture_event_stream_exact"])
+
+        events = self.passing_empty_damage_events()
+        validated = live_run.validate_empty_damage_fixture_events(events)
+        self.assertEqual(
+            tuple(validated),
+            ("ready", "pressure-ready", "child-click", "exit"),
+        )
+        self.assertEqual(list(validated.values()), events)
+
+    def test_empty_damage_event_stream_is_bound_into_classifier_evidence(self) -> None:
+        candidates: list[tuple[str, dict[str, object]]] = []
+
+        evidence = self.passing_empty_damage_evidence()
+        del evidence["events"]
+        candidates.append(("missing-events", evidence))
+
+        evidence = self.passing_empty_damage_evidence()
+        evidence["events"] = []
+        candidates.append(("empty-events", evidence))
+
+        evidence = self.passing_empty_damage_evidence()
+        evidence["events"] = [None, None, None, None]
+        candidates.append(("malformed-event-records", evidence))
+
+        evidence = self.passing_empty_damage_evidence()
+        events = evidence["events"]
+        assert isinstance(events, list)
+        events[0], events[1] = events[1], events[0]
+        candidates.append(("reordered-events", evidence))
+
+        evidence = self.passing_empty_damage_evidence()
+        pressure = evidence["pressure"]
+        assert isinstance(pressure, dict)
+        pressure["parent_frames_at_marker"] = 61
+        candidates.append(("pressure-summary-mismatch", evidence))
+
+        evidence = self.passing_empty_damage_evidence()
+        events = evidence["events"]
+        assert isinstance(events, list)
+        click_event = events[2]
+        assert isinstance(click_event, dict)
+        click_event["x"] = 999.0
+        candidates.append(("click-coordinate-mismatch", evidence))
+
+        evidence = self.passing_empty_damage_evidence()
+        del evidence["click_position"]
+        candidates.append(("missing-click-position", evidence))
+
+        for mutation, candidate in candidates:
+            with self.subTest(mutation=mutation):
+                checks = live_run.empty_damage_fixture_checks(candidate)
+                self.assertFalse(
+                    checks["secondary_fixture_event_stream_exact"],
+                    checks,
+                )
+                self.assertFalse(all(checks.values()), checks)
+
+    def test_empty_damage_boolean_evidence_requires_exact_true(self) -> None:
+        boolean_fields = {
+            ("clicked_within_deadline",): "secondary_pointer_response_bounded",
+            ("input_path", "client_press_release"): "secondary_client_pointer_path",
+            ("input_path", "server_child_focus"): "secondary_server_pointer_path",
+            ("input_path", "server_coordinates"): "secondary_server_pointer_path",
+            ("input_path", "server_press_release"): "secondary_server_pointer_path",
+            ("input_path", "fixture_child_release"): "secondary_surface_pointer_path",
+            ("input_path", "fixture_coordinates"): "secondary_surface_pointer_path",
+            ("pressure", "marker"): "empty_damage_pressure_active",
+            ("pressure", "parent_mapped_empty_commit"): "empty_damage_pressure_active",
+            ("pressure", "child_mapped_empty_commit"): "empty_damage_pressure_active",
+            ("teardown", "client_destroy_logged"): "secondary_toplevel_teardown",
+            ("teardown", "client_windows_absent"): "secondary_toplevel_teardown",
+            ("teardown", "complete"): "secondary_toplevel_teardown",
+            ("teardown", "server_destroy_logged"): "secondary_toplevel_teardown",
+            ("teardown", "server_inventory_available"): "secondary_toplevel_teardown",
+            ("teardown", "server_windows_absent"): "secondary_toplevel_teardown",
+            ("windows", "client_ids_distinct"): "secondary_toplevels_discovered",
+            ("windows", "server_ids_distinct"): "secondary_toplevels_discovered",
+            ("windows", "visible_content"): "secondary_toplevels_visible",
+        }
+        mutations = (("missing", None), ("false", False), ("truthy-string", "true"))
+        for path, expected_check in boolean_fields.items():
+            for mutation, replacement in mutations:
+                with self.subTest(path="/".join(path), mutation=mutation):
+                    evidence = self.passing_empty_damage_evidence()
+                    if mutation == "missing":
+                        self.remove_nested(evidence, path)
+                    else:
+                        self.mutate_nested(evidence, path, replacement)
+                    checks = live_run.empty_damage_fixture_checks(evidence)
+                    self.assertFalse(checks[expected_check], checks)
+                    self.assertFalse(all(checks.values()), checks)
+
+    def test_empty_damage_counts_and_exit_status_require_exact_integers(self) -> None:
+        integer_fields = {
+            ("fixture_exit_status",): (
+                "secondary_fixture_clean_exit",
+                (False, 0.0, "0"),
+            ),
+            ("pressure", "parent_frames_at_marker"): (
+                "empty_damage_pressure_active",
+                (True, 60.0, "60"),
+            ),
+            ("pressure", "child_frames_at_marker"): (
+                "empty_damage_pressure_active",
+                (True, 61.0, "61"),
+            ),
+        }
+        for path, (expected_check, replacements) in integer_fields.items():
+            for replacement in replacements:
+                with self.subTest(path="/".join(path), replacement=repr(replacement)):
+                    evidence = self.passing_empty_damage_evidence()
+                    self.mutate_nested(evidence, path, replacement)
+                    checks = live_run.empty_damage_fixture_checks(evidence)
+                    self.assertFalse(checks[expected_check], checks)
+                    self.assertFalse(all(checks.values()), checks)
+
+        for field in ("parent_frames_at_marker", "child_frames_at_marker"):
+            with self.subTest(field=field, boundary=59):
+                evidence = self.passing_empty_damage_evidence()
+                pressure = evidence["pressure"]
+                assert isinstance(pressure, dict)
+                pressure[field] = 59
+                checks = live_run.empty_damage_fixture_checks(evidence)
+                self.assertFalse(checks["empty_damage_pressure_active"], checks)
+
+    def test_empty_damage_deadline_and_failure_evidence_fail_closed(self) -> None:
+        exact_deadline = self.passing_empty_damage_evidence()
+        exact_deadline["click_observed_after_seconds"] = (
+            live_run.EMPTY_DAMAGE_INPUT_DEADLINE_SECONDS
+        )
+        self.assertTrue(
+            live_run.empty_damage_fixture_checks(exact_deadline)[
                 "secondary_pointer_response_bounded"
             ]
         )
-        evidence["pressure"]["parent_frames_at_marker"] = "60"
-        self.assertFalse(
-            live_run.empty_damage_fixture_checks(evidence)[
-                "empty_damage_pressure_active"
-            ]
+
+        invalid_elapsed = (
+            True,
+            1,
+            "0.25",
+            -0.001,
+            live_run.EMPTY_DAMAGE_INPUT_DEADLINE_SECONDS + 0.000001,
+            float("nan"),
+            float("inf"),
+            -float("inf"),
         )
+        for replacement in invalid_elapsed:
+            with self.subTest(elapsed=repr(replacement)):
+                evidence = self.passing_empty_damage_evidence()
+                evidence["click_observed_after_seconds"] = replacement
+                checks = live_run.empty_damage_fixture_checks(evidence)
+                self.assertFalse(checks["secondary_pointer_response_bounded"], checks)
+                self.assertFalse(all(checks.values()), checks)
+
+        for field in ("click_observed_after_seconds", "click_failure"):
+            with self.subTest(missing=field):
+                evidence = self.passing_empty_damage_evidence()
+                del evidence[field]
+                checks = live_run.empty_damage_fixture_checks(evidence)
+                self.assertFalse(checks["secondary_pointer_response_bounded"], checks)
+                self.assertFalse(all(checks.values()), checks)
+
+        for failure in ("", "timed out"):
+            with self.subTest(click_failure=repr(failure)):
+                evidence = self.passing_empty_damage_evidence()
+                evidence["click_failure"] = failure
+                checks = live_run.empty_damage_fixture_checks(evidence)
+                self.assertFalse(checks["secondary_pointer_response_bounded"], checks)
+                self.assertFalse(all(checks.values()), checks)
+
+    def test_empty_damage_event_sequence_is_complete_and_ordered(self) -> None:
+        for index in range(4):
+            with self.subTest(mutation="missing", index=index):
+                candidate = self.passing_empty_damage_events()
+                candidate.pop(index)
+                with self.assertRaises(live_run.LabFailure):
+                    live_run.validate_empty_damage_fixture_events(candidate)
+            with self.subTest(mutation="duplicate", index=index):
+                candidate = self.passing_empty_damage_events()
+                candidate.insert(index, copy.deepcopy(candidate[index]))
+                with self.assertRaises(live_run.LabFailure):
+                    live_run.validate_empty_damage_fixture_events(candidate)
+            with self.subTest(mutation="wrong-name", index=index):
+                candidate = self.passing_empty_damage_events()
+                candidate[index]["event"] = "unexpected"
+                with self.assertRaises(live_run.LabFailure):
+                    live_run.validate_empty_damage_fixture_events(candidate)
+
+        candidate = self.passing_empty_damage_events()
+        candidate.append({"event": "unexpected"})
+        with self.assertRaises(live_run.LabFailure):
+            live_run.validate_empty_damage_fixture_events(candidate)
+        for index in range(3):
+            with self.subTest(mutation="adjacent-swap", index=index):
+                candidate = self.passing_empty_damage_events()
+                candidate[index], candidate[index + 1] = (
+                    candidate[index + 1], candidate[index]
+                )
+                with self.assertRaises(live_run.LabFailure):
+                    live_run.validate_empty_damage_fixture_events(candidate)
+
+    def test_empty_damage_event_fields_are_exact(self) -> None:
+        for index, event in enumerate(self.passing_empty_damage_events()):
+            for field in tuple(event):
+                with self.subTest(index=index, missing=field):
+                    events = self.passing_empty_damage_events()
+                    del events[index][field]
+                    with self.assertRaises(live_run.LabFailure):
+                        live_run.validate_empty_damage_fixture_events(events)
+            with self.subTest(index=index, extra="unexpected"):
+                events = self.passing_empty_damage_events()
+                events[index]["unexpected"] = True
+                with self.assertRaises(live_run.LabFailure):
+                    live_run.validate_empty_damage_fixture_events(events)
+
+    def test_empty_damage_event_timestamps_are_exact_finite_and_ordered(self) -> None:
+        for index in range(4):
+            original = self.passing_empty_damage_events()[index]["monotonic_seconds"]
+            assert isinstance(original, float)
+            for replacement in (
+                True,
+                int(original),
+                str(original),
+                -0.001,
+                float("nan"),
+                float("inf"),
+                -float("inf"),
+            ):
+                with self.subTest(index=index, timestamp=repr(replacement)):
+                    events = self.passing_empty_damage_events()
+                    events[index]["monotonic_seconds"] = replacement
+                    with self.assertRaises(live_run.LabFailure):
+                        live_run.validate_empty_damage_fixture_events(events)
+
+        events = self.passing_empty_damage_events()
+        events[2]["monotonic_seconds"] = 19.5
+        with self.assertRaises(live_run.LabFailure):
+            live_run.validate_empty_damage_fixture_events(events)
+
+    def test_empty_damage_event_frame_counts_are_exact_and_monotonic(self) -> None:
+        for index in (0, 1, 3):
+            for field in ("parent_frames", "child_frames"):
+                original = self.passing_empty_damage_events()[index][field]
+                assert isinstance(original, int) and not isinstance(original, bool)
+                for replacement in (bool(original), float(original), str(original), -1):
+                    with self.subTest(index=index, field=field, value=repr(replacement)):
+                        events = self.passing_empty_damage_events()
+                        events[index][field] = replacement
+                        with self.assertRaises(live_run.LabFailure):
+                            live_run.validate_empty_damage_fixture_events(events)
+
+        semantic_mutations = (
+            (0, "parent_frames", 1),
+            (0, "child_frames", 1),
+            (1, "parent_frames", 59),
+            (1, "child_frames", 59),
+            (3, "parent_frames", 59),
+            (3, "child_frames", 60),
+        )
+        for index, field, replacement in semantic_mutations:
+            with self.subTest(index=index, field=field, value=replacement):
+                events = self.passing_empty_damage_events()
+                events[index][field] = replacement
+                with self.assertRaises(live_run.LabFailure):
+                    live_run.validate_empty_damage_fixture_events(events)
+
+    def test_empty_damage_click_coordinates_are_exact_finite_values(self) -> None:
+        for field in ("x", "y"):
+            original = self.passing_empty_damage_events()[2][field]
+            assert isinstance(original, float)
+            for replacement in (
+                True,
+                int(original),
+                str(original),
+                -0.001,
+                float("nan"),
+                float("inf"),
+                -float("inf"),
+            ):
+                with self.subTest(field=field, value=repr(replacement)):
+                    events = self.passing_empty_damage_events()
+                    events[2][field] = replacement
+                    with self.assertRaises(live_run.LabFailure):
+                        live_run.validate_empty_damage_fixture_events(events)
+
+    def test_empty_damage_event_loader_rejects_duplicate_json_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "empty-damage.stdout"
+            path.write_text(
+                '{"event":"ready","event":"ready"}\n',
+                encoding="utf-8",
+            )
+            path.chmod(0o600)
+            with self.assertRaises(live_run.LabFailure):
+                live_run.load_empty_damage_fixture_events(path)
 
     def test_primary_server_window_id_is_resolved_once_before_frame_poll(self) -> None:
         source = (LIVE_DIRECTORY / "run.py").read_text(encoding="utf-8")
