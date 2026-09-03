@@ -48,12 +48,6 @@ override IMAGE_BUILD_ROOT := $(STATE_ROOT)/image-builds
 override IMAGE_BUILD_CONTEXT := $(IMAGE_BUILD_ROOT)/$(IMAGE_BACKGROUND_NAME)
 export XPRA_FORK_IMAGE_BACKGROUND_NAME := $(IMAGE_BACKGROUND_NAME)
 
-override RESOLVE_IMAGE = image_id=$$($(PODMAN) image inspect "$(IMAGE)" --format '{{.Id}}'); \
-	[[ "$$image_id" =~ ^[0-9a-f]{64}$$ ]]; \
-	test "$$($(PODMAN) image inspect "$$image_id" --format '{{index .Labels "io.xpra.fork-maintenance.image-builder"}}')" = true; \
-	test "$$($(PODMAN) image inspect "$$image_id" --format '{{index .Labels "io.xpra.fork-maintenance.image-input"}}')" = "$(IMAGE_INPUT_SHA)"; \
-	test "$$($(PODMAN) image inspect "$$image_id" --format '{{index .Labels "io.xpra.fork-maintenance.workflow"}}')" = "$(WORKFLOW_SHA)"
-
 .PHONY: help private-state-check private-state-tests inputs-check selection-check ci-policy-check \
 	source-check source-snapshot \
 	image image-check ci-image ci image-background-start image-background-name-check \
@@ -166,28 +160,11 @@ source-snapshot: source-check
 		--bundle "$(SOURCE_BUNDLE)"
 
 image image-check: source-check inputs-check
-	@$(PODMAN) image exists "$(IMAGE)" || { \
-		printf 'required image is missing: %s\n' "$(IMAGE)" >&2; \
-		printf '%s\n' 'run make image-background-start, then make image-background-wait' >&2; \
-		exit 2; \
-	}
-	@builder=$$($(PODMAN) image inspect "$(IMAGE)" \
-		--format '{{index .Labels "io.xpra.fork-maintenance.image-builder"}}'); \
-		actual=$$($(PODMAN) image inspect "$(IMAGE)" \
-			--format '{{index .Labels "io.xpra.fork-maintenance.image-input"}}'); \
-		workflow=$$($(PODMAN) image inspect "$(IMAGE)" \
-			--format '{{index .Labels "io.xpra.fork-maintenance.workflow"}}'); \
-		test "$$builder" = true || { \
-			printf 'image builder label mismatch for %s\n' "$(IMAGE)" >&2; exit 2; \
-		}; \
-		test "$$actual" = "$(IMAGE_INPUT_SHA)" || { \
-			printf 'image input label mismatch for %s\n' "$(IMAGE)" >&2; exit 2; \
-		}; \
-		test "$$workflow" = "$(WORKFLOW_SHA)" || { \
-			printf 'image workflow label mismatch for %s\n' "$(IMAGE)" >&2; exit 2; \
-		}
+	@python3 "$(JOB)" image check \
+		--image "$(IMAGE)" --image-input-sha256 "$(IMAGE_INPUT_SHA)" \
+		--source "$(BASE_COMMIT)" --workflow-sha256 "$(WORKFLOW_SHA)"
 
-image-remove: image
+image-remove: source-check inputs-check
 	@python3 "$(JOB)" image cache-remove \
 		--image "$(IMAGE)" --image-input-sha256 "$(IMAGE_INPUT_SHA)" \
 		--source "$(BASE_COMMIT)" --workflow-sha256 "$(WORKFLOW_SHA)"

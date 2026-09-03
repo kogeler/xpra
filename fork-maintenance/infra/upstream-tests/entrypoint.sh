@@ -9,6 +9,7 @@ SNAPSHOT_LAB="$INPUTS/lab"
 WORK=/work/xpra
 SOURCE_MIRROR=/work/source.git
 RESOLUTION="$INPUTS/selection-resolution.json"
+RESOLUTION_DIGEST="$INPUTS/selection-resolution.sha256"
 
 if test ! -e "$INPUTS"; then
     python3 "$PAYLOAD_HELPER" extract --destination "$INPUTS"
@@ -29,7 +30,69 @@ selection_tool() {
         "$@"
 }
 
+require_exact_output() {
+    local expected=$1 description=$2 actual
+    shift 2
+    if ! actual=$("$@"); then
+        printf 'cannot determine %s\n' "$description" >&2
+        return 2
+    fi
+    test "$actual" = "$expected" || {
+        printf '%s is inconsistent\n' "$description" >&2
+        return 2
+    }
+}
+
+file_sha256() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+workflow_blob_sha256() {
+    git -C "$WORK" show "$EXPECTED_COMMIT:.github/workflows/test.yml" \
+        | sha256sum | awk '{print $1}'
+}
+
+verified_resolution_patch_rows() {
+    local output
+    if ! output=$(selection_tool resolution-patches \
+        --resolution "$RESOLUTION" \
+        --digest-file "$RESOLUTION_DIGEST" \
+        --source-commit "$EXPECTED_COMMIT" \
+        --selection-sha256 "$SELECTION_DIGEST"); then
+        printf 'cannot read verified patch rows for selection %s\n' "$SELECTION" >&2
+        return 2
+    fi
+    test -n "$output" || {
+        printf 'verified selection has no patch rows: %s\n' "$SELECTION" >&2
+        return 2
+    }
+    printf '%s\n' "$output"
+}
+
+selected_focused_tests() {
+    local output
+    if ! output=$(selection_tool unit-tests); then
+        printf 'cannot read focused unit tests for selection %s\n' "$SELECTION" >&2
+        return 2
+    fi
+    test -n "$output" || {
+        printf 'selection has no focused unit tests: %s\n' "$SELECTION" >&2
+        return 2
+    }
+    printf '%s\n' "$output"
+}
+
+selected_gate_names() {
+    local output
+    if ! output=$(selection_tool gates); then
+        printf 'cannot read gates for selection %s\n' "$SELECTION" >&2
+        return 2
+    fi
+    printf '%s\n' "$output"
+}
+
 validate_inputs() {
+    local expected_bundle_heads
     case "$PATCH_MODE" in
         clean|tests-only|patched) ;;
         *) printf 'invalid patch mode: %s\n' "$PATCH_MODE" >&2; return 2 ;;
@@ -59,14 +122,26 @@ validate_inputs() {
     }
     test -f "$SOURCE" && test ! -L "$SOURCE"
     test -d "$SNAPSHOT_LAB" && test ! -L "$SNAPSHOT_LAB"
-    test "$(git bundle list-heads "$SOURCE")" = \
-        "$EXPECTED_SOURCE_HEAD $EXPECTED_SOURCE_REF"
-    selection_tool validate
-    test "$(selection_tool digest)" = "$SELECTION_DIGEST"
+    expected_bundle_heads="$EXPECTED_SOURCE_HEAD $EXPECTED_SOURCE_REF"
+    if ! require_exact_output "$expected_bundle_heads" 'source bundle heads' \
+        git bundle list-heads "$SOURCE"; then
+        return 2
+    fi
+    if ! selection_tool validate; then
+        printf 'selection %s is invalid\n' "$SELECTION" >&2
+        return 2
+    fi
+    if ! require_exact_output "$SELECTION_DIGEST" 'selection digest' \
+        selection_tool digest; then
+        return 2
+    fi
 }
 
 prepare_source() {
-    local after before resolution_sha
+    local after before gates_output resolution_sha patch_rows_output
+    local count_label expected_patch_count patch_index row row_extra row_index
+    local case_slug patch_status patch_path patch_sha
+    local -a patch_rows=()
     validate_inputs
     test ! -e "$SOURCE_MIRROR"
     test ! -e "$WORK"
@@ -75,24 +150,51 @@ prepare_source() {
     git clone --quiet --no-hardlinks --no-checkout "$SOURCE_MIRROR" "$WORK"
     git -C "$WORK" merge-base --is-ancestor "$EXPECTED_COMMIT" "$EXPECTED_SOURCE_HEAD"
     git -C "$WORK" checkout --quiet --detach "$EXPECTED_COMMIT"
-    test "$(git -C "$WORK" rev-parse HEAD)" = "$EXPECTED_COMMIT"
+    if ! require_exact_output "$EXPECTED_COMMIT" 'checked-out source HEAD' \
+        git -C "$WORK" rev-parse HEAD; then
+        return 2
+    fi
     git -C "$WORK" cat-file -e "$EXPECTED_COMMIT:.github/workflows/test.yml"
-    test "$(git -C "$WORK" show "$EXPECTED_COMMIT:.github/workflows/test.yml" | sha256sum | awk '{print $1}')" = "$EXPECTED_WORKFLOW_SHA"
-    test -z "$(git -C "$WORK" status --porcelain=v1 --untracked-files=all)"
+    if ! require_exact_output "$EXPECTED_WORKFLOW_SHA" 'source workflow digest' \
+        workflow_blob_sha256; then
+        return 2
+    fi
+    if ! require_exact_output '' 'checked-out source status' \
+        git -C "$WORK" status --porcelain=v1 --untracked-files=all; then
+        return 2
+    fi
 
-    selection_tool resolve \
+    if ! selection_tool resolve \
         --source-tree "$WORK" \
-        --source-commit "$EXPECTED_COMMIT" > "$RESOLUTION"
-    resolution_sha=$(python3 - "$RESOLUTION" <<'PY'
+        --source-commit "$EXPECTED_COMMIT" > "$RESOLUTION"; then
+        printf 'cannot resolve selection %s\n' "$SELECTION" >&2
+        return 2
+    fi
+    if ! resolution_sha=$(python3 - "$RESOLUTION" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as stream:
     print(json.load(stream)["resolution_sha256"])
 PY
-)
+    ); then
+        printf 'cannot read selection resolution digest\n' >&2
+        return 2
+    fi
     [[ "$resolution_sha" =~ ^[0-9a-f]{64}$ ]]
-    printf '%s\n' "$resolution_sha" > "$INPUTS/selection-resolution.sha256"
+    printf '%s\n' "$resolution_sha" > "$RESOLUTION_DIGEST"
+    if ! patch_rows_output=$(verified_resolution_patch_rows); then
+        return 2
+    fi
+    mapfile -t patch_rows <<<"$patch_rows_output"
+    IFS=$'\t' read -r count_label expected_patch_count row_extra <<<"${patch_rows[0]}"
+    test "$count_label" = count \
+        && [[ "$expected_patch_count" =~ ^[1-9][0-9]*$ ]] \
+        && test -z "$row_extra" \
+        && test "${#patch_rows[@]}" -eq "$((expected_patch_count + 1))" || {
+        printf 'verified patch-row count is inconsistent for selection %s\n' "$SELECTION" >&2
+        return 2
+    }
 
     cd "$WORK"
     printf 'source_commit=%s\nsource_bundle_head=%s\nsource_bundle_ref=%s\nworkflow_sha256=%s\nselection=%s\nselection_sha256=%s\nselection_resolution_sha256=%s\npatch_mode=%s\n' \
@@ -105,13 +207,34 @@ PY
     pkg-config --version
     sha256sum "$HOST_RUNNER/entrypoint.sh" "$HOST_RUNNER/selection.py" "$PAYLOAD_HELPER"
     find "$SNAPSHOT_LAB" -type f -print0 | sort -z | xargs -0 sha256sum
-    selection_tool gates | sed 's/^/selected_gate=/'
+    if ! gates_output=$(selected_gate_names); then
+        return 2
+    fi
+    if test -n "$gates_output"; then
+        sed 's/^/selected_gate=/' <<<"$gates_output"
+    fi
 
-    while IFS=$'\t' read -r case_slug patch_status patch_path patch_sha; do
-        test -n "$case_slug" && test -n "$patch_status" && test -n "$patch_path"
+    for row_index in "${!patch_rows[@]}"; do
+        test "$row_index" -gt 0 || continue
+        row=${patch_rows[$row_index]}
+        IFS=$'\t' read -r patch_index case_slug patch_status patch_path patch_sha row_extra <<<"$row"
+        [[ "$patch_index" =~ ^(0|[1-9][0-9]*)$ ]] \
+            && test "$patch_index" -eq "$((row_index - 1))" \
+            && test -n "$case_slug" \
+            && test -n "$patch_status" \
+            && test -n "$patch_path" \
+            && [[ "$patch_sha" =~ ^[0-9a-f]{64}$ ]] \
+            && test -z "$row_extra" || {
+            printf 'verified patch-row order or shape is inconsistent at index %s\n' \
+                "$((row_index - 1))" >&2
+            return 2
+        }
         local patch="$SNAPSHOT_LAB/$patch_path"
         test -f "$patch"
-        test "$(sha256sum "$patch" | awk '{print $1}')" = "$patch_sha"
+        if ! require_exact_output "$patch_sha" "selected patch digest for $case_slug" \
+            file_sha256 "$patch"; then
+            return 2
+        fi
         printf 'selected_case=%s selected_patch=%s patch_status=%s patch_sha256=%s\n' \
             "$case_slug" "$patch_path" "$patch_status" "$patch_sha"
         if test "$patch_status" = already-present; then
@@ -134,22 +257,7 @@ PY
             printf 'invalid resolved patch status: %s\n' "$patch_status" >&2
             return 2
         fi
-    done < <(python3 - "$RESOLUTION" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as stream:
-    resolution = json.load(stream)
-for entry in resolution["patches"]:
-    print(
-        entry["case"],
-        entry["status"],
-        entry["patch"],
-        entry["patch_sha256"],
-        sep="\t",
-    )
-PY
-)
+    done
     git diff --check
     git diff --cached --check
 }
@@ -169,12 +277,12 @@ check_elf() {
     fi
 }
 
-selection_has_case() {
-    selection_tool cases | grep -Fx "$1" >/dev/null
-}
-
 require_gate() {
-    selection_tool gates | grep -Fx "$1" >/dev/null || {
+    local gates_output
+    if ! gates_output=$(selected_gate_names); then
+        return 2
+    fi
+    grep -Fx "$1" <<<"$gates_output" >/dev/null || {
         printf 'selection %s does not declare the %s gate\n' "$SELECTION" "$1" >&2
         return 2
     }
@@ -185,19 +293,39 @@ libyuv_patch_mode() {
 }
 
 libyuv_smoke_test() {
-    local smoke
-    smoke=$(selection_tool local-tests | grep -E '/libyuv_smoke\.py$' | head -n 1)
-    test -n "$smoke"
+    local local_test local_tests_output smoke=
+    if ! local_tests_output=$(selection_tool local-tests); then
+        printf 'cannot read local tests for selection %s\n' "$SELECTION" >&2
+        return 2
+    fi
+    while IFS= read -r local_test; do
+        case "$local_test" in
+            */libyuv_smoke.py)
+                test -z "$smoke" || {
+                    printf 'selection %s has multiple libyuv smoke tests\n' "$SELECTION" >&2
+                    return 2
+                }
+                smoke=$local_test
+                ;;
+        esac
+    done <<<"$local_tests_output"
+    test -n "$smoke" || {
+        printf 'selection %s has no libyuv smoke test\n' "$SELECTION" >&2
+        return 2
+    }
     printf '%s\n' "$SNAPSHOT_LAB/$smoke"
 }
 
 check_focused_native_modules() {
-    local xpra_dir converter events display keyboard output smoke_mode smoke_test
+    local xpra_dir converter events display gates_output keyboard output smoke_mode smoke_test
     xpra_dir=$(installed_xpra_dir)
     test -n "$xpra_dir"
     cd "$WORK/tests/unittests"
+    if ! gates_output=$(selected_gate_names); then
+        return 2
+    fi
 
-    if selection_tool gates | grep -Fx libyuv >/dev/null; then
+    if grep -Fx libyuv <<<"$gates_output" >/dev/null; then
         converter=$(find "$xpra_dir/codecs/libyuv" -maxdepth 1 -name 'converter*.so' -print -quit)
         check_elf "$converter"
         PYTHONPATH=".:${xpra_dir%/xpra}" python3 - <<'PY'
@@ -212,7 +340,7 @@ PY
             --patch-mode "$smoke_mode"
     fi
 
-    if selection_tool gates | grep -Fx wayland >/dev/null; then
+    if grep -Fx wayland <<<"$gates_output" >/dev/null; then
         events=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'events*.so' -print -quit)
         display=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'display*.so' -print -quit)
         keyboard=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'keyboard*.so' -print -quit)
@@ -233,7 +361,7 @@ PY
 }
 
 run_focused() {
-    local extra_args test_path
+    local extra_args gates_output selected_output test_path
     local -a selected_paths selected_tests
     case "$PATCH_MODE" in
         patched|tests-only) ;;
@@ -243,11 +371,10 @@ run_focused() {
             ;;
     esac
     prepare_source
-    mapfile -t selected_tests < <(selection_tool unit-tests)
-    test "${#selected_tests[@]}" -gt 0 || {
-        printf 'selection has no focused unit tests: %s\n' "$SELECTION" >&2
+    if ! selected_output=$(selected_focused_tests); then
         return 2
-    }
+    fi
+    mapfile -t selected_tests <<<"$selected_output"
     for test_path in "${selected_tests[@]}"; do
         test_path=${test_path//./\/}.py
         test -f "$WORK/tests/unittests/$test_path" || {
@@ -257,10 +384,13 @@ run_focused() {
         selected_paths+=("$test_path")
     done
     extra_args='--with-terminal_client'
-    if selection_tool gates | grep -Fx libyuv >/dev/null; then
+    if ! gates_output=$(selected_gate_names); then
+        return 2
+    fi
+    if grep -Fx libyuv <<<"$gates_output" >/dev/null; then
         extra_args+=' --with-csc_libyuv --with-argb'
     fi
-    if selection_tool gates | grep -Fx wayland >/dev/null; then
+    if grep -Fx wayland <<<"$gates_output" >/dev/null; then
         extra_args+=' --with-keyboard --with-wayland_server'
     fi
     cd "$WORK"
@@ -358,19 +488,33 @@ run_full() {
 
 run_quarantine() {
     local cythonize=$1 compat=$2 gate=$3 output status module
-    local -a quarantined skip_args test_paths
+    local quarantined_output expected_output
+    local -a quarantined=() expected=() skip_args=() test_paths=()
     require_gate "$gate"
     test "$PATCH_MODE" = clean || {
         printf '%s\n' 'quarantine reassessment requires PATCH_MODE=clean' >&2
         return 2
     }
-    mapfile -t quarantined < <(selection_tool quarantined-tests)
-    test "${#quarantined[@]}" -gt 0 || {
+    if ! quarantined_output=$(selection_tool quarantined-tests); then
+        printf 'cannot read quarantine module union for selection %s\n' "$SELECTION" >&2
+        return 2
+    fi
+    test -n "$quarantined_output" || {
         printf 'selection %s has no quarantined test modules\n' "$SELECTION" >&2
         return 2
     }
-    for module in "${quarantined[@]}"; do
+    mapfile -t quarantined <<<"$quarantined_output"
+    if ! expected_output=$(selection_tool quarantined-tests --gate "$gate"); then
+        printf 'cannot read quarantine assignment for gate %s\n' "$gate" >&2
+        return 2
+    fi
+    if test -n "$expected_output"; then
+        mapfile -t expected <<<"$expected_output"
+    fi
+    for module in "${expected[@]}"; do
         skip_args+=(--skip-fail "$module")
+    done
+    for module in "${quarantined[@]}"; do
         test_paths+=("${module//./\/}.py")
     done
 
@@ -390,48 +534,69 @@ run_quarantine() {
         printf 'quarantine probe failed before producing an accepted test summary: %s\n' "$status" >&2
         return "$status"
     fi
-    python3 - "$output" "${quarantined[@]}" <<'PY'
+    python3 - "$output" "$gate" "${#quarantined[@]}" "${expected[@]}" <<'QUARANTINE_SUMMARY_PY'
 import re
 import sys
 from pathlib import Path
 
 output = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
-expected = tuple(sys.argv[2:])
+gate = sys.argv[2]
+module_count = int(sys.argv[3])
+expected = tuple(sys.argv[4:])
 markers = [match.start() for match in re.finditer(r"(?m)^test summary:$", output)]
 if not markers:
     raise SystemExit("quarantine probe produced no unit-test summary")
 summary = output[markers[-1]:]
 
-def count(label: str) -> int:
-    match = re.search(rf"(?m)^  {re.escape(label)}: ([0-9]+)$", summary)
-    if not match:
+def count(label: str, *, optional: bool = False) -> int:
+    matches = re.findall(rf"(?m)^  {re.escape(label)}: ([0-9]+)$", summary)
+    if not matches and optional:
+        return 0
+    if len(matches) != 1:
         raise SystemExit(f"quarantine probe omitted {label!r}")
-    return int(match.group(1))
+    return int(matches[0])
 
 ignored_match = re.search(
-    r"(?ms)^  ignored failures: [0-9]+\n(?P<items>(?:    - .+\n)*)",
+    r"(?m)^  ignored failures: [0-9]+\n(?P<items>(?:    - [^\n]+\n)*)",
     summary,
 )
 ignored = ()
 if ignored_match:
-    ignored = tuple(
-        match.group(1)
-        for match in re.finditer(
-            r"(?m)^    - (unit(?:\.[a-z0-9_]+)+) \(exit code=[0-9]+\)$",
-            ignored_match.group("items"),
+    lines = ignored_match.group("items").splitlines()
+    parsed = []
+    for line in lines:
+        match = re.fullmatch(
+            r"    - (unit(?:\.[a-z0-9_]+)+) \(exit code=[0-9]+\)",
+            line,
         )
-    )
+        if not match:
+            raise SystemExit(f"quarantine probe has malformed ignored failure: {line!r}")
+        parsed.append(match.group(1))
+    ignored = tuple(parsed)
 
-if count("successful tests") or count("failed tests"):
+successful = count("successful tests")
+failed = count("failed tests")
+skipped = count("skipped tests", optional=True)
+ignored_count = count("ignored failures", optional=True)
+if failed or skipped:
     raise SystemExit(
-        "quarantine is stale or contaminated: a selected module passed or failed outside --skip-fail"
+        f"quarantine gate {gate} is contaminated: failed={failed}, skipped={skipped}"
     )
-if count("ignored failures") != len(ignored) or ignored != expected:
+if successful != module_count - len(expected):
     raise SystemExit(
-        f"quarantine is stale: expected ignored failures {expected!r}, observed {ignored!r}"
+        f"quarantine gate {gate} expected {module_count - len(expected)} successful "
+        f"modules, observed {successful}"
     )
-print("quarantine still required for: " + ", ".join(ignored))
-PY
+if ignored_count != len(ignored) or ignored != expected:
+    raise SystemExit(
+        f"quarantine gate {gate} is stale: expected ignored failures "
+        f"{expected!r}, observed {ignored!r}"
+    )
+print(
+    f"quarantine gate {gate} confirmed failures: "
+    + (", ".join(ignored) or "<none>")
+)
+QUARANTINE_SUMMARY_PY
 }
 
 case "${1:-help}" in

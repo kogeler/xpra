@@ -131,8 +131,10 @@ old/new applied-tree comparison that paths, modes, executable data,
 configuration, test assertions, runner behavior, and live assertions are
 unchanged, then run only resolution, whitespace, and fork-control checks and
 record the proof. This exception cannot cross `develop-rebase`; every upstream
-rebase requires all seven fixed positive live profiles. Any semantic difference
-on an unchanged base also requires the declared live gates.
+rebase requires every production case's declared live gates with its atomic
+case selection and all seven fixed positive live profiles with the complete
+stack selection. Any semantic difference on an unchanged base also requires
+the declared live gates.
 
 Every named live acceptance run requires one nonempty reviewed `CASE` or
 `STACK` selection. A clean-source diagnostic is not live acceptance and must
@@ -312,6 +314,29 @@ make -C fork-maintenance live-xpra-transport-loss \
 make -C fork-maintenance live-wait RUN=xpra-transport-loss-01
 make -C fork-maintenance live-remove RUN=xpra-transport-loss-01
 ```
+
+For both lifecycle profiles, inspect the scenario report rather than accepting
+only the high-level survival booleans. `application_identity_at_capture`, the
+corresponding `application_identity_after_*`, and
+`application_identity_before_termination` must be identical and must contain
+the fixture's exact Python/script argv, PID, procfs start ticks, and command-line
+digest. The corresponding `server_identity_at_capture`,
+`server_identity_after_*`, and
+`server_identity_before_application_termination` must likewise be the same
+bounded PID/start-ticks/argv/digest identity, its PID must equal `server_pid`,
+and it must differ from the fixture PID. `application_termination` must bind
+both identities, record both successful pidfd opens, and record a successful
+fixture-pidfd `SIGTERM`. The in-container termination probe must reject a dead
+or zombie server, double-snapshot both identities, and poll the server pidfd
+again immediately before the signal. The report must then show the exact
+fixture gone and only afterward the server exit. This prevents
+`pgrep --full` from mistaking the older Xpra server for the child merely because
+the server argv contains `--start-child=...interaction_fixture.py`. Named-job
+collection must independently reparse the retained private
+`interaction.identity.json` and `server.pid` files and bind them to the raw
+exact-live application activity, its hardware PID/argv, lifecycle capture, and
+server identity/PID fields, even if all report and artifact digests are
+internally refreshed.
 
 Run both fixed multi-window hardware acceptance profiles with adaptive alpha:
 

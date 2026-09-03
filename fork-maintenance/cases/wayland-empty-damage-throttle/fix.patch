@@ -1,5 +1,5 @@
 diff --git a/tests/unittests/unit/wayland/window_test.py b/tests/unittests/unit/wayland/window_test.py
-index e047159aaf7649f342161a02c27840115be82ebd..407dfa4355627a36d267cabf59b184aba2c6950b 100644
+index e047159aaf7649f342161a02c27840115be82ebd..fcf47a135cc20e65653d01e3d278be41f6213645 100644
 --- a/tests/unittests/unit/wayland/window_test.py
 +++ b/tests/unittests/unit/wayland/window_test.py
 @@ -34,2 +34,23 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
@@ -26,13 +26,14 @@ index e047159aaf7649f342161a02c27840115be82ebd..407dfa4355627a36d267cabf59b184ab
 +        window.acknowledge_empty_changes.side_effect = acknowledge_empty_changes
 +
      @staticmethod
-@@ -41,5 +62,31 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+@@ -41,5 +62,32 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
          server.subsurface_facades = {}
 -        server.window_sources.return_value = ()
 +        source = Mock()
 +        source.is_closed.return_value = False
 +        source.suspended = False
 +        source.can_send_window.return_value = True
++        source.is_window_hidden.return_value = False
 +        source.get_window_source.return_value = None
 +        source.subsurface_sources = {}
 +        server.window_sources.return_value = (source,)
@@ -59,26 +60,27 @@ index e047159aaf7649f342161a02c27840115be82ebd..407dfa4355627a36d267cabf59b184ab
 +        return callback()
 +
      def test_mapped_empty_damage_acknowledges_after_subsurface_updates(self):
-@@ -50,2 +97,6 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+@@ -50,2 +98,7 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
          source = Mock()
 +        source.is_closed.return_value = False
 +        source.suspended = False
 +        source.can_send_window.return_value = True
++        source.is_window_hidden.return_value = False
 +        source.get_window_source.return_value = None
          source.subsurface_sources = {2: subsource}
-@@ -67,2 +118,6 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+@@ -67,2 +120,6 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
  
 +        window.acknowledge_changes.assert_not_called()
 +        server.timeout_add.assert_called_once()
 +        self.assertEqual(server.timeout_add.call_args.args[0], 16)
 +        self.assertFalse(self.fire_empty_damage_timer(server))
          window.acknowledge_changes.assert_called_once_with()
-@@ -94,2 +149,4 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+@@ -94,2 +151,4 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
          window.acknowledge_changes.assert_not_called()
 +        window.clear_wayland_damage_frame_pending.assert_not_called()
 +        self.assertFalse(window.has_wayland_damage_frame_pending())
          server.refresh_window_area.assert_not_called()
-@@ -105,2 +162,322 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+@@ -105,2 +164,358 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
  
 +class WaylandWindowServerEmptyDamageTest(unittest.TestCase):
 +
@@ -114,6 +116,7 @@ index e047159aaf7649f342161a02c27840115be82ebd..407dfa4355627a36d267cabf59b184ab
 +        source.is_closed.return_value = False
 +        source.suspended = False
 +        source.can_send_window.return_value = True
++        source.is_window_hidden.return_value = False
 +        source.get_window_source.return_value = None
 +        source.subsurface_sources = {}
 +        server.window_sources.return_value = (source,)
@@ -143,7 +146,8 @@ index e047159aaf7649f342161a02c27840115be82ebd..407dfa4355627a36d267cabf59b184ab
 +        window = Mock()
 +
 +        for condition in (
-+                "no-sources", "closed", "suspended", "filtered", "window-source-suspended",
++                "no-sources", "closed", "suspended", "filtered", "hidden",
++                "window-source-suspended",
 +        ):
 +            with self.subTest(condition=condition):
 +                server = self.make_server(window)
@@ -156,6 +160,8 @@ index e047159aaf7649f342161a02c27840115be82ebd..407dfa4355627a36d267cabf59b184ab
 +                    source.suspended = True
 +                elif condition == "filtered":
 +                    source.can_send_window.return_value = False
++                elif condition == "hidden":
++                    source.is_window_hidden.return_value = True
 +                else:
 +                    window_source = Mock()
 +                    window_source.suspended = True
@@ -179,6 +185,38 @@ index e047159aaf7649f342161a02c27840115be82ebd..407dfa4355627a36d267cabf59b184ab
 +        window.acknowledge_changes.assert_not_called()
 +        self.assertEqual(server._empty_damage_ack_timer, 0)
 +        self.assertEqual(server._empty_damage_ack_windows, {})
++
++    def test_consumer_becomes_hidden_before_empty_damage_timer(self):
++        window = Mock()
++        server = self.make_server(window)
++        source = server.window_sources.return_value[0]
++
++        WaylandWindowServer.commit(server, 7, True, (100, 80), (), [])
++        source.is_window_hidden.return_value = True
++
++        self.assertFalse(self.fire_empty_damage_timer(server))
++        window.acknowledge_changes.assert_not_called()
++        self.assertEqual(server._empty_damage_ack_timer, 0)
++        self.assertEqual(server._empty_damage_ack_windows, {})
++
++    def test_hidden_consumer_does_not_mask_visible_consumer(self):
++        window = Mock()
++        server = self.make_server(window)
++        hidden = server.window_sources.return_value[0]
++        hidden.is_window_hidden.return_value = True
++        visible = Mock()
++        visible.is_closed.return_value = False
++        visible.suspended = False
++        visible.can_send_window.return_value = True
++        visible.is_window_hidden.return_value = False
++        visible.get_window_source.return_value = None
++        server.window_sources.return_value = (hidden, visible)
++
++        WaylandWindowServer.commit(server, 7, True, (100, 80), (), [])
++
++        server.timeout_add.assert_called_once()
++        self.assertFalse(self.fire_empty_damage_timer(server))
++        window.acknowledge_changes.assert_called_once_with()
 +
 +    def test_damage_frame_becoming_pending_before_timer_fire_prevents_acknowledgement(self):
 +        window = Mock()
@@ -401,20 +439,20 @@ index e047159aaf7649f342161a02c27840115be82ebd..407dfa4355627a36d267cabf59b184ab
 +
 +
  class WaylandWindowServerConfigureTest(unittest.TestCase):
-@@ -126,2 +503,5 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
+@@ -126,2 +541,5 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
          server._set_client_properties.assert_called_once_with(proto, 7, window, properties)
 +        server.cancel_empty_damage_ack.assert_not_called()
 +        window.clear_wayland_damage_frame_pending.assert_not_called()
 +        window.queue_frame_done.assert_not_called()
          surface.resize.assert_not_called()
-@@ -138,4 +518,5 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
+@@ -138,4 +556,5 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
          server._set_client_properties.side_effect = lambda *_args: events.append("properties")
 +        server.cancel_empty_damage_ack.side_effect = lambda *_args: events.append("cancel-empty-ack")
 +        window.queue_frame_done.side_effect = lambda: events.append("queue-frame-done")
          surface.resize.side_effect = lambda *_args: events.append("resize")
 -        surface.frame_done.side_effect = lambda: events.append("frame-done")
          server.server.compositor.flush.side_effect = lambda: events.append("flush")
-@@ -152,6 +533,10 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
+@@ -152,6 +571,10 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
  
 -        self.assertEqual(events, ["properties", "resize", "frame-done", "flush"])
 +        self.assertEqual(events, [
@@ -427,14 +465,14 @@ index e047159aaf7649f342161a02c27840115be82ebd..407dfa4355627a36d267cabf59b184ab
 -        surface.frame_done.assert_called_once_with()
 +        surface.frame_done.assert_not_called()
          server.server.compositor.flush.assert_called_once_with()
-@@ -177,2 +562,6 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
+@@ -177,2 +600,6 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
                  server._set_client_properties.assert_not_called()
 +                server.cancel_empty_damage_ack.assert_not_called()
 +                if window is not None:
 +                    window.clear_wayland_damage_frame_pending.assert_not_called()
 +                    window.queue_frame_done.assert_not_called()
                  if surface is not None:
-@@ -183,2 +572,57 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
+@@ -183,2 +610,57 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
  
 +class WaylandWindowModelTest(unittest.TestCase):
 +
@@ -540,7 +578,7 @@ index 1b363f613037f00a13e5019c7d784a5fbaf18819..f2da0ff215745acc3cc3347c3ee95311
 +            return
          if display := self._gproperties.get("display"):
 diff --git a/xpra/wayland/server/subsystem/window.py b/xpra/wayland/server/subsystem/window.py
-index 991139776bcab9e4b2c80c50050424ab2a76eda4..477fb8ead7e6fefa17913a0d82ccc94ba2d0525d 100644
+index 991139776bcab9e4b2c80c50050424ab2a76eda4..da2f400e72bbb1517a062d66f10c0e372c8a3ce1 100644
 --- a/xpra/wayland/server/subsystem/window.py
 +++ b/xpra/wayland/server/subsystem/window.py
 @@ -28,2 +28,6 @@ focuslog = Logger("server", "wayland", "focus")
@@ -579,7 +617,7 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..477fb8ead7e6fefa17913a0d82ccc94b
 +        if mapped and rects:
 +            window.mark_wayland_damage_frame_pending()
          options = {"damage": True}
-@@ -266,2 +281,48 @@ class WaylandWindowServer(WindowServer):
+@@ -266,2 +281,53 @@ class WaylandWindowServer(WindowServer):
  
 +    def schedule_empty_damage_ack(self, wid: int, window: Window) -> None:
 +        if (
@@ -597,7 +635,12 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..477fb8ead7e6fefa17913a0d82ccc94b
 +
 +    def has_empty_damage_consumer(self, wid: int, window: Window) -> bool:
 +        for ss in self.window_sources():
-+            if ss.is_closed() or ss.suspended or not ss.can_send_window(window):
++            if (
++                ss.is_closed()
++                or ss.suspended
++                or not ss.can_send_window(window)
++                or ss.is_window_hidden(window)
++            ):
 +                continue
 +            ws = ss.get_window_source(wid)
 +            if ws is None or not ws.suspended:
@@ -628,15 +671,15 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..477fb8ead7e6fefa17913a0d82ccc94b
 +            self._empty_damage_ack_timer = 0
 +
      def subsurface_image(self, wid: int, image: ImageWrapper,
-@@ -367,2 +428,3 @@ class WaylandWindowServer(WindowServer):
+@@ -367,2 +433,3 @@ class WaylandWindowServer(WindowServer):
      def destroy(self, wid: int) -> None:
 +        self.cancel_empty_damage_ack(wid)
          # The wlroots xdg surface is being freed. Drop every server-side
-@@ -376,2 +438,3 @@ class WaylandWindowServer(WindowServer):
+@@ -376,2 +443,3 @@ class WaylandWindowServer(WindowServer):
          if window is not None:
 +            window.clear_wayland_damage_frame_pending()
              surface = window.get_property("surface")
-@@ -459,4 +522,5 @@ class WaylandWindowServer(WindowServer):
+@@ -459,4 +527,5 @@ class WaylandWindowServer(WindowServer):
              w, h = geometry[2:4]
 +            self.cancel_empty_damage_ack(wid)
              surface.resize(w, h)

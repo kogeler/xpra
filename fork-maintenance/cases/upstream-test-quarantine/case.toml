@@ -3,15 +3,17 @@ slug = "upstream-test-quarantine"
 kind = "test-quarantine"
 title = "Quarantine failing upstream test modules"
 commit_subject = "Quarantine failing upstream test modules"
-patch_sha256 = "a2ec12d8f91f39ce1eaba0b398314bd191f63be95f1191f1a8bf72d743a785cc"
+patch_sha256 = "5279ec6909f79bd2d229858b4c1fb3a8751a417be77a8e40f957ae87017de68d"
 dependencies = []
 paths = [
+  "tests/unittests/unit/client/record_test.py",
   "tests/unittests/unit/client/x11_client_paint_test.py",
 ]
 
 [tests]
 list = [
   "unit.client.x11_client_paint_test",
+  "unit.client.record_test",
   "full",
   "full-cython",
   "full-no-compat",
@@ -19,6 +21,19 @@ list = [
 
 [quarantine]
 modules = [
+  "unit.client.x11_client_paint_test",
+  "unit.client.record_test",
+]
+
+[quarantine.gates]
+quarantine = [
+  "unit.client.x11_client_paint_test",
+]
+quarantine-cython = [
+  "unit.client.x11_client_paint_test",
+  "unit.client.record_test",
+]
+quarantine-no-compat = [
   "unit.client.x11_client_paint_test",
 ]
 

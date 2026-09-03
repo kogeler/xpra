@@ -148,9 +148,18 @@ Each completed `cases/<slug>/` is either a production case or the single
   validation;
 - optional `tests/`: case-owned functional probes.
 
+The `test-quarantine` kind and the `upstream-test-quarantine` slug are a
+bidirectional reserved identity: no other slug may use that kind, and that slug
+may never be reclassified as production, including during a path-transition
+admission.
+
 The manifest schema retains the `[evidence]` table name for runner
 compatibility, but `required_gates` is only a declarative validation list. It
-does not authorize tracking reports or results.
+does not authorize tracking reports or results. Every gate in that list must be
+self-contained under the exact `CASE=<slug>` selection. A boundary which needs
+production behavior or diagnostics owned by another active patch is declared
+by the complete stack and documented in the case README instead; an empty case
+list does not waive that stack-owned boundary.
 
 Every patch must satisfy all of these conditions:
 
@@ -166,18 +175,25 @@ Every patch must satisfy all of these conditions:
   `unit.*` test;
 - the test-quarantine case has no dependencies, changes only
   `tests/unittests/<unit-module>.py`, and binds every changed path to the exact
-  module named in `[quarantine].modules`;
+  module named in the ordered `[quarantine].modules` union;
+- its `[quarantine.gates]` table has exactly `quarantine`,
+  `quarantine-cython`, and `quarantine-no-compat`; each value is an ordered,
+  unique subset of `modules`, preserves union order, and their union is exactly
+  `modules`;
 - the test-quarantine case requires all three clean `quarantine`,
   `quarantine-cython`, and `quarantine-no-compat` gates.
 
 There is exactly one active test-quarantine case. It is an explicit temporary
 exception, never a production fix or a place for unrelated test repair. Each
 entry requires a current embedded-clean-source failure in the frozen matrix.
-After every explicitly selected upstream rebase, the clean quarantine gates
-invert the usual result:
-they pass only when every listed module remains an exact ignored failure. A
-passing module makes the case stale and must be removed or narrowed before the
-quarantine patch or full patched matrix is accepted.
+After every explicitly selected upstream rebase, each clean quarantine gate
+runs the complete `modules` union but gives `--skip-fail` only to its exact
+gate-specific subset. It passes only when the subset is the exact ordered
+ignored-failure set, every other union module succeeds, no module fails
+unignored, and none is skipped. A passing expected-failure module makes that
+gate assignment stale; a failing complement module makes the leg mapping
+incomplete. Remove or narrow stale state and reassess new failure state before
+the quarantine patch or full patched matrix is accepted.
 
 `case-new` creates a deliberately incomplete `draft = true` case. Drafts are
 not test-selectable. Complete the human-authored fields, create a clean draft
@@ -246,6 +262,31 @@ the recorded embedded source commit. It then atomically replaces that case's
 resolution and metadata. A successful workspace remains current and may be
 edited, staged, and exported again. It never stages the host index or edits
 inherited Xpra source in `develop`.
+
+The sole quarantine duty case has one narrow admission transition when its
+human-authored module union changes. First update `tests.list`,
+`[quarantine].modules`, and all exact `[quarantine.gates]` assignments while
+leaving the old automation-owned `patch_sha256` and `paths` untouched. Both
+`workspace-stage` and `workspace-update` then require explicit
+`ALLOW_PATH_CHANGE=1`. Only this mode may read that temporary mismatch, and it
+still verifies the old patch against its exact old digest and declared paths;
+production cases receive no manifest relaxation. The staged candidate must
+equal the complete new module-derived path union, and candidate validation plus
+the case-update transaction derive and publish the new patch, digest, paths,
+resolution, and workspace metadata together. Manual digest or path edits are
+never an alternative.
+
+The case-update owner records whether that exact quarantine path transition
+was admitted. Owner-only and pre-marker abort recovery may use this authority
+only while the published old patch and manifest remain a structurally valid,
+genuinely path-mismatched quarantine transition. The removal phase carries the
+same authority so an interrupted abort remains exact after owner deletion. A
+completed transaction always returns to ordinary strict case validation.
+Exact schema-1 owner, transaction, and removal records written before the
+transition field existed remain recoverable: absence of that field means
+`false` only when the record has the complete former field set. Every linked
+record must use the same former or current form; mixed forms, extra fields, or
+any other missing field fail closed.
 
 `workspace-status` and `workspace-diff` are read-only inspection interfaces:
 they validate workspace structure and provenance even after the recorded host
@@ -375,12 +416,22 @@ committed source. After `patch-update`, changes to only that case's
 The normal committed result on `develop` is the maintained patch and its
 metadata, not the applied source copy.
 
-## Explicit upstream refresh contract
+## Autonomous upstream refresh and full queue adaptation contract
 
-Only when the operator decides to move `develop` to a newer upstream source
-commit, use this clean sequence. The executable selected-case decision and
-complete queue-validation procedure is
-[`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md):
+Only when the operator decides to move `develop` to the current fork-master
+source boundary, invoke the canonical process with this agent directive:
+
+```text
+Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+```
+
+This is not a Make target. The directive itself chooses the base, authorizes
+the complete local queue-wide process below, and requires the exhaustive
+procedure in
+[`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md).
+`PRIMARY_CASE` controls only review order and reporting depth; it cannot narrow
+the active-case, quarantine, repair, package, test, or live scope. The agent
+derives one unique cycle identifier rather than requesting another input:
 
 1. require `develop`; inspect every non-ignored tracked and untracked change,
    reject unsafe, unexplained, secret, generated, or applied-Xpra-source content,
@@ -393,19 +444,22 @@ complete queue-validation procedure is
 4. switch to `develop` and run `develop-rebase`;
 5. resolve and stage every conflict, then use `git rebase --continue` until the
    rebase completes; abort and stop if correct resolution is not possible;
-6. run `patch-start-check` and resolve the complete active stack against new
-   master;
+6. run `patch-start-check`; read every active patch in its current surrounding
+   source; and give every production case a supported keep/adapt/retire
+   decision, resolving the complete active stack against new master;
 7. run every clean quarantine gate and remove or narrow entries that no longer
    fail on this exact master;
 8. run the complete offline fork-control suite and a tests-only clean control
    for every production case which owns retained test paths; when a case owns no
    test path, record that the control is unavailable and perform the
-   case-specific semantic inspection, then review whether upstream replaced or
-   narrowed any patch behavior;
+   case-specific semantic inspection; adapt or retire any case whose behavior
+   upstream replaced or narrowed, without requesting non-primary scope;
 9. run every patched focused and native gate, all three complete upstream test
-   legs (`full`, `full-cython`, and `full-no-compat`), every case-specific
-   durable package boundary against the complete resulting stack, and all seven
-   fixed positive live profiles, even if the patches applied without textual
+   legs (`full`, `full-cython`, and `full-no-compat`), every production case's
+   declared `required_gates` with its atomic `CASE=<slug>` selection, every
+   case-specific durable package boundary including both real Ubuntu 26.04 and
+   Debian 13 builds against the complete resulting stack, and all seven fixed
+   positive stack live profiles, even if the patches applied without textual
    changes;
 10. reproduce any newly failing author test on this exact clean master before
     adding it to the single duty quarantine, then rerun its clean quarantine
@@ -414,6 +468,15 @@ complete queue-validation procedure is
     otherwise leave every reviewed refresh result uncommitted and report this
     final gate as intentionally outstanding for the operator. Do not create an
     intermediate or final result commit to satisfy a clean-host gate.
+
+If the pass reveals an error or omission in a case, the control plane, a test,
+package/live harness, contract, documentation, or this runbook, that repair is
+already in scope. Make and narrowly test it in the same uninterrupted pass and
+leave it uncommitted with the other results. Maintain exact input/result
+identity so an already valid expensive gate is repeated only when its frozen
+source, patch/selection, image, entrypoint, command/assertion, scenario, runner,
+or acceptance semantics changed. Editing explanatory text alone does not
+restart the ladder; uncertainty invalidates the affected result.
 
 The single start commit is the only direct content commit this refresh
 authorizes. If later adaptation needs another clean-host-only operation, order
@@ -492,9 +555,16 @@ open lock only for image builds. A detached test starter holds the lock itself
 through the immutable-ID handoff without passing it to the test container's
 long-lived helpers.
 Exact cache removal takes the same lock and refuses any matching unresolved
-image-build or test prelaunch/owner. It may recognize an older valid source
-label only for cleanup, while still requiring the complete exact maintenance-label set,
-image input/workflow identity, and immutable image ID.
+image-build or test prelaunch/owner. It may recognize an older source label only
+for cleanup after proving that it names an existing Git commit which is an
+ancestor of, or equal to, the current embedded source. It still requires the
+complete exact maintenance-label set, image input/workflow identity, and
+immutable image ID; an unknown, unrelated, or future source is not removable.
+The non-mutating image preflight and every test start use one exact verifier;
+they also require the current embedded-source label and a valid build-run UUID.
+Consequently an otherwise exact old-source cache after rebase is not acceptance
+input: the explicit locked cache-removal target validates and removes it before
+a named current-source rebuild.
 
 A named standalone image start publishes
 `upstream-tests/image-builds/.<IMAGE_RUN>.image-prelaunch.json` before creating
@@ -616,6 +686,19 @@ its worker starts. Local Make freezes the source snapshot before invoking
 package start, then package start freezes the selection before creating its
 `RUN`; hosted publication freezes one selection and one source snapshot before
 either distribution build and reuses both across them.
+
+Every retained selection cache is always revalidated for its exact owner,
+private types and modes, content-addressed path and metadata, and complete tree
+digest. Semantic replay by the current selection parser is additionally
+required for the cache whose recorded selection digest equals the current
+complete-queue digest; only that cache is reusable. Historical immutable
+caches may contain manifest vocabulary accepted by the resolver which
+published them but rejected by a later resolver. They remain structurally
+validated, retained, and ineligible rather than blocking a new snapshot or
+being deleted. Persisted package lifecycle and removal records likewise remain
+structurally inspectable and recoverable after a resolver change. New build
+execution, payload construction, and collection still require current semantic
+validation and fail closed on any mismatch.
 
 A local package start publishes
 `deb-packages/runs/<RUN>.prelaunch.json` before creating the run directory or
@@ -825,8 +908,9 @@ qualifies: its acceptance always includes the complete fork-control suite,
 clean quarantine reassessment, tests-only controls for production cases which
 own retained tests, documented semantic inspection for those which do not,
 patched focused and native gates, every case-specific durable package boundary
-against the complete resulting stack, all three author-test legs, and all seven
-fixed positive live profiles.
+against the complete resulting stack, all three author-test legs, every
+production case's declared live gates with its atomic case selection, and all
+seven fixed positive live profiles with the complete stack selection.
 
 Ordinary acceptance is green. A pre-existing failure outside the selected
 paths is investigated against canonical CI before any costly local clean
@@ -854,6 +938,30 @@ nonempty reviewed case or stack selection. Foreground, clean-source, and
 picture-fallback probes are diagnostic and cannot publish acceptance. A
 positive fault-injection profile first proves rendering and input, then proves
 the intended disconnect and survival behavior.
+
+The detach and transport-loss profiles identify their GTK application only
+from `interaction.identity.json`, atomically published by that fixture from its
+own process. The runner cross-checks its exact PID, procfs start ticks, command
+line digest, and two-element Python/script argv against the still-live process,
+and rejects an identity equal to the Xpra server PID. It also captures the
+server's independent PID, start ticks, complete argv, and command-line digest.
+Both identities are revalidated after detach or transport loss and immediately
+before termination. One in-container probe opens pidfds for both exact
+identities, rejects an exited or zombie server, double-reads both procfs
+identities, polls the server pidfd again immediately before sending `SIGTERM`
+only through the fixture pidfd, and freezes both identities in the termination
+record. Acceptance then requires the fixture to disappear and that exact
+previously live server to exit in that order.
+A process-name search, a substring match against the server's
+`--start-child` argv, a reusable raw PID, or survival booleans without the
+identity snapshots and exact termination record is never evidence. Both
+scenario acceptance and named-job collection recompute the lifecycle checks
+from those raw fields and require an exact match with the classified boundary.
+Collection also reparses the retained private `interaction.identity.json` and
+`server.pid` authority files and cross-binds them to the exact-live
+application-activity identity, its procfs-derived hardware PID/argv, the
+capture identity, and the server identity/PID report fields; refreshing report
+and artifact digests cannot substitute a different or missing authority file.
 
 The `live-wayland-keyboard` profile is the standalone client-driven keymap
 boundary. Its case-owned, versioned scenario and digest are frozen with the
@@ -1139,7 +1247,8 @@ artifact cycle, update case files from a verified workspace, apply or remove
 patches in a clean non-master host worktree, run tests, and print status.
 
 No target creates a new content commit automatically. Invocation of the
-canonical upstream-refresh runbook itself authorizes one direct agent
+canonical **Autonomous Upstream Refresh and Full Queue Adaptation** runbook
+itself authorizes one direct agent
 preservation commit before fetch/rebase iff exhaustive review finds legitimate
 non-ignored changes. That commit contains the complete reviewed tracked and
 untracked set, requires no further confirmation, and is omitted for an already

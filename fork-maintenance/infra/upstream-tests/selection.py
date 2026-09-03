@@ -38,9 +38,13 @@ SUPPORTED_GATES = frozenset(
     }
 )
 CASE_KINDS = frozenset({"production", "test-quarantine"})
-QUARANTINE_GATES = frozenset(
-    {"quarantine", "quarantine-cython", "quarantine-no-compat"}
+TEST_QUARANTINE_SLUG = "upstream-test-quarantine"
+QUARANTINE_GATE_NAMES = (
+    "quarantine",
+    "quarantine-cython",
+    "quarantine-no-compat",
 )
+QUARANTINE_GATES = frozenset(QUARANTINE_GATE_NAMES)
 LOCAL_TEST_RE = re.compile(
     r"(?:cases|verifications)/[a-z0-9]+(?:-[a-z0-9]+)*/tests/[A-Za-z0-9_./-]+\.py"
 )
@@ -62,6 +66,7 @@ class Case:
     tests: tuple[str, ...]
     required_gates: tuple[str, ...]
     quarantined_tests: tuple[str, ...]
+    quarantined_tests_by_gate: tuple[tuple[str, tuple[str, ...]], ...]
 
 
 @dataclass(frozen=True)
@@ -183,6 +188,10 @@ def read_case(lab_root: Path, slug: str) -> Case:
     kind = manifest.get("kind", "production")
     if not isinstance(kind, str) or kind not in CASE_KINDS:
         fail(f"invalid case kind for {slug}: {kind!r}")
+    if kind == "test-quarantine" and slug != TEST_QUARANTINE_SLUG:
+        fail(f"only {TEST_QUARANTINE_SLUG} may use kind=test-quarantine")
+    if slug == TEST_QUARANTINE_SLUG and kind != "test-quarantine":
+        fail(f"{TEST_QUARANTINE_SLUG} must use kind=test-quarantine")
     tests = require_tests(manifest.get("tests"), f"case {slug}")
     required_gates = require_gates(manifest.get("evidence"), f"case {slug}")
     declared_paths = require_paths(manifest.get("paths"), f"case {slug}")
@@ -214,6 +223,7 @@ def read_case(lab_root: Path, slug: str) -> Case:
         )
     quarantine = manifest.get("quarantine")
     quarantined_tests: tuple[str, ...] = ()
+    quarantined_tests_by_gate: tuple[tuple[str, tuple[str, ...]], ...] = ()
     if kind == "production":
         if quarantine is not None:
             fail(f"production case {slug} may not declare [quarantine]")
@@ -224,6 +234,11 @@ def read_case(lab_root: Path, slug: str) -> Case:
             fail(f"test-quarantine case {slug} may not have dependencies")
         if not isinstance(quarantine, dict):
             fail(f"test-quarantine case {slug} requires [quarantine]")
+        if set(quarantine) != {"modules", "gates"}:
+            fail(
+                f"test-quarantine case {slug} quarantine must contain exactly "
+                "modules and gates"
+            )
         modules = quarantine.get("modules")
         if not isinstance(modules, list) or not modules:
             fail(f"test-quarantine case {slug} requires quarantine.modules")
@@ -238,6 +253,37 @@ def read_case(lab_root: Path, slug: str) -> Case:
             fail(f"invalid quarantine.modules for {slug}")
         if not set(quarantined_tests).issubset(tests):
             fail(f"quarantined modules are not retained tests for {slug}")
+        gates = quarantine.get("gates")
+        if not isinstance(gates, dict) or set(gates) != QUARANTINE_GATES:
+            fail(
+                f"test-quarantine case {slug} quarantine.gates must contain exactly "
+                f"{QUARANTINE_GATE_NAMES}"
+            )
+        assigned: set[str] = set()
+        for gate in QUARANTINE_GATE_NAMES:
+            gate_modules = gates.get(gate)
+            if not isinstance(gate_modules, list):
+                fail(f"invalid quarantine.gates.{gate} for {slug}")
+            parsed = tuple(
+                entry
+                for entry in gate_modules
+                if isinstance(entry, str) and UNIT_TEST_RE.fullmatch(entry)
+            )
+            if len(parsed) != len(gate_modules) or len(parsed) != len(set(parsed)):
+                fail(f"invalid quarantine.gates.{gate} for {slug}")
+            parsed_set = set(parsed)
+            if not parsed_set.issubset(quarantined_tests):
+                fail(f"quarantine.gates.{gate} is not a subset of modules for {slug}")
+            ordered = tuple(test for test in quarantined_tests if test in parsed_set)
+            if parsed != ordered:
+                fail(
+                    f"quarantine.gates.{gate} must preserve quarantine.modules order "
+                    f"for {slug}"
+                )
+            assigned.update(parsed)
+            quarantined_tests_by_gate += ((gate, parsed),)
+        if assigned != set(quarantined_tests):
+            fail(f"every quarantined module must be assigned to at least one gate for {slug}")
         if set(required_gates) != QUARANTINE_GATES:
             fail(f"test-quarantine case {slug} must require all quarantine gates")
     case = Case(
@@ -251,6 +297,7 @@ def read_case(lab_root: Path, slug: str) -> Case:
         tests=tests,
         required_gates=required_gates,
         quarantined_tests=quarantined_tests,
+        quarantined_tests_by_gate=quarantined_tests_by_gate,
     )
     paths = tuple(path.as_posix() for path in patch_source_paths(case))
     if tuple(sorted(declared_paths)) != paths:
@@ -315,6 +362,7 @@ def read_verification(lab_root: Path, slug: str) -> tuple[Case, tuple[str, ...]]
         tests=tests,
         required_gates=required_gates,
         quarantined_tests=(),
+        quarantined_tests_by_gate=(),
     )
     if any(
         not path.parts or path.parts[0] != "tests"
@@ -427,10 +475,15 @@ def iter_gates(selection: Selection) -> Iterator[str]:
             yield test
 
 
-def iter_quarantined_tests(selection: Selection) -> Iterator[str]:
+def iter_quarantined_tests(selection: Selection, gate: str | None = None) -> Iterator[str]:
+    if gate is not None and gate not in QUARANTINE_GATES:
+        fail(f"invalid quarantine gate: {gate}")
     seen: set[str] = set()
     for case in selection.cases:
-        for test in case.quarantined_tests:
+        tests = case.quarantined_tests
+        if gate is not None:
+            tests = dict(case.quarantined_tests_by_gate).get(gate, ())
+        for test in tests:
             if test not in seen:
                 seen.add(test)
                 yield test
@@ -652,6 +705,20 @@ def validate_resolution_document(
 ) -> str:
     if not isinstance(document, dict):
         fail("selection resolution must be a JSON object")
+    expected_keys = {
+        "already_present_cases",
+        "applied_cases",
+        "base_dependencies",
+        "declared_cases",
+        "patches",
+        "resolution_sha256",
+        "schema",
+        "selection",
+        "selection_sha256",
+        "source_commit",
+    }
+    if set(document) != expected_keys:
+        fail("selection resolution fields are inconsistent")
     if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
         fail(f"invalid source commit: {source_commit!r}")
     current_digest = selection_digest(selection, lab_root)
@@ -688,8 +755,10 @@ def validate_resolution_document(
             "patch": case.patch_path.relative_to(lab_root).as_posix(),
             "patch_sha256": hashlib.sha256(case.patch_bytes).hexdigest(),
         }
-        if not isinstance(entry, dict) or any(
-            entry.get(key) != value for key, value in expected.items()
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {*expected, "status"}
+            or any(entry.get(key) != value for key, value in expected.items())
         ):
             fail("selection resolution patch identity is inconsistent")
         status = entry.get("status")
@@ -743,6 +812,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lab-root", type=Path, required=True)
     parser.add_argument("--selection", required=True)
+    parser.add_argument("--gate", choices=QUARANTINE_GATE_NAMES)
     parser.add_argument(
         "action",
         choices=(
@@ -756,6 +826,7 @@ def main() -> int:
             "gates",
             "digest",
             "resolve",
+            "resolution-patches",
             "snapshot",
             "verify-resolution",
         ),
@@ -769,6 +840,8 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        if args.gate is not None and args.action != "quarantined-tests":
+            fail("--gate is valid only with quarantined-tests")
         if args.lab_root.is_symlink():
             fail(f"lab root is a symlink: {args.lab_root}")
         lab_root = args.lab_root.resolve(strict=True)
@@ -795,7 +868,7 @@ def main() -> int:
             for test in iter_unit_tests(selection):
                 print(test)
         elif args.action == "quarantined-tests":
-            for test in iter_quarantined_tests(selection):
+            for test in iter_quarantined_tests(selection, args.gate):
                 print(test)
         elif args.action == "gates":
             for gate in iter_gates(selection):
@@ -812,7 +885,7 @@ def main() -> int:
                 args.source_commit,
             )
             print(json.dumps(resolution, indent=2, sort_keys=True))
-        elif args.action == "verify-resolution":
+        elif args.action in {"resolution-patches", "verify-resolution"}:
             if (
                 args.resolution is None
                 or args.digest_file is None
@@ -843,7 +916,20 @@ def main() -> int:
             )
             if recorded_digest != f"{digest}\n":
                 fail("selection resolution digest file is inconsistent")
-            print(digest)
+            if args.action == "verify-resolution":
+                print(digest)
+            else:
+                entries = document["patches"]
+                print("count", len(entries), sep="\t")
+                for index, entry in enumerate(entries):
+                    print(
+                        index,
+                        entry["case"],
+                        entry["status"],
+                        entry["patch"],
+                        entry["patch_sha256"],
+                        sep="\t",
+                    )
         elif args.action == "snapshot":
             if args.destination is None:
                 fail("--destination is required for snapshot")

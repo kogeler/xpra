@@ -74,6 +74,8 @@ INTERACTION_CLICKED_TITLE = "Xpra Hardware Interaction Clicked"
 INTERACTION_CLICK_MARKER = "/tmp/xpra-hardware-pointer-clicked"
 INTERACTION_KEY_MARKER = "/tmp/xpra-hardware-keyboard-escape"
 INTERACTION_READY_MARKER = "/tmp/xpra-hardware-interaction-ready"
+INTERACTION_IDENTITY_ARTIFACT = "interaction.identity.json"
+INTERACTION_FIXTURE_SCRIPT = "/opt/xpra-fork-maintenance/interaction_fixture.py"
 EMPTY_DAMAGE_PARENT_TITLE = "Xpra Empty Damage Parent"
 EMPTY_DAMAGE_CHILD_TITLE = "Xpra Empty Damage Child"
 EMPTY_DAMAGE_READY_MARKER = "/tmp/xpra-empty-damage-fixture-ready"
@@ -267,7 +269,7 @@ SERVER_ARTIFACT_PATTERNS = (
     re.compile(r"zed\..+"),
     re.compile(r"vkcube\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"opengl\.(?:exit|pid|stderr|stdout)"),
-    re.compile(r"interaction\.(?:exit|pid|stderr|stdout)"),
+    re.compile(r"interaction\.(?:exit|identity\.json|stderr|stdout)"),
     re.compile(r"keyboard-fixture\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"empty-damage\.(?:exit|pid|stderr|stdout)"),
 )
@@ -477,13 +479,37 @@ def live_user_options() -> list[str]:
 
 def scenario_acceptance(report: dict[str, Any], cleanup: dict[str, Any]) -> bool:
     collection = report.get("container_artifact_collection")
+    lifecycle = report.get("lifecycle")
+    lifecycle_profile = report.get("lifecycle_profile")
+    classification = report.get("classification")
+    try:
+        expected_lifecycle = lifecycle_boundary_checks(
+            lifecycle_profile,
+            lifecycle,
+        )
+    except (AttributeError, LabFailure):
+        expected_lifecycle = {}
+    boundaries = (
+        classification.get("boundaries") if isinstance(classification, dict) else None
+    )
+    lifecycle_accepted = bool(
+        expected_lifecycle
+        and all(expected_lifecycle.values())
+        and isinstance(lifecycle, dict)
+        and isinstance(lifecycle_profile, str)
+        and lifecycle.get("mode") == lifecycle_profile
+        and isinstance(boundaries, dict)
+        and boundaries.get("lifecycle") == expected_lifecycle
+    )
     return bool(collection) and all(
         isinstance(item, dict) and item.get("status") == "collected"
         for item in collection
     ) and (
         cleanup.get("passed") is True
-        and report.get("classification", {}).get("diagnostic_only") is not True
-        and report.get("classification", {}).get("first_failed_boundary") == "passed"
+        and lifecycle_accepted
+        and isinstance(classification, dict)
+        and classification.get("diagnostic_only") is not True
+        and classification.get("first_failed_boundary") == "passed"
     )
 
 
@@ -1188,6 +1214,355 @@ def container_process_exists(container: str, pid: int) -> bool:
     )
 
 
+def valid_process_identity(value: Any) -> bool:
+    """Validate one bounded procfs process identity."""
+    if not isinstance(value, dict) or set(value) != {
+        "argv",
+        "cmdline_sha256",
+        "pid",
+        "schema",
+        "start_ticks",
+    }:
+        return False
+    pid = value.get("pid")
+    argv = value.get("argv")
+    cmdline_sha256 = value.get("cmdline_sha256")
+    if not (
+        isinstance(argv, list)
+        and 1 <= len(argv) <= 256
+        and all(isinstance(argument, str) and "\0" not in argument for argument in argv)
+    ):
+        return False
+    try:
+        cmdline = b"\0".join(os.fsencode(argument) for argument in argv) + b"\0"
+    except UnicodeEncodeError:
+        return False
+    if len(cmdline) > 1024 * 1024:
+        return False
+    expected_cmdline_sha256 = hashlib.sha256(cmdline).hexdigest()
+    return bool(
+        type(value.get("schema")) is int
+        and value["schema"] == 1
+        and isinstance(pid, int)
+        and not isinstance(pid, bool)
+        and 0 < pid <= 2**31 - 1
+        and isinstance(value.get("start_ticks"), str)
+        and len(value["start_ticks"]) <= 32
+        and re.fullmatch(r"[1-9][0-9]*", value["start_ticks"])
+        and isinstance(cmdline_sha256, str)
+        and re.fullmatch(r"[0-9a-f]{64}", cmdline_sha256)
+        and cmdline_sha256 == expected_cmdline_sha256
+    )
+
+
+def valid_interaction_fixture_identity(value: Any) -> bool:
+    """Validate the complete identity published by the GTK fixture itself."""
+    argv = value.get("argv") if isinstance(value, dict) else None
+    return bool(
+        valid_process_identity(value)
+        and len(argv) == 2
+        and re.fullmatch(r"python3(?:\.[0-9]+)?", PurePosixPath(argv[0]).name)
+        and argv[1] == INTERACTION_FIXTURE_SCRIPT
+    )
+
+
+def load_interaction_fixture_identity(path: Path) -> dict[str, Any]:
+    """Load one bounded, private fixture-owned process identity artifact."""
+    ensure_private_regular_file(path)
+    raw = path.read_bytes()
+    if not raw or len(raw) > 4096 or b"\0" in raw:
+        raise LabFailure("interaction fixture identity has an invalid size")
+    try:
+        payload = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_json_object_without_duplicates,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise LabFailure("interaction fixture identity is not valid JSON") from error
+    if not valid_interaction_fixture_identity(payload):
+        raise LabFailure("interaction fixture identity has invalid fields")
+    return payload
+
+
+def container_process_identity(container: str, pid: int) -> dict[str, Any] | None:
+    """Read one live process identity from procfs in its container namespace."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        raise LabFailure(f"invalid container process PID: {pid!r}")
+    probe = r"""
+import hashlib
+import json
+import os
+import pathlib
+import select
+import sys
+import time
+
+pid = int(sys.argv[1])
+root = pathlib.Path('/proc') / str(pid)
+try:
+    descriptor = os.pidfd_open(pid)
+except ProcessLookupError:
+    raise SystemExit(3)
+try:
+    poller = select.poll()
+    poller.register(descriptor, select.POLLIN)
+    for attempt in range(5):
+        if poller.poll(0):
+            raise SystemExit(3)
+        try:
+            stat_before = (root / 'stat').read_text(encoding='ascii')
+            cmdline = (root / 'cmdline').read_bytes()
+            stat_after = (root / 'stat').read_text(encoding='ascii')
+        except FileNotFoundError:
+            if poller.poll(0):
+                raise SystemExit(3)
+            if attempt < 4:
+                time.sleep(0.01)
+                continue
+            raise SystemExit(4)
+        end_before = stat_before.rfind(')')
+        end_after = stat_after.rfind(')')
+        before = stat_before[end_before + 2:].split() if end_before >= 0 else []
+        after = stat_after[end_after + 2:].split() if end_after >= 0 else []
+        if (
+            poller.poll(0)
+            or (before and before[0].casefold() in {'x', 'z'})
+            or (after and after[0].casefold() in {'x', 'z'})
+        ):
+            raise SystemExit(3)
+        if len(before) < 20 or len(after) < 20 or len(cmdline) > 1024 * 1024:
+            raise SystemExit(4)
+        if before[19] != after[19]:
+            raise SystemExit(4)
+        argv = [os.fsdecode(value) for value in cmdline.split(b'\0') if value]
+        if not cmdline or not argv:
+            if attempt < 4:
+                time.sleep(0.01)
+                continue
+            if poller.poll(0):
+                raise SystemExit(3)
+            raise SystemExit(4)
+        print(json.dumps({
+            'argv': argv,
+            'cmdline_sha256': hashlib.sha256(cmdline).hexdigest(),
+            'pid': pid,
+            'schema': 1,
+            'start_ticks': before[19],
+        }, sort_keys=True))
+        raise SystemExit(0)
+    raise SystemExit(4)
+finally:
+    os.close(descriptor)
+"""
+    result = podman_exec(
+        container,
+        ["python3", "-c", probe, str(pid)],
+        check=False,
+        announce=False,
+    )
+    if result.returncode == 3:
+        return None
+    if result.returncode:
+        raise LabFailure("could not read the container process identity")
+    try:
+        payload = json.loads(
+            result.stdout,
+            object_pairs_hook=_json_object_without_duplicates,
+        )
+    except json.JSONDecodeError as error:
+        raise LabFailure("container process identity probe returned invalid JSON") from error
+    if not valid_process_identity(payload):
+        raise LabFailure("container process identity has invalid fields")
+    return payload
+
+
+def require_interaction_fixture_identity(
+    container: str,
+    expected: dict[str, Any],
+    *,
+    server_pid: int,
+) -> dict[str, Any]:
+    """Require the same live fixture process and forbid the Xpra server PID."""
+    if not valid_interaction_fixture_identity(expected):
+        raise LabFailure("expected interaction fixture identity is invalid")
+    if expected["pid"] == server_pid:
+        raise LabFailure("interaction fixture identity aliases the Xpra server")
+    observed = require_process_identity(
+        container,
+        expected,
+        role="interaction fixture",
+    )
+    return observed
+
+
+def require_process_identity(
+    container: str,
+    expected: dict[str, Any],
+    *,
+    role: str,
+) -> dict[str, Any]:
+    """Require one unchanged, non-zombie process identity."""
+    if not valid_process_identity(expected):
+        raise LabFailure(f"expected {role} process identity is invalid")
+    observed = container_process_identity(container, expected["pid"])
+    if observed is None:
+        raise LabFailure(f"{role} process is not running")
+    if observed != expected:
+        raise LabFailure(f"{role} process identity changed")
+    return observed
+
+
+def interaction_fixture_identity_is_gone(
+    container: str,
+    expected: dict[str, Any],
+) -> bool:
+    """Return true only when the published process is gone, not when PID was reused."""
+    return process_identity_is_gone(
+        container,
+        expected,
+        role="interaction fixture",
+    )
+
+
+def process_identity_is_gone(
+    container: str,
+    expected: dict[str, Any],
+    *,
+    role: str,
+) -> bool:
+    """Observe exact process exit while failing closed on PID reuse."""
+    if not valid_process_identity(expected):
+        raise LabFailure(f"expected {role} process identity is invalid")
+    observed = container_process_identity(container, expected["pid"])
+    if observed is None:
+        return True
+    if observed != expected:
+        raise LabFailure(f"{role} PID was reused before exit observation")
+    return False
+
+
+def terminate_interaction_fixture(
+    container: str,
+    expected: dict[str, Any],
+    *,
+    server_identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Signal only the exact published fixture through a verified Linux pidfd."""
+    if not valid_process_identity(server_identity):
+        raise LabFailure("expected Xpra server identity is invalid")
+    identity = require_interaction_fixture_identity(
+        container,
+        expected,
+        server_pid=server_identity["pid"],
+    )
+    probe = r"""
+import hashlib
+import json
+import os
+import pathlib
+import select
+import signal
+import sys
+
+pid = int(sys.argv[1])
+expected_start = sys.argv[2]
+expected_hash = sys.argv[3]
+expected_argv = json.loads(sys.argv[4])
+server_pid = int(sys.argv[5])
+server_start = sys.argv[6]
+server_hash = sys.argv[7]
+server_argv = json.loads(sys.argv[8])
+
+def snapshot(process_pid):
+    root = pathlib.Path('/proc') / str(process_pid)
+    stat_before = (root / 'stat').read_text(encoding='ascii')
+    cmdline = (root / 'cmdline').read_bytes()
+    stat_after = (root / 'stat').read_text(encoding='ascii')
+    end_before = stat_before.rfind(')')
+    end_after = stat_after.rfind(')')
+    before = stat_before[end_before + 2:].split() if end_before >= 0 else []
+    after = stat_after[end_after + 2:].split() if end_after >= 0 else []
+    argv = [os.fsdecode(value) for value in cmdline.split(b'\0') if value]
+    if (
+        len(before) < 20
+        or len(after) < 20
+        or before[0].casefold() in {'x', 'z'}
+        or after[0].casefold() in {'x', 'z'}
+        or before[19] != after[19]
+        or not cmdline
+        or not argv
+        or len(cmdline) > 1024 * 1024
+    ):
+        raise SystemExit(4)
+    return before[19], hashlib.sha256(cmdline).hexdigest(), argv
+
+try:
+    descriptor = os.pidfd_open(pid)
+except ProcessLookupError:
+    raise SystemExit(3)
+try:
+    try:
+        server_descriptor = os.pidfd_open(server_pid)
+    except ProcessLookupError:
+        raise SystemExit(5)
+    try:
+        server_poller = select.poll()
+        server_poller.register(server_descriptor, select.POLLIN)
+        if server_poller.poll(0):
+            raise SystemExit(5)
+        try:
+            observed_server = snapshot(server_pid)
+        except (FileNotFoundError, ProcessLookupError):
+            raise SystemExit(5)
+        if observed_server != (server_start, server_hash, server_argv):
+            raise SystemExit(5)
+        try:
+            observed_fixture = snapshot(pid)
+        except (FileNotFoundError, ProcessLookupError):
+            raise SystemExit(3)
+        if observed_fixture != (expected_start, expected_hash, expected_argv):
+            raise SystemExit(4)
+        if server_poller.poll(0):
+            raise SystemExit(5)
+        signal.pidfd_send_signal(descriptor, signal.SIGTERM)
+    finally:
+        os.close(server_descriptor)
+finally:
+    os.close(descriptor)
+"""
+    result = podman_exec(
+        container,
+        [
+            "python3",
+            "-c",
+            probe,
+            str(identity["pid"]),
+            identity["start_ticks"],
+            identity["cmdline_sha256"],
+            json.dumps(identity["argv"]),
+            str(server_identity["pid"]),
+            server_identity["start_ticks"],
+            server_identity["cmdline_sha256"],
+            json.dumps(server_identity["argv"]),
+        ],
+        check=False,
+        announce=False,
+    )
+    if result.returncode:
+        raise LabFailure(
+            "could not terminate the exact interaction fixture while the "
+            f"Xpra server was live (status {result.returncode})"
+        )
+    return {
+        "identity": identity,
+        "pidfd": True,
+        "server_identity": server_identity,
+        "server_pidfd": True,
+        "signal": "SIGTERM",
+        "returncode": result.returncode,
+    }
+
+
 def quiesce_failed_workloads(
     processes: tuple[tuple[str, str, int], ...],
     *,
@@ -1368,6 +1743,8 @@ def wait_for_hardware_fixture(
     """Require the selected graphics child and shared GTK auxiliary readiness."""
     fixture = hardware_fixture_spec(application)
     probe = r"""
+import hashlib
+import json
 import os
 import re
 import stat
@@ -1391,8 +1768,68 @@ def child_state(name):
         return False
     return True
 
+
+def interaction_state(expected_script):
+    path = Path('/artifacts/interaction.identity.json')
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        return None
+    if (
+        not stat.S_ISREG(details.st_mode)
+        or details.st_uid != os.getuid()
+        or details.st_nlink != 1
+        or stat.S_IMODE(details.st_mode) & 0o077
+    ):
+        return False
+    try:
+        raw = path.read_bytes()
+        identity = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if (
+        not raw
+        or len(raw) > 4096
+        or not isinstance(identity, dict)
+        or set(identity) != {'argv', 'cmdline_sha256', 'pid', 'schema', 'start_ticks'}
+        or type(identity.get('schema')) is not int
+        or identity.get('schema') != 1
+        or not isinstance(identity.get('pid'), int)
+        or isinstance(identity.get('pid'), bool)
+        or not 0 < identity['pid'] <= 2**31 - 1
+        or not isinstance(identity.get('start_ticks'), str)
+        or re.fullmatch(r'[1-9][0-9]{0,31}', identity['start_ticks']) is None
+        or not isinstance(identity.get('cmdline_sha256'), str)
+        or re.fullmatch(r'[0-9a-f]{64}', identity['cmdline_sha256']) is None
+        or identity.get('argv') != ['python3', expected_script]
+    ):
+        return False
+    root = Path('/proc') / str(identity['pid'])
+    try:
+        stat_before = (root / 'stat').read_text(encoding='ascii')
+        cmdline = (root / 'cmdline').read_bytes()
+        stat_after = (root / 'stat').read_text(encoding='ascii')
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    end_before = stat_before.rfind(')')
+    end_after = stat_after.rfind(')')
+    before = stat_before[end_before + 2:].split() if end_before >= 0 else []
+    after = stat_after[end_after + 2:].split() if end_after >= 0 else []
+    argv = [os.fsdecode(value) for value in cmdline.split(b'\0') if value]
+    return bool(
+        len(before) >= 20
+        and len(after) >= 20
+        and before[0].casefold() not in {'x', 'z'}
+        and after[0].casefold() not in {'x', 'z'}
+        and before[19] == after[19] == identity['start_ticks']
+        and argv == identity['argv']
+        and hashlib.sha256(cmdline).hexdigest() == identity['cmdline_sha256']
+    )
+
+
 primary_name = sys.argv[1]
-states = tuple(child_state(name) for name in ('interaction', primary_name))
+expected_script = sys.argv[2]
+states = (interaction_state(expected_script), child_state(primary_name))
 if False in states:
     raise SystemExit(76)
 markers = [Path('/tmp/xpra-hardware-interaction-ready')]
@@ -1438,6 +1875,7 @@ raise SystemExit(75)
                 "-c",
                 probe,
                 fixture.primary_name,
+                INTERACTION_FIXTURE_SCRIPT,
             ],
             check=False,
             announce=False,
@@ -3196,6 +3634,19 @@ grep -E 'libvulkan_radeon|libEGL_mesa|libGLX_mesa|radeonsi_dri|swrast_dri|libgal
         "pid": pid,
         "render_nodes": sorted(set(render_nodes)),
     }
+
+
+def process_gpu_evidence_matches_identity(
+    evidence: Any,
+    identity: Any,
+) -> bool:
+    """Bind procfs GPU evidence to the exact process cmdline identity."""
+    return bool(
+        isinstance(evidence, dict)
+        and valid_process_identity(identity)
+        and evidence.get("pid") == identity["pid"]
+        and evidence.get("argv") == " ".join(identity["argv"]) + " "
+    )
 
 
 def keyboard_process_connection_identity(
@@ -5976,9 +6427,9 @@ def application_contract(application: str) -> tuple[str, tuple[str, ...], str]:
             "",
         )
     return (
-        "python3 /opt/xpra-fork-maintenance/interaction_fixture.py",
+        f"python3 {INTERACTION_FIXTURE_SCRIPT}",
         ("xpra hardware interaction ready",),
-        "",
+        INTERACTION_IDENTITY_ARTIFACT,
     )
 
 
@@ -9714,52 +10165,148 @@ def lifecycle_boundary_checks(
 ) -> dict[str, bool]:
     """Classify only observed process and command outcomes for one lifecycle."""
     if lifecycle_profile == "application-exit":
+        client_exit_status = lifecycle.get("client_exit_status")
         return {
-            "client_exit_zero": lifecycle.get("client_exit_status") == 0,
-            "client_exited_after_server": bool(
-                lifecycle.get("client_exited_after_server")
+            "client_exit_zero": (
+                type(client_exit_status) is int and client_exit_status == 0
             ),
-            "server_exited_after_application": bool(
-                lifecycle.get("server_exited_after_application")
-            ),
+            "client_exited_after_server": lifecycle.get("client_exited_after_server")
+            is True,
+            "server_exited_after_application": lifecycle.get(
+                "server_exited_after_application"
+            )
+            is True,
         }
+    after_identity_field = (
+        "application_identity_after_detach"
+        if lifecycle_profile == "detach"
+        else "application_identity_after_transport_loss"
+    )
+    initial_identity = lifecycle.get("application_identity_at_capture")
+    survived_identity = lifecycle.get(after_identity_field)
+    before_termination = lifecycle.get("application_identity_before_termination")
+    server_after_identity_field = (
+        "server_identity_after_detach"
+        if lifecycle_profile == "detach"
+        else "server_identity_after_transport_loss"
+    )
+    initial_server_identity = lifecycle.get("server_identity_at_capture")
+    survived_server_identity = lifecycle.get(server_after_identity_field)
+    server_before_termination = lifecycle.get(
+        "server_identity_before_application_termination"
+    )
+    termination = lifecycle.get("application_termination")
+    identity_shape_exact = bool(
+        valid_interaction_fixture_identity(initial_identity)
+        and valid_interaction_fixture_identity(survived_identity)
+        and valid_interaction_fixture_identity(before_termination)
+    )
+    identity_unchanged = bool(
+        identity_shape_exact
+        and initial_identity == survived_identity == before_termination
+    )
+    server_identity_shape_exact = bool(
+        valid_process_identity(initial_server_identity)
+        and valid_process_identity(survived_server_identity)
+        and valid_process_identity(server_before_termination)
+    )
+    server_identity_unchanged = bool(
+        server_identity_shape_exact
+        and initial_server_identity
+        == survived_server_identity
+        == server_before_termination
+    )
+    server_pid = lifecycle.get("server_pid")
+    fixture_distinct_from_server = bool(
+        identity_shape_exact
+        and server_identity_shape_exact
+        and server_pid == initial_server_identity["pid"]
+        and initial_identity["pid"] != server_pid
+    )
+    exact_termination = bool(
+        isinstance(termination, dict)
+        and set(termination)
+        == {
+            "identity",
+            "pidfd",
+            "returncode",
+            "server_identity",
+            "server_pidfd",
+            "signal",
+        }
+        and termination.get("identity") == before_termination
+        and termination.get("pidfd") is True
+        and termination.get("server_identity") == server_before_termination
+        and termination.get("server_pidfd") is True
+        and type(termination.get("returncode")) is int
+        and termination["returncode"] == 0
+        and termination.get("signal") == "SIGTERM"
+    )
+    identity_checks = {
+        "fixture_identity_published": identity_shape_exact,
+        "fixture_identity_unchanged": identity_unchanged,
+        "server_identity_published": server_identity_shape_exact,
+        "server_identity_unchanged": server_identity_unchanged,
+        "fixture_distinct_from_server": fixture_distinct_from_server,
+        "server_alive_before_application_termination": (
+            lifecycle.get("server_alive_before_application_termination") is True
+        ),
+        "exact_fixture_termination": exact_termination,
+        "application_exited_after_termination": (
+            lifecycle.get("application_exited_after_termination") is True
+        ),
+    }
     if lifecycle_profile == "detach":
+        detach_returncode = lifecycle.get("detach_returncode")
+        client_exit_status = lifecycle.get("client_exit_status")
         return {
-            "detach_command_succeeded": lifecycle.get("detach_returncode") == 0,
-            "client_exit_zero": lifecycle.get("client_exit_status") == 0,
-            "client_exited_after_detach": bool(
-                lifecycle.get("client_exited_after_detach")
+            "detach_command_succeeded": (
+                type(detach_returncode) is int and detach_returncode == 0
             ),
-            "server_survived_detach": bool(lifecycle.get("server_survived_detach")),
-            "application_survived_detach": bool(
-                lifecycle.get("application_survived_detach")
+            "client_exit_zero": (
+                type(client_exit_status) is int and client_exit_status == 0
             ),
-            "server_exited_after_application": bool(
-                lifecycle.get("server_exited_after_application")
+            "client_exited_after_detach": lifecycle.get("client_exited_after_detach")
+            is True,
+            "server_survived_detach": lifecycle.get("server_survived_detach") is True,
+            "application_survived_detach": (
+                lifecycle.get("application_survived_detach") is True
+                and identity_unchanged
             ),
+            **identity_checks,
+            "server_exited_after_application": lifecycle.get(
+                "server_exited_after_application"
+            )
+            is True,
         }
     if lifecycle_profile != "transport-loss":
         raise LabFailure(f"unsupported lifecycle profile: {lifecycle_profile}")
     exit_status = lifecycle.get("client_exit_status")
+    disconnect_returncode = lifecycle.get("transport_disconnect_returncode")
     return {
         "transport_disconnect_succeeded": (
-            lifecycle.get("transport_disconnect_returncode") == 0
+            type(disconnect_returncode) is int and disconnect_returncode == 0
         ),
         "client_exit_nonzero": isinstance(exit_status, int)
         and not isinstance(exit_status, bool)
         and exit_status != 0,
-        "client_exited_after_transport_loss": bool(
-            lifecycle.get("client_exited_after_transport_loss")
+        "client_exited_after_transport_loss": lifecycle.get(
+            "client_exited_after_transport_loss"
+        )
+        is True,
+        "server_survived_transport_loss": lifecycle.get(
+            "server_survived_transport_loss"
+        )
+        is True,
+        "application_survived_transport_loss": (
+            lifecycle.get("application_survived_transport_loss") is True
+            and identity_unchanged
         ),
-        "server_survived_transport_loss": bool(
-            lifecycle.get("server_survived_transport_loss")
-        ),
-        "application_survived_transport_loss": bool(
-            lifecycle.get("application_survived_transport_loss")
-        ),
-        "server_exited_after_application": bool(
-            lifecycle.get("server_exited_after_application")
-        ),
+        **identity_checks,
+        "server_exited_after_application": lifecycle.get(
+            "server_exited_after_application"
+        )
+        is True,
     }
 
 
@@ -9776,7 +10323,9 @@ def application_boundary_checks(
     if application in MULTIWINDOW_HARDWARE_APPLICATIONS:
         fixture = hardware_fixture_spec(application)
         checks = {
-            "process_alive_at_capture": bool(application_activity.get("process_alive")),
+            "process_alive_at_capture": (
+                application_activity.get("process_alive") is True
+            ),
             "render_node_open": render_node_open,
             "graphics_frames_changed": bool(
                 application_activity.get("graphics_motion", {}).get("changed")
@@ -9822,7 +10371,9 @@ def application_boundary_checks(
     )
     if application == "vkcube":
         return {
-            "process_alive_at_capture": bool(application_activity.get("process_alive")),
+            "process_alive_at_capture": (
+                application_activity.get("process_alive") is True
+            ),
             "render_node_open": render_node_open,
             "radv_mapped": radv_mapped,
             "graphics_frames_changed": bool(
@@ -9831,7 +10382,9 @@ def application_boundary_checks(
         }
     if application != "zed":
         return {
-            "process_alive_at_capture": bool(application_activity.get("process_alive"))
+            "process_alive_at_capture": (
+                application_activity.get("process_alive") is True
+            )
         }
     return {
         "render_node_open": render_node_open,
@@ -10735,7 +11288,37 @@ def run_scenario(
             directory / "window-focused-screen.rgba.png",
             background_rgb,
         )
-        if pid_file:
+        application_identity: dict[str, Any] | None = None
+        server_process_identity: dict[str, Any] | None = None
+        application_process_alive = False
+        if args.application == "gtk":
+            if pid_file != INTERACTION_IDENTITY_ARTIFACT:
+                raise LabFailure("GTK application identity artifact is misconfigured")
+            application_identity_path = wait_for_container_artifact(
+                server,
+                directory,
+                pid_file,
+                "interaction fixture identity publication",
+            )
+            application_identity = load_interaction_fixture_identity(
+                application_identity_path
+            )
+            application_pid = application_identity["pid"]
+            server_process_identity = container_process_identity(server, server_pid)
+            if server_process_identity is None:
+                raise LabFailure("Xpra server exited before application capture")
+            require_process_identity(
+                server,
+                server_process_identity,
+                role="Xpra server",
+            )
+            require_interaction_fixture_identity(
+                server,
+                application_identity,
+                server_pid=server_process_identity["pid"],
+            )
+            application_process_alive = True
+        elif pid_file:
             application_pid_path = wait_for_container_artifact(
                 server,
                 directory,
@@ -10743,19 +11326,29 @@ def run_scenario(
                 "application PID publication",
             )
             application_pid = int(application_pid_path.read_text().strip())
-        else:
-            executable = (
-                "vkcube" if args.application == "vkcube" else "interaction_fixture.py"
-            )
+        elif args.application == "vkcube":
             pgrep = podman_exec(
                 server,
-                ["pgrep", "--oldest", "--full", executable],
+                ["pgrep", "--oldest", "--exact", "vkcube"],
             )
             application_pid = int(pgrep.stdout.strip().splitlines()[0])
+        else:
+            raise LabFailure("application process identity contract is unavailable")
         application_gpu = process_gpu_evidence(server, application_pid)
+        if application_identity is not None and not process_gpu_evidence_matches_identity(
+            application_gpu,
+            application_identity,
+        ):
+            raise LabFailure("GTK process evidence does not match its published identity")
         application_activity: dict[str, Any] = {
-            "process_alive": container_process_exists(server, application_pid)
+            "process_alive": (
+                application_process_alive
+                if application_identity is not None
+                else container_process_exists(server, application_pid)
+            )
         }
+        if application_identity is not None:
+            application_activity["process_identity"] = application_identity
         client_graphics: dict[str, Any] = {}
         if args.encoding == "h264":
             client_graphics = process_gpu_evidence(client, client_pid)
@@ -10907,6 +11500,17 @@ def run_scenario(
             )
 
         lifecycle: dict[str, Any] = {"mode": args.lifecycle}
+        if application_identity is not None:
+            assert server_process_identity is not None
+            lifecycle.update(
+                {
+                    "application_identity_at_capture": application_identity,
+                    "server_identity_at_capture": server_process_identity,
+                    "server_pid": server_pid,
+                }
+            )
+        if args.lifecycle in {"detach", "transport-loss"} and application_identity is None:
+            raise LabFailure("lifecycle profile requires fixture-owned application identity")
         if args.lifecycle == "application-exit":
             if args.application in MULTIWINDOW_HARDWARE_APPLICATIONS | {"vkcube"}:
                 podman_exec(
@@ -10978,20 +11582,66 @@ def run_scenario(
                 }
             )
             time.sleep(0.5)
+            survived_identity = require_interaction_fixture_identity(
+                server,
+                application_identity,
+                server_pid=server_pid,
+            )
+            assert server_process_identity is not None
+            survived_server_identity = require_process_identity(
+                server,
+                server_process_identity,
+                role="Xpra server",
+            )
             lifecycle.update(
                 {
-                    "application_survived_detach": container_process_exists(
-                        server, application_pid
+                    "application_identity_after_detach": survived_identity,
+                    "application_survived_detach": True,
+                    "server_identity_after_detach": survived_server_identity,
+                    "server_survived_detach": True,
+                }
+            )
+            if not lifecycle["server_survived_detach"]:
+                raise LabFailure("Xpra server did not survive detach")
+            before_termination = require_interaction_fixture_identity(
+                server,
+                application_identity,
+                server_pid=server_pid,
+            )
+            server_before_termination = require_process_identity(
+                server,
+                server_process_identity,
+                role="Xpra server",
+            )
+            lifecycle.update(
+                {
+                    "application_identity_before_termination": before_termination,
+                    "server_identity_before_application_termination": (
+                        server_before_termination
                     ),
-                    "server_survived_detach": container_process_exists(
-                        server, server_pid
+                    "server_alive_before_application_termination": True,
+                    "application_termination": terminate_interaction_fixture(
+                        server,
+                        application_identity,
+                        server_identity=server_process_identity,
                     ),
                 }
             )
-            podman_exec(server, ["kill", "-TERM", str(application_pid)], check=False)
+            wait_for(
+                "interaction fixture exit after deliberate termination",
+                lambda: interaction_fixture_identity_is_gone(
+                    server,
+                    application_identity,
+                ),
+            )
+            lifecycle["application_exited_after_termination"] = True
             wait_for(
                 "Xpra server exit after detached application termination",
-                lambda: not container_process_exists(server, server_pid),
+                lambda: process_identity_is_gone(
+                    server,
+                    server_process_identity,
+                    role="Xpra server",
+                ),
                 timeout=15,
             )
             lifecycle["server_exited_after_application"] = True
@@ -11016,20 +11666,68 @@ def run_scenario(
                 }
             )
             time.sleep(0.5)
+            survived_identity = require_interaction_fixture_identity(
+                server,
+                application_identity,
+                server_pid=server_pid,
+            )
+            assert server_process_identity is not None
+            survived_server_identity = require_process_identity(
+                server,
+                server_process_identity,
+                role="Xpra server",
+            )
             lifecycle.update(
                 {
-                    "application_survived_transport_loss": container_process_exists(
-                        server, application_pid
+                    "application_identity_after_transport_loss": survived_identity,
+                    "application_survived_transport_loss": True,
+                    "server_identity_after_transport_loss": (
+                        survived_server_identity
                     ),
-                    "server_survived_transport_loss": container_process_exists(
-                        server, server_pid
+                    "server_survived_transport_loss": True,
+                }
+            )
+            if not lifecycle["server_survived_transport_loss"]:
+                raise LabFailure("Xpra server did not survive transport loss")
+            before_termination = require_interaction_fixture_identity(
+                server,
+                application_identity,
+                server_pid=server_pid,
+            )
+            server_before_termination = require_process_identity(
+                server,
+                server_process_identity,
+                role="Xpra server",
+            )
+            lifecycle.update(
+                {
+                    "application_identity_before_termination": before_termination,
+                    "server_identity_before_application_termination": (
+                        server_before_termination
+                    ),
+                    "server_alive_before_application_termination": True,
+                    "application_termination": terminate_interaction_fixture(
+                        server,
+                        application_identity,
+                        server_identity=server_process_identity,
                     ),
                 }
             )
-            podman_exec(server, ["kill", "-TERM", str(application_pid)], check=False)
+            wait_for(
+                "interaction fixture exit after deliberate termination",
+                lambda: interaction_fixture_identity_is_gone(
+                    server,
+                    application_identity,
+                ),
+            )
+            lifecycle["application_exited_after_termination"] = True
             wait_for(
                 "Xpra server exit after transport-loss application termination",
-                lambda: not container_process_exists(server, server_pid),
+                lambda: process_identity_is_gone(
+                    server,
+                    server_process_identity,
+                    role="Xpra server",
+                ),
                 timeout=15,
             )
             lifecycle["server_exited_after_application"] = True

@@ -18,7 +18,4 @@ list = [
 ]
 
 [evidence]
-required_gates = [
-  "live-wayland-h264-hardware",
-  "live-wayland-opengl-h264-hardware",
-]
+required_gates = []
