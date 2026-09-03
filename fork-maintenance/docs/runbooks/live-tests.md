@@ -164,6 +164,11 @@ schema, digest, two distinct structured RMLVO configurations, aligned
 layout/variant groups, options, one unchanged numeric physical keycode, and an
 ordered expected character for every group. These values are scenario data;
 the runner and production code contain no language or country choices.
+Because the scenario path and provenance are currently case-owned, retiring
+the keyboard case first requires a reviewed migration to durable neutral or
+generic manifest-declared ownership. The migration must update the runner,
+provenance checks, immutable inventories, and mutation tests before the
+stack-selected keyboard gate can remain valid without that case.
 
 The clean maintained client uses `setxkbmap` on its actual X11 display. The
 bound scenario first uses model `pc104` with four ordered groups

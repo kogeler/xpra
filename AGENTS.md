@@ -74,7 +74,21 @@ the published case files and any bound workspace resolution/metadata even when
 the tree and update owner are already gone.
 
 Only when the operator explicitly starts a new upstream-refresh and patch-
-adaptation cycle does the clean host workflow run:
+adaptation cycle does the clean host workflow run. Follow the canonical
+selected-case and queue-wide procedure in
+[`fork-maintenance/docs/runbooks/upstream-refresh.md`](fork-maintenance/docs/runbooks/upstream-refresh.md):
+
+Starting that runbook grants one narrow local-commit authority before any
+fetch, local-master update, or rebase. If `develop` has non-ignored changes,
+the agent must review every tracked and untracked path, reject unsafe,
+unexplained, secret, generated, or applied-Xpra-source content, stage the exact
+complete legitimate set—including legitimate user work unrelated to the
+refresh—and create one preservation commit without asking for another
+confirmation. An already clean checkout gets no empty commit. After
+that start boundary the agent must not create an intermediate or final content
+commit for refresh results; those changes remain uncommitted for operator
+review. `git rebase --continue` only replays the pre-existing series and is not
+a second direct content-commit authorization.
 
 ```bash
 make -C fork-maintenance repo-sync
@@ -112,9 +126,11 @@ only with an exact-SHA `--force-with-lease`; plain `--force` is forbidden.
 ## Patch queue contract
 
 `fork-maintenance/cases/<id>/fix.patch` is the source of truth for one atomic
-production behavior plus its focused tests, except for the single explicitly
-typed test-quarantine duty case. `case.toml` binds the exact patch digest,
-paths, dependencies, tests, and required gates. The complete active queue is
+production behavior plus any case-owned focused tests, except for the single
+explicitly typed test-quarantine duty case. A production case may instead name
+an existing focused module only when its README binds the durable real boundary
+which proves the behavior. `case.toml` binds the exact patch digest, paths,
+dependencies, tests, and required gates. The complete active queue is
 `fork-maintenance/stacks/develop.toml`.
 
 The currently retained active cases are:
@@ -389,9 +405,11 @@ change. Resolve the refreshed queue, run whitespace and fork-control checks,
 and state the proof in the handoff; do not launch focused, native, full, or live
 jobs. This exception never applies after `develop-rebase`: every explicit
 upstream rebase requires the clean quarantine reassessment, all fork-control,
-focused, native, and three full upstream legs, plus all seven positive live
-profiles, even when every retained patch applies without textual changes. Any
-uncertainty or semantic change uses the normal ladder.
+tests-only clean controls or documented no-test semantic substitutes, patched
+focused/native gates, every durable package boundary on the resulting stack,
+all three full upstream legs, and all seven positive live profiles, even when
+every retained patch applies without textual changes. Any uncertainty or
+semantic change uses the normal ladder.
 
 Do not start or repeat an expensive downstream test when the observed failure
 occurred in a pre-test guard and the change only removes or narrows that guard.
@@ -531,6 +549,10 @@ after review; it never deletes patches, cases, or unrelated Podman objects.
 ## Git and publication authority
 
 - Do not commit unless the user explicitly asks in the current conversation.
+  Invoking the canonical upstream-refresh runbook is itself authorization for
+  its one reviewed pre-rebase preservation commit when non-ignored changes
+  exist; it never authorizes an empty commit or any later result,
+  intermediate, or final commit.
 - Never push, force-push, mutate a remote ref, or change global Git
   configuration.
 - The scheduled `master-sync.yml` service identity may fast-forward only the

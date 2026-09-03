@@ -43,6 +43,16 @@ usable installed capability rather than only selected filenames.
 
 ## Required validation
 
+This case owns no test path, so `PATCH_MODE=tests-only` is intentionally
+unavailable, and the focused runner does not support `PATCH_MODE=clean`.
+During an upstream refresh, inspect the clean upstream packaging directly; do
+not count either guard failure as a control. Run the existing focused module on
+the patched or resulting stack. If current upstream appears to replace the
+packaging behavior completely, prepare the whole reviewed case-retirement
+candidate and run both package builds against the resulting `stacks/develop`;
+the DEB runner has no clean patch mode and must not be bypassed with a partial
+stack or ad hoc package probe.
+
 - `unit.codecs.video_helper_test`;
 - `make -C fork-maintenance/infra/deb-packages check`;
 - the complete offline `make -C fork-maintenance check`;
