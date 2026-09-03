@@ -75,7 +75,6 @@ env -u DISPLAY GDK_BACKEND=wayland \
     python3 /opt/xpra-fork-maintenance/interaction_fixture.py \
     > /artifacts/interaction.stdout 2> /artifacts/interaction.stderr &
 interaction_pid=$!
-printf '%s\n' "$interaction_pid" > /artifacts/interaction.pid
 
 wait_for_child "$interaction_pid" interaction_status
 wait_for_child "$primary_pid" primary_status

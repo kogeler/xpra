@@ -184,8 +184,9 @@ testing, editing, committing, or publishing the unchanged current base.
 
 After each explicitly selected rebase, reassess the single test-quarantine case
 on the new clean source in all three matrix modes before applying it. Follow
-[`test-quarantine.md`](test-quarantine.md); a newly green module must leave the
-quarantine in the same reviewed cycle.
+[`test-quarantine.md`](test-quarantine.md); a module which becomes green in an
+assigned gate must leave that gate in the same reviewed cycle. Remove the
+module and its patch path only when no gate still assigns it.
 
 ## Runtime root
 
@@ -204,7 +205,8 @@ target removes the automation's transient `__pycache__` entries.
 ## Upstream-test image
 
 `test-image` verifies the input-keyed, label-verified upstream-test image and
-never builds it:
+never builds it. It uses the same exact current-source ownership verifier as a
+test start, including the build-run UUID and complete maintenance label set:
 
 ```bash
 make -C fork-maintenance test-image
@@ -244,8 +246,14 @@ Podman build child inherits the open lock. The lock remains after the named run
 and is validated, not deleted, by cycle cleanup.
 `test-image-cache-remove` also refuses a matching image-build or test
 prelaunch/owner. It can identify an otherwise exact owned cache whose recorded
-source commit is older than the current source, but it still requires the full
-label set, input/workflow identity, and immutable image ID before removal.
+source is an existing Git commit and an ancestor of, or equal to, the current
+embedded source. It still requires the full label set, input/workflow identity,
+and immutable image ID before removal; an unknown, unrelated, or future source
+is rejected. When
+an upstream rebase leaves that exact stale-source condition, remove the cache
+through this target, require `test-image` to report it absent, and then run the
+named build sequence above. Never use this route for an unexplained or broader
+provenance mismatch.
 
 This standalone upstream-test image lifecycle is the only image build that uses
 `IMAGE_RUN`. Live and DEB runners build or reuse their images inside the parent

@@ -1287,9 +1287,21 @@ class BuildArgumentTests(unittest.TestCase):
                     job,
                     "validate_selection_state",
                     return_value=selection_values,
-                ),
+                ) as validate_selection,
             ):
                 job.validate_build_arguments(args)
+                validate_selection.assert_called_with(
+                    args.selection_state,
+                    verify_semantic=True,
+                )
+                job.validate_build_arguments(
+                    args,
+                    verify_selection_semantic=False,
+                )
+                validate_selection.assert_called_with(
+                    args.selection_state,
+                    verify_semantic=False,
+                )
                 args.source = "f" * 40
                 with self.assertRaisesRegex(job.JobError, "do not match their source"):
                     job.validate_build_arguments(args)
@@ -1614,12 +1626,19 @@ class LocalOwnershipTests(unittest.TestCase):
                 patch.object(job, "RESULT_ROOT", result_root),
                 patch.object(job, "prepare_state"),
                 patch.object(job, "package_terminal_lock", side_effect=unlocked),
-                patch.object(job, "validate_build_arguments"),
+                patch.object(job, "validate_build_arguments") as validate,
                 patch("sys.stdout", new_callable=io.StringIO) as output,
             ):
                 self.assertEqual(job.package_status(argparse.Namespace(name=name)), 0)
                 self.assertEqual(json.loads(output.getvalue())["phase"], "prelaunch")
                 self.assertEqual(job.package_abort(argparse.Namespace(name=name)), 0)
+            self.assertTrue(validate.call_args_list)
+            self.assertTrue(
+                all(
+                    item.kwargs == {"verify_selection_semantic": False}
+                    for item in validate.call_args_list
+                )
+            )
             self.assertFalse(directory.exists())
             self.assertFalse((run_root / f"{name}.prelaunch.json").exists())
 
@@ -1832,7 +1851,7 @@ class LocalOwnershipTests(unittest.TestCase):
                 patch.object(job, "OUTPUT_ROOT", output_root),
                 patch.object(job, "prepare_state"),
                 patch.object(job, "package_terminal_lock", side_effect=unlocked),
-                patch.object(job, "validate_build_arguments"),
+                patch.object(job, "validate_build_arguments") as validate,
                 patch.object(job, "runner_sha256", return_value=current),
             ):
                 stale_record, _stale_args = self.abort_fixture(
@@ -1874,6 +1893,13 @@ class LocalOwnershipTests(unittest.TestCase):
                     job.package_abort(argparse.Namespace(name="current-completed"))
                 remove.assert_not_called()
                 self.assertTrue(job.run_directory("current-completed").is_dir())
+            self.assertTrue(validate.call_args_list)
+            self.assertTrue(
+                all(
+                    item.kwargs == {"verify_selection_semantic": False}
+                    for item in validate.call_args_list
+                )
+            )
 
     def test_lost_job_cleanup_removes_owned_partial_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -2078,7 +2104,7 @@ class LocalOwnershipTests(unittest.TestCase):
                 patch.object(job, "prepare_state"),
                 patch.object(job, "package_terminal_lock", side_effect=unlocked),
                 patch.object(job, "load_record", return_value=record),
-                patch.object(job, "validate_build_arguments"),
+                patch.object(job, "validate_build_arguments") as validate,
                 patch.object(
                     job.background_job,
                     "process_state",
@@ -2101,6 +2127,13 @@ class LocalOwnershipTests(unittest.TestCase):
             self.assertFalse(directory.exists())
             self.assertTrue((result_root / f"{name}.status.json").is_file())
             self.assertTrue((result_root / f"{name}.remove.json").is_file())
+            self.assertTrue(validate.call_args_list)
+            self.assertTrue(
+                all(
+                    item.kwargs == {"verify_selection_semantic": False}
+                    for item in validate.call_args_list
+                )
+            )
 
     def test_successful_result_removal_is_idempotent_after_runtime_removal(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -2427,6 +2460,66 @@ class SelectionCacheTests(unittest.TestCase):
                 self.assertEqual(state.parent.stat().st_mode & 0o777, 0o700)
                 self.assertEqual(state.stat().st_mode & 0o777, 0o600)
                 self.assertEqual(job.validate_selection_state(state), first)
+
+    def test_incompatible_historical_cache_does_not_block_current_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            lab_root = self.lab_fixture(root)
+            selection_root = root / "selections"
+            selection_root.mkdir(mode=0o700)
+            resolver = self.digest_resolver(lab_root)
+            resolved_roots: list[Path] = []
+
+            def recorded_digest(
+                selection: str,
+                selected_root: Path = lab_root,
+            ) -> str:
+                resolved_roots.append(selected_root)
+                return resolver(selection, selected_root)
+
+            with (
+                patch.object(job, "MAINTENANCE_ROOT", lab_root),
+                patch.object(job, "SELECTION_ROOT", selection_root),
+                patch.object(job, "prepare_state"),
+                patch.object(job, "selection_digest", side_effect=recorded_digest),
+            ):
+                current = job.freeze_selection_cache(job.ACTIVE_SELECTION)
+
+                staging = selection_root / "historical-staging"
+                historical_lab = staging / "lab"
+                staging.mkdir(mode=0o700)
+                historical_lab.mkdir(mode=0o700)
+                legacy_manifest = historical_lab / "legacy-manifest.toml"
+                legacy_manifest.write_text("schema = 0\n", encoding="utf-8")
+                legacy_manifest.chmod(0o600)
+                historical_sha256 = "0" * 64
+                historical_state = staging / "selection.json"
+                job.background_job.publish_json(
+                    historical_state,
+                    {
+                        "owner": job.SELECTION_OWNER,
+                        "schema": 1,
+                        "selection": job.ACTIVE_SELECTION,
+                        "selection_sha256": historical_sha256,
+                        "snapshot_tree_sha256": job.selection_tree_sha256(
+                            historical_lab
+                        ),
+                    },
+                )
+                historical_cache = job.selection_cache_root(
+                    historical_sha256,
+                    job.sha256_file(historical_state),
+                )
+                staging.rename(historical_cache)
+                published_historical_lab = historical_cache / "lab"
+
+                resolved_roots.clear()
+                self.assertEqual(
+                    job.freeze_selection_cache(job.ACTIVE_SELECTION),
+                    current,
+                )
+                self.assertNotIn(published_historical_lab, resolved_roots)
+                self.assertIn(Path(current["selection_snapshot"]), resolved_roots)
 
     def test_owned_and_valid_marker_only_crash_debris_are_recovered_exactly(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

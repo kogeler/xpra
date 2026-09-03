@@ -96,8 +96,19 @@ The commands in this section are not prerequisites for investigation,
 workspace work, tests, live acceptance, CI reproduction, or publication of the
 unchanged current `develop` base. Run them only when the operator deliberately
 chooses to move the queue to a newer upstream commit and begin a new adaptation
-cycle. The complete agent procedure for rebasing, deciding whether one selected
-case should be kept, adapted, or retired, and revalidating the whole queue is
+cycle. The single entry point for the complete **Autonomous Upstream Refresh
+and Full Queue Adaptation** procedure is this agent directive:
+
+```text
+Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+```
+
+It is not a shell command or Make target. `PRIMARY_CASE` affects only review
+order and detail. The invoked runbook derives a unique cycle name, semantically
+reassesses every active production case plus the quarantine, repairs in-scope
+workflow defects as it encounters them, and runs the full clean, focused,
+native, package, three-leg, atomic-case-live, and seven-profile stack-live
+ladder. The exhaustive procedure is
 [`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md).
 
 Before the first `repo-sync`, that runbook reviews every staged, unstaged, and
@@ -241,19 +252,25 @@ make -C fork-maintenance test-start \
 ```
 
 Repeat for `quarantine-cython` and `quarantine-no-compat`. These gates are
-green only while each listed module is still non-green; a newly passing module
-must be removed or narrowed in the quarantine case.
+green only when each gate's exact assigned subset is the ordered ignored-
+failure set and every other module in the complete ordered union passes without
+skips. A newly passing assigned module must be removed from that leg; remove
+the module and its patch path only when no gate still assigns it. A newly
+failing complement module must first be reproduced and then assigned to its
+exact affected leg before the patched matrix is accepted.
 
 Every explicit upstream rebase then requires the complete current validation,
 even if every patch applied without a textual refresh: offline fork-control
 tests, tests-only controls for production cases which own retained tests plus
 the documented no-test semantic inspection for those which do not, patched
 focused and native gates, every case-specific durable package boundary against
-the complete resulting stack, all three complete upstream workflow legs, and
-all seven fixed positive live profiles. A new upstream-suite failure enters the
-single quarantine only after the exact module reproduces on the clean rebased
-source in the same mode; the clean quarantine gates and patched matrix are
-rerun after that change.
+the complete resulting stack including both real Ubuntu 26.04 and Debian 13
+builds, all three complete upstream workflow legs, every production case's
+declared live gates with its atomic `CASE=<slug>` selection, and all seven fixed
+positive stack live profiles. A new upstream-suite failure enters the single
+quarantine only after the exact module reproduces on the clean rebased source
+in the same mode; the clean quarantine gates and patched matrix are rerun after
+that change.
 
 After a whole prefixed work cycle is finalized and reviewed, delete its
 collected results and finalized workspaces through an exact two-phase plan:
@@ -350,8 +367,9 @@ At 00:37 and 12:37 UTC, the separate hosted workflow invokes the guarded
 `ci-master-sync` Make target. It fast-forwards only `kogeler/xpra:master` from
 `Xpra-org/xpra:master`, never uses force, and never changes `develop`. It also
 supports manual operator dispatch. When deliberately starting a new adaptation
-cycle, the operator later fetches fork master, updates local master, and
-manually rebases develop. See
+cycle, the operator invokes the `autonomous-upstream-refresh` agent directive;
+the agent then performs the guarded fetch, local-master fast-forward, and
+`develop` rebase as part of the complete queue-adaptation runbook. See
 [`docs/runbooks/master-sync.md`](docs/runbooks/master-sync.md).
 
 ## Documentation
@@ -366,8 +384,9 @@ manually rebases develop. See
 - [`docs/runbooks/patch-cycle.md`](docs/runbooks/patch-cycle.md): apply, edit,
   refresh, and remove;
 - [`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md):
-  rebase `develop`, reassess one selected case against fresh fork master, and
-  run the complete post-rebase acceptance ladder;
+  autonomously rebase `develop`, make a current-source keep/adapt/retire
+  decision for every active case, repair the maintenance workflow when needed,
+  and run the complete post-rebase package/test/live acceptance ladder;
 - [`docs/runbooks/upstream-tests.md`](docs/runbooks/upstream-tests.md): container
   test matrix;
 - [`docs/runbooks/ci.md`](docs/runbooks/ci.md): thin develop workflow and

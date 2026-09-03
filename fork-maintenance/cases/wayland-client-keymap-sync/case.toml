@@ -3,7 +3,7 @@ slug = "wayland-client-keymap-sync"
 kind = "production"
 title = "Synchronize Wayland keymaps with clients"
 commit_subject = "Synchronize Wayland keymaps with clients"
-patch_sha256 = "32dee2542d7bcd51ba08de47e5f4f2337a2f96474e43876ff60db9c0ef5bac3a"
+patch_sha256 = "779c3ead631732f55717ae314965ad640f8a2a543f7885009b8755896ec0b951"
 dependencies = []
 paths = [
   "tests/unittests/unit/client/keyboard_helper_test.py",
@@ -14,6 +14,7 @@ paths = [
   "tests/unittests/unit/wayland/window_test.py",
   "xpra/client/gtk3/keyboard_helper.py",
   "xpra/client/gui/keyboard_helper.py",
+  "xpra/client/subsystem/keyboard.py",
   "xpra/platform/keyboard_base.py",
   "xpra/platform/posix/keyboard.py",
   "xpra/server/core.py",

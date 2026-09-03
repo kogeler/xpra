@@ -50,7 +50,7 @@ to miss the important ownership boundaries.
 | `xpra/wayland/server/surface.pyx` | Reads `wlr_surface.buffer_damage`, captures the mapped surface, emits `surface-image`, and then emits the generic `commit` with damage rectangles and subsurface geometry. |
 | `xpra/wayland/server/wayland_surface.pyx` | Implements synchronous `Surface.frame_done()` by calling `wlr_surface_send_frame_done()`. It does not schedule a future callback. |
 | `xpra/wayland/server/subsystem/window.py` | Updates the Python window model, classifies mapped commits as damaged or empty, fans real damage out to Xpra consumers, and owns the new shared empty-ack timer. |
-| `xpra/server/subsystem/window.py` and `xpra/server/source/window.py` | Route a damage rectangle to every eligible client connection and its `WindowSource`. |
+| `xpra/server/subsystem/window.py` and `xpra/server/source/window.py` | Route a damage rectangle to every eligible client connection and its `WindowSource`; the generic source also suppresses pixels for windows hidden from a client's `sharing=combine` display area. |
 | `xpra/server/window/compress.py` | Owns normal batching and backlog decisions. `WindowSource.send_delayed_regions()` acknowledges the Wayland surface on the UI thread before extracting and encoding delayed regions. |
 | `xpra/wayland/server/models/window.py` | Is the common acknowledgement boundary reached both by normal `WindowSource` work and by the empty-damage timer. The damage guard therefore belongs here, not only in the Wayland server timer. |
 
@@ -184,7 +184,8 @@ Consumer eligibility intentionally mirrors the ordinary Xpra window delivery
 boundary. A candidate is eligible when at least one `WindowsConnection`:
 
 - is neither closed nor connection-suspended;
-- accepts the window through `can_send_window(window)`; and
+- accepts the window through `can_send_window(window)`;
+- does not currently hide the window from that connection's display area; and
 - has no `WindowSource` yet, or has an existing `WindowSource` which is not
   suspended.
 
@@ -194,6 +195,15 @@ covers initial-window delivery. Do not add separate idle, readonly, recording,
 iconic, ownership, or application-specific tests here unless the generic
 damage path adopts the same rule. In particular, `is_idle` changes batching
 policy but does not make ordinary window damage ineligible.
+
+The hidden-window predicate was added upstream with `sharing=combine` after
+the first version of this patch. Native Wayland currently rejects that sharing
+layout, while the seamless X11 server is its supported producer, but the
+generic `WindowsConnection.damage()` boundary is shared and now suppresses
+damage for such a hidden window. Keeping the empty-callback test aligned avoids
+a latent invisible-render loop if Wayland later gains that layout, and the
+fire-time recheck covers a connection whose visibility changes after the timer
+was armed.
 
 With no eligible consumer the callback is intentionally retained instead of
 driving an invisible application at roughly the timer cadence. A newly
