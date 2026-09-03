@@ -80,6 +80,7 @@ EMPTY_DAMAGE_READY_MARKER = "/tmp/xpra-empty-damage-fixture-ready"
 EMPTY_DAMAGE_START_MARKER = "/tmp/xpra-empty-damage-pressure-start"
 EMPTY_DAMAGE_PRESSURE_MARKER = "/tmp/xpra-empty-damage-pressure-ready"
 EMPTY_DAMAGE_CLICK_MARKER = "/tmp/xpra-empty-damage-child-clicked"
+EMPTY_DAMAGE_INPUT_DEADLINE_SECONDS = 3.0
 KEYBOARD_FIXTURE_TITLE = "Xpra Wayland Keyboard Fixture"
 KEYBOARD_SCENARIO_BASENAME = "live-wayland-keyboard.json"
 LEGACY_SOURCE_VARIANT_SELECTORS = {"master": ()}
@@ -8760,13 +8761,77 @@ def load_empty_damage_fixture_events(path: Path) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for line in lines:
         try:
-            event = json.loads(line)
+            event = json.loads(
+                line,
+                object_pairs_hook=_json_object_without_duplicates,
+            )
         except json.JSONDecodeError as error:
             raise LabFailure("empty-damage fixture event stream is not JSON") from error
         if not isinstance(event, dict) or not isinstance(event.get("event"), str):
             raise LabFailure("empty-damage fixture event is invalid")
         events.append(event)
     return events
+
+
+def validate_empty_damage_fixture_events(
+    events: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Validate the fixture's complete ordered application observation stream."""
+    if type(events) is not list or any(type(event) is not dict for event in events):
+        raise LabFailure("empty-damage fixture events are not an exact object list")
+    event_names = ("ready", "pressure-ready", "child-click", "exit")
+    if len(events) != len(event_names) or tuple(
+        event.get("event") for event in events
+    ) != event_names:
+        raise LabFailure("empty-damage fixture events are missing, extra, or reordered")
+    frame_keys = {"child_frames", "event", "monotonic_seconds", "parent_frames"}
+    click_keys = {"event", "monotonic_seconds", "x", "y"}
+    if any(set(event) != frame_keys for event in (events[0], events[1], events[3])):
+        raise LabFailure("empty-damage fixture frame event fields are invalid")
+    if set(events[2]) != click_keys:
+        raise LabFailure("empty-damage fixture click event fields are invalid")
+
+    def exact_finite_float(value: Any, *, nonnegative: bool = True) -> float | None:
+        if type(value) is not float or not -float("inf") < value < float("inf"):
+            return None
+        if nonnegative and value < 0:
+            return None
+        return value
+
+    timestamps = tuple(
+        exact_finite_float(event.get("monotonic_seconds"))
+        for event in events
+    )
+    if any(value is None for value in timestamps) or tuple(sorted(timestamps)) != timestamps:
+        raise LabFailure("empty-damage fixture event timestamps are invalid")
+    ready_parent = _exact_int(events[0].get("parent_frames"))
+    ready_child = _exact_int(events[0].get("child_frames"))
+    pressure_parent = _exact_int(events[1].get("parent_frames"), positive=True)
+    pressure_child = _exact_int(events[1].get("child_frames"), positive=True)
+    exit_parent = _exact_int(events[3].get("parent_frames"), positive=True)
+    exit_child = _exact_int(events[3].get("child_frames"), positive=True)
+    if ready_parent != 0 or ready_child != 0:
+        raise LabFailure("empty-damage fixture recycled callbacks before pressure start")
+    if (
+        pressure_parent is None
+        or pressure_child is None
+        or pressure_parent < 60
+        or pressure_child < 60
+    ):
+        raise LabFailure("empty-damage fixture pressure counts are invalid")
+    if (
+        exit_parent is None
+        or exit_child is None
+        or exit_parent < pressure_parent
+        or exit_child < pressure_child
+    ):
+        raise LabFailure("empty-damage fixture exit counts regressed")
+    if (
+        exact_finite_float(events[2].get("x")) is None
+        or exact_finite_float(events[2].get("y")) is None
+    ):
+        raise LabFailure("empty-damage fixture click coordinates are invalid")
+    return dict(zip(event_names, events, strict=True))
 
 
 def empty_damage_fixture_checks(evidence: dict[str, Any]) -> dict[str, bool]:
@@ -8781,38 +8846,81 @@ def empty_damage_fixture_checks(evidence: dict[str, Any]) -> dict[str, bool]:
     teardown = teardown if isinstance(teardown, dict) else {}
     parent_frames = _exact_int(pressure.get("parent_frames_at_marker"), positive=True)
     child_frames = _exact_int(pressure.get("child_frames_at_marker"), positive=True)
+    validated_events: dict[str, dict[str, Any]] = {}
+    events = evidence.get("events")
+    if type(events) is list:
+        try:
+            validated_events = validate_empty_damage_fixture_events(events)
+        except LabFailure:
+            pass
+    pressure_event = validated_events.get("pressure-ready", {})
+    click_event = validated_events.get("child-click", {})
+    click_position = evidence.get("click_position")
+    click_position_valid = bool(
+        type(click_position) is list
+        and len(click_position) == 2
+        and all(_exact_int(value) is not None and value >= 0 for value in click_position)
+    )
+    event_stream_exact = bool(
+        validated_events
+        and parent_frames == _exact_int(pressure_event.get("parent_frames"), positive=True)
+        and child_frames == _exact_int(pressure_event.get("child_frames"), positive=True)
+        and click_position_valid
+        and abs(click_event["x"] - click_position[0]) <= 1
+        and abs(click_event["y"] - click_position[1]) <= 1
+    )
+    click_elapsed = evidence.get("click_observed_after_seconds")
+    click_elapsed_valid = bool(
+        type(click_elapsed) is float
+        and 0 <= click_elapsed < float("inf")
+        and click_elapsed <= EMPTY_DAMAGE_INPUT_DEADLINE_SECONDS
+    )
     return {
         "secondary_toplevels_discovered": bool(
-            windows.get("client_ids_distinct")
-            and windows.get("server_ids_distinct")
+            windows.get("client_ids_distinct") is True
+            and windows.get("server_ids_distinct") is True
         ),
-        "secondary_toplevels_visible": bool(windows.get("visible_content")),
+        "secondary_toplevels_visible": windows.get("visible_content") is True,
         "empty_damage_pressure_active": bool(
-            pressure.get("marker")
-            and pressure.get("parent_mapped_empty_commit")
-            and pressure.get("child_mapped_empty_commit")
+            pressure.get("marker") is True
+            and pressure.get("parent_mapped_empty_commit") is True
+            and pressure.get("child_mapped_empty_commit") is True
             and parent_frames is not None
             and child_frames is not None
             and parent_frames >= 60
             and child_frames >= 60
         ),
         "secondary_client_pointer_path": bool(
-            input_path.get("client_press_release")
+            input_path.get("client_press_release") is True
         ),
         "secondary_server_pointer_path": bool(
-            input_path.get("server_child_focus")
-            and input_path.get("server_coordinates")
-            and input_path.get("server_press_release")
+            input_path.get("server_child_focus") is True
+            and input_path.get("server_coordinates") is True
+            and input_path.get("server_press_release") is True
         ),
         "secondary_surface_pointer_path": bool(
-            input_path.get("fixture_child_release")
-            and input_path.get("fixture_coordinates")
+            input_path.get("fixture_child_release") is True
+            and input_path.get("fixture_coordinates") is True
         ),
         "secondary_pointer_response_bounded": bool(
-            evidence.get("clicked_within_deadline")
+            evidence.get("clicked_within_deadline") is True
+            and "click_failure" in evidence
+            and evidence["click_failure"] is None
+            and click_elapsed_valid
         ),
-        "secondary_toplevel_teardown": bool(teardown.get("complete")),
-        "secondary_fixture_clean_exit": evidence.get("fixture_exit_status") == 0,
+        "secondary_toplevel_teardown": all(
+            teardown.get(name) is True
+            for name in (
+                "client_destroy_logged",
+                "client_windows_absent",
+                "complete",
+                "server_destroy_logged",
+                "server_inventory_available",
+                "server_windows_absent",
+            )
+        ),
+        "secondary_fixture_event_stream_exact": event_stream_exact,
+        "secondary_fixture_clean_exit": _exact_int(evidence.get("fixture_exit_status")) == 0,
     }
 
 
@@ -8968,45 +9076,72 @@ def exercise_empty_damage_fixture(
     client_click_offset = container_artifact_size(client, "client.stdout")
     server_click_offset = container_artifact_size(server, "server.stderr")
     click_started = time.monotonic()
-    podman_exec(
-        client,
-        [
-            "env",
-            f"DISPLAY={CLIENT_DISPLAY}",
-            "xdotool",
-            "windowactivate",
-            "--sync",
-            child_window[0],
-            "mousemove",
-            "--sync",
-            "--window",
-            child_window[0],
-            str(click_x),
-            str(click_y),
-            "click",
-            "1",
-        ],
-    )
+    click_deadline = click_started + EMPTY_DAMAGE_INPUT_DEADLINE_SECONDS
+    click_observed = click_started
     clicked = False
     click_failure: str | None = None
     try:
-        wait_for(
-            "empty-damage child pointer release",
-            lambda: (
+        remaining = click_deadline - time.monotonic()
+        if remaining <= 0:
+            raise LabFailure("empty-damage input deadline expired before injection")
+        podman_exec(
+            client,
+            [
+                "env",
+                f"DISPLAY={CLIENT_DISPLAY}",
+                "xdotool",
+                "windowactivate",
+                "--sync",
+                child_window[0],
+                "mousemove",
+                "--sync",
+                "--window",
+                child_window[0],
+                str(click_x),
+                str(click_y),
+                "click",
+                "1",
+            ],
+            timeout=remaining,
+        )
+
+        def child_pointer_release_observed() -> bool:
+            probe_remaining = click_deadline - time.monotonic()
+            if probe_remaining <= 0:
+                return False
+            return (
                 podman_exec(
                     server,
                     ["test", "-f", EMPTY_DAMAGE_CLICK_MARKER],
                     check=False,
                     announce=False,
+                    timeout=probe_remaining,
                 ).returncode
                 == 0
-            ),
-            timeout=3,
+            )
+
+        remaining = click_deadline - time.monotonic()
+        if remaining <= 0:
+            raise LabFailure("empty-damage input deadline expired after injection")
+        wait_for(
+            "empty-damage child pointer release",
+            child_pointer_release_observed,
+            timeout=remaining,
         )
-        clicked = True
+        click_observed = time.monotonic()
+        clicked = click_observed <= click_deadline
+        if not clicked:
+            click_failure = "empty-damage pointer release exceeded the input deadline"
+    except subprocess.TimeoutExpired:
+        click_observed = time.monotonic()
+        click_failure = (
+            "empty-damage input command exceeded the "
+            f"{EMPTY_DAMAGE_INPUT_DEADLINE_SECONDS:g}s deadline"
+        )
     except LabFailure as error:
+        click_observed = time.monotonic()
         click_failure = str(error)
-    click_observed_after = round(time.monotonic() - click_started, 6)
+    click_observed_after = round(click_observed - click_started, 6)
     if not clicked:
         podman_exec(
             server,
@@ -9104,25 +9239,27 @@ def exercise_empty_damage_fixture(
         directory,
         ("empty-damage.stdout", "empty-damage.stderr"),
     )
-    events = load_empty_damage_fixture_events(directory / "empty-damage.stdout")
-    pressure_event = next(
-        (event for event in events if event.get("event") == "pressure-ready"),
-        None,
-    )
-    click_event = next(
-        (event for event in events if event.get("event") == "child-click"),
-        None,
-    )
-    click_event_x = click_event.get("x") if isinstance(click_event, dict) else None
-    click_event_y = click_event.get("y") if isinstance(click_event, dict) else None
+    event_list = load_empty_damage_fixture_events(directory / "empty-damage.stdout")
+    validated_events: dict[str, dict[str, Any]] = {}
+    try:
+        validated_events = validate_empty_damage_fixture_events(event_list)
+    except LabFailure:
+        # Preserve the bounded raw observations in the failure report. The
+        # classifier below requires an exact complete stream, so partial or
+        # malformed semantics cannot become acceptance evidence.
+        pass
+    pressure_event = validated_events.get("pressure-ready", {})
+    click_event = validated_events.get("child-click", {})
+    click_event_x = click_event.get("x")
+    click_event_y = click_event.get("y")
     input_path.update(
         {
-            "fixture_child_release": click_event is not None,
+            "fixture_child_release": bool(click_event),
             "fixture_coordinates": bool(
-                isinstance(click_event_x, (int, float))
-                and isinstance(click_event_y, (int, float))
-                and abs(float(click_event_x) - click_x) <= 1
-                and abs(float(click_event_y) - click_y) <= 1
+                type(click_event_x) is float
+                and type(click_event_y) is float
+                and abs(click_event_x - click_x) <= 1
+                and abs(click_event_y - click_y) <= 1
             ),
         }
     )
@@ -9141,17 +9278,14 @@ def exercise_empty_damage_fixture(
         "click_failure": click_failure,
         "click_observed_after_seconds": click_observed_after,
         "click_position": [click_x, click_y],
+        "events": event_list,
         "fixture_exit_status": fixture_exit_status,
         "input_path": input_path,
         "pid": fixture_pid,
         "pressure": {
-            "marker": pressure_event is not None,
-            "parent_frames_at_marker": (
-                pressure_event.get("parent_frames", 0) if pressure_event else 0
-            ),
-            "child_frames_at_marker": (
-                pressure_event.get("child_frames", 0) if pressure_event else 0
-            ),
+            "marker": bool(pressure_event),
+            "parent_frames_at_marker": pressure_event.get("parent_frames", 0),
+            "child_frames_at_marker": pressure_event.get("child_frames", 0),
             "parent_mapped_empty_commit": mapped_empty_commits["parent"],
             "child_mapped_empty_commit": mapped_empty_commits["child"],
         },
