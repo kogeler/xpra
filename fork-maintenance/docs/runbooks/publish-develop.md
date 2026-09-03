@@ -2,9 +2,12 @@
 
 ## Authority
 
-The operator owns every commit signature, push, remote branch creation, and
-default-branch change. Agents and automation may prepare and audit local state,
-but never execute those remote mutations.
+The operator owns every refresh-result commit and signature, push, remote
+branch creation, and default-branch change. The sole earlier exception is the
+canonical upstream-refresh runbook's one reviewed preservation commit before
+fetch/rebase when non-ignored pre-existing work must be retained. Agents and
+automation may otherwise prepare and audit local state, but never execute
+remote mutations.
 
 Do not publish an applied patch worktree. Clean `develop` contains the patch
 queue representation and automation only.
@@ -35,7 +38,8 @@ This gate uses the unique source merge base already embedded in current
 `develop`. It does not fetch, compare live master refs, require master
 freshness/equality, or rebase. A newer upstream tip is not a publication
 blocker for the already adapted queue; the operator owns the decision whether
-and when to begin a separate upstream-refresh cycle.
+and when to begin a separate upstream-refresh cycle. That cycle follows
+[`upstream-refresh.md`](upstream-refresh.md).
 
 `develop-check` requires one embedded linear source boundary, rejects merge
 commits above it, and rejects committed Xpra source copies outside the patch
@@ -57,8 +61,10 @@ The handoff states:
 - ordered active cases and their current resolution;
 - all three clean quarantine reassessment results on this source when required;
 - after every upstream rebase, the complete offline suite, production
-  tests-only controls, focused/native gates, all three full author-test legs,
-  and all seven fixed positive live jobs actually completed on this base;
+  tests-only controls or documented no-test semantic substitutes,
+  focused/native gates and resulting-stack package boundaries, all three full
+  author-test legs, and all seven fixed positive live jobs actually completed
+  on this base;
 - any required gates still outstanding;
 - whether local commits are signed as required.
 
@@ -68,16 +74,26 @@ contains a concise outcome only.
 
 ## Commits
 
-No target creates a new content commit automatically. `develop-rebase` does
-replay existing commits and changes their local identities. When the user
-explicitly authorizes an agent commit in the current conversation, create only
-the requested local commit(s) after the gates pass. Do not change Git signing
-configuration. If the required hardware key is unavailable, leave an
-explicitly identified unsigned handoff for the operator to rewrite and
-re-audit.
+No target creates a new content commit automatically. Invoking
+[`upstream-refresh.md`](upstream-refresh.md) authorizes the agent to create
+exactly one direct preservation commit at the start, before fetch/rebase, iff
+exhaustive review finds legitimate non-ignored changes. It must contain all and
+only that complete reviewed tracked and untracked set, must contain no secret,
+generated artifact, unexplained content, or applied Xpra source, includes
+reviewed legitimate user work even when unrelated to the refresh, and needs no
+additional confirmation. An already clean checkout gets no empty commit.
 
-After any signing amendment, recheck parent, tree/diff, subject, and signature
-because the commit identity changed.
+After that boundary, the agent creates no intermediate, prerequisite, adapted
+case, retirement, quarantine, CI-layout, documentation, or final result commit
+during the refresh. `develop-rebase` does replay the pre-existing series and
+changes commit identities, but that replay is not a second direct content
+commit. Dirty reviewed results are handed to the operator with
+`develop-check` explicitly outstanding. Do not change Git signing
+configuration; if the configured start commit cannot be created, stop before
+fetch/rebase rather than weakening signing policy or making a later commit.
+
+After the operator creates or amends a result commit, recheck parent,
+tree/diff, subject, and signature because the commit identity changed.
 
 ## Operator-only push
 

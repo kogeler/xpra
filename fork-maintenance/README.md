@@ -96,7 +96,17 @@ The commands in this section are not prerequisites for investigation,
 workspace work, tests, live acceptance, CI reproduction, or publication of the
 unchanged current `develop` base. Run them only when the operator deliberately
 chooses to move the queue to a newer upstream commit and begin a new adaptation
-cycle.
+cycle. The complete agent procedure for rebasing, deciding whether one selected
+case should be kept, adapted, or retired, and revalidating the whole queue is
+[`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md).
+
+Before the first `repo-sync`, that runbook reviews every staged, unstaged, and
+untracked non-ignored path. If legitimate work exists, invoking the runbook
+authorizes the agent to preserve the complete reviewed set in one local start
+commit without another confirmation; a clean checkout gets no empty commit.
+No intermediate or final refresh-result commit is created after that boundary.
+The commands below therefore start only after the runbook has required clean
+porcelain and recorded the preservation commit SHA or `<none>`.
 
 Run commands from the Xpra root:
 
@@ -130,8 +140,10 @@ source boundary.
 
 ## Host-worktree fallback
 
-Only during an explicit clean-host refresh or integration cycle may a patch be
-applied to clean `develop` for exceptional diagnosis:
+Only during an exceptional explicitly selected clean-host integration cycle may
+a patch be applied to clean `develop` for diagnosis. Canonical upstream-refresh
+adaptation instead uses isolated applicable or `PATCH_MODE=reconstruct`
+workspaces so later cases never require an intermediate cleanliness commit:
 
 ```bash
 make -C fork-maintenance patch-apply CASE=wayland-initial-window-state
@@ -234,11 +246,14 @@ must be removed or narrowed in the quarantine case.
 
 Every explicit upstream rebase then requires the complete current validation,
 even if every patch applied without a textual refresh: offline fork-control
-tests, tests-only controls for every production case, patched focused and native
-gates, all three complete upstream workflow legs, and all seven fixed positive
-live profiles. A new upstream-suite failure enters the single quarantine only
-after the exact module reproduces on the clean rebased source in the same mode;
-the clean quarantine gates and patched matrix are rerun after that change.
+tests, tests-only controls for production cases which own retained tests plus
+the documented no-test semantic inspection for those which do not, patched
+focused and native gates, every case-specific durable package boundary against
+the complete resulting stack, all three complete upstream workflow legs, and
+all seven fixed positive live profiles. A new upstream-suite failure enters the
+single quarantine only after the exact module reproduces on the clean rebased
+source in the same mode; the clean quarantine gates and patched matrix are
+rerun after that change.
 
 After a whole prefixed work cycle is finalized and reviewed, delete its
 collected results and finalized workspaces through an exact two-phase plan:
@@ -350,6 +365,9 @@ manually rebases develop. See
   default pre-commit patch cycle;
 - [`docs/runbooks/patch-cycle.md`](docs/runbooks/patch-cycle.md): apply, edit,
   refresh, and remove;
+- [`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md):
+  rebase `develop`, reassess one selected case against fresh fork master, and
+  run the complete post-rebase acceptance ladder;
 - [`docs/runbooks/upstream-tests.md`](docs/runbooks/upstream-tests.md): container
   test matrix;
 - [`docs/runbooks/ci.md`](docs/runbooks/ci.md): thin develop workflow and
@@ -386,3 +404,7 @@ releases, drafts outside exact recovery, tag-only state, and ambiguous state
 are preserved. Agents invoke neither hosted mutation target.
 `develop-rebase` only replays existing local commits onto fetched fork master
 during an operator-selected upstream refresh.
+The refresh runbook invocation separately authorizes one direct agent
+preservation commit before its first `repo-sync` iff legitimate non-ignored
+work exists. It contains the complete reviewed pre-existing state and needs no
+second confirmation; the agent creates no later intermediate or result commit.

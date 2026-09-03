@@ -53,6 +53,19 @@ Only an operator decision to begin a new upstream adaptation cycle activates
 may instruct the operator to perform the documented non-forced remote sync;
 agents never run that mutation. Those explicit refresh commands are never a
 prerequisite for examining, editing, or testing the current `develop` queue.
+The canonical selected-case decision and queue-wide revalidation procedure is
+[`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md).
+
+That explicit runbook begins by normalizing `develop`: when non-ignored
+changes exist, the agent exhaustively reviews them and creates one local
+preservation commit containing every legitimate tracked and untracked change
+and nothing else, including reviewed legitimate work unrelated to the refresh.
+The runbook invocation itself supplies authority for that one commit, so no
+additional confirmation is requested. A clean checkout gets no empty commit.
+No refresh result, intermediate prerequisite, or final queue
+change is committed by the agent after this boundary; if later work needs a
+clean host, order it before tracked result edits, use an isolated supported
+path, or stop rather than manufacturing another commit.
 
 A temporary non-master branch is supported only for exceptional clean
 host-worktree integration diagnosis and patch operations after it descends from
@@ -113,8 +126,9 @@ must be removed or narrowed before the patched full matrix is accepted.
 When upstream absorbs a patch exactly, the resolver reports
 `already-present`. Removing it from the active queue still requires a current
 code review and the case's relevant tests on the embedded clean source. Since run output is
-local-only, record the conclusion in the commit message or external discussion,
-not a new tracked evidence archive.
+local-only, record the conclusion in the external refresh handoff; a later
+operator-created commit may summarize it, but no tracked evidence archive is
+created.
 
 ## Runners and artifacts
 
@@ -159,14 +173,15 @@ and changing nonuniform forwarded frames. The Vulkan and OpenGL primary gates
 are independent positive proofs.
 
 The exact public live acceptance set is Zed RGB, adaptive-alpha Zed H.264, RGB
-detach, RGB transport-loss fault injection, multi-window Vulkan hardware, and
-multi-window OpenGL hardware. Their fixed Make wrappers require a nonempty
-reviewed case or stack. `profiles.yml` alone supplies the selectable client
-network/quality overlay and its default; `live-cli.yml` alone supplies static
-server/client Xpra arguments. Do not duplicate their concrete values in Python,
-Make, or unit-test assertions. Clean-source and picture-fallback diagnostics
-cannot publish acceptance; every public target is a positive Xpra behavior
-proof rather than an expected-failure result.
+detach, RGB transport-loss fault injection, native-Wayland client-keymap input,
+multi-window Vulkan hardware, and multi-window OpenGL hardware. Their fixed
+Make wrappers require a nonempty reviewed case or stack. `profiles.yml` alone
+supplies the selectable client network/quality overlay and its default;
+`live-cli.yml` alone supplies static server/client Xpra arguments. Do not
+duplicate their concrete values in Python, Make, or unit-test assertions.
+Clean-source and picture-fallback diagnostics cannot publish acceptance; every
+public target is a positive Xpra behavior proof rather than an expected-failure
+result.
 
 DEB builds are a separate branch-agnostic source path. They use `HEAD` and
 enumerate refs whose final component is `master`, require one uniquely latest
@@ -433,8 +448,10 @@ whitespace, and fork-control checks and report the non-semantic proof. Any
 uncertainty falls back to the normal validation ladder. This exception is only
 for a patch/documentation refresh on an unchanged embedded source. It never
 applies after `develop-rebase`: a changed base requires every clean quarantine,
-fork-control, focused, native, full-matrix, and positive live gate even if the
-patch bytes did not need modification.
+fork-control, tests-only clean control or documented no-test semantic
+substitute, patched focused/native gate, durable package boundary on the
+resulting stack, full-matrix leg, and positive live gate even if the patch bytes
+did not need modification.
 
 When a run fails before entering an expensive test target, validate a fix to
 that pre-test guard with the narrow control-plane unit test and direct preflight
@@ -458,3 +475,11 @@ publication it may additionally keep the three newest canonical owned DEB
 releases and delete older owned releases in exact tag-first/release-ID-last
 order; an exact published release from a failed or cancelled earlier attempt
 may resume only this retention. Agents invoke neither target.
+
+The only direct agent commit implied by a runbook is the canonical
+upstream-refresh preservation commit before fetch/rebase when the checkout is
+dirty. It is exhaustively reviewed, contains all and only legitimate
+non-ignored pre-existing changes, including legitimate unrelated user work,
+and is created without a second confirmation.
+After it—or immediately when the checkout began clean—the agent leaves all
+refresh results uncommitted. Rebase replay is not a new direct content commit.
