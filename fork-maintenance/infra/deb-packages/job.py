@@ -1087,7 +1087,11 @@ def normalize_selection_tree(root: Path) -> None:
                 raise JobError(f"unsupported DEB selection snapshot entry: {child}")
 
 
-def validate_selection_state(path: Path) -> dict[str, str]:
+def validate_selection_state(
+    path: Path,
+    *,
+    verify_semantic: bool = True,
+) -> dict[str, str]:
     payload = background_job.load_json(path)
     expected_keys = {
         "owner",
@@ -1130,7 +1134,7 @@ def validate_selection_state(path: Path) -> dict[str, str]:
     observed_tree = selection_tree_sha256(snapshot)
     if observed_tree != tree_sha256:
         raise JobError("DEB selection cache tree digest does not match")
-    if selection_digest(selection, snapshot) != selection_sha256:
+    if verify_semantic and selection_digest(selection, snapshot) != selection_sha256:
         raise JobError("DEB selection cache semantic digest does not match")
     return {
         "selection": selection,
@@ -1251,9 +1255,18 @@ def existing_selection_caches(selection: str, selection_sha256: str) -> tuple[di
     for path in sorted(SELECTION_ROOT.iterdir(), key=lambda item: item.name):
         if path.name.startswith("."):
             continue
-        if path.is_symlink() or not path.is_dir() or name_pattern.fullmatch(path.name) is None:
+        match = name_pattern.fullmatch(path.name)
+        if path.is_symlink() or not path.is_dir() or match is None:
             raise JobError(f"unowned entry in the DEB selection cache: {path}")
-        values = validate_selection_state(path / "selection.json")
+        # A retained snapshot was semantically validated by the resolver which
+        # published it.  A newer resolver may intentionally reject that old
+        # manifest vocabulary.  Always revalidate its exact private tree and
+        # metadata, but replay current semantics only for the current digest:
+        # only that entry can be selected and reused by this invocation.
+        values = validate_selection_state(
+            path / "selection.json",
+            verify_semantic=match.group(1) == selection_sha256,
+        )
         if (
             values["selection"] == selection
             and values["selection_sha256"] == selection_sha256
@@ -1368,7 +1381,11 @@ def build_payload(args: argparse.Namespace) -> Iterator[tuple[container_payload.
     )
 
 
-def validate_build_arguments(args: argparse.Namespace) -> None:
+def validate_build_arguments(
+    args: argparse.Namespace,
+    *,
+    verify_selection_semantic: bool = True,
+) -> None:
     if args.distro not in DISTROS:
         raise JobError(f"unsupported DEB distribution: {args.distro}")
     if args.selection != ACTIVE_SELECTION:
@@ -1434,7 +1451,10 @@ def validate_build_arguments(args: argparse.Namespace) -> None:
         raise JobError("DEB build arguments do not match their source snapshot")
     selection_snapshot = Path(args.selection_snapshot)
     selection_state = Path(args.selection_state)
-    selection_values = validate_selection_state(selection_state)
+    selection_values = validate_selection_state(
+        selection_state,
+        verify_semantic=verify_selection_semantic,
+    )
     expected_selection = {
         "selection": str(args.selection),
         "selection_cache_sha256": str(args.selection_cache_sha256),
@@ -2399,7 +2419,11 @@ def validate_local_arguments(name: str, arguments: object) -> argparse.Namespace
     if not isinstance(arguments, dict):
         raise JobError("package job has invalid owned arguments")
     args = argparse.Namespace(**arguments)
-    validate_build_arguments(args)
+    # Persisted lifecycle records must remain inspectable and exactly
+    # recoverable after the selection resolver evolves.  This still validates
+    # the cache's private path, metadata and tree digest; execution and
+    # acceptance paths call validate_build_arguments() with semantic replay.
+    validate_build_arguments(args, verify_selection_semantic=False)
     expected = local_build_paths(name, args.distro)
     for key, value in expected.items():
         if str(getattr(args, key)) != str(value):
@@ -3258,7 +3282,7 @@ def package_abort(args: argparse.Namespace) -> int:
     if status_path(args.name).exists() or status_path(args.name).is_symlink():
         raise JobError("collected package jobs cannot be aborted")
     build_args = record_args(record)
-    validate_build_arguments(build_args)
+    validate_build_arguments(build_args, verify_selection_semantic=False)
     state = background_job.process_state(record, require_current=False)
     if state["state"] == "completed":
         if record.get("runner_sha256") == runner_sha256():

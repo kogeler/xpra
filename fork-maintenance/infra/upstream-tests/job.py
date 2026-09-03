@@ -816,9 +816,42 @@ def image_identity(
     return image_id
 
 
-def removable_image_identity(image: str, image_input: str, workflow: str) -> str:
-    """Resolve an exactly owned cache image even when its source label is stale."""
-    if not SHA256_RE.fullmatch(image_input) or not SHA256_RE.fullmatch(workflow):
+def require_removable_image_source(cached_source: str, current_source: str) -> None:
+    """Require a cached source to belong to the current embedded-source history."""
+    if not COMMIT_RE.fullmatch(cached_source) or not COMMIT_RE.fullmatch(current_source):
+        raise JobError("image has invalid removal source provenance")
+    for label, commit in (("cached", cached_source), ("current", current_source)):
+        exists = command(
+            ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+            cwd=PROJECT_ROOT,
+            check=False,
+        )
+        if exists.returncode:
+            raise JobError(f"image {label} removal source is not an existing commit")
+    ancestor = command(
+        ["git", "merge-base", "--is-ancestor", cached_source, current_source],
+        cwd=PROJECT_ROOT,
+        check=False,
+    )
+    if ancestor.returncode == 1:
+        raise JobError("image cached source is not an ancestor of the current source")
+    if ancestor.returncode:
+        raise JobError("cannot validate image removal source ancestry")
+
+
+def removable_image_identity(
+    image: str,
+    image_input: str,
+    workflow: str,
+    *,
+    current_source: str,
+) -> str:
+    """Resolve an exact current or ancestor-source cache image for removal."""
+    if (
+        not SHA256_RE.fullmatch(image_input)
+        or not SHA256_RE.fullmatch(workflow)
+        or not COMMIT_RE.fullmatch(current_source)
+    ):
         raise JobError("invalid expected image provenance")
     item = inspect_json(["podman", "image", "inspect", image])
     image_id = str(item.get("Id", "")).removeprefix("sha256:")
@@ -832,6 +865,7 @@ def removable_image_identity(image: str, image_input: str, workflow: str) -> str
     build_run = actual_labels.get("io.xpra.fork-maintenance.image-build-run-id", "")
     if not COMMIT_RE.fullmatch(source) or not UUID4_RE.fullmatch(build_run):
         raise JobError(f"image has invalid removal provenance: {image}")
+    require_removable_image_source(source, current_source)
     expected = {
         "io.xpra.fork-maintenance.image-builder": "true",
         "io.xpra.fork-maintenance.image-build-run-id": build_run,
@@ -1879,6 +1913,28 @@ def image_ensure(args: argparse.Namespace) -> int:
         return _image_ensure_locked(args)
 
 
+def image_check(args: argparse.Namespace) -> int:
+    """Verify that the cached image has exact current-source provenance."""
+    prepare_state()
+    with image_cache_lock():
+        exists = command(["podman", "image", "exists", args.image], check=False)
+        if exists.returncode == 1:
+            raise JobError(
+                f"required image is missing: {args.image}; "
+                "run make image-background-start, then make image-background-wait"
+            )
+        if exists.returncode != 0:
+            raise JobError(f"cannot inspect image name: {args.image}")
+        image_id = image_identity(
+            args.image,
+            args.image_input_sha256,
+            args.workflow_sha256,
+            source=args.source,
+        )
+    print(f"using verified cached image {args.image} ({image_id})")
+    return 0
+
+
 def _image_ensure_locked(args: argparse.Namespace) -> int:
     exists = command(["podman", "image", "exists", args.image], check=False)
     if exists.returncode == 0:
@@ -1918,6 +1974,7 @@ def image_cache_remove(args: argparse.Namespace) -> int:
             args.image,
             args.image_input_sha256,
             args.workflow_sha256,
+            current_source=args.source,
         )
         require_image_cache_unleased(args.image, image_id)
         command(["podman", "image", "rm", image_id])
@@ -2415,6 +2472,9 @@ def parser() -> argparse.ArgumentParser:
         subparser.set_defaults(handler=handler)
     image = commands.add_parser("image")
     image_commands = image.add_subparsers(dest="operation", required=True)
+    image_check_parser = image_commands.add_parser("check")
+    add_common_image_arguments(image_check_parser)
+    image_check_parser.set_defaults(handler=image_check)
     image_ensure_parser = image_commands.add_parser("ensure")
     add_common_image_arguments(image_ensure_parser)
     image_ensure_parser.set_defaults(handler=image_ensure)

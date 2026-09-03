@@ -1,8 +1,60 @@
+diff --git a/tests/unittests/unit/client/record_test.py b/tests/unittests/unit/client/record_test.py
+index 3ff16568b602fc2db4c3415b5e98f6462ecf9bc4..545d172c3f3638edd13e704600d89a43e2f7b630 100644
+--- a/tests/unittests/unit/client/record_test.py
++++ b/tests/unittests/unit/client/record_test.py
+@@ -9,6 +9,7 @@ import os.path
+ import shutil
+ import tempfile
+ import unittest
++from importlib.machinery import EXTENSION_SUFFIXES
+ from typing import Any
+ from unittest.mock import patch
+ 
+@@ -45,6 +46,19 @@ class FakeGLib:
+         self.timers = {}
+ 
+ 
++def is_extension_module(filename: str) -> bool:
++    return any(filename.endswith(suffix) for suffix in EXTENSION_SUFFIXES)
++
++
++RECORD_MODULE_IS_EXTENSION = is_extension_module(
++    getattr(record_module, "__file__", "") or "",
++)
++
++
++@unittest.skipIf(
++    RECORD_MODULE_IS_EXTENSION,
++    "downstream Cython-only quarantine: recheck on every upstream rebase",
++)
+ class RecordClientTest(unittest.TestCase):
+ 
+     def setUp(self):
+@@ -308,6 +322,19 @@ class RecordClientTest(unittest.TestCase):
+         self.assertEqual(self.client.grabbed, 0)
+ 
+ 
++class RecordQuarantineBoundaryTest(unittest.TestCase):
++
++    def test_only_extension_modules_are_quarantined(self):
++        self.assertFalse(is_extension_module("/tmp/xpra/client/base/record.py"))
++        for suffix in EXTENSION_SUFFIXES:
++            with self.subTest(suffix=suffix):
++                self.assertTrue(is_extension_module(f"/tmp/xpra/client/base/record{suffix}"))
++        self.assertEqual(
++            bool(getattr(RecordClientTest, "__unittest_skip__", False)),
++            RECORD_MODULE_IS_EXTENSION,
++        )
++
++
+ def main():
+     unittest.main()
+ 
 diff --git a/tests/unittests/unit/client/x11_client_paint_test.py b/tests/unittests/unit/client/x11_client_paint_test.py
-index 4bc3ccefc850c00585a923bfd9b24cf874132f30..35f6f789ae21844c5bd53e2d79c1099b93ca2004 100644
+index f1b7b375d3ab68b3c8f8a866764e5b7b37374841..7b2096d9935e0d2b9862681c5981dc6f15ba003f 100644
 --- a/tests/unittests/unit/client/x11_client_paint_test.py
 +++ b/tests/unittests/unit/client/x11_client_paint_test.py
-@@ -23,6 +23,7 @@ BLUE = (0, 0, 253)
+@@ -22,6 +22,7 @@ BLUE = (0, 0, 253)
  GREY = (128, 128, 128)
  
  

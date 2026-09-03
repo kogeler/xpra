@@ -162,9 +162,10 @@ class UpstreamMakeContractTest(unittest.TestCase):
         entrypoint = ENTRYPOINT.read_text(encoding="utf-8")
         self.assertNotIn("wayland-initial-window-state", entrypoint)
         self.assertGreaterEqual(
-            entrypoint.count("selection_tool gates | grep -Fx wayland"),
+            entrypoint.count('grep -Fx wayland <<<"$gates_output"'),
             2,
         )
+        self.assertIn("if ! gates_output=$(selected_gate_names); then", entrypoint)
         self.assertIn(
             "extra_args+=' --with-keyboard --with-wayland_server'",
             entrypoint,

@@ -60,6 +60,38 @@ def completed(
     return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
 
 
+def interaction_identity(pid: int = 41) -> dict[str, object]:
+    argv = ["python3", live_run.INTERACTION_FIXTURE_SCRIPT]
+    return {
+        "argv": argv,
+        "cmdline_sha256": hashlib.sha256(
+            b"\0".join(os.fsencode(argument) for argument in argv) + b"\0"
+        ).hexdigest(),
+        "pid": pid,
+        "schema": 1,
+        "start_ticks": "123456",
+    }
+
+
+def server_identity(pid: int = 8) -> dict[str, object]:
+    argv = [
+        "/usr/bin/python3",
+        "/usr/bin/xpra",
+        "seamless",
+        live_run.SERVER_DISPLAY,
+        f"--start-child=python3 {live_run.INTERACTION_FIXTURE_SCRIPT}",
+    ]
+    return {
+        "argv": argv,
+        "cmdline_sha256": hashlib.sha256(
+            b"\0".join(os.fsencode(argument) for argument in argv) + b"\0"
+        ).hexdigest(),
+        "pid": pid,
+        "schema": 1,
+        "start_ticks": "654321",
+    }
+
+
 def execute_container_log_probe(
     root: Path,
 ) -> object:
@@ -222,6 +254,8 @@ class LiveJobTest(unittest.TestCase):
         }
 
     def make_report(self, run: str, record: dict[str, object]) -> None:
+        application = str(record["application"])
+        lifecycle_profile = str(record["lifecycle"])
         report = job.result_path(run)
         report.parent.mkdir(parents=True)
         report.parent.chmod(0o700)
@@ -247,9 +281,94 @@ class LiveJobTest(unittest.TestCase):
         artifact = scenario_root / "evidence.txt"
         artifact.write_text("evidence\n", encoding="utf-8")
         artifact.chmod(0o600)
+        application_activity: dict[str, object] = {}
+        hardware: dict[str, object] = {}
+        if application == "gtk" and lifecycle_profile in {"detach", "transport-loss"}:
+            identity = interaction_identity()
+            server = server_identity()
+            identity_artifact = scenario_root / live_run.INTERACTION_IDENTITY_ARTIFACT
+            identity_artifact.write_text(
+                json.dumps(identity, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            identity_artifact.chmod(0o600)
+            server_pid_artifact = scenario_root / "server.pid"
+            server_pid_artifact.write_text(f"{server['pid']}\n", encoding="ascii")
+            server_pid_artifact.chmod(0o600)
+            application_activity.update(
+                {
+                    "process_alive": True,
+                    "process_identity": copy.deepcopy(identity),
+                }
+            )
+            hardware["application"] = {
+                "argv": " ".join(identity["argv"]) + " ",
+                "pid": identity["pid"],
+            }
+            lifecycle = {
+                "application_exited_after_termination": True,
+                "application_identity_at_capture": copy.deepcopy(identity),
+                "application_identity_before_termination": copy.deepcopy(identity),
+                "application_termination": {
+                    "identity": copy.deepcopy(identity),
+                    "pidfd": True,
+                    "returncode": 0,
+                    "server_identity": copy.deepcopy(server),
+                    "server_pidfd": True,
+                    "signal": "SIGTERM",
+                },
+                "mode": lifecycle_profile,
+                "server_alive_before_application_termination": True,
+                "server_exited_after_application": True,
+                "server_identity_at_capture": copy.deepcopy(server),
+                "server_identity_before_application_termination": copy.deepcopy(
+                    server
+                ),
+                "server_pid": server["pid"],
+            }
+            if lifecycle_profile == "detach":
+                lifecycle.update(
+                    {
+                        "application_identity_after_detach": copy.deepcopy(identity),
+                        "application_survived_detach": True,
+                        "client_exit_status": 0,
+                        "client_exited_after_detach": True,
+                        "detach_returncode": 0,
+                        "server_identity_after_detach": copy.deepcopy(server),
+                        "server_survived_detach": True,
+                    }
+                )
+            else:
+                lifecycle.update(
+                    {
+                        "application_identity_after_transport_loss": copy.deepcopy(
+                            identity
+                        ),
+                        "application_survived_transport_loss": True,
+                        "client_exit_status": 1,
+                        "client_exited_after_transport_loss": True,
+                        "server_identity_after_transport_loss": copy.deepcopy(server),
+                        "server_survived_transport_loss": True,
+                        "transport_disconnect_returncode": 0,
+                    }
+                )
+        else:
+            lifecycle = {
+                "client_exit_status": 0,
+                "client_exited_after_server": True,
+                "mode": "application-exit",
+                "server_exited_after_application": True,
+            }
+        artifact_sha256 = {
+            path.relative_to(scenario_root).as_posix(): job.sha256_file(path)
+            for path in scenario_root.iterdir()
+            if path.is_file()
+        }
         scenario = {
+            "application": application,
+            "application_activity": application_activity,
             "artifact_collection_passed": True,
-            "artifact_sha256": {"evidence.txt": job.sha256_file(artifact)},
+            "artifact_sha256": artifact_sha256,
             "client": {
                 "network_options": list(
                     live_run.live_config.network_profile(
@@ -257,7 +376,18 @@ class LiveJobTest(unittest.TestCase):
                     ).client_options()
                 )
             },
+            "classification": {
+                "boundaries": {
+                    "lifecycle": live_run.lifecycle_boundary_checks(
+                        lifecycle_profile,
+                        lifecycle,
+                    )
+                }
+            },
             "cleanup": {"passed": True},
+            "hardware": hardware,
+            "lifecycle": lifecycle,
+            "lifecycle_profile": lifecycle_profile,
             "name": "default-alpha",
             "network_profile": record["network_profile"],
             "result": "passed",
@@ -271,17 +401,17 @@ class LiveJobTest(unittest.TestCase):
         report.write_text(
             json.dumps(
                 {
-                    "application": "zed",
+                    "application": application,
                     "encoding": "rgb",
                     "h264_client_policy": "strict",
-                    "lifecycle_profile": "application-exit",
+                    "lifecycle_profile": lifecycle_profile,
                     "network_profile": record["network_profile"],
                     "invocation": {
                         "alpha_scenarios": "default",
-                        "application": "zed",
+                        "application": application,
                         "h264_client_policy": "strict",
                         "job_id": JOB_ID,
-                        "lifecycle": "application-exit",
+                        "lifecycle": lifecycle_profile,
                         "network_profile": record["network_profile"],
                         "render_node": record["render_node"],
                         "run_id": run,
@@ -908,6 +1038,125 @@ class LiveJobTest(unittest.TestCase):
         _result, _digest, checks = job.report_validation(run, record)
         self.assertFalse(checks["evidence_tree"])
 
+    def test_report_validation_recomputes_lifecycle_evidence(self) -> None:
+        run = "mutated-lifecycle"
+        record = self.record(run)
+        job.prepare_private_state()
+        self.make_report(run, record)
+        report_path = job.result_path(run)
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        scenario = payload["scenarios"][0]
+        scenario["lifecycle"]["client_exited_after_server"] = "true"
+        scenario["classification"]["boundaries"]["lifecycle"][
+            "client_exited_after_server"
+        ] = True
+        scenario_path = report_path.parent / scenario["name"] / "report.json"
+        scenario_path.write_text(
+            json.dumps(scenario, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        payload["scenario_report_sha256"][scenario["name"]] = job.sha256_file(
+            scenario_path
+        )
+        report_path.write_text(
+            json.dumps(payload, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        _result, _digest, checks = job.report_validation(run, record)
+        self.assertFalse(checks["evidence_tree"])
+
+    def test_report_validation_binds_gtk_lifecycle_authority_files(self) -> None:
+        def rewrite_report(run: str, payload: dict[str, object]) -> None:
+            report_path = job.result_path(run)
+            scenario = payload["scenarios"][0]
+            scenario_path = report_path.parent / scenario["name"] / "report.json"
+            scenario_path.write_text(
+                json.dumps(scenario, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            payload["scenario_report_sha256"][scenario["name"]] = job.sha256_file(
+                scenario_path
+            )
+            report_path.write_text(
+                json.dumps(payload, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+        mutations = (
+            "missing-identity",
+            "changed-identity",
+            "activity",
+            "process-alive",
+            "hardware-pid",
+            "hardware-argv",
+            "server-identity",
+            "server-pid",
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                run = f"gtk-authority-{mutation}"
+                record = self.record(run)
+                record["application"] = "gtk"
+                record["lifecycle"] = "detach"
+                job.prepare_private_state()
+                self.make_report(run, record)
+                _result, _digest, initial = job.report_validation(run, record)
+                self.assertTrue(initial["evidence_tree"])
+
+                report_path = job.result_path(run)
+                payload = json.loads(report_path.read_text(encoding="utf-8"))
+                scenario = payload["scenarios"][0]
+                scenario_root = report_path.parent / scenario["name"]
+                if mutation == "missing-identity":
+                    (scenario_root / live_run.INTERACTION_IDENTITY_ARTIFACT).unlink()
+                    del scenario["artifact_sha256"][
+                        live_run.INTERACTION_IDENTITY_ARTIFACT
+                    ]
+                elif mutation == "changed-identity":
+                    identity_path = (
+                        scenario_root / live_run.INTERACTION_IDENTITY_ARTIFACT
+                    )
+                    identity_path.write_text(
+                        json.dumps(interaction_identity(pid=42), sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                    scenario["artifact_sha256"][
+                        live_run.INTERACTION_IDENTITY_ARTIFACT
+                    ] = job.sha256_file(identity_path)
+                elif mutation == "activity":
+                    scenario["application_activity"][
+                        "process_identity"
+                    ] = interaction_identity(pid=42)
+                elif mutation == "process-alive":
+                    scenario["application_activity"]["process_alive"] = False
+                elif mutation == "hardware-pid":
+                    scenario["hardware"]["application"]["pid"] = 42
+                elif mutation == "hardware-argv":
+                    scenario["hardware"]["application"]["argv"] = "python3 fixture.py"
+                elif mutation == "server-identity":
+                    scenario["lifecycle"]["server_identity_at_capture"] = (
+                        server_identity(pid=9)
+                    )
+                else:
+                    server_pid_path = scenario_root / "server.pid"
+                    server_pid_path.write_text("9\n", encoding="ascii")
+                    scenario["artifact_sha256"]["server.pid"] = job.sha256_file(
+                        server_pid_path
+                    )
+                rewrite_report(run, payload)
+                _result, _digest, checks = job.report_validation(run, record)
+                self.assertFalse(checks["evidence_tree"])
+
+    def test_report_validation_accepts_complete_gtk_transport_identities(self) -> None:
+        run = "gtk-transport-identities"
+        record = self.record(run)
+        record["application"] = "gtk"
+        record["lifecycle"] = "transport-loss"
+        job.prepare_private_state()
+        self.make_report(run, record)
+        _result, _digest, checks = job.report_validation(run, record)
+        self.assertTrue(checks["evidence_tree"])
+
     def test_collect_rejects_running_process(self) -> None:
         run = "running"
         record = self.record(run)
@@ -1213,6 +1462,13 @@ class LiveJobTest(unittest.TestCase):
                 "owned_objects",
                 side_effect=AssertionError("removed status must not inspect Podman"),
             ),
+            patch.object(
+                job,
+                "evidence_tree_validation",
+                side_effect=AssertionError(
+                    "removed status must not replay current report semantics"
+                ),
+            ),
             redirect_stdout(status_output),
         ):
             self.assertEqual(job.status(Namespace(run=run)), 0)
@@ -1227,6 +1483,13 @@ class LiveJobTest(unittest.TestCase):
                 job,
                 "load_freeze_prelaunch",
                 side_effect=AssertionError("removed logs must not use freeze state"),
+            ),
+            patch.object(
+                job,
+                "evidence_tree_validation",
+                side_effect=AssertionError(
+                    "removed logs must not replay current report semantics"
+                ),
             ),
             patch.object(job.sys, "stdout", logs_output),
         ):
@@ -1976,8 +2239,12 @@ class LiveRunnerCleanupTest(unittest.TestCase):
         for call in execute.call_args_list:
             self.assertEqual(call.args[0], "server")
             self.assertEqual(call.args[1][:2], ["python3", "-c"])
-            self.assertEqual(call.args[1][-1], "vkcube")
+            self.assertEqual(call.args[1][-2:], ["vkcube", live_run.INTERACTION_FIXTURE_SCRIPT])
             self.assertEqual(call.kwargs, {"announce": False, "check": False})
+        probe = execute.call_args.args[1][2]
+        self.assertIn("interaction.identity.json", probe)
+        self.assertIn("states = (interaction_state(expected_script)", probe)
+        self.assertNotIn("child_state(name) for name in ('interaction'", probe)
         pull.assert_not_called()
 
     def test_opengl_fixture_readiness_binds_the_glmark2_primary(self) -> None:
@@ -1994,7 +2261,7 @@ class LiveRunnerCleanupTest(unittest.TestCase):
             live_run.wait_for_hardware_fixture("server", 101, Path(raw), "opengl")
 
         command = execute.call_args.args[1]
-        self.assertEqual(command[-1], "opengl")
+        self.assertEqual(command[-2:], ["opengl", live_run.INTERACTION_FIXTURE_SCRIPT])
 
     def test_dead_hardware_child_stops_server_before_collecting_evidence(self) -> None:
         events: list[str] = []
@@ -3397,12 +3664,31 @@ class LiveTransportProfileTest(unittest.TestCase):
         )
 
     def test_lifecycle_boundaries_fail_closed(self) -> None:
+        identity = interaction_identity()
+        server = server_identity()
         detach = {
+            "application_exited_after_termination": True,
+            "application_identity_after_detach": copy.deepcopy(identity),
+            "application_identity_at_capture": copy.deepcopy(identity),
+            "application_identity_before_termination": copy.deepcopy(identity),
             "application_survived_detach": True,
+            "application_termination": {
+                "identity": copy.deepcopy(identity),
+                "pidfd": True,
+                "returncode": 0,
+                "server_identity": copy.deepcopy(server),
+                "server_pidfd": True,
+                "signal": "SIGTERM",
+            },
             "client_exit_status": 0,
             "client_exited_after_detach": True,
             "detach_returncode": 0,
+            "server_alive_before_application_termination": True,
             "server_exited_after_application": True,
+            "server_identity_after_detach": copy.deepcopy(server),
+            "server_identity_at_capture": copy.deepcopy(server),
+            "server_identity_before_application_termination": copy.deepcopy(server),
+            "server_pid": server["pid"],
             "server_survived_detach": True,
         }
         self.assertTrue(
@@ -3414,11 +3700,29 @@ class LiveTransportProfileTest(unittest.TestCase):
                 "application_survived_detach"
             ]
         )
+        detach["application_survived_detach"] = True
         transport = {
+            "application_exited_after_termination": True,
+            "application_identity_after_transport_loss": copy.deepcopy(identity),
+            "application_identity_at_capture": copy.deepcopy(identity),
+            "application_identity_before_termination": copy.deepcopy(identity),
             "application_survived_transport_loss": True,
+            "application_termination": {
+                "identity": copy.deepcopy(identity),
+                "pidfd": True,
+                "returncode": 0,
+                "server_identity": copy.deepcopy(server),
+                "server_pidfd": True,
+                "signal": "SIGTERM",
+            },
             "client_exit_status": 1,
             "client_exited_after_transport_loss": True,
+            "server_alive_before_application_termination": True,
             "server_exited_after_application": True,
+            "server_identity_after_transport_loss": copy.deepcopy(server),
+            "server_identity_at_capture": copy.deepcopy(server),
+            "server_identity_before_application_termination": copy.deepcopy(server),
+            "server_pid": server["pid"],
             "server_survived_transport_loss": True,
             "transport_disconnect_returncode": 0,
         }
@@ -3427,12 +3731,447 @@ class LiveTransportProfileTest(unittest.TestCase):
                 live_run.lifecycle_boundary_checks("transport-loss", transport).values()
             )
         )
+        for mutation in ("missing", "changed"):
+            with self.subTest(transport_server_identity=mutation):
+                candidate = copy.deepcopy(transport)
+                if mutation == "missing":
+                    del candidate["server_identity_after_transport_loss"]
+                else:
+                    candidate["server_identity_after_transport_loss"][
+                        "start_ticks"
+                    ] = "765432"
+                self.assertFalse(
+                    all(
+                        live_run.lifecycle_boundary_checks(
+                            "transport-loss",
+                            candidate,
+                        ).values()
+                    )
+                )
         transport["client_exit_status"] = 0
         self.assertFalse(
             live_run.lifecycle_boundary_checks("transport-loss", transport)[
                 "client_exit_nonzero"
             ]
         )
+        transport["client_exit_status"] = 1
+        transport["transport_disconnect_returncode"] = False
+        self.assertFalse(
+            live_run.lifecycle_boundary_checks("transport-loss", transport)[
+                "transport_disconnect_succeeded"
+            ]
+        )
+        self.assertFalse(
+            live_run.lifecycle_boundary_checks(
+                "application-exit",
+                {
+                    "client_exit_status": False,
+                    "client_exited_after_server": True,
+                    "server_exited_after_application": True,
+                },
+            )["client_exit_zero"]
+        )
+
+    def test_lifecycle_rejects_the_old_server_argv_false_positive(self) -> None:
+        old_false_positive = {
+            "application_survived_detach": True,
+            "client_exit_status": 0,
+            "client_exited_after_detach": True,
+            "detach_returncode": 0,
+            "server_exited_after_application": True,
+            "server_survived_detach": True,
+        }
+        checks = live_run.lifecycle_boundary_checks("detach", old_false_positive)
+        self.assertFalse(checks["fixture_identity_published"])
+        self.assertFalse(checks["application_survived_detach"])
+        self.assertFalse(all(checks.values()))
+        forged_report = {
+            "classification": {
+                "boundaries": {
+                    "lifecycle": dict.fromkeys(checks, True),
+                },
+                "first_failed_boundary": "passed",
+            },
+            "container_artifact_collection": [{"status": "collected"}],
+            "lifecycle": old_false_positive,
+            "lifecycle_profile": "detach",
+        }
+        self.assertFalse(live_run.scenario_acceptance(forged_report, {"passed": True}))
+
+        server_argv = {
+            **interaction_identity(pid=8),
+            "argv": [
+                "/usr/bin/python3",
+                "/usr/local/bin/xpra",
+                "seamless",
+                "--start-child=python3 " + live_run.INTERACTION_FIXTURE_SCRIPT,
+            ],
+        }
+        self.assertFalse(live_run.valid_interaction_fixture_identity(server_argv))
+
+    def test_lifecycle_fixture_identity_fields_fail_closed_independently(self) -> None:
+        identity = interaction_identity()
+        server = server_identity()
+        lifecycle = {
+            "application_exited_after_termination": True,
+            "application_identity_after_detach": copy.deepcopy(identity),
+            "application_identity_at_capture": copy.deepcopy(identity),
+            "application_identity_before_termination": copy.deepcopy(identity),
+            "application_survived_detach": True,
+            "application_termination": {
+                "identity": copy.deepcopy(identity),
+                "pidfd": True,
+                "returncode": 0,
+                "server_identity": copy.deepcopy(server),
+                "server_pidfd": True,
+                "signal": "SIGTERM",
+            },
+            "client_exit_status": 0,
+            "client_exited_after_detach": True,
+            "detach_returncode": 0,
+            "server_alive_before_application_termination": True,
+            "server_exited_after_application": True,
+            "server_identity_after_detach": copy.deepcopy(server),
+            "server_identity_at_capture": copy.deepcopy(server),
+            "server_identity_before_application_termination": copy.deepcopy(server),
+            "server_pid": server["pid"],
+            "server_survived_detach": True,
+        }
+        self.assertTrue(all(live_run.lifecycle_boundary_checks("detach", lifecycle).values()))
+        required = (
+            "application_exited_after_termination",
+            "application_identity_after_detach",
+            "application_identity_at_capture",
+            "application_identity_before_termination",
+            "application_termination",
+            "server_alive_before_application_termination",
+            "server_identity_after_detach",
+            "server_identity_at_capture",
+            "server_identity_before_application_termination",
+            "server_pid",
+        )
+        for field in required:
+            with self.subTest(field=field):
+                candidate = copy.deepcopy(lifecycle)
+                del candidate[field]
+                self.assertFalse(
+                    all(live_run.lifecycle_boundary_checks("detach", candidate).values())
+                )
+        mutations = (
+            ("application_identity_after_detach", "start_ticks", "654321"),
+            ("application_identity_at_capture", "cmdline_sha256", "b" * 64),
+            ("application_identity_before_termination", "pid", 42),
+            ("server_identity_after_detach", "start_ticks", "765432"),
+            ("server_identity_at_capture", "cmdline_sha256", "c" * 64),
+            ("server_identity_before_application_termination", "pid", 9),
+        )
+        for field, identity_field, replacement in mutations:
+            with self.subTest(field=field, identity_field=identity_field):
+                candidate = copy.deepcopy(lifecycle)
+                candidate[field][identity_field] = replacement
+                self.assertFalse(
+                    all(live_run.lifecycle_boundary_checks("detach", candidate).values())
+                )
+        aliases_server = copy.deepcopy(lifecycle)
+        aliases_server["server_pid"] = identity["pid"]
+        self.assertFalse(
+            live_run.lifecycle_boundary_checks("detach", aliases_server)[
+                "fixture_distinct_from_server"
+            ]
+        )
+        for field, replacement in (
+            ("identity", interaction_identity(pid=42)),
+            ("pidfd", False),
+            ("returncode", False),
+            ("returncode", 1),
+            ("server_identity", server_identity(pid=9)),
+            ("server_pidfd", False),
+            ("signal", "SIGKILL"),
+        ):
+            with self.subTest(termination_field=field):
+                candidate = copy.deepcopy(lifecycle)
+                candidate["application_termination"][field] = replacement
+                self.assertFalse(
+                    live_run.lifecycle_boundary_checks("detach", candidate)[
+                        "exact_fixture_termination"
+                    ]
+                )
+        for field in ("server_identity", "server_pidfd"):
+            with self.subTest(missing_termination_field=field):
+                candidate = copy.deepcopy(lifecycle)
+                del candidate["application_termination"][field]
+                self.assertFalse(
+                    live_run.lifecycle_boundary_checks("detach", candidate)[
+                        "exact_fixture_termination"
+                    ]
+                )
+
+        for field in ("client_exit_status", "detach_returncode"):
+            with self.subTest(boolean_integer_field=field):
+                candidate = copy.deepcopy(lifecycle)
+                candidate[field] = False
+                self.assertFalse(
+                    all(live_run.lifecycle_boundary_checks("detach", candidate).values())
+                )
+
+        boolean_schema = copy.deepcopy(lifecycle)
+        boolean_schema["application_identity_at_capture"]["schema"] = True
+        self.assertFalse(
+            live_run.lifecycle_boundary_checks("detach", boolean_schema)[
+                "fixture_identity_published"
+            ]
+        )
+
+    def test_interaction_fixture_identity_loader_is_exact(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / live_run.INTERACTION_IDENTITY_ARTIFACT
+            path.write_text(json.dumps(interaction_identity()) + "\n", encoding="utf-8")
+            path.chmod(0o600)
+            self.assertEqual(
+                live_run.load_interaction_fixture_identity(path),
+                interaction_identity(),
+            )
+            server_identity = interaction_identity(pid=8)
+            server_identity["argv"] = [
+                "/usr/bin/python3",
+                "/usr/local/bin/xpra",
+                "--start-child=python3 " + live_run.INTERACTION_FIXTURE_SCRIPT,
+            ]
+            path.write_text(json.dumps(server_identity) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(live_run.LabFailure, "invalid fields"):
+                live_run.load_interaction_fixture_identity(path)
+
+    def test_collector_binds_gtk_lifecycle_to_authority_artifacts(self) -> None:
+        identity = interaction_identity()
+        server = server_identity()
+        with tempfile.TemporaryDirectory() as raw:
+            scenario_root = Path(raw)
+            identity_path = scenario_root / live_run.INTERACTION_IDENTITY_ARTIFACT
+            identity_path.write_text(
+                json.dumps(identity, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            identity_path.chmod(0o600)
+            server_pid_path = scenario_root / "server.pid"
+            server_pid_path.write_text("8\n", encoding="ascii")
+            server_pid_path.chmod(0o600)
+            embedded = {
+                "application_activity": {
+                    "process_alive": True,
+                    "process_identity": copy.deepcopy(identity),
+                },
+                "hardware": {
+                    "application": {
+                        "argv": " ".join(identity["argv"]) + " ",
+                        "pid": identity["pid"],
+                    }
+                },
+                "lifecycle": {
+                    "application_identity_at_capture": copy.deepcopy(identity),
+                    "server_identity_at_capture": copy.deepcopy(server),
+                    "server_pid": server["pid"],
+                },
+            }
+            self.assertTrue(
+                job.gtk_fixture_artifact_evidence_matches(
+                    embedded,
+                    scenario_root,
+                    live_run,
+                )
+            )
+
+            for field in ("application_activity", "hardware", "lifecycle"):
+                with self.subTest(missing_report_field=field):
+                    candidate = copy.deepcopy(embedded)
+                    del candidate[field]
+                    self.assertFalse(
+                        job.gtk_fixture_artifact_evidence_matches(
+                            candidate,
+                            scenario_root,
+                            live_run,
+                        )
+                    )
+
+            for container_field, identity_field in (
+                ("application_activity", "process_identity"),
+                ("lifecycle", "application_identity_at_capture"),
+                ("lifecycle", "server_identity_at_capture"),
+            ):
+                with self.subTest(mismatched_report_identity=container_field):
+                    candidate = copy.deepcopy(embedded)
+                    candidate[container_field][identity_field] = (
+                        server_identity(pid=9)
+                        if identity_field == "server_identity_at_capture"
+                        else interaction_identity(pid=42)
+                    )
+                    self.assertFalse(
+                        job.gtk_fixture_artifact_evidence_matches(
+                            candidate,
+                            scenario_root,
+                            live_run,
+                        )
+                    )
+
+            activity_not_alive = copy.deepcopy(embedded)
+            activity_not_alive["application_activity"]["process_alive"] = False
+            self.assertFalse(
+                job.gtk_fixture_artifact_evidence_matches(
+                    activity_not_alive,
+                    scenario_root,
+                    live_run,
+                )
+            )
+            for field, replacement in (
+                ("pid", 42),
+                ("argv", " ".join(identity["argv"])),
+            ):
+                with self.subTest(hardware_application_field=field):
+                    candidate = copy.deepcopy(embedded)
+                    candidate["hardware"]["application"][field] = replacement
+                    self.assertFalse(
+                        job.gtk_fixture_artifact_evidence_matches(
+                            candidate,
+                            scenario_root,
+                            live_run,
+                        )
+                    )
+
+            different = interaction_identity(pid=42)
+            identity_path.write_text(
+                json.dumps(different, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(
+                job.gtk_fixture_artifact_evidence_matches(
+                    embedded,
+                    scenario_root,
+                    live_run,
+                )
+            )
+            identity_path.unlink()
+            self.assertFalse(
+                job.gtk_fixture_artifact_evidence_matches(
+                    embedded,
+                    scenario_root,
+                    live_run,
+                )
+            )
+
+            identity_path.write_text(
+                json.dumps(identity, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            identity_path.chmod(0o600)
+            server_pid_path.write_text("9\n", encoding="ascii")
+            self.assertFalse(
+                job.gtk_fixture_artifact_evidence_matches(
+                    embedded,
+                    scenario_root,
+                    live_run,
+                )
+            )
+
+    def test_interaction_fixture_rejects_a_stale_or_reused_pid(self) -> None:
+        expected = interaction_identity()
+        reused = {**expected, "start_ticks": "654321"}
+        with patch.object(
+            live_run,
+            "container_process_identity",
+            return_value=reused,
+        ):
+            with self.assertRaisesRegex(live_run.LabFailure, "identity changed"):
+                live_run.require_interaction_fixture_identity(
+                    "server",
+                    expected,
+                    server_pid=8,
+                )
+            with self.assertRaisesRegex(live_run.LabFailure, "PID was reused"):
+                live_run.interaction_fixture_identity_is_gone("server", expected)
+        with self.assertRaisesRegex(live_run.LabFailure, "aliases the Xpra server"):
+            live_run.require_interaction_fixture_identity(
+                "server",
+                expected,
+                server_pid=expected["pid"],
+            )
+
+    def test_fixture_termination_binds_two_pidfds_in_one_probe(self) -> None:
+        fixture = interaction_identity()
+        server = server_identity()
+        with (
+            patch.object(
+                live_run,
+                "require_interaction_fixture_identity",
+                return_value=fixture,
+            ),
+            patch.object(
+                live_run,
+                "podman_exec",
+                return_value=completed(["python3", "-c", "probe"]),
+            ) as execute,
+        ):
+            evidence = live_run.terminate_interaction_fixture(
+                "server",
+                fixture,
+                server_identity=server,
+            )
+
+        command = execute.call_args.args[1]
+        probe = command[2]
+        self.assertEqual(
+            command[3:],
+            [
+                str(fixture["pid"]),
+                fixture["start_ticks"],
+                fixture["cmdline_sha256"],
+                json.dumps(fixture["argv"]),
+                str(server["pid"]),
+                server["start_ticks"],
+                server["cmdline_sha256"],
+                json.dumps(server["argv"]),
+            ],
+        )
+        self.assertIn("descriptor = os.pidfd_open(pid)", probe)
+        self.assertIn("server_descriptor = os.pidfd_open(server_pid)", probe)
+        self.assertGreaterEqual(probe.count("server_poller.poll(0)"), 2)
+        self.assertLess(
+            probe.index("server_descriptor = os.pidfd_open(server_pid)"),
+            probe.index("signal.pidfd_send_signal(descriptor, signal.SIGTERM)"),
+        )
+        self.assertEqual(
+            evidence,
+            {
+                "identity": fixture,
+                "pidfd": True,
+                "returncode": 0,
+                "server_identity": server,
+                "server_pidfd": True,
+                "signal": "SIGTERM",
+            },
+        )
+
+    def test_zombie_fixture_identity_is_treated_as_exited(self) -> None:
+        probe_result = completed(["python3", "-c", "probe"], returncode=3)
+        with patch.object(live_run, "podman_exec", return_value=probe_result) as execute:
+            self.assertIsNone(live_run.container_process_identity("server", 41))
+        probe = execute.call_args.args[1][2]
+        self.assertIn("descriptor = os.pidfd_open(pid)", probe)
+        self.assertIn("poller.register(descriptor, select.POLLIN)", probe)
+        self.assertIn("before[0].casefold() in {'x', 'z'}", probe)
+        self.assertIn("after[0].casefold() in {'x', 'z'}", probe)
+        self.assertIn("stat_before", probe)
+        self.assertIn("stat_after", probe)
+        self.assertIn("for attempt in range(5)", probe)
+        with patch.object(
+            live_run,
+            "container_process_identity",
+            return_value=None,
+        ):
+            self.assertTrue(
+                live_run.interaction_fixture_identity_is_gone(
+                    "server",
+                    interaction_identity(),
+                )
+            )
 
     def test_server_window_id_is_title_bound(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -5032,7 +5771,7 @@ class LiveTransportProfileTest(unittest.TestCase):
     def test_hardware_artifact_allowlist_includes_only_exact_fixture_files(self) -> None:
         allowed = (
             "interaction.exit",
-            "interaction.pid",
+            "interaction.identity.json",
             "interaction.stderr",
             "interaction.stdout",
             "keyboard-fixture.exit",
@@ -5055,6 +5794,7 @@ class LiveTransportProfileTest(unittest.TestCase):
                 )
         for name in (
             "interaction.core",
+            "interaction.pid",
             "keyboard-fixture.core",
             "keyboard-fixture.trace",
             "opengl.core",
@@ -5166,6 +5906,9 @@ class LiveTransportProfileTest(unittest.TestCase):
     def test_interaction_fixture_is_ready_and_has_a_transparent_border(self) -> None:
         source = (LIVE_DIRECTORY / "interaction_fixture.py").read_text(encoding="utf-8")
         self.assertIn('READY_MARKER = Path("/tmp/xpra-hardware-interaction-ready")', source)
+        self.assertIn('IDENTITY_ARTIFACT = Path("/artifacts/interaction.identity.json")', source)
+        self.assertIn("publish_process_identity()", source)
+        self.assertIn("os.link(temporary, IDENTITY_ARTIFACT)", source)
         self.assertIn("get_rgba_visual()", source)
         self.assertIn("window.set_visual(visual)", source)
         self.assertIn("window.set_app_paintable(True)", source)
@@ -5182,6 +5925,11 @@ class LiveTransportProfileTest(unittest.TestCase):
             source.index("GLib.idle_add"),
             source.index("Gtk.main()"),
         )
+
+    def test_gtk_contract_uses_fixture_owned_identity_not_pgrep(self) -> None:
+        command, _titles, identity_artifact = live_run.application_contract("gtk")
+        self.assertEqual(command, f"python3 {live_run.INTERACTION_FIXTURE_SCRIPT}")
+        self.assertEqual(identity_artifact, live_run.INTERACTION_IDENTITY_ARTIFACT)
 
     def test_hardware_launcher_uses_an_opaque_native_wayland_opengl_primary(
         self,

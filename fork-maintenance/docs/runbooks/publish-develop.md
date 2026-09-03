@@ -4,10 +4,17 @@
 
 The operator owns every refresh-result commit and signature, push, remote
 branch creation, and default-branch change. The sole earlier exception is the
-canonical upstream-refresh runbook's one reviewed preservation commit before
-fetch/rebase when non-ignored pre-existing work must be retained. Agents and
-automation may otherwise prepare and audit local state, but never execute
-remote mutations.
+canonical **Autonomous Upstream Refresh and Full Queue Adaptation** runbook's
+one reviewed preservation commit before fetch/rebase when non-ignored
+pre-existing work must be retained. Its agent directive is:
+
+```text
+Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+```
+
+It is not a shell command, and `PRIMARY_CASE` does not narrow the full-queue
+scope. Agents and automation may otherwise prepare and audit local state, but
+never execute remote mutations.
 
 Do not publish an applied patch worktree. Clean `develop` contains the patch
 queue representation and automation only.
@@ -59,12 +66,15 @@ The handoff states:
 - exact `master` and `develop` commits;
 - exact embedded source commit;
 - ordered active cases and their current resolution;
+- a current-source keep/adapt/retire conclusion for every pre-refresh
+  production case, with the primary case documented in greatest detail;
 - all three clean quarantine reassessment results on this source when required;
 - after every upstream rebase, the complete offline suite, production
   tests-only controls or documented no-test semantic substitutes,
-  focused/native gates and resulting-stack package boundaries, all three full
-  author-test legs, and all seven fixed positive live jobs actually completed
-  on this base;
+  focused/native gates and both real resulting-stack package builds, all three
+  full author-test legs, every production case's declared live gates with its
+  atomic case selection, and all seven fixed positive live jobs with the
+  complete stack selection actually completed on this base;
 - any required gates still outstanding;
 - whether local commits are signed as required.
 

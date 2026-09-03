@@ -17,6 +17,47 @@ Current source and maintainer feedback outrank old notes, logs, patch context,
 or earlier conversations. Historical output is diagnostic context only; it is
 never current acceptance evidence.
 
+## Autonomous upstream-refresh entry point
+
+To make an agent rebase `develop` onto the current verified fork `master`,
+reassess and adapt the entire active patch queue, and execute the complete
+acceptance cycle, give it this exact directive with any active production case
+as the review priority:
+
+```text
+Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+```
+
+This is an agent directive, not a shell command or Make target. It invokes the
+complete **Autonomous Upstream Refresh and Full Queue Adaptation** runbook at
+[`fork-maintenance/docs/runbooks/upstream-refresh.md`](fork-maintenance/docs/runbooks/upstream-refresh.md).
+The directive is sufficient authorization for the whole local pass:
+
+- review all existing non-ignored work and, only when it is legitimate, create
+  exactly one complete preservation commit before fetch/rebase without asking
+  again; create no empty commit;
+- verify fork/canonical master equality, fast-forward local `master`, and rebase
+  `develop` without merging;
+- read every active patch in its current surrounding source and make a
+  keep/adapt/retire decision for every production case, plus reassess the
+  quarantine; `PRIMARY_CASE` changes only review order and detail, never scope;
+- repair any discovered case, control, test, package/live harness, contract,
+  documentation, or runbook defect in the same uninterrupted pass, without
+  restarting still-valid expensive gates unless their frozen semantic inputs
+  changed;
+- run all required clean controls, quarantine, focused/native and fork-control
+  checks, both real DEB builds, all three full upstream legs, every declared
+  atomic case live gate, and all seven positive complete-stack live profiles;
+- leave every rebase/adaptation/repair result after the initial preservation
+  boundary uncommitted for operator review.
+
+The agent derives a unique cycle identifier; the operator need not provide one
+or separately expand scope for another active case. This directive never
+authorizes `gh repo sync`, a push or force-push, hosted package publication,
+workflow dispatch, default-branch mutation, or any other remote write. A live
+master mismatch requiring remote synchronization returns only that external
+boundary to the operator.
+
 ## Branch roles
 
 - `upstream/master` is the canonical Xpra source.
@@ -75,7 +116,7 @@ the tree and update owner are already gone.
 
 Only when the operator explicitly starts a new upstream-refresh and patch-
 adaptation cycle does the clean host workflow run. Follow the canonical
-selected-case and queue-wide procedure in
+autonomous full-queue procedure in
 [`fork-maintenance/docs/runbooks/upstream-refresh.md`](fork-maintenance/docs/runbooks/upstream-refresh.md):
 
 Starting that runbook grants one narrow local-commit authority before any
@@ -143,11 +184,13 @@ The currently retained active cases are:
 - `upstream-test-quarantine` (the single test-only duty case).
 
 The quarantine case is not a production fix. It may change only the exact
-upstream unit-test modules listed in its `[quarantine]` manifest table. Before
+upstream unit-test modules listed in its `[quarantine]` manifest union. Before
 applying it after every fork-master rebase, run all three clean `quarantine*`
-gates. If any listed module is green on the clean embedded source, remove or narrow
-that entry and refresh the one quarantine patch; never carry it forward merely
-because it still applies.
+gates. Each gate must confirm its exact assigned failure subset and that every
+other listed module is green in that leg. Remove or narrow a stale gate
+assignment and refresh the one quarantine patch; a module which is deliberately
+assigned only to another failing leg is not stale merely because it is green
+here. Never carry quarantine forward merely because its patch still applies.
 
 Do not resurrect deleted historical cases, verifications, evidence, or stacks
 without an explicit new request and a current-source reassessment.
@@ -407,9 +450,10 @@ jobs. This exception never applies after `develop-rebase`: every explicit
 upstream rebase requires the clean quarantine reassessment, all fork-control,
 tests-only clean controls or documented no-test semantic substitutes, patched
 focused/native gates, every durable package boundary on the resulting stack,
-all three full upstream legs, and all seven positive live profiles, even when
-every retained patch applies without textual changes. Any uncertainty or
-semantic change uses the normal ladder.
+all three full upstream legs, every production case's declared live gates with
+its atomic `CASE=<slug>` selection, and all seven positive stack live profiles,
+even when every retained patch applies without textual changes. Any uncertainty
+or semantic change uses the normal ladder.
 
 Do not start or repeat an expensive downstream test when the observed failure
 occurred in a pre-test guard and the change only removes or narrows that guard.
@@ -483,9 +527,12 @@ the image-cache lock through immutable-ID handoff and payload delivery so
 Podman's long-lived networking helper cannot retain that cache lease.
 
 Upstream image-cache removal refuses any matching unresolved image-build or
-test prelaunch/owner. Cleanup may accept an older valid source label only while
-all other ownership labels, image inputs, workflow digest, and immutable image
-ID still match exactly; that cleanup path cannot create acceptance evidence.
+test prelaunch/owner. Cleanup may accept an older source label only after
+proving that it names an existing commit which is an ancestor of, or equal to,
+the current embedded source, while all other ownership labels, image inputs,
+workflow digest, and immutable image ID still match exactly. An unknown,
+unrelated, or future source is not removable, and this cleanup path cannot
+create acceptance evidence.
 
 Every collected test, standalone upstream image build, live run, and DEB build
 publishes an immutable removal transaction before deleting runtime ownership.

@@ -83,8 +83,16 @@ fork remains an owner-review boundary.
 
 Automatic master synchronization deliberately does not rebase or invalidate
 `develop`. When the operator is ready to move the embedded source boundary and
-adapt the queue to it, follow the complete selected-case and queue-wide
-procedure in [`upstream-refresh.md`](upstream-refresh.md). Its initial local
+adapt the complete queue to it, invoke the **Autonomous Upstream Refresh and
+Full Queue Adaptation** procedure with:
+
+```text
+Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+```
+
+This is an agent directive, not a shell command. The exhaustive procedure is
+[`upstream-refresh.md`](upstream-refresh.md); `PRIMARY_CASE` changes only
+review order and detail, never scope. Its initial local
 worktree review and optional one preservation commit must finish before the
 first command below. That invocation needs no additional commit confirmation;
 all later adaptation and validation results remain uncommitted. Its ref and
@@ -104,7 +112,10 @@ queue, and run the complete post-rebase ladder before publishing the rewritten
 the queue applies unchanged: offline fork checks, clean quarantine reassessment,
 tests-only controls for cases which own retained tests, case-specific no-test
 semantic inspection, durable package boundaries against the resulting stack,
-patched focused/native gates, all three full author-test legs, and all seven
-fixed positive live profiles. If the operator does not choose this refresh,
+including both real Ubuntu 26.04 and Debian 13 builds, patched focused/native
+gates, all three full author-test legs, every production case's declared live
+gates with its atomic case selection, and all seven fixed positive live
+profiles with the complete stack selection. If the operator does not choose
+this refresh,
 current `develop` continues to be tested and published against its existing
 embedded source regardless of later master movement.

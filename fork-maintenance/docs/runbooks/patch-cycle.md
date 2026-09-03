@@ -33,8 +33,16 @@ duty case follows the separate admission and rebase rules in
 
 The remainder of this runbook is the clean host-worktree fallback used only
 when the operator deliberately begins a new upstream adaptation cycle. The
-complete rebase, selected-case decision tree, queue-wide tests, and seven live
-profiles are owned by [`upstream-refresh.md`](upstream-refresh.md).
+complete autonomous rebase, every-case decision tree, queue-wide package/test
+ladder, atomic case live gates, and seven stack live profiles are owned by
+[`upstream-refresh.md`](upstream-refresh.md). Its single agent entry point is:
+
+```text
+Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+```
+
+That line is an agent directive, not a shell command. `PRIMARY_CASE` changes
+review order and detail only; it never narrows the full-queue scope.
 That canonical runbook first creates one reviewed preservation commit when
 non-ignored work exists; its invocation authorizes that commit without another
 confirmation. It creates no empty commit for a clean checkout and no later
@@ -185,12 +193,13 @@ stack never becomes one atomic case patch.
 Long or acceptance tests do not require applying patches to the host worktree;
 their runners freeze the embedded source and apply the selected queue in isolation.
 
-## Operator-selected upstream refresh
+## Autonomous upstream refresh summary
 
 An advance of any master ref does not itself invalidate or block current
 `develop`. Use this procedure only when the operator intentionally chooses that
-new commit as the next patch-adaptation base. This section is a summary;
-[`upstream-refresh.md`](upstream-refresh.md) is the canonical executable
+new commit as the next patch-adaptation base by invoking
+`autonomous-upstream-refresh`. This section is a summary;
+[`upstream-refresh.md`](upstream-refresh.md) is the canonical exhaustive
 runbook.
 
 After the canonical runbook's initial preservation boundary has left the
@@ -215,8 +224,9 @@ make -C fork-maintenance stack-check STACK=develop
 
 Before applying the duty quarantine or accepting any patched full run, execute
 all three clean `quarantine*` gates from
-[`test-quarantine.md`](test-quarantine.md). Remove or narrow every entry that is
-green on the new source; forward applicability alone is never evidence that a
+[`test-quarantine.md`](test-quarantine.md). Remove an assignment that is green
+in its gate, and remove the module and patch path only when no failing gate
+still assigns it; forward applicability alone is never evidence that a
 quarantine remains necessary.
 
 An upstream rebase always invalidates the previous functional acceptance,
@@ -225,10 +235,11 @@ offline fork-control suite, a tests-only clean control for every production
 case which owns retained tests and the documented no-test semantic inspection
 otherwise, every patched focused and native gate, all three complete upstream
 workflow legs, every case-specific durable package boundary against the
-resulting stack, and all seven fixed positive live profiles. A new author-test
-failure may enter the single quarantine only after the same module fails on
-this exact clean source; then rerun the quarantine gates and complete patched
-matrix.
+resulting stack including both real Ubuntu 26.04 and Debian 13 builds, every
+production case's declared live gates with its atomic `CASE=<slug>` selection,
+and all seven fixed positive stack live profiles. A new author-test failure may
+enter the single quarantine only after the same module fails on this exact
+clean source; then rerun the quarantine gates and complete patched matrix.
 
 An `apply` case uses the ordinary isolated `PATCH_MODE=patched` flow. A
 `diverged` case cannot: both `patch-apply` and ordinary patched workspace

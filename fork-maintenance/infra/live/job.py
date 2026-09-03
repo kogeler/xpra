@@ -1950,6 +1950,52 @@ def current_image_validation(payload: dict[str, Any]) -> bool:
     return True
 
 
+def gtk_fixture_artifact_evidence_matches(
+    embedded: dict[str, Any],
+    scenario_root: Path,
+    runner: Any,
+) -> bool:
+    """Bind GTK lifecycle claims to the fixture and server authority files."""
+    identity_path = scenario_root / runner.INTERACTION_IDENTITY_ARTIFACT
+    server_pid_path = scenario_root / "server.pid"
+    try:
+        identity = runner.load_interaction_fixture_identity(identity_path)
+        ensure_private_regular(server_pid_path)
+        raw_server_pid = server_pid_path.read_bytes()
+    except (JobError, OSError, ValueError, runner.LabFailure):
+        return False
+    if not re.fullmatch(rb"[1-9][0-9]{0,9}\n", raw_server_pid):
+        return False
+    server_pid = int(raw_server_pid)
+    if server_pid > 2**31 - 1:
+        return False
+    activity = embedded.get("application_activity")
+    lifecycle = embedded.get("lifecycle")
+    hardware = embedded.get("hardware")
+    application_process = (
+        hardware.get("application") if isinstance(hardware, dict) else None
+    )
+    server_identity = (
+        lifecycle.get("server_identity_at_capture")
+        if isinstance(lifecycle, dict)
+        else None
+    )
+    return bool(
+        isinstance(activity, dict)
+        and activity.get("process_alive") is True
+        and activity.get("process_identity") == identity
+        and runner.process_gpu_evidence_matches_identity(
+            application_process,
+            identity,
+        )
+        and isinstance(lifecycle, dict)
+        and lifecycle.get("application_identity_at_capture") == identity
+        and runner.valid_process_identity(server_identity)
+        and server_identity["pid"] == server_pid
+        and lifecycle.get("server_pid") == server_pid
+    )
+
+
 def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
     runner = live_runner_module()
     root = report.parent
@@ -2011,6 +2057,47 @@ def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
             if path != scenario_report
         }
         if observed != artifact_digests:
+            return False
+        lifecycle = embedded.get("lifecycle")
+        classification = embedded.get("classification")
+        boundaries = (
+            classification.get("boundaries")
+            if isinstance(classification, dict)
+            else None
+        )
+        classified_lifecycle = (
+            boundaries.get("lifecycle") if isinstance(boundaries, dict) else None
+        )
+        lifecycle_profile = payload.get("lifecycle_profile")
+        if (
+            not isinstance(lifecycle, dict)
+            or not isinstance(lifecycle_profile, str)
+            or embedded.get("lifecycle_profile") != lifecycle_profile
+            or lifecycle.get("mode") != lifecycle_profile
+        ):
+            return False
+        try:
+            expected_lifecycle = runner.lifecycle_boundary_checks(
+                lifecycle_profile,
+                lifecycle,
+            )
+        except runner.LabFailure:
+            return False
+        if (
+            classified_lifecycle != expected_lifecycle
+            or not expected_lifecycle
+            or not all(expected_lifecycle.values())
+        ):
+            return False
+        if (
+            payload.get("application") == "gtk"
+            and lifecycle_profile in {"detach", "transport-loss"}
+            and not gtk_fixture_artifact_evidence_matches(
+                embedded,
+                scenario_root,
+                runner,
+            )
+        ):
             return False
         if keyboard_scenario is not None:
             interaction = embedded.get("interaction")
