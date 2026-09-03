@@ -72,7 +72,8 @@ UNIT_TEST_RE = re.compile(r"unit(?:\.[a-z0-9_]+)+")
 SELECTION_RE = re.compile(r"(?:cases|stacks)/[a-z0-9]+(?:-[a-z0-9]+)*")
 WORKSPACE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 CYCLE_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-WORKSPACE_PATCH_MODES = frozenset({"clean", "tests-only", "patched"})
+RUNNER_PATCH_MODES = frozenset({"clean", "tests-only", "patched"})
+WORKSPACE_PATCH_MODES = RUNNER_PATCH_MODES | {"reconstruct"}
 SUPPORTED_GATES = frozenset(
     {
         "focused",
@@ -846,6 +847,112 @@ def selection_resolution(
     return data
 
 
+def case_selection_digest(case: Case) -> str:
+    """Return the canonical selection digest for one exact completed case."""
+    lab_root = case.directory.parent.parent
+    result = run(
+        (
+            sys.executable,
+            str(SELECTION_TOOL),
+            "--lab-root",
+            str(lab_root),
+            "--selection",
+            f"cases/{case.slug}",
+            "digest",
+        )
+    )
+    lines = result.stdout.splitlines()
+    if len(lines) != 1 or not SHA256_RE.fullmatch(lines[0]):
+        fail("case selection digest output is invalid")
+    return lines[0]
+
+
+def case_patch_status(repo: Path, revision: str, case: Case) -> str:
+    """Classify one validated patch against an immutable source revision."""
+    if not GIT_SHA_RE.fullmatch(revision):
+        fail("case patch classification has an invalid source commit")
+    with tempfile.TemporaryDirectory(prefix="xpra-fork-reconstruct-") as raw:
+        source = Path(raw)
+        archive_tree(repo, revision, source)
+        forward = (
+            git(
+                source,
+                "apply",
+                "--check",
+                "--whitespace=error-all",
+                str(case.patch),
+                check=False,
+            ).returncode
+            == 0
+        )
+        reverse = (
+            git(
+                source,
+                "apply",
+                "--reverse",
+                "--check",
+                "--whitespace=error-all",
+                str(case.patch),
+                check=False,
+            ).returncode
+            == 0
+        )
+    if forward and reverse:
+        return "ambiguous"
+    if forward:
+        return "apply"
+    if reverse:
+        return "already-present"
+    return "diverged"
+
+
+def reconstruction_selection_resolution(
+    repo: Path,
+    revision: str,
+    selection: str,
+    case: Case,
+) -> dict[str, Any]:
+    """Bind a completed diverged case before rebuilding it from clean source."""
+    expected_selection = f"cases/{case.slug}"
+    if selection != expected_selection:
+        fail("reconstruction requires exactly one completed case selection")
+    if case.dependencies:
+        fail(
+            f"case {case.slug} has dependencies; reconstruction requires an "
+            "independent completed case"
+        )
+    status = case_patch_status(repo, revision, case)
+    if status != "diverged":
+        fail(
+            f"case {case.slug} is {status} at base {revision}; "
+            "reconstruction requires a diverged patch"
+        )
+    payload: dict[str, Any] = {
+        "schema": 1,
+        "source_commit": revision,
+        "selection": selection,
+        "selection_sha256": case_selection_digest(case),
+        "declared_cases": [case.slug],
+        "base_dependencies": [],
+        "patches": [
+            {
+                "case": case.slug,
+                "patch": f"cases/{case.slug}/fix.patch",
+                "patch_sha256": case.patch_sha256,
+                "status": "diverged",
+            }
+        ],
+        "applied_cases": [],
+        "already_present_cases": [],
+        "reconstruction_case": case.slug,
+        "reconstruction_manifest_sha256": sha256_file(case.manifest),
+        "reconstruction_paths": list(case.paths),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    payload["resolution_sha256"] = hashlib.sha256(canonical).hexdigest()
+    return payload
+
+
 def selected_cases(selection: str) -> tuple[Case, ...]:
     cases = load_cases()
     kind, slug = selection.split("/", 1)
@@ -1603,9 +1710,14 @@ def finish_case_update_remove_transaction(repo: Path, slug: str) -> tuple[Path, 
             workspace_name,
             require_host_identity=False,
         )
+        allowed_modes = (
+            {"patched"}
+            if payload["disposition"] == "complete"
+            else {"clean", "patched", "reconstruct"}
+        )
         if (
             workspace.selection != f"cases/{slug}"
-            or workspace.patch_mode != "patched"
+            or workspace.patch_mode not in allowed_modes
         ):
             fail("case update removal workspace is inconsistent")
     if transaction.exists() or transaction.is_symlink():
@@ -1800,10 +1912,12 @@ def workspace_update_payloads(
     workspace: Workspace,
     transaction_directory: Path,
 ) -> tuple[tuple[str, Path, bytes, bytes, int], ...]:
-    expected_mode = "clean" if isinstance(case, DraftCase) else "patched"
+    expected_modes = (
+        {"clean"} if isinstance(case, DraftCase) else {"patched", "reconstruct"}
+    )
     if (
         workspace.selection != f"cases/{case.slug}"
-        or workspace.patch_mode != expected_mode
+        or workspace.patch_mode not in expected_modes
     ):
         fail("case update workspace is inconsistent")
     with case_update_candidate_lab(
@@ -3146,6 +3260,9 @@ def _create_workspace_locked(
         fail(f"invalid workspace patch mode: {patch_mode!r}")
     state = isolated_start_check(repo)
     draft: DraftCase | None = None
+    reconstruct = patch_mode == "reconstruct"
+    if reconstruct and not selection.startswith("cases/"):
+        fail("reconstruction requires exactly one completed case selection")
     if selection.startswith("cases/"):
         case_slug = selection.split("/", 1)[1]
         case_directory = CASES_ROOT / case_slug
@@ -3159,7 +3276,17 @@ def _create_workspace_locked(
             resolution = draft_selection_resolution(draft, state.source_commit, selection)
         else:
             cases = selected_cases(selection)
-            resolution = selection_resolution(repo, state.source_commit, selection)
+            if reconstruct:
+                if len(cases) != 1 or cases[0].slug != case_slug:
+                    fail("reconstruction requires exactly one completed case selection")
+                resolution = reconstruction_selection_resolution(
+                    repo,
+                    state.source_commit,
+                    selection,
+                    cases[0],
+                )
+            else:
+                resolution = selection_resolution(repo, state.source_commit, selection)
     else:
         cases = selected_cases(selection)
         resolution = selection_resolution(repo, state.source_commit, selection)
@@ -3231,12 +3358,14 @@ def _create_workspace_locked(
                 fail("selection resolution patch entry is invalid")
             slug = entry.get("case")
             status = entry.get("status")
-            if not isinstance(slug, str) or slug not in by_slug or status not in {
-                "apply",
-                "already-present",
-            }:
+            allowed_status = {"diverged"} if reconstruct else {"apply", "already-present"}
+            if (
+                not isinstance(slug, str)
+                or slug not in by_slug
+                or status not in allowed_status
+            ):
                 fail("selection resolution patch identity is invalid")
-            if status != "apply" or patch_mode == "clean":
+            if status != "apply" or patch_mode in {"clean", "reconstruct"}:
                 continue
             case = by_slug[slug]
             arguments = ["apply", "--index", "--whitespace=error-all"]
@@ -3393,6 +3522,15 @@ def _update_case_from_workspace_locked(
     if isinstance(case, DraftCase):
         if entries != [] or resolution.get("draft_case") != case.slug:
             fail("draft workspace resolution is inconsistent")
+    elif workspace.patch_mode == "reconstruct":
+        expected_resolution = reconstruction_selection_resolution(
+            repo,
+            workspace.source_commit,
+            workspace.selection,
+            case,
+        )
+        if resolution != expected_resolution:
+            fail("reconstruction workspace provenance is inconsistent")
     else:
         if not isinstance(entries, list) or len(entries) != 1:
             fail("atomic workspace resolution is inconsistent")
@@ -4146,6 +4284,8 @@ def workspace_fingerprint_cleanup_blockers(repo: Path) -> tuple[str, ...]:
 
 def _finalized_workspace_fingerprint_locked(repo: Path, name: str) -> str:
     workspace = load_workspace(repo, name, require_host_identity=False)
+    if workspace.patch_mode == "reconstruct":
+        fail(f"workspace {name} is an unexported reconstruction workspace")
     if unstaged_names(workspace.source) or untracked_names(workspace.source):
         fail(f"workspace {name} contains an unexported candidate or untracked files")
     if rev_parse(workspace.source, "HEAD") != workspace.source_commit:
@@ -4330,7 +4470,7 @@ def validate_upstream_status(values: dict[str, str], name: str, root: Path) -> s
             or not SHA256_RE.fullmatch(values["selection_sha256"])
             or not GIT_SHA_RE.fullmatch(values["source_head"])
             or not SELECTION_RE.fullmatch(values["selection"])
-            or values["patch_mode"] not in WORKSPACE_PATCH_MODES
+            or values["patch_mode"] not in RUNNER_PATCH_MODES
             or values["source_remote"] not in REMOTE_URLS
             or not TEST_RE.fullmatch(values["target"])
             or not values["image"]
@@ -7438,18 +7578,38 @@ def main(argv: list[str] | None = None) -> int:
         print("workspace_create=passed")
     elif args.command == "workspace-status":
         with workspace_lifecycle_lock(repo):
-            workspace = load_workspace(repo, args.workspace)
+            workspace = load_workspace(
+                repo,
+                args.workspace,
+                require_host_identity=False,
+            )
+            host_branch = current_branch(repo)
+            host_head = rev_parse(repo, "HEAD")
             print(f"workspace={workspace.directory}")
             print(f"source={workspace.source}")
             print(f"source_commit={workspace.source_commit}")
             print(f"selection={workspace.selection}")
             print(f"patch_mode={workspace.patch_mode}")
+            print(f"recorded_branch={workspace.branch}")
+            print(f"recorded_head={workspace.head}")
+            print(f"current_branch={host_branch}")
+            print(f"current_head={host_head}")
+            host_identity = (
+                "current"
+                if (host_branch, host_head) == (workspace.branch, workspace.head)
+                else "stale"
+            )
+            print(f"host_identity={host_identity}")
             print(f"staged_paths={','.join(workspace_candidate_names(workspace))}")
             print(f"unstaged_paths={','.join(unstaged_names(workspace.source))}")
             print(f"untracked_paths={','.join(untracked_names(workspace.source))}")
     elif args.command == "workspace-diff":
         with workspace_lifecycle_lock(repo):
-            workspace = load_workspace(repo, args.workspace)
+            workspace = load_workspace(
+                repo,
+                args.workspace,
+                require_host_identity=False,
+            )
             output = git(
                 workspace.source,
                 "diff",

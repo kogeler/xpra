@@ -95,7 +95,12 @@ gh workflow run master-sync.yml --repo kogeler/xpra --ref develop
 ```
 
 Agents never dispatch it. The explicit local refresh then fetches and verifies
-both master refs:
+both master refs, but only after following the initial boundary in
+[`upstream-refresh.md`](upstream-refresh.md). That boundary exhaustively reviews
+the non-ignored worktree and, iff legitimate changes exist, creates the one
+complete preservation commit authorized by invoking the runbook without a
+second confirmation. A clean checkout gets no empty commit. Require clean
+porcelain and record that commit SHA or `<none>` before the first `repo-sync`:
 
 ```bash
 make -C fork-maintenance repo-sync
@@ -130,8 +135,9 @@ commit while the checkout is clean:
 git switch --no-track -c develop refs/remotes/origin/master
 ```
 
-Only after an operator decision to adopt a newer upstream base, transfer those
-commits by rebasing clean `develop` onto the verified local `master`:
+Only after an operator decision to adopt a newer upstream base and completion
+of the canonical runbook's one-start-commit boundary, transfer those commits by
+rebasing clean `develop` onto the verified local `master`:
 
 ```bash
 git switch develop
@@ -166,11 +172,15 @@ the reviewed branch with the exact-SHA `--force-with-lease` procedure in
 [`publish-develop.md`](publish-develop.md). Neither this automation nor an
 agent pushes the rewrite.
 
-When fork-control files are still uncommitted, do not switch or rebase the
-dirty checkout. Use `isolated-start-check` and the named workspace flow against
-the source already embedded in `develop`. A clean rebase is required only when
-the operator intentionally changes that source boundary, not before testing,
-editing, committing, or publishing the unchanged current base.
+For ordinary work on the unchanged embedded base, when fork-control files are
+uncommitted, do not switch or rebase the dirty checkout. Use
+`isolated-start-check` and the named workspace flow. When the operator instead
+invokes the upstream-refresh runbook, its one reviewed preservation commit
+normalizes that pre-existing legitimate state before fetch/rebase. After that
+boundary the agent creates no intermediate or final refresh-result commit; new
+changes remain uncommitted for operator review. A clean rebase is required only
+when the operator intentionally changes the source boundary, not before
+testing, editing, committing, or publishing the unchanged current base.
 
 After each explicitly selected rebase, reassess the single test-quarantine case
 on the new clean source in all three matrix modes before applying it. Follow

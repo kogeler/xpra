@@ -1258,7 +1258,8 @@ class IsolatedWorkspaceTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def mocks(self):
+    def mocks(self, case: contrib.Case | None = None):
+        selected_case = self.case if case is None else case
         state = contrib.IsolatedState(
             branch="develop",
             head=self.head,
@@ -1269,9 +1270,44 @@ class IsolatedWorkspaceTest(unittest.TestCase):
         )
         return (
             patch.object(contrib, "isolated_start_check", return_value=state),
-            patch.object(contrib, "selected_cases", return_value=(self.case,)),
+            patch.object(contrib, "selected_cases", return_value=(selected_case,)),
             patch.object(contrib, "selection_resolution", return_value=self.resolution),
-            patch.object(contrib, "get_case", return_value=self.case),
+            patch.object(contrib, "get_case", return_value=selected_case),
+        )
+
+    def replace_case_patch(
+        self,
+        patch_bytes: bytes,
+        paths: tuple[str, ...],
+        *,
+        manifest_text: str | None = None,
+    ) -> contrib.Case:
+        self.case.patch.write_bytes(patch_bytes)
+        original = (
+            self.case.manifest.read_text(encoding="utf-8")
+            if manifest_text is None
+            else manifest_text
+        )
+        self.case.manifest.write_text(
+            contrib.updated_manifest_text(
+                original,
+                digest=hashlib.sha256(patch_bytes).hexdigest(),
+                paths=paths,
+                draft=False,
+            ),
+            encoding="utf-8",
+        )
+        return contrib.load_case(self.case_dir)
+
+    def diverged_case(self, old: bytes = b"stale") -> contrib.Case:
+        return self.replace_case_patch(
+            b"diff --git a/target.txt b/target.txt\n"
+            b"--- a/target.txt\n"
+            b"+++ b/target.txt\n"
+            b"@@ -1 +1 @@\n"
+            b"-" + old + b"\n"
+            b"+replacement\n",
+            ("target.txt",),
         )
 
     def case_update_candidate(self) -> tuple[bytes, str]:
@@ -1429,6 +1465,82 @@ class IsolatedWorkspaceTest(unittest.TestCase):
         self.assertEqual(command("git", "branch", "--show-current", cwd=self.repo), "develop")
         self.assertEqual(command("git", "rev-parse", "HEAD", cwd=self.repo), self.head)
 
+    def test_workspace_status_reports_current_host_identity(self) -> None:
+        start, selected, resolution, _case = self.mocks()
+        with start, selected, resolution:
+            workspace = contrib.create_workspace(
+                self.repo,
+                "status-current-01",
+                "cases/sample-case",
+                "patched",
+            )
+
+        output = command(
+            sys.executable,
+            str(Path(contrib.__file__)),
+            "--repo",
+            str(self.repo),
+            "workspace-status",
+            workspace.name,
+        )
+
+        self.assertIn(f"recorded_branch={workspace.branch}", output)
+        self.assertIn(f"recorded_head={workspace.head}", output)
+        self.assertIn("current_branch=develop", output)
+        self.assertIn(f"current_head={workspace.head}", output)
+        self.assertIn("host_identity=current", output)
+
+    def test_workspace_status_inspects_stale_identity_but_mutation_refuses_it(self) -> None:
+        start, selected, resolution, _case = self.mocks()
+        with start, selected, resolution:
+            workspace = contrib.create_workspace(
+                self.repo,
+                "status-stale-01",
+                "cases/sample-case",
+                "patched",
+            )
+        note = self.repo / "fork-maintenance" / "refresh-note.txt"
+        note.write_text("new host commit\n", encoding="utf-8")
+        command("git", "add", str(note.relative_to(self.repo)), cwd=self.repo)
+        command(
+            "git",
+            "-c",
+            "user.name=Workspace Test",
+            "-c",
+            "user.email=workspace@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "advance host",
+            cwd=self.repo,
+        )
+        current_head = command("git", "rev-parse", "HEAD", cwd=self.repo)
+
+        output = command(
+            sys.executable,
+            str(Path(contrib.__file__)),
+            "--repo",
+            str(self.repo),
+            "workspace-status",
+            workspace.name,
+        )
+
+        self.assertIn(f"recorded_head={workspace.head}", output)
+        self.assertIn(f"current_head={current_head}", output)
+        self.assertIn("host_identity=stale", output)
+        stale_diff = command(
+            sys.executable,
+            str(Path(contrib.__file__)),
+            "--repo",
+            str(self.repo),
+            "workspace-diff",
+            workspace.name,
+        )
+        self.assertIn("diff --git a/target.txt b/target.txt", stale_diff)
+        self.assertIn("+new", stale_diff)
+        with self.assertRaisesRegex(contrib.ContribError, "host branch or HEAD changed"):
+            contrib.stage_workspace(self.repo, workspace.name)
+
     def test_tests_only_workspace_keeps_master_production_code(self) -> None:
         start, selected, resolution, _case = self.mocks()
         with start, selected, resolution:
@@ -1444,6 +1556,377 @@ class IsolatedWorkspaceTest(unittest.TestCase):
             contrib.workspace_candidate_names(workspace),
             ("tests/sample_test.py",),
         )
+
+    def test_reconstruct_exports_a_diverged_case_from_clean_source(self) -> None:
+        case = self.diverged_case()
+        start, selected, _resolution, case_mock = self.mocks(case)
+        host_head = command("git", "rev-parse", "HEAD", cwd=self.repo)
+        host_index = command("git", "write-tree", cwd=self.repo)
+
+        with start, selected:
+            workspace = contrib.create_workspace(
+                self.repo,
+                "reconstruct-01",
+                "cases/sample-case",
+                "reconstruct",
+            )
+
+        self.assertEqual((workspace.source / "target.txt").read_text(), "old\n")
+        self.assertEqual(contrib.workspace_candidate_names(workspace), ())
+        original_resolution = json.loads(
+            contrib.workspace_resolution_path(workspace.directory).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(original_resolution["reconstruction_case"], case.slug)
+        self.assertEqual(original_resolution["patches"][0]["status"], "diverged")
+        self.assertEqual(
+            original_resolution["patches"][0]["patch_sha256"],
+            case.patch_sha256,
+        )
+
+        (workspace.source / "target.txt").write_text("rebased\n", encoding="utf-8")
+        with case_mock:
+            self.assertEqual(
+                contrib.stage_workspace(self.repo, workspace.name),
+                ("target.txt",),
+            )
+            updated = contrib.update_case_from_workspace(self.repo, workspace.name)
+
+        refreshed = contrib.load_workspace(self.repo, workspace.name)
+        refreshed_resolution = json.loads(
+            contrib.workspace_resolution_path(refreshed.directory).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(refreshed.patch_mode, "patched")
+        self.assertNotIn("reconstruction_case", refreshed_resolution)
+        self.assertEqual(refreshed_resolution["patches"][0]["status"], "apply")
+        self.assertEqual(
+            refreshed_resolution["patches"][0]["patch_sha256"],
+            updated.patch_sha256,
+        )
+        self.assertEqual((self.repo / "target.txt").read_text(), "old\n")
+        self.assertEqual(command("git", "rev-parse", "HEAD", cwd=self.repo), host_head)
+        self.assertEqual(command("git", "write-tree", cwd=self.repo), host_index)
+
+    def test_reconstruct_recovery_publishes_the_patched_workspace_state(self) -> None:
+        case = self.diverged_case()
+        start, selected, _resolution, case_mock = self.mocks(case)
+        with start, selected:
+            workspace = contrib.create_workspace(
+                self.repo,
+                "reconstruct-recovery-01",
+                "cases/sample-case",
+                "reconstruct",
+            )
+        (workspace.source / "target.txt").write_text("rebased\n", encoding="utf-8")
+        with case_mock:
+            contrib.stage_workspace(self.repo, workspace.name)
+            with (
+                patch.object(
+                    contrib,
+                    "complete_case_update_transaction",
+                    side_effect=RuntimeError("simulated reconstruction export crash"),
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated reconstruction export crash",
+                ),
+            ):
+                contrib.update_case_from_workspace(self.repo, workspace.name)
+
+        transaction = contrib.validate_case_update_transaction(
+            self.repo,
+            self.case.slug,
+        )
+        self.assertEqual(
+            tuple(entry.key for entry in transaction.entries),
+            (
+                "case-patch",
+                "case-manifest",
+                "workspace-resolution",
+                "workspace-metadata",
+            ),
+        )
+        self.assertEqual(
+            contrib.load_workspace(self.repo, workspace.name).patch_mode,
+            "reconstruct",
+        )
+
+        contrib.recover_case_creation(self.repo, self.case.slug)
+
+        updated = contrib.load_case(self.case_dir)
+        recovered = contrib.load_workspace(self.repo, workspace.name)
+        recovered_resolution = json.loads(
+            contrib.workspace_resolution_path(recovered.directory).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(recovered.patch_mode, "patched")
+        self.assertNotIn("reconstruction_case", recovered_resolution)
+        self.assertEqual(recovered_resolution["patches"][0]["status"], "apply")
+        self.assertEqual(
+            recovered_resolution["patches"][0]["patch_sha256"],
+            updated.patch_sha256,
+        )
+        self.assertIn("+rebased", updated.patch.read_text(encoding="utf-8"))
+        self.assertFalse(transaction.directory.exists())
+        self.assertFalse(transaction.owner.exists())
+
+    def test_reconstruct_rejects_a_forward_applicable_case(self) -> None:
+        start, selected, _resolution, _case = self.mocks()
+        with (
+            start,
+            selected,
+            self.assertRaisesRegex(
+                contrib.ContribError,
+                "reconstruction requires a diverged patch",
+            ),
+        ):
+            contrib.create_workspace(
+                self.repo,
+                "reconstruct-apply-01",
+                "cases/sample-case",
+                "reconstruct",
+            )
+
+    def test_reconstruct_rejects_a_stack_selection(self) -> None:
+        start, _selected, _resolution, _case = self.mocks()
+        with (
+            start,
+            self.assertRaisesRegex(
+                contrib.ContribError,
+                "reconstruction requires exactly one completed case selection",
+            ),
+        ):
+            contrib.create_workspace(
+                self.repo,
+                "reconstruct-stack-01",
+                "stacks/develop",
+                "reconstruct",
+            )
+
+    def test_reconstruct_rejects_an_already_present_case(self) -> None:
+        case = self.replace_case_patch(
+            b"diff --git a/target.txt b/target.txt\n"
+            b"--- a/target.txt\n"
+            b"+++ b/target.txt\n"
+            b"@@ -1 +1 @@\n"
+            b"-new\n"
+            b"+old\n",
+            ("target.txt",),
+        )
+        start, selected, _resolution, _case = self.mocks(case)
+        with (
+            start,
+            selected,
+            self.assertRaisesRegex(
+                contrib.ContribError,
+                "reconstruction requires a diverged patch",
+            ),
+        ):
+            contrib.create_workspace(
+                self.repo,
+                "reconstruct-present-01",
+                "cases/sample-case",
+                "reconstruct",
+            )
+
+    def test_reconstruct_rejects_an_ambiguous_case(self) -> None:
+        case = self.replace_case_patch(
+            b"diff --git a/target.txt b/target.txt\n"
+            b"--- a/target.txt\n"
+            b"+++ b/target.txt\n"
+            b"@@ -1 +1 @@\n"
+            b"-old\n"
+            b"+old\n",
+            ("target.txt",),
+        )
+        start, selected, _resolution, _case = self.mocks(case)
+        with (
+            start,
+            selected,
+            self.assertRaisesRegex(
+                contrib.ContribError,
+                "reconstruction requires a diverged patch",
+            ),
+        ):
+            contrib.create_workspace(
+                self.repo,
+                "reconstruct-ambiguous-01",
+                "cases/sample-case",
+                "reconstruct",
+            )
+
+    def test_reconstruct_rejects_a_case_with_dependencies(self) -> None:
+        case = self.diverged_case()
+        case.manifest.write_text(
+            case.manifest.read_text(encoding="utf-8").replace(
+                "dependencies = []",
+                'dependencies = ["prerequisite"]',
+            ),
+            encoding="utf-8",
+        )
+        case = contrib.load_case(self.case_dir)
+        start, selected, _resolution, _case = self.mocks(case)
+        with (
+            start,
+            selected,
+            self.assertRaisesRegex(contrib.ContribError, "has dependencies"),
+        ):
+            contrib.create_workspace(
+                self.repo,
+                "reconstruct-dependent-01",
+                "cases/sample-case",
+                "reconstruct",
+            )
+
+    def test_reconstruct_refuses_an_empty_replacement(self) -> None:
+        case = self.diverged_case()
+        start, selected, _resolution, case_mock = self.mocks(case)
+        with start, selected:
+            workspace = contrib.create_workspace(
+                self.repo,
+                "reconstruct-empty-01",
+                "cases/sample-case",
+                "reconstruct",
+            )
+        with (
+            case_mock,
+            self.assertRaisesRegex(contrib.ContribError, "candidate is empty"),
+        ):
+            contrib.update_case_from_workspace(self.repo, workspace.name)
+
+    def test_reconstruct_failed_export_removes_only_its_preparation(self) -> None:
+        case = self.diverged_case()
+        start, selected, _resolution, case_mock = self.mocks(case)
+        with start, selected:
+            workspace = contrib.create_workspace(
+                self.repo,
+                "reconstruct-abort-01",
+                "cases/sample-case",
+                "reconstruct",
+            )
+        (workspace.source / "target.txt").write_text("rebased\n", encoding="utf-8")
+        with case_mock:
+            contrib.stage_workspace(self.repo, workspace.name)
+        old_patch = case.patch.read_bytes()
+        old_manifest = case.manifest.read_bytes()
+
+        with (
+            case_mock,
+            patch.object(
+                contrib,
+                "selection_resolution",
+                side_effect=contrib.ContribError("candidate resolution failed"),
+            ),
+            self.assertRaisesRegex(contrib.ContribError, "candidate resolution failed"),
+        ):
+            contrib.update_case_from_workspace(self.repo, workspace.name)
+
+        self.assertEqual(case.patch.read_bytes(), old_patch)
+        self.assertEqual(case.manifest.read_bytes(), old_manifest)
+        self.assertEqual(contrib.load_workspace(self.repo, workspace.name).patch_mode, "reconstruct")
+        update_root = contrib.case_updates_root(self.repo)
+        self.assertEqual(
+            tuple(path.name for path in update_root.iterdir()),
+            (".lifecycle.lock",),
+        )
+
+    def test_cycle_cleanup_refuses_an_unexported_reconstruction(self) -> None:
+        case = self.diverged_case()
+        start, selected, _resolution, _case = self.mocks(case)
+        with start, selected:
+            contrib.create_workspace(
+                self.repo,
+                "reconstruct-finalize-01",
+                "cases/sample-case",
+                "reconstruct",
+            )
+        with self.assertRaisesRegex(
+            contrib.ContribError,
+            "unexported reconstruction workspace",
+        ):
+            contrib.finalized_workspace_fingerprint(
+                self.repo,
+                "reconstruct-finalize-01",
+            )
+
+    def test_reconstruct_rechecks_old_case_provenance_before_export(self) -> None:
+        case = self.diverged_case()
+        start, selected, _resolution, case_mock = self.mocks(case)
+        with start, selected:
+            workspace = contrib.create_workspace(
+                self.repo,
+                "reconstruct-provenance-01",
+                "cases/sample-case",
+                "reconstruct",
+            )
+        (workspace.source / "target.txt").write_text("rebased\n", encoding="utf-8")
+        with case_mock:
+            contrib.stage_workspace(self.repo, workspace.name)
+
+        changed_case = self.diverged_case(old=b"different-stale")
+        with (
+            patch.object(contrib, "get_case", return_value=changed_case),
+            self.assertRaisesRegex(
+                contrib.ContribError,
+                "reconstruction workspace provenance is inconsistent",
+            ),
+        ):
+            contrib.update_case_from_workspace(self.repo, workspace.name)
+
+        self.assertEqual((self.repo / "target.txt").read_text(), "old\n")
+        self.assertEqual(contrib.load_workspace(self.repo, workspace.name).patch_mode, "reconstruct")
+
+    def test_reconstruct_accepts_a_completed_quarantine_case(self) -> None:
+        patch_bytes = (
+            b"diff --git a/tests/unittests/unit/sample_test.py "
+            b"b/tests/unittests/unit/sample_test.py\n"
+            b"--- a/tests/unittests/unit/sample_test.py\n"
+            b"+++ b/tests/unittests/unit/sample_test.py\n"
+            b"@@ -1 +1 @@\n"
+            b"-stale\n"
+            b"+replacement\n"
+        )
+        manifest = """schema = 1
+slug = "sample-case"
+kind = "test-quarantine"
+title = "Sample"
+commit_subject = "Sample"
+patch_sha256 = "placeholder"
+dependencies = []
+paths = ["tests/unittests/unit/sample_test.py"]
+
+[tests]
+list = ["unit.sample_test"]
+
+[quarantine]
+modules = ["unit.sample_test"]
+
+[evidence]
+required_gates = ["quarantine", "quarantine-cython", "quarantine-no-compat"]
+"""
+        manifest = manifest.replace(
+            'patch_sha256 = "placeholder"',
+            f'patch_sha256 = "{hashlib.sha256(patch_bytes).hexdigest()}"',
+        )
+        self.case.patch.write_bytes(patch_bytes)
+        self.case.manifest.write_text(manifest, encoding="utf-8")
+        case = contrib.load_case(self.case_dir)
+        start, selected, _resolution, _case = self.mocks(case)
+
+        with start, selected:
+            workspace = contrib.create_workspace(
+                self.repo,
+                "reconstruct-quarantine-01",
+                "cases/sample-case",
+                "reconstruct",
+            )
+
+        self.assertEqual(workspace.patch_mode, "reconstruct")
+        self.assertEqual(contrib.workspace_candidate_names(workspace), ())
 
     def test_workspace_update_exports_only_the_isolated_candidate(self) -> None:
         start, selected, resolution, case_mock = self.mocks()
@@ -3307,6 +3790,27 @@ class CycleCleanupTest(unittest.TestCase):
             encoding="utf-8",
         )
         with self.assertRaisesRegex(contrib.ContribError, "current owned schema"):
+            contrib.build_cleanup_plan(
+                self.repo,
+                "audit",
+                inspect_runtime=False,
+            )
+
+    def test_cleanup_rejects_reconstruct_as_an_upstream_runner_mode(self) -> None:
+        self.collected_result("audit-focused-01")
+        status = self.logs / "audit-focused-01.status"
+        status.write_text(
+            status.read_text(encoding="utf-8").replace(
+                "patch_mode=patched\n",
+                "patch_mode=reconstruct\n",
+            ),
+            encoding="utf-8",
+        )
+        self.refresh_upstream_remove_transaction("audit-focused-01")
+        with self.assertRaisesRegex(
+            contrib.ContribError,
+            "upstream test provenance is invalid",
+        ):
             contrib.build_cleanup_plan(
                 self.repo,
                 "audit",

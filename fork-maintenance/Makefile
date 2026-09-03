@@ -98,7 +98,7 @@ help:
 		'make -C fork-maintenance case-recover CASE=short-behavior-name' \
 		'    Create a draft case or recover exact interrupted create, update, or update-removal state' \
 		'make -C fork-maintenance workspace-create CASE=name WORKSPACE=unique-name' \
-		'    Export the embedded source and apply the case, or start a clean draft, below .artifacts/' \
+		'    Export the embedded source and apply a case, start a clean draft, or reconstruct a diverged case' \
 		'make -C fork-maintenance workspace-{status,diff,stage,update,remove} WORKSPACE=name' \
 		'    Inspect, refresh, or remove the exact isolated workspace' \
 		'make -C fork-maintenance workspace-recover WORKSPACE=name' \
