@@ -76,7 +76,7 @@ are fixed, retire the case from `stacks/develop.toml` and remove the case in
 the same reviewed change; do not keep an empty placeholder or history archive.
 
 Complete this reassessment after every upstream rebase even when the quarantine
-patch and both production patches needed no textual refresh. A new failure from
+patch and every production patch needed no textual refresh. A new failure from
 the patched full matrix is not quarantine authority by itself: rerun the exact
 module on the clean rebased source in the same mode and admit it only when that
 control reproduces the same author-owned failure.

@@ -1149,6 +1149,30 @@ class ContainerBoundaryTests(unittest.TestCase):
                 ["podman", "rm", "--force", container_id],
             )
 
+    def test_container_removal_rejects_disk_and_retained_provenance_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            args = build_args(Path(raw))
+            recorded = {
+                "base_image_id": "a" * 64,
+                "builder_image_input_sha256": "c" * 64,
+                "container_id": "e" * 64,
+                "image_id": "b" * 64,
+            }
+            retained = {**recorded, "container_id": "d" * 64}
+            with (
+                patch.object(job, "load_container_record", return_value=recorded),
+                patch.object(job, "command") as command_mock,
+                self.assertRaisesRegex(
+                    job.JobError,
+                    "differs from retained provenance",
+                ),
+            ):
+                job.remove_owned_container(
+                    args,
+                    immutable_record=retained,
+                )
+            command_mock.assert_not_called()
+
     def test_image_context_is_streamed(self) -> None:
         production_lock_root = job.LOCK_ROOT
         production_before = (
@@ -1771,6 +1795,7 @@ class LocalOwnershipTests(unittest.TestCase):
         }
         status: dict[str, object] = {
             "arguments": arguments,
+            "container": {},
             "log_sha256": job.sha256_file(runtime_log),
             "name": name,
             "output": str(args.output),
@@ -2025,6 +2050,7 @@ class LocalOwnershipTests(unittest.TestCase):
             }
             status = {
                 "arguments": arguments,
+                "container": {},
                 "log_sha256": job.sha256_file(runtime_log),
                 "name": name,
                 "output": str(args.output),
@@ -2070,10 +2096,132 @@ class LocalOwnershipTests(unittest.TestCase):
             remove_container.assert_called_once_with(
                 ANY,
                 tolerate_invalid_record=True,
+                immutable_record={},
             )
             self.assertFalse(directory.exists())
             self.assertTrue((result_root / f"{name}.status.json").is_file())
             self.assertTrue((result_root / f"{name}.remove.json").is_file())
+
+    def test_successful_result_removal_is_idempotent_after_runtime_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            run_root = root / "runs"
+            output_root = root / "outputs"
+            result_root = root / "results"
+            for path in (run_root, output_root, result_root):
+                path.mkdir(mode=0o700)
+            name = "successful-remove-retry"
+            record, status, args, runtime_log = self.collected_fixture(
+                root,
+                run_root,
+                output_root,
+                name,
+            )
+            container = {
+                "base_image_id": "a" * 64,
+                "builder_image_input_sha256": "c" * 64,
+                "container_id": "e" * 64,
+                "image_id": "b" * 64,
+            }
+            job.background_job.publish_json(
+                Path(args.container_state),
+                {
+                    "base_image_id": container["base_image_id"],
+                    "build_id": args.build_id,
+                    "builder_image_input_sha256": container[
+                        "builder_image_input_sha256"
+                    ],
+                    "container_id": container["container_id"],
+                    "container_name": args.container_name,
+                    "image_id": container["image_id"],
+                    "owner": job.OWNER,
+                    "schema": 1,
+                    "selection_cache_sha256": args.selection_cache_sha256,
+                },
+            )
+            output = Path(args.output)
+            output.write_bytes(b"validated package output\n")
+            output.chmod(0o600)
+            status.update(
+                {
+                    "container": container,
+                    "output_sha256": job.sha256_file(output),
+                    "validation_ok": True,
+                }
+            )
+            collected = run_root / name / "status.json"
+            collected.write_bytes(job.json_payload(status))
+            collected.chmod(0o600)
+            invocations: list[list[str]] = []
+
+            def command_mock(argv: list[str], **_kwargs: object):
+                invocations.append(argv)
+                self.assertEqual(
+                    argv,
+                    ["podman", "container", "exists", container["container_id"]],
+                )
+                return completed(argv, returncode=1)
+
+            with (
+                patch.object(job, "RUN_ROOT", run_root),
+                patch.object(job, "OUTPUT_ROOT", output_root),
+                patch.object(job, "RESULT_ROOT", result_root),
+                patch.object(job, "prepare_state"),
+                patch.object(job, "package_terminal_lock", side_effect=unlocked),
+                patch.object(job, "load_record", return_value=record),
+                patch.object(job, "validate_build_arguments"),
+                patch.object(
+                    job.background_job,
+                    "process_state",
+                    return_value={"state": "completed"},
+                ),
+                patch.object(
+                    job.background_job,
+                    "runtime_log_path",
+                    return_value=runtime_log,
+                ),
+                patch.object(job, "command", side_effect=command_mock),
+            ):
+                self.assertEqual(job.package_remove(argparse.Namespace(name=name)), 0)
+                self.assertFalse((run_root / name).exists())
+                self.assertEqual(job.package_remove(argparse.Namespace(name=name)), 0)
+
+            expected = [
+                ["podman", "container", "exists", container["container_id"]],
+                ["podman", "container", "exists", container["container_id"]],
+            ]
+            self.assertEqual(invocations, expected)
+            self.assertTrue((result_root / f"{name}.remove.json").is_file())
+            self.assertTrue((result_root / f"{name}.status.json").is_file())
+            self.assertTrue(output.is_file())
+
+    def test_removal_rejects_malformed_embedded_container_provenance(self) -> None:
+        with self.assertRaisesRegex(
+            job.JobError,
+            "invalid container record fields",
+        ):
+            job.validate_embedded_container_record(
+                {
+                    "base_image_id": "a" * 64,
+                    "container_id": "e" * 64,
+                    "image_id": "b" * 64,
+                },
+                required=True,
+            )
+
+        with self.assertRaisesRegex(
+            job.JobError,
+            "invalid immutable container ID",
+        ):
+            job.validate_embedded_container_record(
+                {
+                    "base_image_id": int("1" * 64),
+                    "builder_image_input_sha256": "c" * 64,
+                    "container_id": "e" * 64,
+                    "image_id": "b" * 64,
+                },
+                required=True,
+            )
 
     def test_remove_retries_after_only_one_final_file_was_published(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

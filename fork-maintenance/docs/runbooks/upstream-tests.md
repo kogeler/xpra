@@ -117,9 +117,13 @@ selection/application, build commands, and runner behavior. Refresh derived
 digests, resolve the selection, run whitespace and fork-control checks, and
 report the proof instead. Any uncertainty or semantic difference resumes the
 normal ladder. This exception never spans an upstream rebase. After
-`develop-rebase`, run the clean quarantine reassessment, tests-only controls,
-patched focused/native gates, and every full leg even when the patch files did
-not change.
+`develop-rebase`, run the clean quarantine reassessment, tests-only controls
+for cases which own retained tests, case-specific no-test semantic inspection
+for those which do not, patched focused/native gates, every case-specific
+durable package boundary against the complete resulting stack, and every full
+leg even when the patch files did not change. The canonical complete sequence
+is
+[`upstream-refresh.md`](upstream-refresh.md).
 
 ## Focused tests
 
@@ -136,6 +140,13 @@ make -C fork-maintenance test-wait RUN=wayland-master-regression-01
 This is the non-vacuous control for deciding whether upstream replaced a case.
 `PATCH_MODE=clean` applies nothing and therefore cannot run a newly introduced
 focused module; `PATCH_MODE=patched` applies the complete selected patch.
+When a production patch owns no test path, `PATCH_MODE=tests-only` fails closed
+instead of pretending to provide a regression. The focused runner also rejects
+`PATCH_MODE=clean`; do not classify either guard failure as a clean test. Perform
+the semantic inspection required by that case's README, run its existing
+focused module on the patched or resulting stack, and prove its durable real
+boundary against the complete resulting stack before deciding that upstream
+replaced it.
 
 Run one atomic case while developing it:
 

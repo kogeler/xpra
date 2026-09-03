@@ -32,12 +32,20 @@ duty case follows the separate admission and rebase rules in
 [`test-quarantine.md`](test-quarantine.md).
 
 The remainder of this runbook is the clean host-worktree fallback used only
-when the operator deliberately begins a new upstream adaptation cycle.
+when the operator deliberately begins a new upstream adaptation cycle. The
+complete rebase, selected-case decision tree, queue-wide tests, and seven live
+profiles are owned by [`upstream-refresh.md`](upstream-refresh.md).
+That canonical runbook first creates one reviewed preservation commit when
+non-ignored work exists; its invocation authorizes that commit without another
+confirmation. It creates no empty commit for a clean checkout and no later
+intermediate or result commit.
 
 ## Host-worktree fallback preconditions
 
 Only when the operator chooses to move the queue to a newer upstream base,
-fetch the fork base and prepare the branch in this order:
+complete the canonical runbook's exhaustive initial-worktree review and its
+one preservation commit when needed. Once that leaves `develop` clean, fetch
+the fork base and prepare the branch in this order:
 
 ```bash
 make -C fork-maintenance repo-sync
@@ -181,9 +189,12 @@ their runners freeze the embedded source and apply the selected queue in isolati
 
 An advance of any master ref does not itself invalidate or block current
 `develop`. Use this procedure only when the operator intentionally chooses that
-new commit as the next patch-adaptation base.
+new commit as the next patch-adaptation base. This section is a summary;
+[`upstream-refresh.md`](upstream-refresh.md) is the canonical executable
+runbook.
 
-With a clean checkout:
+After the canonical runbook's initial preservation boundary has left the
+checkout clean:
 
 ```bash
 make -C fork-maintenance repo-sync
@@ -210,22 +221,40 @@ quarantine remains necessary.
 
 An upstream rebase always invalidates the previous functional acceptance,
 including when every patch still applies byte-for-byte. Run the complete
-offline fork-control suite, every production case in `tests-only` mode, every
-patched focused and native gate, all three complete upstream workflow legs, and
-all seven fixed positive live profiles. A new author-test failure may enter the
-single quarantine only after the same module fails on this exact clean source;
-then rerun the quarantine gates and complete patched matrix.
+offline fork-control suite, a tests-only clean control for every production
+case which owns retained tests and the documented no-test semantic inspection
+otherwise, every patched focused and native gate, all three complete upstream
+workflow legs, every case-specific durable package boundary against the
+resulting stack, and all seven fixed positive live profiles. A new author-test
+failure may enter the single quarantine only after the same module fails on
+this exact clean source; then rerun the quarantine gates and complete patched
+matrix.
 
-Refresh divergent cases one at a time using the apply/edit/update/unapply cycle.
-Run focused checks after each case, then the stack gates. Finish with a clean:
+An `apply` case uses the ordinary isolated `PATCH_MODE=patched` flow. A
+`diverged` case cannot: both `patch-apply` and ordinary patched workspace
+creation intentionally stop at resolver failure. Reconstruct its complete
+candidate in the provenance-bound isolated `PATCH_MODE=reconstruct` mode from
+`upstream-refresh.md`; never edit or stage host Xpra source, use rejects or
+fuzz, export only conflict hunks, or create an intermediate cleanliness commit.
+Run focused checks after each case, then the stack gates. If no tracked content
+changed, finish with:
 
 ```bash
 make -C fork-maintenance develop-check
 ```
 
+If refreshed queue or control-plane files remain uncommitted, `develop-check`
+correctly refuses the dirty checkout. Leave that final gate explicitly
+outstanding in the handoff for the operator; the agent does not create an
+intermediate or final refresh-result commit to satisfy the gate.
+
 ## Commit boundary
 
-No automation target commits. An agent may create a local commit only after the
-user explicitly authorizes it in the current conversation and the relevant
-checks pass. Never commit an applied source copy to clean `develop`; commit the
-case/stack/automation changes. Never push.
+No automation target commits. Invocation of the canonical upstream-refresh
+runbook itself authorizes exactly one direct local preservation commit before
+fetch/rebase when exhaustive review finds legitimate non-ignored changes. It
+contains the complete reviewed tracked and untracked set, is omitted for a
+clean checkout, and never contains an applied source copy. After that boundary
+the agent leaves all case, stack, and automation refresh results uncommitted
+for the operator; no intermediate or final result commit is allowed merely to
+restore a clean gate. Never push.

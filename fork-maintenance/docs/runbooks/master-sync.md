@@ -60,8 +60,14 @@ operator from the command line:
 gh workflow run master-sync.yml --repo kogeler/xpra --ref develop
 ```
 
-When this dispatch belongs to an explicit refresh cycle, wait for it to finish,
-then fetch the fork master it produced:
+When this dispatch belongs to an explicit refresh cycle, wait for it to finish.
+Before fetching the fork master it produced, enter the one-start-commit boundary
+in [`upstream-refresh.md`](upstream-refresh.md): inspect every non-ignored
+change and, iff legitimate work exists, preserve the complete reviewed set in
+the one autonomous local commit authorized by invoking that runbook. A clean
+checkout gets no empty commit, and no later refresh-result commit is allowed.
+Only after the runbook records that commit SHA or `<none>` and requires clean
+porcelain, fetch and verify:
 
 ```bash
 make -C fork-maintenance repo-sync
@@ -77,7 +83,12 @@ fork remains an owner-review boundary.
 
 Automatic master synchronization deliberately does not rebase or invalidate
 `develop`. When the operator is ready to move the embedded source boundary and
-adapt the queue to it, use:
+adapt the queue to it, follow the complete selected-case and queue-wide
+procedure in [`upstream-refresh.md`](upstream-refresh.md). Its initial local
+worktree review and optional one preservation commit must finish before the
+first command below. That invocation needs no additional commit confirmation;
+all later adaptation and validation results remain uncommitted. Its ref and
+rebase sequence is:
 
 ```bash
 make -C fork-maintenance repo-sync
@@ -91,7 +102,9 @@ Resolve every rebase conflict, reassess the quarantine case, resolve the active
 queue, and run the complete post-rebase ladder before publishing the rewritten
 `develop` with an exact-SHA force-with-lease. The ladder is mandatory even when
 the queue applies unchanged: offline fork checks, clean quarantine reassessment,
-tests-only controls, patched focused/native gates, all three full author-test
-legs, and all seven fixed positive live profiles. If the operator does not
-choose this refresh, current `develop` continues to be tested and published
-against its existing embedded source regardless of later master movement.
+tests-only controls for cases which own retained tests, case-specific no-test
+semantic inspection, durable package boundaries against the resulting stack,
+patched focused/native gates, all three full author-test legs, and all seven
+fixed positive live profiles. If the operator does not choose this refresh,
+current `develop` continues to be tested and published against its existing
+embedded source regardless of later master movement.
