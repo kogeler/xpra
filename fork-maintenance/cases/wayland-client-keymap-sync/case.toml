@@ -1,0 +1,47 @@
+schema = 1
+slug = "wayland-client-keymap-sync"
+kind = "production"
+title = "Synchronize Wayland keymaps with clients"
+commit_subject = "Synchronize Wayland keymaps with clients"
+patch_sha256 = "32dee2542d7bcd51ba08de47e5f4f2337a2f96474e43876ff60db9c0ef5bac3a"
+dependencies = []
+paths = [
+  "tests/unittests/unit/client/keyboard_helper_test.py",
+  "tests/unittests/unit/server/subsystem/settings_test.py",
+  "tests/unittests/unit/wayland/keyboard_config_test.py",
+  "tests/unittests/unit/wayland/keyboard_test.py",
+  "tests/unittests/unit/wayland/linkage_test.py",
+  "tests/unittests/unit/wayland/window_test.py",
+  "xpra/client/gtk3/keyboard_helper.py",
+  "xpra/client/gui/keyboard_helper.py",
+  "xpra/platform/keyboard_base.py",
+  "xpra/platform/posix/keyboard.py",
+  "xpra/server/core.py",
+  "xpra/server/source/keyboard.py",
+  "xpra/server/subsystem/keyboard.py",
+  "xpra/server/subsystem/settings.py",
+  "xpra/wayland/server/keyboard.pyx",
+  "xpra/wayland/server/keyboard_config.py",
+  "xpra/wayland/server/subsystem/keyboard.py",
+  "xpra/wayland/server/subsystem/pointer.py",
+  "xpra/wayland/server/subsystem/window.py",
+  "xpra/wayland/server/wlroots.pxd",
+]
+
+[tests]
+list = [
+  "unit.client.keyboard_helper_test",
+  "unit.server.subsystem.settings_test",
+  "unit.wayland.keyboard_config_test",
+  "unit.wayland.keyboard_test",
+  "unit.wayland.window_test",
+  "wayland",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = [
+  "live-wayland-keyboard",
+]

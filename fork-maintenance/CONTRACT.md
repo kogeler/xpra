@@ -179,10 +179,11 @@ its publication start gate. Derived fields are never edited by hand.
 Only these active cases are retained:
 
 1. `wayland-initial-window-state`;
-2. `wayland-empty-damage-throttle`;
-3. `video-pipeline-cleanup-race`;
-4. `debian-libva-codecs-package`;
-5. `upstream-test-quarantine`.
+2. `wayland-client-keymap-sync`;
+3. `wayland-empty-damage-throttle`;
+4. `video-pipeline-cleanup-race`;
+5. `debian-libva-codecs-package`;
+6. `upstream-test-quarantine`.
 
 ## Stack contract
 
@@ -366,7 +367,7 @@ commit, use this clean sequence:
    every production case, then review whether upstream replaced or narrowed any
    patch behavior;
 9. run every patched focused and native gate, all three complete upstream test
-   legs (`full`, `full-cython`, and `full-no-compat`), and all six fixed positive
+   legs (`full`, `full-cython`, and `full-no-compat`), and all seven fixed positive
    live profiles, even if the patches applied without textual changes;
 10. reproduce any newly failing author test on this exact clean master before
     adding it to the single duty quarantine, then rerun its clean quarantine
@@ -497,7 +498,7 @@ owner and final report bind the selected network-profile name.
 
 Every public live wrapper accepts `NETWORK_PROFILE=<name>`. Omitting it uses
 the `default_profile` declared only in `profiles.yml`. The normal required
-six-gate acceptance ladder runs once with that default. Other tracked
+seven-gate acceptance ladder runs once with that default. Other tracked
 network profiles exercise the same positive gates on operator request; they do
 not create additional mandatory gates or weaken any rendering, codec,
 lifecycle, or cleanup assertion.
@@ -775,7 +776,7 @@ uncertain, the exception does not apply and the normal ladder is required. A
 `develop-rebase` necessarily changes the embedded source and therefore never
 qualifies: its acceptance always includes the complete fork-control suite,
 clean quarantine reassessment, production tests-only controls, patched focused
-and native gates, all three author-test legs, and all six fixed positive live
+and native gates, all three author-test legs, and all seven fixed positive live
 profiles.
 
 Ordinary acceptance is green. A pre-existing failure outside the selected
@@ -796,13 +797,40 @@ or execution path restores the normal validation ladder.
 
 The live runner keeps direct Xpra boundaries distinct from SSH orchestration.
 Its exact positive set is Zed RGB, adaptive-alpha Zed H.264, RGB detach, RGB
-direct-TCP transport-loss fault injection, multi-window Vulkan/input hardware
-H.264, and multi-window native-Wayland OpenGL/input hardware H.264. Each fixed
+direct-TCP transport-loss fault injection, native-Wayland client-keymap input,
+multi-window Vulkan/input hardware H.264, and multi-window native-Wayland
+OpenGL/input hardware H.264. Each fixed
 Make wrapper binds every profile dimension and every named job requires a
 nonempty reviewed case or stack selection. Foreground, clean-source, and
 picture-fallback probes are diagnostic and cannot publish acceptance. A
 positive fault-injection profile first proves rendering and input, then proves
 the intended disconnect and survival behavior.
+
+The `live-wayland-keyboard` profile is the standalone client-driven keymap
+boundary. Its case-owned, versioned scenario and digest are frozen with the
+normal immutable inputs. The clean maintained client configures its real X11
+display with each declared structured RMLVO map, locks every declared group,
+and sends complete press/release pairs for one unchanged physical key through
+XTEST. A native-Wayland GTK entry running on the patched server receives no
+expected values and publishes only its actual ordered key events and UTF-8
+buffer. The bound case fixture exercises XKB's four-group maximum twice across
+Latin, Cyrillic, Arabic, Georgian, and Armenian data, then applies a distinct
+replacement on the same connection. Acceptance requires the clean client's
+nested `keymap-changed` packet to be received, to install the expected hash,
+and to be explicitly accepted after normalization in that exact order; a
+preceding `layout-changed` application, an identical-only or silent packet, or
+any rejected-configuration status cannot pass. Each injection also binds a
+bounded clean-client log interval containing exactly the real `key-action`
+press and release sent by Xpra, including its keycode, group, keysym, name,
+Unicode string, and the exact internal Xpra ID of the forwarded fixture window;
+successful XTEST calls alone are not client observation. The
+post-input server information must expose the exact effective RMLVO, compiled
+group count, owner, and final exercised group. It also requires exact client
+XKB state, group-aware server translation and device events, the complete
+authoritative application text sequence, unchanged client/server process and
+established-TCP identities, runtime replacement, zero fixture exit,
+application-exit lifecycle, and owned cleanup. Packet/log/group evidence
+without the application buffer is never sufficient.
 
 H.264 acceptance deliberately assigns different CSC roles to the endpoints.
 The server enables `libyuv` to convert Wayland `BGRX`/`RGBX` source buffers to

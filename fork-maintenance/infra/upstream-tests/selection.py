@@ -32,6 +32,7 @@ SUPPORTED_GATES = frozenset(
         "full-cython",
         "full-no-compat",
         "live-rgb",
+        "live-wayland-keyboard",
         "live-wayland-h264-hardware",
         "live-wayland-opengl-h264-hardware",
     }
