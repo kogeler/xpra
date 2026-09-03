@@ -67,7 +67,9 @@ If it is absent, follow the durable image-build sequence in
 [`bootstrap.md`](bootstrap.md). Do not let an ordinary test target silently
 pull or rebuild its environment. Test jobs inspect that cache entry and create
 their container from the returned immutable image ID, never from the mutable tag
-alone. Retained `image-builds/.image-cache.lock` serializes cache creation,
+alone. The preflight and test startup use the same exact verifier, including
+the current source label, build-run UUID, and rejection of extra maintenance
+labels. Retained `image-builds/.image-cache.lock` serializes cache creation,
 immutable-ID inspection/use handoff, and explicit removal. Podman image-build
 children inherit the open lock. A detached container's Python starter instead
 holds the lock itself through validation, immutable-ID handoff, and payload
@@ -76,9 +78,14 @@ long-lived networking helper retains the lease.
 
 `test-image-cache-remove` takes that same lock and refuses deletion while any
 matching image-build or test prelaunch/owner still leases the image. Cleanup may
-accept an older valid source label only because removal does not make new
-acceptance evidence; the complete owner-label set and image/input/workflow
-identity must still match exactly.
+accept a source label only after proving that it is an existing Git commit and
+an ancestor of, or equal to, the current embedded source; unknown, unrelated,
+and future commits are rejected. Removal still does not make new acceptance
+evidence, and the complete owner-label set plus image/input/workflow identity
+must match exactly. After an upstream rebase, when `test-image`
+rejects an otherwise exact cache solely for that old source label, use this
+target, confirm that `test-image` now reports the image absent, and rebuild it
+through the named lifecycle. Any broader label mismatch remains a hard stop.
 
 A named standalone build publishes
 `image-builds/.<IMAGE_RUN>.image-prelaunch.json` before creating and populating
@@ -242,11 +249,13 @@ make -C fork-maintenance test-start \
   TARGET=quarantine-no-compat RUN=rebase-quarantine-no-compat-01
 ```
 
-These targets intentionally invert the result. They return success only after
-the build succeeds and every declared module is still an ignored failure; a
-passing module or a different failure set makes the gate fail as stale. Follow
-[`test-quarantine.md`](test-quarantine.md) to remove or narrow stale entries
-before the patched full matrix.
+These targets intentionally use mixed expectations. Every gate runs the full
+ordered `[quarantine].modules` union, passes `--skip-fail` only for its exact
+`[quarantine.gates].<gate>` subset, and returns success only when that subset is
+the ordered ignored-failure set while every complement module passes. Any
+unignored failure, skipped module, or count mismatch fails closed. Follow
+[`test-quarantine.md`](test-quarantine.md) to remove stale assignments or admit
+a newly affected leg before the patched full matrix.
 
 ## Failure triage
 

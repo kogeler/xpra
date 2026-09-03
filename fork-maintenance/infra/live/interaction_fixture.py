@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from pathlib import Path
 
 import gi
@@ -16,9 +19,59 @@ CLICKED_TITLE = "Xpra Hardware Interaction Clicked"
 CLICK_MARKER = Path("/tmp/xpra-hardware-pointer-clicked")
 KEY_MARKER = Path("/tmp/xpra-hardware-keyboard-escape")
 READY_MARKER = Path("/tmp/xpra-hardware-interaction-ready")
+IDENTITY_ARTIFACT = Path("/artifacts/interaction.identity.json")
+
+
+def process_identity() -> dict[str, object]:
+    """Return the kernel identity of this exact fixture process."""
+    proc = Path("/proc/self")
+    stat_value = (proc / "stat").read_text(encoding="ascii")
+    end = stat_value.rfind(")")
+    fields = stat_value[end + 2 :].split() if end >= 0 else []
+    if len(fields) < 20:
+        raise RuntimeError("cannot read the interaction fixture start time")
+    cmdline = (proc / "cmdline").read_bytes()
+    argv = [os.fsdecode(value) for value in cmdline.split(b"\0") if value]
+    if not cmdline or not argv:
+        raise RuntimeError("cannot read the interaction fixture command line")
+    return {
+        "argv": argv,
+        "cmdline_sha256": hashlib.sha256(cmdline).hexdigest(),
+        "pid": os.getpid(),
+        "schema": 1,
+        "start_ticks": fields[19],
+    }
+
+
+def publish_process_identity() -> None:
+    """Publish identity without replacing any pre-existing artifact."""
+    payload = (json.dumps(process_identity(), sort_keys=True) + "\n").encode()
+    temporary = IDENTITY_ARTIFACT.with_name(
+        f".{IDENTITY_ARTIFACT.name}.{os.getpid()}.partial"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, IDENTITY_ARTIFACT)
+        directory = os.open(
+            IDENTITY_ARTIFACT.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        os.close(descriptor)
+        temporary.unlink(missing_ok=True)
 
 
 def main() -> int:
+    publish_process_identity()
     for marker in (CLICK_MARKER, KEY_MARKER, READY_MARKER):
         marker.unlink(missing_ok=True)
     window = Gtk.Window(title=READY_TITLE)

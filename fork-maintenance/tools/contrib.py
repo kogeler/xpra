@@ -92,9 +92,13 @@ SUPPORTED_GATES = frozenset(
     }
 )
 CASE_KINDS = frozenset({"production", "test-quarantine"})
-QUARANTINE_GATES = frozenset(
-    {"quarantine", "quarantine-cython", "quarantine-no-compat"}
+TEST_QUARANTINE_SLUG = "upstream-test-quarantine"
+QUARANTINE_GATE_NAMES = (
+    "quarantine",
+    "quarantine-cython",
+    "quarantine-no-compat",
 )
+QUARANTINE_GATES = frozenset(QUARANTINE_GATE_NAMES)
 ACTIVE_FORK_WORKFLOW = ".github/workflows/develop.yml"
 MASTER_SYNC_WORKFLOW = ".github/workflows/master-sync.yml"
 DEB_RELEASE_WORKFLOW = ".github/workflows/deb-packages.yml"
@@ -138,6 +142,7 @@ class Case:
     tests: tuple[str, ...]
     required_gates: tuple[str, ...]
     quarantined_tests: tuple[str, ...]
+    quarantined_tests_by_gate: tuple[tuple[str, tuple[str, ...]], ...]
 
     @property
     def patch(self) -> Path:
@@ -363,12 +368,41 @@ def patch_paths(path: Path) -> tuple[str, ...]:
     return tuple(sorted(found))
 
 
+def quarantine_module_paths(modules: Iterable[str]) -> tuple[str, ...]:
+    return tuple(
+        sorted(f"tests/unittests/{module.replace('.', '/')}.py" for module in modules)
+    )
+
+
+def is_quarantine_path_transition(case: Case | DraftCase) -> bool:
+    return (
+        isinstance(case, Case)
+        and case.slug == TEST_QUARANTINE_SLUG
+        and case.kind == "test-quarantine"
+        and tuple(sorted(case.paths)) != quarantine_module_paths(case.quarantined_tests)
+    )
+
+
+def validate_case_kind_identity(slug: str, kind: str, manifest: Path) -> None:
+    if kind == "test-quarantine" and slug != TEST_QUARANTINE_SLUG:
+        fail(
+            f"{manifest}: only {TEST_QUARANTINE_SLUG!r} may use "
+            "kind='test-quarantine'"
+        )
+    if slug == TEST_QUARANTINE_SLUG and kind != "test-quarantine":
+        fail(f"{manifest}: {TEST_QUARANTINE_SLUG!r} must use kind='test-quarantine'")
+
+
 def case_is_draft(directory: Path) -> bool:
     manifest = directory / "case.toml"
     return manifest.is_file() and read_toml(manifest).get("draft") is True
 
 
-def load_case(directory: Path) -> Case:
+def load_case(
+    directory: Path,
+    *,
+    allow_quarantine_path_transition: bool = False,
+) -> Case:
     manifest = directory / "case.toml"
     data = read_toml(manifest)
     if data.get("schema") != 1 or data.get("draft") is True:
@@ -379,6 +413,7 @@ def load_case(directory: Path) -> Case:
     kind = data.get("kind", "production")
     if not isinstance(kind, str) or kind not in CASE_KINDS:
         fail(f"{manifest}: kind must be one of {sorted(CASE_KINDS)}")
+    validate_case_kind_identity(slug, kind, manifest)
     title = require_string(data, "title", manifest)
     subject = require_string(data, "commit_subject", manifest)
     if "\n" in title or "\n" in subject:
@@ -420,6 +455,7 @@ def load_case(directory: Path) -> Case:
         fail(f"{manifest}: evidence.required_gates contains an unsupported gate")
     quarantine_data = data.get("quarantine")
     quarantined_tests: tuple[str, ...] = ()
+    quarantined_tests_by_gate: tuple[tuple[str, tuple[str, ...]], ...] = ()
     if kind == "production":
         if quarantine_data is not None:
             fail(f"{manifest}: production cases may not declare [quarantine]")
@@ -430,6 +466,11 @@ def load_case(directory: Path) -> Case:
             fail(f"{manifest}: test-quarantine cases may not have dependencies")
         if not isinstance(quarantine_data, dict):
             fail(f"{manifest}: test-quarantine cases require [quarantine]")
+        if set(quarantine_data) != {"modules", "gates"}:
+            fail(
+                f"{manifest}: test-quarantine quarantine must contain exactly "
+                "modules and gates"
+            )
         quarantined_tests = require_strings(quarantine_data, "modules", manifest)
         if (
             not quarantined_tests
@@ -439,12 +480,40 @@ def load_case(directory: Path) -> Case:
             fail(f"{manifest}: quarantine.modules must contain unique unit.* modules")
         if not set(quarantined_tests).issubset(tests):
             fail(f"{manifest}: every quarantined module must be retained in tests.list")
+        gates_data = quarantine_data.get("gates")
+        if not isinstance(gates_data, dict) or set(gates_data) != QUARANTINE_GATES:
+            fail(
+                f"{manifest}: quarantine.gates must contain exactly "
+                f"{QUARANTINE_GATE_NAMES}"
+            )
+        assigned: set[str] = set()
+        for gate in QUARANTINE_GATE_NAMES:
+            gate_modules = require_strings(gates_data, gate, manifest)
+            if (
+                len(gate_modules) != len(set(gate_modules))
+                or not all(UNIT_TEST_RE.fullmatch(item) for item in gate_modules)
+            ):
+                fail(f"{manifest}: quarantine.gates.{gate} must contain unique unit.* modules")
+            gate_set = set(gate_modules)
+            if not gate_set.issubset(quarantined_tests):
+                fail(f"{manifest}: quarantine.gates.{gate} is not a subset of modules")
+            ordered = tuple(test for test in quarantined_tests if test in gate_set)
+            if gate_modules != ordered:
+                fail(
+                    f"{manifest}: quarantine.gates.{gate} must preserve "
+                    "quarantine.modules order"
+                )
+            assigned.update(gate_modules)
+            quarantined_tests_by_gate += ((gate, gate_modules),)
+        if assigned != set(quarantined_tests):
+            fail(f"{manifest}: every quarantined module must be assigned to at least one gate")
         if set(required_gates) != QUARANTINE_GATES:
             fail(f"{manifest}: a test-quarantine case must require all quarantine gates")
-        expected_paths = tuple(
-            sorted(f"tests/unittests/{item.replace('.', '/')}.py" for item in quarantined_tests)
-        )
-        if tuple(sorted(paths)) != expected_paths:
+        expected_paths = quarantine_module_paths(quarantined_tests)
+        if (
+            tuple(sorted(paths)) != expected_paths
+            and not allow_quarantine_path_transition
+        ):
             fail(
                 f"{manifest}: test-quarantine paths must exactly match its modules: "
                 f"{expected_paths}"
@@ -461,6 +530,7 @@ def load_case(directory: Path) -> Case:
         tests,
         required_gates,
         quarantined_tests,
+        quarantined_tests_by_gate,
     )
     if sha256_file(case.patch) != case.patch_sha256:
         fail(f"{manifest}: fix.patch does not match patch_sha256")
@@ -485,6 +555,7 @@ def load_draft_case(directory: Path) -> DraftCase:
     kind = data.get("kind", "production")
     if not isinstance(kind, str) or kind not in CASE_KINDS:
         fail(f"{manifest}: kind must be one of {sorted(CASE_KINDS)}")
+    validate_case_kind_identity(slug, kind, manifest)
     dependencies = require_strings(data, "dependencies", manifest)
     if (
         len(dependencies) != len(set(dependencies))
@@ -499,11 +570,18 @@ def load_draft_case(directory: Path) -> DraftCase:
     return DraftCase(slug, directory, kind, dependencies)
 
 
-def load_cases() -> dict[str, Case]:
+def load_cases(*, quarantine_path_transition: str = "") -> dict[str, Case]:
     if CASES_ROOT.is_symlink() or not CASES_ROOT.is_dir():
         fail(f"cases directory is missing or unsafe: {CASES_ROOT}")
+    if quarantine_path_transition and not SLUG_RE.fullmatch(quarantine_path_transition):
+        fail(f"invalid quarantine path transition slug: {quarantine_path_transition!r}")
     cases = {
-        path.name: load_case(path)
+        path.name: load_case(
+            path,
+            allow_quarantine_path_transition=(
+                path.name == quarantine_path_transition
+            ),
+        )
         for path in sorted(CASES_ROOT.iterdir())
         if path.is_dir() and not path.name.startswith(".") and not case_is_draft(path)
     }
@@ -566,14 +644,23 @@ def load_stacks(cases: dict[str, Case]) -> dict[str, Stack]:
     return stacks
 
 
-def get_case(slug: str, *, allow_draft: bool = False) -> Case | DraftCase:
+def get_case(
+    slug: str,
+    *,
+    allow_draft: bool = False,
+    allow_quarantine_path_transition: bool = False,
+) -> Case | DraftCase:
     if not SLUG_RE.fullmatch(slug):
         fail(f"invalid case slug: {slug!r}")
     directory = CASES_ROOT / slug
     if allow_draft and directory.is_dir() and case_is_draft(directory):
         return load_draft_case(directory)
     try:
-        return load_cases()[slug]
+        return load_cases(
+            quarantine_path_transition=(
+                slug if allow_quarantine_path_transition else ""
+            )
+        )[slug]
     except KeyError as error:
         raise ContribError(f"unknown completed case: {slug}") from error
 
@@ -679,6 +766,14 @@ def sync_repo(repo: Path) -> str:
     for remote in ("origin", "upstream"):
         fetch_master(repo, remote)
     return verify_live_fork_master(repo)
+
+
+def repo_sync(repo: Path) -> str:
+    """Enter the public refresh fetch boundary only from clean develop."""
+    if current_branch(repo) != INTEGRATION_BRANCH:
+        fail(f"repo-sync requires the {INTEGRATION_BRANCH} branch")
+    require_clean(repo)
+    return sync_repo(repo)
 
 
 def is_ancestor(repo: Path, older: str, newer: str) -> bool:
@@ -1186,6 +1281,7 @@ def case_update_owner_payload(
     slug: str,
     workspace: str,
     operation_id: str,
+    quarantine_path_transition: bool = False,
 ) -> dict[str, Any]:
     transaction, owner = case_update_paths(repo, slug)
     return {
@@ -1193,6 +1289,7 @@ def case_update_owner_payload(
         "operation_id": operation_id,
         "owner": CASE_UPDATE_OWNER,
         "policy": "complete",
+        "quarantine_path_transition": quarantine_path_transition,
         "repository": str(repo.resolve()),
         "schema": 1,
         "slug": slug,
@@ -1202,23 +1299,35 @@ def case_update_owner_payload(
     }
 
 
+def case_update_quarantine_path_transition(payload: dict[str, Any]) -> bool:
+    """Return the validated transition authority, including legacy false."""
+    return bool(payload.get("quarantine_path_transition", False))
+
+
 def validate_case_update_owner(repo: Path, slug: str) -> dict[str, Any]:
     transaction, owner = case_update_paths(repo, slug)
     payload = load_cleanup_json(owner, "case update owner")
     workspace = payload.get("workspace")
     operation_id = payload.get("operation_id")
+    has_quarantine_path_transition = "quarantine_path_transition" in payload
+    quarantine_path_transition = payload.get("quarantine_path_transition", False)
     if not isinstance(workspace, str) or (
         workspace and not WORKSPACE_RE.fullmatch(workspace)
     ):
         fail(f"case update owner has an invalid workspace: {owner}")
     if not isinstance(operation_id, str) or not UUID4_RE.fullmatch(operation_id):
         fail(f"case update owner has an invalid operation identity: {owner}")
+    if has_quarantine_path_transition and not isinstance(quarantine_path_transition, bool):
+        fail(f"case update owner has invalid quarantine transition authority: {owner}")
     expected = case_update_owner_payload(
         repo,
         slug,
         workspace,
         operation_id,
+        quarantine_path_transition,
     )
+    if not has_quarantine_path_transition:
+        expected.pop("quarantine_path_transition")
     if payload != expected:
         fail(f"case update owner is inconsistent: {owner}")
     if Path(str(payload["transaction"])) != transaction:
@@ -1325,6 +1434,7 @@ def validate_case_update_transaction(
         "operation_id",
         "owner",
         "policy",
+        "quarantine_path_transition",
         "repository",
         "schema",
         "slug",
@@ -1332,6 +1442,8 @@ def validate_case_update_transaction(
         "workspace",
         "owner_record",
     }
+    if "quarantine_path_transition" not in owner:
+        expected_top.remove("quarantine_path_transition")
     if set(marker) != expected_top:
         fail(f"case update transaction has an unexpected schema: {marker_path}")
     for key in expected_top.difference({"entries"}):
@@ -1501,10 +1613,13 @@ def case_update_remove_payload(
     operation_id: str,
     owner_sha256: str,
     workspace: str,
+    quarantine_path_transition: bool,
+    *,
+    include_quarantine_path_transition: bool = True,
 ) -> dict[str, Any]:
     transaction, owner = case_update_paths(repo, slug)
     staging, _removal = case_update_removal_paths(repo, slug)
-    return {
+    payload = {
         "device": device,
         "disposition": disposition,
         "fingerprint": fingerprint,
@@ -1523,6 +1638,9 @@ def case_update_remove_payload(
         "transaction": str(transaction),
         "workspace": workspace,
     }
+    if include_quarantine_path_transition:
+        payload["quarantine_path_transition"] = quarantine_path_transition
+    return payload
 
 
 def validate_case_update_remove_transaction(repo: Path, slug: str) -> dict[str, Any]:
@@ -1536,6 +1654,8 @@ def validate_case_update_remove_transaction(repo: Path, slug: str) -> dict[str, 
     operation_id = payload.get("operation_id")
     owner_sha256 = payload.get("owner_sha256")
     workspace_name = payload.get("workspace")
+    has_quarantine_path_transition = "quarantine_path_transition" in payload
+    quarantine_path_transition = payload.get("quarantine_path_transition", False)
     owner_present = owner.exists() or owner.is_symlink()
     if (
         not isinstance(operation_id, str)
@@ -1543,13 +1663,32 @@ def validate_case_update_remove_transaction(repo: Path, slug: str) -> dict[str, 
         or not SHA256_RE.fullmatch(str(owner_sha256 or ""))
         or not isinstance(workspace_name, str)
         or (workspace_name and not WORKSPACE_RE.fullmatch(workspace_name))
+        or (
+            has_quarantine_path_transition
+            and not isinstance(quarantine_path_transition, bool)
+        )
     ):
         fail(f"case update removal phase identity is invalid: {removal}")
+    expected_owner = case_update_owner_payload(
+        repo,
+        slug,
+        workspace_name,
+        operation_id,
+        quarantine_path_transition,
+    )
+    if not has_quarantine_path_transition:
+        expected_owner.pop("quarantine_path_transition")
+    if sha256_bytes(canonical_json_bytes(expected_owner)) != owner_sha256:
+        fail(f"case update removal owner digest is inconsistent: {removal}")
     if owner_present:
         owner_payload = validate_case_update_owner(repo, slug)
         if (
             owner_payload["operation_id"] != operation_id
             or owner_payload["workspace"] != workspace_name
+            or ("quarantine_path_transition" in owner_payload)
+            != has_quarantine_path_transition
+            or case_update_quarantine_path_transition(owner_payload)
+            != quarantine_path_transition
             or sha256_file(owner) != owner_sha256
         ):
             fail(f"case update removal owner differs: {removal}")
@@ -1616,6 +1755,8 @@ def validate_case_update_remove_transaction(repo: Path, slug: str) -> dict[str, 
             operation_id,
             str(owner_sha256),
             workspace_name,
+            quarantine_path_transition,
+            include_quarantine_path_transition=has_quarantine_path_transition,
         )
     ):
         fail(f"case update removal phase is inconsistent: {removal}")
@@ -1689,6 +1830,10 @@ def publish_case_update_remove_transaction(
             str(owner_payload["operation_id"]),
             sha256_file(case_update_paths(repo, slug)[1]),
             str(owner_payload["workspace"]),
+            case_update_quarantine_path_transition(owner_payload),
+            include_quarantine_path_transition=(
+                "quarantine_path_transition" in owner_payload
+            ),
         ),
         "case update removal phase",
     )
@@ -1702,6 +1847,10 @@ def finish_case_update_remove_transaction(repo: Path, slug: str) -> tuple[Path, 
     validate_published_case(
         slug,
         repo / "fork-maintenance" / "cases" / slug,
+        allow_quarantine_path_transition=(
+            payload["disposition"] == "abort"
+            and case_update_quarantine_path_transition(payload)
+        ),
     )
     workspace_name = str(payload["workspace"])
     if workspace_name:
@@ -1818,6 +1967,9 @@ def validate_case_update_preparation(repo: Path, slug: str) -> dict[str, Any]:
         validate_published_case(
             slug,
             repo / "fork-maintenance" / "cases" / slug,
+            allow_quarantine_path_transition=case_update_quarantine_path_transition(
+                owner
+            ),
         )
         workspace_name = str(owner["workspace"])
         if workspace_name:
@@ -1991,6 +2143,7 @@ def atomic_update_case_files(
     verify_source_commit: str | None = None,
 ) -> Case:
     manifest_bytes = manifest_text.encode("utf-8")
+    quarantine_path_transition = is_quarantine_path_transition(case)
     expected_case_directory = repo / "fork-maintenance" / "cases" / case.slug
     if case.directory != expected_case_directory:
         fail(f"case update escaped its repository case directory: {case.directory}")
@@ -2030,6 +2183,7 @@ def atomic_update_case_files(
                 case.slug,
                 workspace_name,
                 operation_id,
+                quarantine_path_transition,
             ),
             "case update owner",
         )
@@ -2094,6 +2248,7 @@ def atomic_update_case_files(
                 case.slug,
                 workspace_name,
                 operation_id,
+                quarantine_path_transition,
             )
             marker["entries"] = marker_entries
             publish_private_json(
@@ -3451,7 +3606,11 @@ def _stage_workspace_locked(
     if not workspace.selection.startswith("cases/"):
         fail("only an atomic case workspace can be staged for patch update")
     slug = workspace.selection.split("/", 1)[1]
-    case = get_case(slug, allow_draft=True)
+    case = get_case(
+        slug,
+        allow_draft=True,
+        allow_quarantine_path_transition=allow_path_change,
+    )
     candidate = set(workspace_candidate_names(workspace))
     candidate.update(unstaged_names(workspace.source))
     candidate.update(untracked_names(workspace.source))
@@ -3472,6 +3631,10 @@ def _stage_workspace_locked(
     names = workspace_candidate_names(workspace)
     if not names:
         fail("workspace candidate is empty after staging")
+    if isinstance(case, Case) and case.kind == "test-quarantine":
+        expected = quarantine_module_paths(case.quarantined_tests)
+        if names != expected:
+            fail(f"workspace quarantine paths {names} do not match modules {expected}")
     if git(
         workspace.source,
         "diff",
@@ -3512,7 +3675,11 @@ def _update_case_from_workspace_locked(
     if not workspace.selection.startswith("cases/"):
         fail("only an atomic case workspace can update a case")
     slug = workspace.selection.split("/", 1)[1]
-    case = get_case(slug, allow_draft=True)
+    case = get_case(
+        slug,
+        allow_draft=True,
+        allow_quarantine_path_transition=allow_path_change,
+    )
     expected_patch_bytes = case.patch.read_bytes()
     expected_manifest_bytes = case.manifest.read_bytes()
     resolution = json.loads(
@@ -3550,6 +3717,10 @@ def _update_case_from_workspace_locked(
         and not allow_path_change
     ):
         fail(f"workspace paths {names} do not match manifest paths {tuple(sorted(case.paths))}")
+    if isinstance(case, Case) and case.kind == "test-quarantine":
+        expected = quarantine_module_paths(case.quarantined_tests)
+        if names != expected:
+            fail(f"workspace quarantine paths {names} do not match modules {expected}")
     patch_bytes = git(
         workspace.source,
         "diff",
@@ -5396,6 +5567,7 @@ def validate_deb_retained_state(package_root: Path) -> tuple[str, ...]:
         blockers.append(f"deb-selection-runtime:{partial}")
 
     cache_name = re.compile(r"([0-9a-f]{64})-([0-9a-f]{64})")
+    active_selection_sha256 = deb_selection_semantic_digest(AUTOMATION_ROOT)
     for cache in sorted(selections.iterdir(), key=lambda item: item.name):
         if cache in allowed_hidden:
             continue
@@ -5431,7 +5603,15 @@ def validate_deb_retained_state(package_root: Path) -> tuple[str, ...]:
             or sha256_file(state_path) != cache_sha256
             or state.get("snapshot_tree_sha256")
             != deb_selection_tree_sha256(snapshot)
-            or deb_selection_semantic_digest(snapshot) != selection_sha256
+        ):
+            fail(f"retained DEB selection cache provenance is inconsistent: {cache}")
+        # Historical immutable snapshots may use manifest vocabulary which a
+        # later resolver no longer accepts.  Their private tree and complete
+        # content-addressed metadata remain mandatory above.  Replay semantic
+        # validation only for a cache which could represent the active queue.
+        if (
+            selection_sha256 == active_selection_sha256
+            and deb_selection_semantic_digest(snapshot) != selection_sha256
         ):
             fail(f"retained DEB selection cache provenance is inconsistent: {cache}")
     return tuple(blockers)
@@ -7140,15 +7320,27 @@ def validate_case_create_partial(partial: Path) -> None:
         fail(f"case creation partial contains a symlink: {partial}")
 
 
-def validate_published_case(slug: str, directory: Path | None = None) -> None:
+def validate_published_case(
+    slug: str,
+    directory: Path | None = None,
+    *,
+    allow_quarantine_path_transition: bool = False,
+) -> None:
     if directory is None:
         directory = CASES_ROOT / slug
     if directory.is_symlink() or not directory.is_dir():
         fail(f"published case is missing or unsafe: {directory}")
     if case_is_draft(directory):
+        if allow_quarantine_path_transition:
+            fail("a draft case cannot carry quarantine path-transition authority")
         case = load_draft_case(directory)
     else:
-        case = load_case(directory)
+        case = load_case(
+            directory,
+            allow_quarantine_path_transition=allow_quarantine_path_transition,
+        )
+        if allow_quarantine_path_transition and not is_quarantine_path_transition(case):
+            fail("case update owner has stale quarantine path-transition authority")
     if case.slug != slug:
         fail(f"published case has an inconsistent identity: {directory}")
 
@@ -7185,6 +7377,9 @@ def _recover_case_update_locked(repo: Path, slug: str) -> tuple[Path, ...]:
             validate_published_case(
                 slug,
                 repo / "fork-maintenance" / "cases" / slug,
+                allow_quarantine_path_transition=case_update_quarantine_path_transition(
+                    owner_payload
+                ),
             )
             workspace_name = str(owner_payload["workspace"])
             if workspace_name:
@@ -7290,13 +7485,16 @@ def scaffold_case(repo: Path, slug: str) -> Path:
     try:
         temporary.mkdir(mode=0o700)
         (temporary / "tests").mkdir()
+        case_kind = (
+            "test-quarantine" if slug == TEST_QUARANTINE_SLUG else "production"
+        )
         (temporary / "case.toml").write_text(
             "\n".join(
                 (
                     "schema = 1",
                     "draft = true",
                     f'slug = "{slug}"',
-                    'kind = "production"',
+                    f'kind = "{case_kind}"',
                     'title = ""',
                     'commit_subject = ""',
                     'patch_sha256 = ""',
@@ -7459,7 +7657,7 @@ def main(argv: list[str] | None = None) -> int:
         if status:
             print(status, end="")
     elif args.command == "repo-sync":
-        base = sync_repo(repo)
+        base = repo_sync(repo)
         print(f"fork_master={base}")
         print("sync=passed")
     elif args.command == "master-update":
