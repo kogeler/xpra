@@ -156,6 +156,9 @@ make -C fork-maintenance test-wait RUN=develop-focused-01
 
 Focused execution derives unit modules from the selected manifests. A missing
 subject module is a failure, not a skip.
+When the selection declares the `wayland` gate, focused setup enables the
+native Wayland server extension for any owning case; this is gate-driven and
+must not depend on the `wayland-initial-window-state` slug.
 
 ## Native boundaries
 

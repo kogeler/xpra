@@ -3,6 +3,7 @@ slug = "develop"
 description = "The complete active downstream patch queue"
 series = [
   "wayland-initial-window-state",
+  "wayland-client-keymap-sync",
   "wayland-empty-damage-throttle",
   "video-pipeline-cleanup-race",
   "debian-libva-codecs-package",
@@ -16,6 +17,7 @@ list = [
   "quarantine-cython",
   "quarantine-no-compat",
   "wayland",
+  "live-wayland-keyboard",
   "full",
   "full-cython",
   "full-no-compat",

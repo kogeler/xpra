@@ -212,7 +212,7 @@ An upstream rebase always invalidates the previous functional acceptance,
 including when every patch still applies byte-for-byte. Run the complete
 offline fork-control suite, every production case in `tests-only` mode, every
 patched focused and native gate, all three complete upstream workflow legs, and
-all six fixed positive live profiles. A new author-test failure may enter the
+all seven fixed positive live profiles. A new author-test failure may enter the
 single quarantine only after the same module fails on this exact clean source;
 then rerun the quarantine gates and complete patched matrix.
 

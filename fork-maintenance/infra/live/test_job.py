@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import fcntl
 import hashlib
 import importlib.util
@@ -8,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import unittest
 from argparse import Namespace
 from contextlib import contextmanager, redirect_stdout
@@ -3003,6 +3005,7 @@ class LiveTransportProfileTest(unittest.TestCase):
 
     def test_supported_xpra_only_profiles_are_exact(self) -> None:
         expected = {
+            ("keyboard", "application-exit", "rgb", "strict", "default"),
             ("zed", "application-exit", "rgb", "strict", "default"),
             ("zed", "application-exit", "h264", "adaptive-alpha", "default"),
             (
@@ -3141,6 +3144,13 @@ class LiveTransportProfileTest(unittest.TestCase):
                 "LIFECYCLE=application-exit",
                 "ENCODING=h264",
                 "H264_CLIENT_POLICY=adaptive-alpha",
+                "ALPHA_SCENARIOS=default",
+            ),
+            "live-wayland-keyboard": (
+                "APPLICATION=keyboard",
+                "LIFECYCLE=application-exit",
+                "ENCODING=rgb",
+                "H264_CLIENT_POLICY=strict",
                 "ALPHA_SCENARIOS=default",
             ),
             "live-xpra-detach": (
@@ -3448,6 +3458,905 @@ class LiveTransportProfileTest(unittest.TestCase):
                     2: "Xpra Hardware Interaction Ready on server",
                 },
             )
+
+    def passing_keyboard_evidence(
+        self,
+    ) -> tuple[dict[str, object], dict[str, object], str]:
+        scenario_path = (
+            LIVE_DIRECTORY.parents[1]
+            / "cases"
+            / "wayland-client-keymap-sync"
+            / "tests"
+            / live_run.KEYBOARD_SCENARIO_BASENAME
+        )
+        scenario = live_run.load_keyboard_scenario(scenario_path)
+        scenario_sha256 = live_run.sha256_file(scenario_path)
+        window_id = 4194305
+        physical_keycode = 24
+        symbol_values = {
+            "q": (113, "q", "q", "q"),
+            "a": (97, "a", "a", "a"),
+            "й": (1738, "Cyrillic_shorti", "Cyrillic_shorti", "Cyrillic_shorti"),
+            "ض": (1494, "Arabic_dad", "Arabic_dad", "Arabic_dad"),
+            "ქ": (0x10010E5, "Georgian_khar", "Q", "U+10E5"),
+            "ճ": (0x1000573, "Armenian_tche", "Q", "U+0573"),
+        }
+        cumulative = ""
+        phases = []
+        events: list[dict[str, object]] = [
+            {
+                "backend": "wayland-0",
+                "event": "ready",
+                "monotonic_ns": 1000,
+                "schema": 1,
+                "sequence": 0,
+                "text": "",
+                "title": live_run.KEYBOARD_FIXTURE_TITLE,
+            }
+        ]
+        sequence = 1
+        offset = 100
+        for phase in scenario["phases"]:
+            phase_inputs = []
+            phase_start = offset
+            offset += 100
+            phase_end = offset
+            for item in phase["inputs"]:
+                before = cumulative
+                cumulative += item["expected_text"]
+                keysym, driver_keyname, packet_keyname, fixture_keyname = symbol_values[
+                    item["expected_text"]
+                ]
+                start = offset
+                offset += 100
+                trace = {
+                    "device": [
+                        {"keycode": physical_keycode, "pressed": True},
+                        {"keycode": physical_keycode, "pressed": False},
+                    ],
+                    "resolutions": [
+                        {
+                            "client_group": item["group"],
+                            "client_keycode": physical_keycode,
+                            "keyname": packet_keyname,
+                            "keyval": keysym,
+                            "pressed": True,
+                            "server_group": item["group"],
+                            "server_keycode": physical_keycode,
+                        },
+                        {
+                            "client_group": item["group"],
+                            "client_keycode": physical_keycode,
+                            "keyname": packet_keyname,
+                            "keyval": keysym,
+                            "pressed": False,
+                            "server_group": item["group"],
+                            "server_keycode": physical_keycode,
+                        },
+                    ],
+                    "sha256": "a" * 64,
+                }
+                phase_inputs.append(
+                    {
+                        "application_text": cumulative,
+                        "client": {
+                            "display": live_run.CLIENT_DISPLAY,
+                            "focus_before": window_id,
+                            "group_after": item["group"],
+                            "group_before": item["group"],
+                            "group_requested": item["group"],
+                            "keysym": keysym,
+                            "keysym_name": driver_keyname,
+                            "physical_keycode": physical_keycode,
+                            "press": True,
+                            "release": True,
+                            "schema": 1,
+                            "window": window_id,
+                        },
+                        "client_log_range": [start, offset],
+                        "client_trace": {
+                            "events": [
+                                {
+                                    "group": item["group"],
+                                    "keycode": physical_keycode,
+                                    "keyname": packet_keyname,
+                                    "keysym": keysym,
+                                    "modifiers": [],
+                                    "pressed": pressed,
+                                    "string": item["expected_text"],
+                                    "window": 1,
+                                }
+                                for pressed in (True, False)
+                            ],
+                            "sha256": "b" * 64,
+                        },
+                        "expected_text": item["expected_text"],
+                        "group": item["group"],
+                        "server_log_range": [start, offset],
+                        "server_trace": trace,
+                    }
+                )
+                for event, text in (
+                    ("key-press", before),
+                    ("changed", cumulative),
+                    ("key-release", cumulative),
+                ):
+                    record: dict[str, object] = {
+                        "event": event,
+                        "monotonic_ns": 1000 + sequence,
+                        "schema": 1,
+                        "sequence": sequence,
+                        "text": text,
+                    }
+                    if event != "changed":
+                        record.update(
+                            {
+                                "hardware_keycode": physical_keycode,
+                                "keyname": fixture_keyname,
+                                "keyval": keysym,
+                            }
+                        )
+                    events.append(record)
+                    sequence += 1
+            rmlvo_hash = live_run.keyboard_rmlvo_hash(phase["rmlvo"])
+            phases.append(
+                {
+                    "client_query": phase["rmlvo"],
+                    "inputs": phase_inputs,
+                    "name": phase["name"],
+                    "rmlvo": phase["rmlvo"],
+                    "rmlvo_hash": rmlvo_hash,
+                    "server_application": {
+                        "group_count": len(phase["rmlvo"]["layouts"]),
+                        "hash": rmlvo_hash,
+                        "log_range": [phase_start, phase_end],
+                        "owner": "keyboard-client-uuid",
+                        "sha256": "f" * 64,
+                    },
+                    "server_info_artifact": f"server-info-keyboard-{phase['name']}.txt",
+                    "server_info": {
+                        "compiled_groups": len(phase["rmlvo"]["layouts"]),
+                        "current_group": phase["inputs"][-1]["group"],
+                        "effective_rmlvo": phase["rmlvo"],
+                        "layout_groups": True,
+                        "owner": "keyboard-client-uuid",
+                        "rejected_configuration": False,
+                    },
+                    "server_info_sha256": "c" * 64,
+                    "structured_update": {
+                        "group_count": len(phase["rmlvo"]["layouts"]),
+                        "hash": rmlvo_hash,
+                        "log_range": [phase_start, phase_end],
+                        "owner": "keyboard-client-uuid",
+                        "packet": "keymap-changed",
+                        "representation": "legacy",
+                        "result": "installed",
+                        "sha256": "f" * 64,
+                    },
+                }
+            )
+        events.append(
+            {
+                "event": "closed",
+                "monotonic_ns": 1000 + sequence,
+                "schema": 1,
+                "sequence": sequence,
+                "text": cumulative,
+            }
+        )
+
+        def identity(role: str) -> dict[str, object]:
+            client = role == "client"
+            process = {
+                "cmdline_sha256": ("d" if client else "e") * 64,
+                "pid": 300 if client else 200,
+                "start_ticks": "123456" if client else "654321",
+            }
+            return {
+                "connection": {
+                    "family": "tcp4",
+                    "inode": 101 if client else 202,
+                    "local_address": "0300590A" if client else "0200590A",
+                    "local_port": 38000 if client else live_run.SERVER_PORT,
+                    "remote_address": "0200590A" if client else "0300590A",
+                    "remote_port": live_run.SERVER_PORT if client else 38000,
+                    "state": "established",
+                },
+                "process": process,
+            }
+
+        snapshots = [
+            {"client": identity("client"), "server": identity("server")}
+            for _phase in range(len(phases) + 1)
+        ]
+        evidence: dict[str, object] = {
+            "application": {
+                "events": events,
+                "exit_status": 0,
+                "final_text": cumulative,
+                "observed_texts": live_run.keyboard_expected_texts(scenario),
+            },
+            "identity_snapshots": snapshots,
+            "phases": phases,
+            "physical_keycode": physical_keycode,
+            "runtime_replacement": {
+                "after_hash": phases[-1]["rmlvo_hash"],
+                "application_observed_after_replacement": True,
+                "before_hash": phases[0]["rmlvo_hash"],
+                "configuration_changed": True,
+                "connection_unchanged": True,
+                "processes_unchanged": True,
+            },
+            "scenario": {"data": scenario, "sha256": scenario_sha256},
+            "schema": 1,
+            "window_id": window_id,
+            "xpra_window_id": 1,
+        }
+        return evidence, scenario, scenario_sha256
+
+    def test_keyboard_live_report_and_every_required_field_fail_closed(self) -> None:
+        evidence, scenario, digest = self.passing_keyboard_evidence()
+        checks = live_run.keyboard_live_checks(evidence, scenario, digest)
+        self.assertEqual(tuple(checks), live_run.KEYBOARD_LIVE_CHECK_NAMES)
+        self.assertTrue(all(checks.values()), checks)
+
+        dictionary_paths: list[tuple[object, ...]] = []
+
+        def collect(value: object, path: tuple[object, ...] = ()) -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    dictionary_paths.append((*path, key))
+                    collect(child, (*path, key))
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    collect(child, (*path, index))
+
+        def parent_at(value: object, path: tuple[object, ...]) -> object:
+            current = value
+            for component in path:
+                current = current[component]  # type: ignore[index]
+            return current
+
+        collect(evidence)
+        for path in dictionary_paths:
+            with self.subTest(missing="/".join(map(str, path))):
+                candidate = copy.deepcopy(evidence)
+                parent = parent_at(candidate, path[:-1])
+                assert isinstance(parent, dict)
+                parent.pop(path[-1])
+                mutated = live_run.keyboard_live_checks(candidate, scenario, digest)
+                self.assertFalse(all(mutated.values()), mutated)
+
+        packet_only = copy.deepcopy(evidence)
+        packet_only["application"] = {
+            "events": [],
+            "exit_status": 0,
+            "final_text": "",
+            "observed_texts": [],
+        }
+        packet_checks = live_run.keyboard_live_checks(packet_only, scenario, digest)
+        self.assertTrue(packet_checks["server_group_translation_exact"])
+        self.assertFalse(packet_checks["application_text_authoritative"])
+        self.assertFalse(all(packet_checks.values()))
+
+        rejected_after_layout = copy.deepcopy(evidence)
+        rejected_after_layout["phases"][0]["structured_update"]["result"] = "rejected"
+        rejected_after_layout["phases"][0]["server_info"][
+            "rejected_configuration"
+        ] = True
+        rejected_checks = live_run.keyboard_live_checks(
+            rejected_after_layout, scenario, digest
+        )
+        self.assertTrue(rejected_checks["server_keymaps_applied"])
+        self.assertTrue(rejected_checks["application_text_authoritative"])
+        self.assertFalse(rejected_checks["structured_keymap_packet_accepted"])
+        self.assertFalse(rejected_checks["no_rejected_configuration"])
+        self.assertFalse(all(rejected_checks.values()))
+
+        identical_only = copy.deepcopy(evidence)
+        identical_only["phases"][0]["structured_update"]["result"] = "identical"
+        identical_checks = live_run.keyboard_live_checks(
+            identical_only, scenario, digest
+        )
+        self.assertFalse(identical_checks["structured_keymap_packet_accepted"])
+        self.assertFalse(all(identical_checks.values()))
+
+        client_release_missing = copy.deepcopy(evidence)
+        client_release_missing["phases"][0]["inputs"][0]["client_trace"][
+            "events"
+        ].pop()
+        client_release_checks = live_run.keyboard_live_checks(
+            client_release_missing, scenario, digest
+        )
+        self.assertFalse(client_release_checks["client_press_release_observed"])
+        self.assertFalse(all(client_release_checks.values()))
+
+        client_string_wrong = copy.deepcopy(evidence)
+        client_string_wrong["phases"][0]["inputs"][0]["client_trace"]["events"][
+            1
+        ]["string"] = "a"
+        client_string_checks = live_run.keyboard_live_checks(
+            client_string_wrong, scenario, digest
+        )
+        self.assertFalse(client_string_checks["client_press_release_observed"])
+        self.assertFalse(all(client_string_checks.values()))
+
+        wrong_xpra_window = copy.deepcopy(evidence)
+        wrong_xpra_window["phases"][0]["inputs"][0]["client_trace"]["events"][
+            1
+        ]["window"] = 2
+        wrong_xpra_window_checks = live_run.keyboard_live_checks(
+            wrong_xpra_window, scenario, digest
+        )
+        self.assertFalse(
+            wrong_xpra_window_checks["client_press_release_observed"]
+        )
+        self.assertFalse(all(wrong_xpra_window_checks.values()))
+
+        wrong_key = copy.deepcopy(evidence)
+        wrong_key["phases"][0]["inputs"][0]["client_trace"]["events"][0][
+            "keycode"
+        ] = 25
+        wrong_key_checks = live_run.keyboard_live_checks(wrong_key, scenario, digest)
+        self.assertFalse(wrong_key_checks["client_press_release_observed"])
+        self.assertFalse(all(wrong_key_checks.values()))
+
+        wrong_group = copy.deepcopy(evidence)
+        wrong_group["phases"][0]["inputs"][0]["server_trace"]["resolutions"][0][
+            "server_group"
+        ] = 1
+        wrong_group_checks = live_run.keyboard_live_checks(
+            wrong_group, scenario, digest
+        )
+        self.assertFalse(wrong_group_checks["server_group_translation_exact"])
+        self.assertFalse(all(wrong_group_checks.values()))
+
+        wrong_server_keyname = copy.deepcopy(evidence)
+        for event in wrong_server_keyname["phases"][0]["inputs"][0][
+            "server_trace"
+        ]["resolutions"]:
+            event["keyname"] = "foreign-name"
+        wrong_server_keyname_checks = live_run.keyboard_live_checks(
+            wrong_server_keyname, scenario, digest
+        )
+        self.assertFalse(
+            wrong_server_keyname_checks["server_group_translation_exact"]
+        )
+        self.assertFalse(all(wrong_server_keyname_checks.values()))
+
+        unstable_fixture_keyname = copy.deepcopy(evidence)
+        unstable_fixture_keyname["application"]["events"][3]["keyname"] = "other"
+        unstable_fixture_keyname_checks = live_run.keyboard_live_checks(
+            unstable_fixture_keyname, scenario, digest
+        )
+        self.assertFalse(
+            unstable_fixture_keyname_checks["fixture_event_sequence_exact"]
+        )
+        self.assertFalse(all(unstable_fixture_keyname_checks.values()))
+
+        reconnected = copy.deepcopy(evidence)
+        for role in ("client", "server"):
+            connection = reconnected["identity_snapshots"][1][role]["connection"]
+            connection["inode"] += 1000
+        reconnected["identity_snapshots"][1]["client"]["connection"][
+            "local_port"
+        ] += 1
+        reconnected["identity_snapshots"][1]["server"]["connection"][
+            "remote_port"
+        ] += 1
+        reconnect_checks = live_run.keyboard_live_checks(
+            reconnected, scenario, digest
+        )
+        self.assertFalse(reconnect_checks["connection_identity_unchanged"])
+        self.assertFalse(reconnect_checks["runtime_replacement_proven"])
+        self.assertFalse(all(reconnect_checks.values()))
+
+        absent_replacement = copy.deepcopy(evidence)
+        absent_replacement["runtime_replacement"]["configuration_changed"] = False
+        replacement_checks = live_run.keyboard_live_checks(
+            absent_replacement, scenario, digest
+        )
+        self.assertFalse(replacement_checks["runtime_replacement_proven"])
+        self.assertFalse(all(replacement_checks.values()))
+
+        duplicate_application_event = copy.deepcopy(evidence)
+        duplicate_application_event["application"]["events"].insert(
+            2,
+            copy.deepcopy(duplicate_application_event["application"]["events"][1]),
+        )
+        duplicate_event_checks = live_run.keyboard_live_checks(
+            duplicate_application_event, scenario, digest
+        )
+        self.assertFalse(duplicate_event_checks["fixture_event_sequence_exact"])
+        self.assertFalse(duplicate_event_checks["application_text_authoritative"])
+        self.assertFalse(all(duplicate_event_checks.values()))
+
+        stale_client_range = copy.deepcopy(evidence)
+        stale_client_range["phases"][1]["inputs"][0]["client_log_range"] = list(
+            stale_client_range["phases"][0]["inputs"][0]["client_log_range"]
+        )
+        stale_client_checks = live_run.keyboard_live_checks(
+            stale_client_range, scenario, digest
+        )
+        self.assertFalse(stale_client_checks["client_press_release_observed"])
+        self.assertFalse(all(stale_client_checks.values()))
+
+        stale_application_range = copy.deepcopy(evidence)
+        for field in ("server_application", "structured_update"):
+            stale_application_range["phases"][1][field]["log_range"] = [50, 75]
+        stale_application_checks = live_run.keyboard_live_checks(
+            stale_application_range, scenario, digest
+        )
+        self.assertFalse(stale_application_checks["phase_configurations_bound"])
+        self.assertFalse(all(stale_application_checks.values()))
+
+        wrong_effective_group = copy.deepcopy(evidence)
+        wrong_effective_group["phases"][0]["server_info"]["current_group"] = 0
+        effective_group_checks = live_run.keyboard_live_checks(
+            wrong_effective_group, scenario, digest
+        )
+        self.assertFalse(
+            effective_group_checks["server_info_effective_state_exact"]
+        )
+        self.assertFalse(all(effective_group_checks.values()))
+
+        layout_only = copy.deepcopy(evidence)
+        layout_only["phases"][0]["structured_update"]["packet"] = "layout-changed"
+        layout_only_checks = live_run.keyboard_live_checks(layout_only, scenario, digest)
+        self.assertTrue(layout_only_checks["server_keymaps_applied"])
+        self.assertTrue(layout_only_checks["application_text_authoritative"])
+        self.assertFalse(layout_only_checks["structured_keymap_packet_accepted"])
+        self.assertFalse(all(layout_only_checks.values()))
+
+        finalized = copy.deepcopy(evidence)
+        finalized["checks"] = checks
+        self.assertTrue(
+            live_run.keyboard_embedded_checks_match(finalized, scenario, digest)
+        )
+        missing_check = copy.deepcopy(finalized)
+        missing_check["checks"].pop("structured_keymap_packet_accepted")
+        self.assertFalse(
+            live_run.keyboard_embedded_checks_match(missing_check, scenario, digest)
+        )
+        extra_check = copy.deepcopy(finalized)
+        extra_check["checks"]["layout_only_is_enough"] = True
+        self.assertFalse(
+            live_run.keyboard_embedded_checks_match(extra_check, scenario, digest)
+        )
+        false_check = copy.deepcopy(finalized)
+        false_check["checks"]["structured_keymap_packet_accepted"] = False
+        self.assertFalse(
+            live_run.keyboard_embedded_checks_match(false_check, scenario, digest)
+        )
+        non_boolean_check = copy.deepcopy(finalized)
+        non_boolean_check["checks"]["structured_keymap_packet_accepted"] = 1
+        self.assertFalse(
+            live_run.keyboard_embedded_checks_match(
+                non_boolean_check, scenario, digest
+            )
+        )
+
+    def test_keyboard_scenario_requires_changed_four_group_output(self) -> None:
+        _evidence, scenario, _digest = self.passing_keyboard_evidence()
+        self.assertEqual(
+            [len(phase["rmlvo"]["layouts"]) for phase in scenario["phases"]],
+            [4, 4],
+        )
+        self.assertEqual(
+            [phase["rmlvo"]["model"] for phase in scenario["phases"]],
+            ["pc104", "pc105"],
+        )
+        self.assertEqual(scenario["phases"][0]["inputs"][-1]["expected_text"], "ض")
+        self.assertEqual(
+            [item["expected_text"] for item in scenario["phases"][1]["inputs"]],
+            ["ქ", "ճ", "q", "a"],
+        )
+        characters = [
+            item["expected_text"]
+            for phase in scenario["phases"]
+            for item in phase["inputs"]
+        ]
+        self.assertEqual(characters, ["q", "a", "й", "ض", "ქ", "ճ", "q", "a"])
+        self.assertEqual(
+            {unicodedata.name(character).split()[0] for character in characters},
+            {"LATIN", "CYRILLIC", "ARABIC", "GEORGIAN", "ARMENIAN"},
+        )
+        unchanged = copy.deepcopy(scenario)
+        unchanged["phases"][1]["inputs"] = copy.deepcopy(
+            unchanged["phases"][0]["inputs"]
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "scenario.json"
+            path.write_text(json.dumps(unchanged), encoding="utf-8")
+            with self.assertRaisesRegex(live_run.LabFailure, "output is unchanged"):
+                live_run.load_keyboard_scenario(path)
+            same_model = copy.deepcopy(scenario)
+            same_model["phases"][1]["rmlvo"]["model"] = same_model["phases"][0][
+                "rmlvo"
+            ]["model"]
+            path.write_text(json.dumps(same_model), encoding="utf-8")
+            with self.assertRaisesRegex(live_run.LabFailure, "distinct models"):
+                live_run.load_keyboard_scenario(path)
+            boolean_schema = copy.deepcopy(scenario)
+            boolean_schema["schema"] = True
+            path.write_text(json.dumps(boolean_schema), encoding="utf-8")
+            with self.assertRaisesRegex(live_run.LabFailure, "header is invalid"):
+                live_run.load_keyboard_scenario(path)
+
+    def test_keyboard_structured_log_and_server_info_fail_closed(self) -> None:
+        accepted_log = (
+            "applied Wayland keyboard configuration hash="
+            + "0" * 64
+            + " groups=4 owner=keyboard-client-uuid\n"
+            "received Wayland structured keymap packet=keymap-changed\n"
+            "applied Wayland keyboard configuration hash="
+            + "a" * 64
+            + " groups=4 owner=keyboard-client-uuid\n"
+            "accepted Wayland structured keymap packet=keymap-changed "
+            "representation=legacy hash="
+            + "a" * 64
+            + " groups=4 owner=keyboard-client-uuid result=installed\n"
+        )
+        info_text = (
+            "keyboard.compiled-groups=4\n"
+            "keyboard.current-group=0\n"
+            "keyboard.effective-rmlvo.layout-groups=True\n"
+            "keyboard.effective-rmlvo.layouts='us', 'fr', 'ru', 'ara'\n"
+            "keyboard.effective-rmlvo.model=pc105\n"
+            "keyboard.effective-rmlvo.options=\n"
+            "keyboard.effective-rmlvo.rules=evdev\n"
+            "keyboard.effective-rmlvo.variants='', '', '', ''\n"
+            "keyboard.owner=keyboard-client-uuid\n"
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            log_path = directory / "server.stderr"
+            log_path.write_text(accepted_log, encoding="utf-8")
+            structured = live_run.parse_keyboard_structured_update(
+                log_path, 0, log_path.stat().st_size
+            )
+            self.assertEqual(structured["packet"], "keymap-changed")
+            self.assertEqual(structured["representation"], "legacy")
+            self.assertEqual(structured["result"], "installed")
+            application = live_run.parse_keyboard_server_application(
+                log_path, 0, log_path.stat().st_size
+            )
+            self.assertEqual(application["hash"], "a" * 64)
+            silent_log = "received Wayland structured keymap packet=keymap-changed\n"
+            log_path.write_text(silent_log, encoding="utf-8")
+            with self.assertRaisesRegex(live_run.LabFailure, "receipt and acceptance"):
+                live_run.parse_keyboard_structured_update(
+                    log_path, 0, log_path.stat().st_size
+                )
+            rejected_log = accepted_log.replace(
+                "accepted Wayland",
+                "Warning: rejected Wayland keyboard configuration: invalid layouts\n"
+                "accepted Wayland",
+            )
+            log_path.write_text(rejected_log, encoding="utf-8")
+            with self.assertRaisesRegex(live_run.LabFailure, "rejected"):
+                live_run.parse_keyboard_structured_update(
+                    log_path, 0, log_path.stat().st_size
+                )
+            log_path.write_text(
+                "rejected Wayland keyboard configuration: legacy update\n"
+                + accepted_log,
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(live_run.LabFailure, "rejected"):
+                live_run.parse_keyboard_structured_update(
+                    log_path, 0, log_path.stat().st_size
+                )
+
+            identical_log = accepted_log.replace(
+                "result=installed", "result=identical"
+            )
+            log_path.write_text(identical_log, encoding="utf-8")
+            with self.assertRaisesRegex(live_run.LabFailure, "did not install"):
+                live_run.parse_keyboard_structured_update(
+                    log_path, 0, log_path.stat().st_size
+                )
+
+            ordered_application = (
+                "applied Wayland keyboard configuration hash="
+                + "a" * 64
+                + " groups=4 owner=keyboard-client-uuid\n"
+            )
+            application_before_receipt = accepted_log.replace(
+                "received Wayland structured keymap packet=keymap-changed\n"
+                + ordered_application,
+                ordered_application
+                + "received Wayland structured keymap packet=keymap-changed\n",
+            )
+            log_path.write_text(application_before_receipt, encoding="utf-8")
+            with self.assertRaisesRegex(
+                live_run.LabFailure, "ordered keymap application"
+            ):
+                live_run.parse_keyboard_structured_update(
+                    log_path, 0, log_path.stat().st_size
+                )
+
+            wrong_application = accepted_log.replace(
+                "applied Wayland keyboard configuration hash=" + "a" * 64,
+                "applied Wayland keyboard configuration hash=" + "b" * 64,
+            )
+            log_path.write_text(wrong_application, encoding="utf-8")
+            with self.assertRaisesRegex(live_run.LabFailure, "does not match"):
+                live_run.parse_keyboard_structured_update(
+                    log_path, 0, log_path.stat().st_size
+                )
+
+            log_path.write_bytes(accepted_log.encode() + b"\xff")
+            with self.assertRaisesRegex(live_run.LabFailure, "not UTF-8"):
+                live_run.parse_keyboard_structured_update(
+                    log_path, 0, log_path.stat().st_size
+                )
+
+            info_path = directory / "server-info.txt"
+            info_path.write_text(info_text, encoding="utf-8")
+            info_path.chmod(0o600)
+            info = live_run.parse_keyboard_server_info(info_path)
+            self.assertFalse(info["rejected_configuration"])
+            self.assertEqual(
+                info["effective_rmlvo"]["layouts"], ["us", "fr", "ru", "ara"]
+            )
+            info_path.write_text(
+                info_text + "keyboard.rejected-configuration.reason=invalid layouts\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                live_run.parse_keyboard_server_info(info_path)[
+                    "rejected_configuration"
+                ]
+            )
+
+    def test_keyboard_client_packet_log_is_exact_and_utf8(self) -> None:
+        client_log = (
+            "2026-09-02 14:20:01,549 "
+            "do_send_keyboard('key-action', 1, 'Q', True, [], "
+            "16781541, 'ქ', 24, 0)\n"
+            "2026-09-02 14:20:01,599 "
+            "do_send_keyboard('key-action', 1, 'Q', False, [], "
+            "16781541, 'ქ', 24, 0)\n"
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "client.stdout"
+            path.write_text(client_log, encoding="utf-8")
+            trace = live_run.parse_keyboard_client_trace(path, 0, path.stat().st_size)
+            self.assertEqual(
+                trace["events"],
+                [
+                    {
+                        "group": 0,
+                        "keycode": 24,
+                        "keyname": "Q",
+                        "keysym": 16781541,
+                        "modifiers": [],
+                        "pressed": pressed,
+                        "string": "ქ",
+                        "window": 1,
+                    }
+                    for pressed in (True, False)
+                ],
+            )
+            self.assertRegex(trace["sha256"], r"^[0-9a-f]{64}$")
+
+            path.write_bytes(client_log.encode("utf-8") + b"\xff")
+            with self.assertRaisesRegex(live_run.LabFailure, "not UTF-8"):
+                live_run.parse_keyboard_client_trace(path, 0, path.stat().st_size)
+
+            wrong_packet = client_log.replace("'key-action'", "'key-repeat'", 1)
+            path.write_text(wrong_packet, encoding="utf-8")
+            with self.assertRaisesRegex(live_run.LabFailure, "invalid packet values"):
+                live_run.parse_keyboard_client_trace(path, 0, path.stat().st_size)
+
+    def test_keyboard_authority_artifacts_are_reparsed_fail_closed(self) -> None:
+        evidence, scenario, digest = self.passing_keyboard_evidence()
+        server_payload = bytearray()
+        client_payload = bytearray()
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            for phase_index, phase in enumerate(evidence["phases"]):
+                rmlvo_hash = phase["rmlvo_hash"]
+                owner = phase["server_application"]["owner"]
+                groups = phase["server_application"]["group_count"]
+                configuration_start = len(server_payload)
+                server_payload.extend(
+                    (
+                        "applied Wayland keyboard configuration hash="
+                        + str(phase_index) * 64
+                        + f" groups={groups} owner={owner}\n"
+                        "received Wayland structured keymap packet=keymap-changed\n"
+                        "applied Wayland keyboard configuration hash="
+                        + rmlvo_hash
+                        + f" groups={groups} owner={owner}\n"
+                        "accepted Wayland structured keymap packet=keymap-changed "
+                        "representation=legacy hash="
+                        + rmlvo_hash
+                        + f" groups={groups} owner={owner} result=installed\n"
+                    ).encode("utf-8")
+                )
+                configuration_end = len(server_payload)
+                phase["server_application"]["log_range"] = [
+                    configuration_start,
+                    configuration_end,
+                ]
+                phase["structured_update"]["log_range"] = [
+                    configuration_start,
+                    configuration_end,
+                ]
+                for item in phase["inputs"]:
+                    client_start = len(client_payload)
+                    for event in item["client_trace"]["events"]:
+                        client_payload.extend(
+                            (
+                                "2026-09-02 14:20:01,000 do_send_keyboard("
+                                f"'key-action', {event['window']}, {event['keyname']!r}, "
+                                f"{event['pressed']!r}, {event['modifiers']!r}, "
+                                f"{event['keysym']}, {event['string']!r}, "
+                                f"{event['keycode']}, {event['group']})\n"
+                            ).encode()
+                        )
+                    item["client_log_range"] = [client_start, len(client_payload)]
+
+                    server_start = len(server_payload)
+                    for event in item["server_trace"]["resolutions"]:
+                        server_payload.extend(
+                            (
+                                f"get_keycode: pressed={event['pressed']!r} "
+                                f"keyname={event['keyname']!r} keyval={event['keyval']} "
+                                f"client-keycode={event['client_keycode']} "
+                                f"client-group={event['client_group']} -> "
+                                f"{event['server_keycode']}/{event['server_group']}\n"
+                            ).encode()
+                        )
+                    for event in item["server_trace"]["device"]:
+                        server_payload.extend(
+                            (
+                                "wlr_seat_keyboard_notify_key(0x1, 1, "
+                                f"{event['keycode']}, {int(event['pressed'])})\n"
+                            ).encode("ascii")
+                        )
+                    item["server_log_range"] = [server_start, len(server_payload)]
+
+                rmlvo = phase["rmlvo"]
+                info_path = directory / phase["server_info_artifact"]
+                info_path.write_text(
+                    f"keyboard.compiled-groups={groups}\n"
+                    f"keyboard.current-group={phase['server_info']['current_group']}\n"
+                    "keyboard.effective-rmlvo.layout-groups=True\n"
+                    "keyboard.effective-rmlvo.layouts="
+                    + repr(tuple(rmlvo["layouts"]))[1:-1]
+                    + "\n"
+                    f"keyboard.effective-rmlvo.model={rmlvo['model']}\n"
+                    f"keyboard.effective-rmlvo.options={rmlvo['options']}\n"
+                    f"keyboard.effective-rmlvo.rules={rmlvo['rules']}\n"
+                    "keyboard.effective-rmlvo.variants="
+                    + repr(tuple(rmlvo["variants"]))[1:-1]
+                    + "\n"
+                    f"keyboard.owner={owner}\n",
+                    encoding="utf-8",
+                )
+                info_path.chmod(0o600)
+
+            server_log = directory / "server.stderr"
+            client_log = directory / "client.stdout"
+            server_log.write_bytes(server_payload)
+            client_log.write_bytes(client_payload)
+            server_log.chmod(0o600)
+            client_log.chmod(0o600)
+            fixture_log = directory / "keyboard-fixture.stdout"
+            fixture_log.write_text(
+                "".join(
+                    json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+                    + "\n"
+                    for event in evidence["application"]["events"]
+                ),
+                encoding="utf-8",
+            )
+            fixture_log.chmod(0o600)
+            fixture_exit = directory / "keyboard-fixture.exit"
+            fixture_exit.write_text("0\n", encoding="ascii")
+            fixture_exit.chmod(0o600)
+
+            for phase in evidence["phases"]:
+                start, end = phase["server_application"]["log_range"]
+                phase["server_application"] = live_run.parse_keyboard_server_application(
+                    server_log, start, end
+                )
+                phase["structured_update"] = live_run.parse_keyboard_structured_update(
+                    server_log, start, end
+                )
+                info_path = directory / phase["server_info_artifact"]
+                phase["server_info"] = live_run.parse_keyboard_server_info(info_path)
+                phase["server_info_sha256"] = live_run.sha256_file(info_path)
+                for item in phase["inputs"]:
+                    start, end = item["client_log_range"]
+                    item["client_trace"] = live_run.parse_keyboard_client_trace(
+                        client_log, start, end
+                    )
+                    start, end = item["server_log_range"]
+                    item["server_trace"] = live_run.parse_keyboard_server_trace(
+                        server_log, start, end
+                    )
+
+            evidence["checks"] = live_run.keyboard_live_checks(
+                evidence, scenario, digest
+            )
+            self.assertTrue(all(evidence["checks"].values()), evidence["checks"])
+            self.assertTrue(
+                live_run.keyboard_embedded_checks_match(evidence, scenario, digest)
+            )
+            self.assertTrue(
+                live_run.keyboard_artifact_evidence_matches(evidence, directory)
+            )
+
+            original_client = client_log.read_bytes()
+            client_log.write_bytes(original_client.replace(b"True", b"False", 1))
+            self.assertFalse(
+                live_run.keyboard_artifact_evidence_matches(evidence, directory)
+            )
+            client_log.write_bytes(original_client)
+
+            original_server = server_log.read_bytes()
+            first_hash = evidence["phases"][0]["rmlvo_hash"].encode("ascii")
+            server_log.write_bytes(original_server.replace(first_hash, b"f" * 64, 1))
+            self.assertFalse(
+                live_run.keyboard_artifact_evidence_matches(evidence, directory)
+            )
+            server_log.write_bytes(original_server)
+
+            first_info = directory / evidence["phases"][0]["server_info_artifact"]
+            original_info = first_info.read_bytes()
+            first_info.write_bytes(
+                original_info + b"keyboard.rejected.reason=mutation\n"
+            )
+            self.assertFalse(
+                live_run.keyboard_artifact_evidence_matches(evidence, directory)
+            )
+            first_info.write_bytes(original_info)
+
+            original_fixture = fixture_log.read_bytes()
+            fixture_log.write_bytes(original_fixture.rsplit(b"\n", 2)[0] + b"\n")
+            self.assertFalse(
+                live_run.keyboard_artifact_evidence_matches(evidence, directory)
+            )
+            fixture_log.write_bytes(original_fixture)
+
+            fixture_log.write_bytes(original_fixture + b"\xff")
+            self.assertFalse(
+                live_run.keyboard_artifact_evidence_matches(evidence, directory)
+            )
+            fixture_log.write_bytes(original_fixture)
+
+            fixture_exit.write_text("1\n", encoding="ascii")
+            self.assertFalse(
+                live_run.keyboard_artifact_evidence_matches(evidence, directory)
+            )
+
+    def test_keyboard_scenario_and_container_inventory_are_bound(self) -> None:
+        evidence, scenario, digest = self.passing_keyboard_evidence()
+        self.assertEqual(evidence["scenario"], {"data": scenario, "sha256": digest})
+        command, titles, pid_file = live_run.application_contract("keyboard")
+        self.assertEqual(
+            command,
+            "/opt/xpra-fork-maintenance/start_wayland_keyboard_fixture.sh",
+        )
+        self.assertEqual(titles, (live_run.KEYBOARD_FIXTURE_TITLE,))
+        self.assertEqual(pid_file, "keyboard-fixture.pid")
+        harness_names = {path.name for path in live_run.HARNESS_INPUTS}
+        context_names = {path.name for path in live_run.BUILD_CONTEXT_INPUTS}
+        for name in (
+            "start_wayland_keyboard_fixture.sh",
+            "wayland_keyboard_fixture.py",
+            "xkb_xtest_driver.c",
+        ):
+            self.assertIn(name, harness_names)
+            self.assertIn(name, context_names)
+        containerfile = (LIVE_DIRECTORY / "Containerfile").read_text(encoding="utf-8")
+        self.assertIn("xpra-xkb-xtest-driver", containerfile)
+        self.assertIn("start_wayland_keyboard_fixture.sh", containerfile)
+        self.assertIn("wayland_keyboard_fixture.py", containerfile)
 
     def test_empty_damage_fixture_checks_fail_closed(self) -> None:
         evidence = {
@@ -3770,6 +4679,10 @@ class LiveTransportProfileTest(unittest.TestCase):
             "interaction.pid",
             "interaction.stderr",
             "interaction.stdout",
+            "keyboard-fixture.exit",
+            "keyboard-fixture.pid",
+            "keyboard-fixture.stderr",
+            "keyboard-fixture.stdout",
             "vkcube.exit",
             "vkcube.pid",
             "vkcube.stderr",
@@ -3786,6 +4699,8 @@ class LiveTransportProfileTest(unittest.TestCase):
                 )
         for name in (
             "interaction.core",
+            "keyboard-fixture.core",
+            "keyboard-fixture.trace",
             "opengl.core",
             "opengl.trace",
             "vkcube.trace",
@@ -3941,6 +4856,7 @@ class LiveTransportProfileTest(unittest.TestCase):
     def test_pixel_tolerance_is_scoped_to_the_owning_profile(self) -> None:
         self.assertEqual(live_run.pixel_error_limit("zed", "rgb"), 0.0)
         self.assertEqual(live_run.pixel_error_limit("gtk", "rgb"), 1.0)
+        self.assertEqual(live_run.pixel_error_limit("keyboard", "rgb"), 1.0)
         self.assertEqual(live_run.pixel_error_limit("hardware", "h264"), 15.0)
         self.assertEqual(live_run.pixel_error_limit("opengl", "h264"), 15.0)
         self.assertEqual(live_run.pixel_error_limit("vkcube", "rgb"), 0.0)
