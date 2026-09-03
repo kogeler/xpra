@@ -3,16 +3,18 @@ slug = "wayland-empty-damage-throttle"
 kind = "production"
 title = "Throttle empty-damage Wayland frame callbacks"
 commit_subject = "Throttle empty-damage Wayland frame callbacks"
-patch_sha256 = "6746faf5bb45f6d0c9dcf0c89428195d340a1c3f7129791706afa98b2daf831b"
+patch_sha256 = "5ae59f7a054f1a48c7dfe3ffaa28fe8c5885ad167625bc060c69ab9b21b0377b"
 dependencies = []
 paths = [
   "tests/unittests/unit/wayland/window_test.py",
+  "xpra/wayland/server/models/window.py",
   "xpra/wayland/server/subsystem/window.py",
 ]
 
 [tests]
 list = [
   "unit.wayland.window_test",
+  "wayland",
   "full",
   "full-cython",
   "full-no-compat",
