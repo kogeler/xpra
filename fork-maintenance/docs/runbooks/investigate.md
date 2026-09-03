@@ -81,7 +81,14 @@ case for it.
 
 ## Reassess an existing patch
 
-Resolve it before editing:
+Resolve it before creating a workspace:
+
+```bash
+make -C fork-maintenance patch-check CASE=short-behavior-name
+```
+
+If resolution is `apply` or exact `already-present`, create the audit
+workspace:
 
 ```bash
 make -C fork-maintenance workspace-create \
@@ -90,8 +97,12 @@ make -C fork-maintenance workspace-create \
 
 - `apply` means the stored patch remains forward-applicable;
 - `already-present` means the embedded source contains that exact diff;
-- `diverged` means upstream changed the boundary and the full patch must be
-  refreshed.
+- `ambiguous` stops before workspace creation. During an explicitly authorized
+  upstream refresh, a proven `diverged` case uses the provenance-bound isolated
+  `PATCH_MODE=reconstruct` flow in
+  [`upstream-refresh.md`](upstream-refresh.md); ordinary patched workspace and
+  host `patch-apply` modes deliberately cannot force that state. Reconstruction
+  keeps host source/index untouched and does not create an intermediate commit.
 
 For a claimed upstream replacement, map each original trigger, production
 path, state transition, and postcondition to current code. Then run the retained

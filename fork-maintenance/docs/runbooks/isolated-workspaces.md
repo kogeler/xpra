@@ -64,7 +64,34 @@ Available modes are:
 - `patched`: apply the complete forward-applicable case or stack;
 - `tests-only`: apply only its `tests/` paths to unmodified embedded-source production
   code;
-- `clean`: apply nothing while retaining selection and resolution provenance.
+- `clean`: apply nothing while retaining ordinary selection and resolution
+  provenance;
+- `reconstruct`: start one completed case from clean embedded source only after
+  proving that its current patch is exactly `diverged` (neither forward- nor
+  reverse-applicable).
+
+`reconstruct` is a workspace-only recovery mode, not a test-runner patch mode.
+It rejects stacks, drafts, cases with dependencies, `apply`, `already-present`,
+and `ambiguous` patches. A dependent case needs a separately designed
+dependency-aware reconstruction boundary; the clean-source mode must not record
+an empty or invented dependency resolution.
+Its private resolution binds the old manifest, patch, paths, selection digest,
+and source commit. This permits a complete replacement without applying a
+broken patch to the host or making an intermediate control-plane commit:
+
+```bash
+make -C fork-maintenance workspace-create \
+  CASE=wayland-empty-damage-throttle \
+  WORKSPACE=refresh-empty-damage-01 \
+  PATCH_MODE=reconstruct
+```
+
+Build the full replacement in the clean workspace, then use the ordinary
+`workspace-stage` and `workspace-update` commands below. Export repeats the
+old-patch divergence and provenance checks before the existing atomic case
+update transaction verifies and publishes the new forward/reverse-applicable
+patch. An empty replacement is refused; retire an upstream-complete case
+through the reviewed queue-removal workflow instead.
 
 Use `tests-only` for the non-vacuous upstream control. It cannot be exported as
 a complete case patch.
@@ -89,6 +116,16 @@ Inspect generated state with:
 make -C fork-maintenance workspace-status WORKSPACE=wayland-audit-01
 make -C fork-maintenance workspace-diff WORKSPACE=wayland-audit-01
 ```
+
+`workspace-status` and `workspace-diff` are deliberately read-only and can
+inspect a structurally valid workspace created at an older host commit. Status
+prints both the recorded and current branch/HEAD and reports
+`host_identity=current` or `host_identity=stale`; diff prints its exact staged
+candidate against the recorded source tree. A stale result may be reviewed and
+removed through the exact removal lifecycle, but it cannot be staged or
+exported: every candidate-mutating stage/update command continues to require
+the original host branch and HEAD. Exact stale removal remains the deliberate
+exception after the read-only review.
 
 If creation, direct removal, or a cleanup fingerprint audit was interrupted,
 inspect its marker-backed state and recover only that workspace identity before

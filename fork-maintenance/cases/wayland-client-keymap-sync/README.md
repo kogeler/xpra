@@ -51,3 +51,12 @@ and before acceptance; a preceding legacy layout update, packet-only evidence,
 or info diagnostics cannot substitute for application observations. Each input
 also freezes the clean Xpra client's actual logged `key-action` press/release
 pair and cross-binds it to the native XTEST, server, and widget observations.
+
+The versioned live input currently resides at
+`tests/live-wayland-keyboard.json` inside this case. The live runner and its job
+provenance require exactly one selected case to own that file. Therefore this
+case cannot be retired merely because upstream absorbs the production diff: the
+scenario must first move to durable neutral ownership, or to an equivalent
+generic manifest-declared mechanism, with the runner, provenance, inventories,
+mutation tests, contract, and live runbook updated together. The migrated
+`live-wayland-keyboard STACK=develop` gate must pass before deleting this case.

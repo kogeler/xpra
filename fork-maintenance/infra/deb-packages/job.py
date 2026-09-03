@@ -1490,12 +1490,53 @@ def load_container_record(args: argparse.Namespace) -> dict[str, str] | None:
     return values
 
 
+def validate_embedded_container_record(
+    value: object,
+    *,
+    required: bool,
+) -> dict[str, str] | None:
+    """Validate immutable container provenance retained in collected status."""
+    if not isinstance(value, dict):
+        raise JobError("DEB collected status has an invalid container record")
+    if not value:
+        if required:
+            raise JobError("successful DEB status has no container provenance")
+        return None
+    keys = {
+        "base_image_id",
+        "builder_image_input_sha256",
+        "container_id",
+        "image_id",
+    }
+    if set(value) != keys:
+        raise JobError("DEB collected status has invalid container record fields")
+    if any(
+        not isinstance(value[key], str) or not SHA256_RE.fullmatch(value[key])
+        for key in keys
+    ):
+        raise JobError("DEB collected status has an invalid immutable container ID")
+    return {key: value[key] for key in keys}
+
+
 def remove_owned_container(
     args: argparse.Namespace,
     *,
     tolerate_invalid_record: bool = False,
+    immutable_record: object | None = None,
 ) -> None:
+    retained = (
+        validate_embedded_container_record(
+            immutable_record,
+            required=not tolerate_invalid_record,
+        )
+        if immutable_record is not None
+        else None
+    )
     recorded = load_container_record(args)
+    if recorded is not None and retained is not None and recorded != retained:
+        raise JobError("DEB container record differs from retained provenance")
+    if recorded is None:
+        recorded = retained
     if recorded is None and not tolerate_invalid_record:
         raise JobError("DEB container has no immutable ownership record")
     identifier = recorded["container_id"] if recorded else args.container_name
@@ -2909,6 +2950,10 @@ def publish_remove_transaction(
         background_job.ensure_private_regular(path)
     if validate_collected_status(name, record) != status:
         raise JobError("package collected status changed before removal")
+    validate_embedded_container_record(
+        status.get("container"),
+        required=status["validation_ok"],
+    )
     transaction = {
         "final_log": str(result_log_path(name)),
         "final_status": str(result_path(name)),
@@ -3000,6 +3045,10 @@ def load_remove_transaction(name: str) -> dict[str, Any]:
         or not isinstance(transaction.get("validation_ok"), bool)
     ):
         raise JobError("package removal transaction has an invalid collected status")
+    validate_embedded_container_record(
+        status.get("container"),
+        required=transaction["validation_ok"],
+    )
     for key in (
         "log_sha256",
         "owner_sha256",
@@ -3078,6 +3127,7 @@ def finish_package_remove(name: str, transaction: dict[str, Any]) -> None:
     remove_owned_container(
         build_args,
         tolerate_invalid_record=not transaction["validation_ok"],
+        immutable_record=status["container"],
     )
     validation_scratch = validation_paths(output)
     if any(path.exists() or path.is_symlink() for path in validation_scratch):

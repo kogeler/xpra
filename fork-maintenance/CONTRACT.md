@@ -92,6 +92,14 @@ Only an operator-selected upstream-refresh cycle rebases the fork-only
 `develop` commits onto the freshly verified local `master`, followed by patch
 resolution and validation against the new source. Merging `master`,
 `upstream/master`, or an equivalent upstream ref into `develop` is forbidden.
+Before any fetch or rebase, that runbook reviews the complete non-ignored
+worktree. If legitimate changes exist, its invocation authorizes the agent to
+stage all and only those tracked and untracked changes and create exactly one
+local preservation commit without further confirmation, including reviewed
+legitimate user work unrelated to the refresh; a clean checkout gets no empty
+commit. The agent creates no later intermediate or result commit in that
+refresh. Rebase replay may change the identities of the already committed
+series but is not another direct content commit.
 If Git stops during that explicit rebase, the refresh remains incomplete until
 every conflict is resolved and the rebase completes; existing pre-refresh
 evidence remains historical rather than evidence for the new base.
@@ -133,7 +141,9 @@ Each completed `cases/<slug>/` is either a production case or the single
 - `case.toml`: stable identity, title, commit subject, patch digest,
   dependencies, owned paths, focused tests, and required gates;
 - `fix.patch`: one atomic binary-capable Git patch containing production code
-  and its regression tests, or only quarantined upstream test modules;
+  plus any case-owned regression tests, or only quarantined upstream test
+  modules; a production case without retained test paths must name an existing
+  focused control and bind its durable real boundary in `README.md`;
 - `README.md`: current failure boundary, patch ownership, and required
   validation;
 - optional `tests/`: case-owned functional probes.
@@ -217,6 +227,16 @@ resolved or applied; edits are made only in the detached workspace. Promotion
 validates the completed manifest, derives the patch and owned paths, and
 updates workspace provenance to the new completed case.
 
+During an explicit upstream refresh, one completed independent case whose
+patch is provably `diverged` may use workspace-only
+`PATCH_MODE=reconstruct`. This mode rejects stacks, drafts, cases with
+dependencies, and every `apply`, `already-present`, or `ambiguous` patch. It
+starts from clean embedded source without applying the old patch and binds the
+old manifest, patch, path set, canonical selection digest, and source commit.
+Export revalidates all of that provenance, refuses an empty replacement, and
+publishes only a complete new forward-applicable, reverse-rejecting case. Test,
+live, and package runners never accept `reconstruct` as an execution mode.
+
 An atomic case workspace may be edited and staged with `workspace-stage`.
 `workspace-update` requires the same host branch and HEAD, a complete staged
 candidate, no untracked or unstaged workspace output, exact path ownership
@@ -227,6 +247,12 @@ resolution and metadata. A successful workspace remains current and may be
 edited, staged, and exported again. It never stages the host index or edits
 inherited Xpra source in `develop`.
 
+`workspace-status` and `workspace-diff` are read-only inspection interfaces:
+they validate workspace structure and provenance even after the recorded host
+branch/HEAD becomes stale, report that identity, and expose the exact staged
+candidate for supersession review. `workspace-stage`, `workspace-update`, and
+all other candidate mutations continue to require the original host identity.
+
 Every host `patch-update` and isolated `workspace-update` publishes an ignored
 case-update owner and exact old/new payload transaction below
 `case-updates/<slug>.update{,.owner.json}` before replacing a tracked target.
@@ -236,8 +262,9 @@ verification scratch in the finalized workspace; the candidate lab is removed
 before the transaction marker is published.
 
 Every workspace export binds the case patch/manifest and that workspace's
-resolution and metadata in the same all-new transaction. Draft promotion moves
-the workspace from clean to patched mode; an existing case remains patched. A
+resolution and metadata in the same all-new transaction. Draft promotion and
+diverged reconstruction move the workspace from clean or reconstruct to
+patched mode; an ordinary existing-case update remains patched. A
 complete `transaction.json` is replayed to the recorded new state after
 interruption; preparation without that marker is discarded. An owner without a
 transaction is cleared only after the currently published case and any bound
@@ -351,9 +378,16 @@ metadata, not the applied source copy.
 ## Explicit upstream refresh contract
 
 Only when the operator decides to move `develop` to a newer upstream source
-commit, use this clean sequence:
+commit, use this clean sequence. The executable selected-case decision and
+complete queue-validation procedure is
+[`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md):
 
-1. require a clean checkout;
+1. require `develop`; inspect every non-ignored tracked and untracked change,
+   reject unsafe, unexplained, secret, generated, or applied-Xpra-source content,
+   and, when legitimate changes exist, create the one complete preservation
+   commit authorized by invoking this runbook, including legitimate user work
+   unrelated to the refresh; require a clean checkout after that commit and
+   create no empty commit when it was already clean;
 2. run `repo-sync`;
 3. fast-forward local `master` with `master-update`;
 4. switch to `develop` and run `develop-rebase`;
@@ -363,16 +397,29 @@ commit, use this clean sequence:
    master;
 7. run every clean quarantine gate and remove or narrow entries that no longer
    fail on this exact master;
-8. run the complete offline fork-control suite and the tests-only control for
-   every production case, then review whether upstream replaced or narrowed any
-   patch behavior;
+8. run the complete offline fork-control suite and a tests-only clean control
+   for every production case which owns retained test paths; when a case owns no
+   test path, record that the control is unavailable and perform the
+   case-specific semantic inspection, then review whether upstream replaced or
+   narrowed any patch behavior;
 9. run every patched focused and native gate, all three complete upstream test
-   legs (`full`, `full-cython`, and `full-no-compat`), and all seven fixed positive
-   live profiles, even if the patches applied without textual changes;
+   legs (`full`, `full-cython`, and `full-no-compat`), every case-specific
+   durable package boundary against the complete resulting stack, and all seven
+   fixed positive live profiles, even if the patches applied without textual
+   changes;
 10. reproduce any newly failing author test on this exact clean master before
     adding it to the single duty quarantine, then rerun its clean quarantine
     gates and the complete patched matrix;
-11. run `develop-check` before handoff.
+11. run `develop-check` before handoff only when the resulting branch is clean;
+    otherwise leave every reviewed refresh result uncommitted and report this
+    final gate as intentionally outstanding for the operator. Do not create an
+    intermediate or final result commit to satisfy a clean-host gate.
+
+The single start commit is the only direct content commit this refresh
+authorizes. If later adaptation needs another clean-host-only operation, order
+all such work before tracked result edits, use a supported isolated mechanism,
+or stop and describe the missing mechanism; never use an intermediate commit
+as workspace cleanup.
 
 This explicit sequence fetches both master refs and requires live
 fork/canonical equality. If step 2 reports a stale fork, the operator may run
@@ -775,9 +822,11 @@ native, full-matrix, or live resources on that refresh. If any condition is
 uncertain, the exception does not apply and the normal ladder is required. A
 `develop-rebase` necessarily changes the embedded source and therefore never
 qualifies: its acceptance always includes the complete fork-control suite,
-clean quarantine reassessment, production tests-only controls, patched focused
-and native gates, all three author-test legs, and all seven fixed positive live
-profiles.
+clean quarantine reassessment, tests-only controls for production cases which
+own retained tests, documented semantic inspection for those which do not,
+patched focused and native gates, every case-specific durable package boundary
+against the complete resulting stack, all three author-test legs, and all seven
+fixed positive live profiles.
 
 Ordinary acceptance is green. A pre-existing failure outside the selected
 paths is investigated against canonical CI before any costly local clean
@@ -1089,8 +1138,14 @@ and removal or case-update transactions, remove a digest-confirmed finalized
 artifact cycle, update case files from a verified workspace, apply or remove
 patches in a clean non-master host worktree, run tests, and print status.
 
-No target creates a new content commit automatically. `develop-rebase` only
-replays existing fork-only commits onto fetched fork master and therefore changes
+No target creates a new content commit automatically. Invocation of the
+canonical upstream-refresh runbook itself authorizes one direct agent
+preservation commit before fetch/rebase iff exhaustive review finds legitimate
+non-ignored changes. That commit contains the complete reviewed tracked and
+untracked set, requires no further confirmation, and is omitted for an already
+clean checkout. No intermediate or final refresh result commit is authorized;
+the operator receives those changes uncommitted. `develop-rebase` only replays
+existing fork-only commits onto fetched fork master and therefore changes
 their local identities. The hosted-only `ci-master-sync` target may only perform
 the exact non-forced fork-master sync defined above. The hosted-only
 `ci-deb-release` target may only create its unique draft, ordinary release with
@@ -1108,7 +1163,7 @@ attempt. Drafts and unrelated or manual releases, tag-only state, and ambiguous
 state remain untouched outside the exact recovery rules above. All other
 automation never pushes, force-updates or mutates remote refs or releases,
 creates or edits a pull request, changes the default branch, or changes global
-Git configuration. Agents invoke neither hosted mutation target. An agent
-creates a new commit only after explicit current-conversation authorization.
-The operator reviews and performs all branch publication and default-branch
-actions.
+Git configuration. Agents invoke neither hosted mutation target. Outside the
+one runbook-start preservation boundary, an agent creates a new commit only
+after explicit current-conversation authorization. The operator reviews and
+performs all result commits, branch publication, and default-branch actions.
