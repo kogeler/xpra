@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "name": "four-group-runtime-replacement",
+  "phases": [
+    {
+      "name": "initial",
+      "rmlvo": {
+        "rules": "evdev",
+        "model": "pc104",
+        "layouts": ["us", "fr", "ru", "ara"],
+        "variants": ["", "", "", ""],
+        "options": ""
+      },
+      "physical_keycode": 24,
+      "inputs": [
+        {"group": 0, "expected_text": "q"},
+        {"group": 1, "expected_text": "a"},
+        {"group": 2, "expected_text": "й"},
+        {"group": 3, "expected_text": "ض"}
+      ]
+    },
+    {
+      "name": "replaced",
+      "rmlvo": {
+        "rules": "evdev",
+        "model": "pc105",
+        "layouts": ["ge", "am", "us", "fr"],
+        "variants": ["", "", "", ""],
+        "options": ""
+      },
+      "physical_keycode": 24,
+      "inputs": [
+        {"group": 0, "expected_text": "ქ"},
+        {"group": 1, "expected_text": "ճ"},
+        {"group": 2, "expected_text": "q"},
+        {"group": 3, "expected_text": "a"}
+      ]
+    }
+  ]
+}

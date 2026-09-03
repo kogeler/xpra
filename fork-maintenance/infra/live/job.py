@@ -66,7 +66,10 @@ HARNESS_INPUTS = (
     INFRA_ROOT / "requirements.txt",
     INFRA_ROOT / "run.py",
     INFRA_ROOT / "start_hardware_fixture.sh",
+    INFRA_ROOT / "start_wayland_keyboard_fixture.sh",
     INFRA_ROOT / "start_zed.sh",
+    INFRA_ROOT / "wayland_keyboard_fixture.py",
+    INFRA_ROOT / "xkb_xtest_driver.c",
     INFRA_ROOT / "xwd_to_png.py",
     SELECTION_TOOL,
     BACKGROUND_SUPERVISOR,
@@ -724,6 +727,24 @@ def validate_input_provenance(
         raise JobError("live-job input provenance has invalid Zed digests")
     if (application == "zed") != (zed_archive is not None):
         raise JobError("live-job input provenance has the wrong application payload")
+    keyboard_scenario = provenance.get("keyboard_scenario")
+    if keyboard_scenario is not None and (
+        not isinstance(keyboard_scenario, dict)
+        or set(keyboard_scenario) != {"name", "path", "schema", "sha256"}
+        or type(keyboard_scenario.get("schema")) is not int
+        or keyboard_scenario.get("schema") != 1
+        or not isinstance(keyboard_scenario.get("name"), str)
+        or not isinstance(keyboard_scenario.get("path"), str)
+        or re.fullmatch(
+            r"cases/[a-z0-9]+(?:-[a-z0-9]+)*/tests/live-wayland-keyboard\.json",
+            keyboard_scenario["path"],
+        )
+        is None
+        or not SHA256_RE.fullmatch(str(keyboard_scenario.get("sha256", "")))
+    ):
+        raise JobError("live-job input provenance has an invalid keyboard scenario")
+    if (application == "keyboard") != (keyboard_scenario is not None):
+        raise JobError("live-job input provenance has the wrong keyboard scenario payload")
     if provenance.get("harness_sha256") != harness_digest:
         raise JobError("live-job input provenance has the wrong harness digest")
     if provenance.get("server_selection") != (selection or "master"):
@@ -1930,6 +1951,7 @@ def current_image_validation(payload: dict[str, Any]) -> bool:
 
 
 def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
+    runner = live_runner_module()
     root = report.parent
     source = payload.get("source")
     scenarios = payload.get("scenarios")
@@ -1954,6 +1976,15 @@ def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
         return False
     if set(scenario_digests) != set(names):
         return False
+    keyboard_scenario = None
+    keyboard_scenario_sha256 = None
+    if payload.get("application") == "keyboard":
+        keyboard_path = root / "inputs" / "keyboard-scenario.json"
+        try:
+            keyboard_scenario = runner.load_keyboard_scenario(keyboard_path)
+            keyboard_scenario_sha256 = sha256_file(keyboard_path)
+        except (OSError, ValueError, runner.LabFailure):
+            return False
     for embedded, name in zip(scenarios, names, strict=True):
         scenario_root = root / name
         scenario_report = scenario_root / "report.json"
@@ -1981,6 +2012,32 @@ def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
         }
         if observed != artifact_digests:
             return False
+        if keyboard_scenario is not None:
+            interaction = embedded.get("interaction")
+            evidence = (
+                interaction.get("evidence") if isinstance(interaction, dict) else None
+            )
+            classification = embedded.get("classification")
+            boundaries = (
+                classification.get("boundaries")
+                if isinstance(classification, dict)
+                else None
+            )
+            classified_checks = (
+                boundaries.get("interaction") if isinstance(boundaries, dict) else None
+            )
+            if (
+                not isinstance(evidence, dict)
+                or not isinstance(keyboard_scenario_sha256, str)
+                or not runner.keyboard_embedded_checks_match(
+                    evidence, keyboard_scenario, keyboard_scenario_sha256
+                )
+                or classified_checks != evidence.get("checks")
+                or not runner.keyboard_artifact_evidence_matches(
+                    evidence, scenario_root
+                )
+            ):
+                return False
     return input_checksum_validation(root / "inputs", source)
 
 

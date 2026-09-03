@@ -23,7 +23,7 @@ server:
     - "--html=off"
   diagnostics:
     - "-d"
-    - "wayland,damage,encoding,encoder,argb"
+    - "wayland,damage,encoding,encoder,argb,keyboard"
   commands:
     version:
       - "--version"
@@ -60,7 +60,7 @@ client:
     - "--bandwidth-detection=no"
   diagnostics:
     - "-d"
-    - "draw,paint,cairo,window,gtk,alpha,libva"
+    - "draw,paint,cairo,window,gtk,alpha,libva,keyboard"
   commands:
     version:
       - "--version"

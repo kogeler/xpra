@@ -3096,6 +3096,7 @@ class CycleCleanupTest(unittest.TestCase):
                         "harness": {"infra/live/job.py": "f" * 64},
                         "input_manifest_sha256": "7" * 64,
                         "input_tree_sha256": "8" * 64,
+                        "keyboard_scenario": None,
                         "path": str(inputs),
                         "schema": 2,
                         "server_context_archive_sha256": "9" * 64,
@@ -3348,6 +3349,146 @@ class CycleCleanupTest(unittest.TestCase):
         self.assertFalse(status.exists())
         self.assertFalse(log.exists())
         self.assertFalse(result.exists())
+
+    def test_cleanup_accepts_live_keyboard_scenario_provenance(self) -> None:
+        status_path, _log, result = self.collected_live_result("audit-live-01")
+        scenario = result / "inputs" / "keyboard-scenario.json"
+        scenario.write_bytes(b'{"schema":1}\n')
+        scenario.chmod(0o600)
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        status["input_provenance"]["keyboard_scenario"] = {
+            "name": "wayland-keyboard-groups",
+            "path": (
+                "cases/wayland-client-keymap-sync/tests/"
+                "live-wayland-keyboard.json"
+            ),
+            "schema": 1,
+            "sha256": hashlib.sha256(scenario.read_bytes()).hexdigest(),
+        }
+        status_path.write_text(json.dumps(status) + "\n", encoding="utf-8")
+        marker = self.live_jobs / "audit-live-01.remove.json"
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        payload["record"]["input_provenance"] = status["input_provenance"]
+        payload["status_sha256"] = hashlib.sha256(status_path.read_bytes()).hexdigest()
+        marker.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+        plan = contrib.build_cleanup_plan(
+            self.repo,
+            "audit",
+            inspect_runtime=False,
+        )
+        self.assertEqual(len(plan.targets), 4)
+
+    def test_cleanup_rejects_missing_live_keyboard_scenario_provenance(self) -> None:
+        status_path, _log, _result = self.collected_live_result("audit-live-01")
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        status["input_provenance"].pop("keyboard_scenario")
+        status_path.write_text(json.dumps(status) + "\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(contrib.ContribError, "input provenance"):
+            contrib.build_cleanup_plan(
+                self.repo,
+                "audit",
+                inspect_runtime=False,
+            )
+
+    def test_cleanup_rejects_invalid_live_keyboard_scenario_provenance(self) -> None:
+        invalid_values = (
+            {},
+            {
+                "name": "wayland-keyboard-groups",
+                "path": (
+                    "cases/wayland-client-keymap-sync/tests/"
+                    "live-wayland-keyboard.json"
+                ),
+                "schema": True,
+                "sha256": "9" * 64,
+            },
+            {
+                "name": "../keyboard",
+                "path": (
+                    "cases/wayland-client-keymap-sync/tests/"
+                    "live-wayland-keyboard.json"
+                ),
+                "schema": 1,
+                "sha256": "9" * 64,
+            },
+            {
+                "name": "wayland-keyboard-groups",
+                "path": "../live-wayland-keyboard.json",
+                "schema": 1,
+                "sha256": "9" * 64,
+            },
+            {
+                "name": "wayland-keyboard-groups",
+                "path": (
+                    "cases/wayland-client-keymap-sync/tests/"
+                    "live-wayland-keyboard.json"
+                ),
+                "schema": 1,
+                "sha256": "invalid",
+            },
+        )
+        for index, value in enumerate(invalid_values):
+            with self.subTest(index=index):
+                name = f"invalid-live-{index}-01"
+                status_path, _log, _result = self.collected_live_result(name)
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+                status["input_provenance"]["keyboard_scenario"] = value
+                status_path.write_text(json.dumps(status) + "\n", encoding="utf-8")
+                with self.assertRaisesRegex(
+                    contrib.ContribError,
+                    "keyboard scenario provenance",
+                ):
+                    contrib.build_cleanup_plan(
+                        self.repo,
+                        f"invalid-live-{index}",
+                        inspect_runtime=False,
+                    )
+
+    def test_cleanup_rejects_unbound_live_keyboard_scenario_data(self) -> None:
+        _status, _log, result = self.collected_live_result("unexpected-live-01")
+        scenario = result / "inputs" / "keyboard-scenario.json"
+        scenario.write_bytes(b"unexpected\n")
+        scenario.chmod(0o600)
+
+        with self.assertRaisesRegex(contrib.ContribError, "unexpected keyboard"):
+            contrib.build_cleanup_plan(
+                self.repo,
+                "unexpected-live",
+                inspect_runtime=False,
+            )
+
+    def test_cleanup_rejects_missing_or_changed_live_keyboard_scenario_data(
+        self,
+    ) -> None:
+        for index, payload in enumerate((None, b"changed\n")):
+            with self.subTest(index=index):
+                name = f"scenario-data-{index}-01"
+                status_path, _log, result = self.collected_live_result(name)
+                scenario = result / "inputs" / "keyboard-scenario.json"
+                expected = b'{"schema":1}\n'
+                if payload is not None:
+                    scenario.write_bytes(payload)
+                    scenario.chmod(0o600)
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+                status["input_provenance"]["keyboard_scenario"] = {
+                    "name": "wayland-keyboard-groups",
+                    "path": (
+                        "cases/wayland-client-keymap-sync/tests/"
+                        "live-wayland-keyboard.json"
+                    ),
+                    "schema": 1,
+                    "sha256": hashlib.sha256(expected).hexdigest(),
+                }
+                status_path.write_text(json.dumps(status) + "\n", encoding="utf-8")
+                expected_error = "unavailable" if payload is None else "digest"
+                with self.assertRaisesRegex(contrib.ContribError, expected_error):
+                    contrib.build_cleanup_plan(
+                        self.repo,
+                        f"scenario-data-{index}",
+                        inspect_runtime=False,
+                    )
 
     def test_cleanup_accepts_a_failed_live_result_with_an_invalid_report(self) -> None:
         status_path, log, result = self.collected_live_result("audit-live-01")
@@ -4566,6 +4707,7 @@ class ManifestTest(unittest.TestCase):
             {
                 "debian-libva-codecs-package",
                 "upstream-test-quarantine",
+                "wayland-client-keymap-sync",
                 "wayland-empty-damage-throttle",
                 "wayland-initial-window-state",
                 "video-pipeline-cleanup-race",
@@ -4580,6 +4722,7 @@ class ManifestTest(unittest.TestCase):
             stack.series,
             (
                 "wayland-initial-window-state",
+                "wayland-client-keymap-sync",
                 "wayland-empty-damage-throttle",
                 "video-pipeline-cleanup-race",
                 "debian-libva-codecs-package",

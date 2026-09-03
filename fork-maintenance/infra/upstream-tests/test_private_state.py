@@ -158,6 +158,40 @@ class UpstreamMakeContractTest(unittest.TestCase):
         self.assertIn("patched|tests-only", entrypoint)
         self.assertIn("tests-only workspace", CONTRACT.read_text(encoding="utf-8"))
 
+    def test_wayland_build_and_linkage_are_gate_driven(self) -> None:
+        entrypoint = ENTRYPOINT.read_text(encoding="utf-8")
+        self.assertNotIn("wayland-initial-window-state", entrypoint)
+        self.assertGreaterEqual(
+            entrypoint.count("selection_tool gates | grep -Fx wayland"),
+            2,
+        )
+        self.assertIn(
+            "extra_args+=' --with-keyboard --with-wayland_server'",
+            entrypoint,
+        )
+        self.assertIn(
+            "EXTRA_ARGS='--minimal --with-modules --with-server "
+            "--with-keyboard --with-wayland_server'",
+            entrypoint,
+        )
+        self.assertGreaterEqual(
+            entrypoint.count(
+                'keyboard=$(find "$xpra_dir/wayland/server" '
+                "-maxdepth 1 -name 'keyboard*.so' -print -quit)"
+            ),
+            2,
+        )
+        self.assertGreaterEqual(
+            entrypoint.count(
+                "from xpra.wayland.server import display, events, keyboard"
+            ),
+            1,
+        )
+        self.assertIn(
+            "python3 setup.py unittests unit/wayland/linkage_test.py",
+            entrypoint,
+        )
+
     def test_source_bundle_is_verified_before_publication(self) -> None:
         source = Path(__file__).with_name("job.py").read_text(encoding="utf-8")
         snapshot = source.split("def source_snapshot", 1)[1].split(

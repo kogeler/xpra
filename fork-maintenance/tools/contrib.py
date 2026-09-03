@@ -85,6 +85,7 @@ SUPPORTED_GATES = frozenset(
         "full-cython",
         "full-no-compat",
         "live-rgb",
+        "live-wayland-keyboard",
         "live-wayland-h264-hardware",
         "live-wayland-opengl-h264-hardware",
     }
@@ -4638,6 +4639,7 @@ def validate_live_status(
     expected_provenance = provenance_hashes | {
         "client_selection",
         "harness",
+        "keyboard_scenario",
         "path",
         "schema",
         "server_selection",
@@ -4690,6 +4692,34 @@ def validate_live_status(
         )
     ):
         fail(f"collected live Zed provenance is inconsistent: {name}")
+    keyboard_scenario = provenance.get("keyboard_scenario")
+    if keyboard_scenario is not None and (
+        not isinstance(keyboard_scenario, dict)
+        or set(keyboard_scenario) != {"name", "path", "schema", "sha256"}
+        or type(keyboard_scenario.get("schema")) is not int
+        or keyboard_scenario.get("schema") != 1
+        or not isinstance(keyboard_scenario.get("name"), str)
+        or not SLUG_RE.fullmatch(keyboard_scenario["name"])
+        or not isinstance(keyboard_scenario.get("path"), str)
+        or re.fullmatch(
+            r"cases/[a-z0-9]+(?:-[a-z0-9]+)*/tests/live-wayland-keyboard\.json",
+            keyboard_scenario["path"],
+        )
+        is None
+        or not SHA256_RE.fullmatch(str(keyboard_scenario.get("sha256", "")))
+    ):
+        fail(f"collected live keyboard scenario provenance is inconsistent: {name}")
+    keyboard_scenario_path = result_directory / "inputs" / "keyboard-scenario.json"
+    if keyboard_scenario is None:
+        if keyboard_scenario_path.exists() or keyboard_scenario_path.is_symlink():
+            fail(f"collected live result has unexpected keyboard scenario data: {name}")
+    else:
+        require_cleanup_file(
+            keyboard_scenario_path,
+            "collected live keyboard scenario",
+        )
+        if sha256_file(keyboard_scenario_path) != keyboard_scenario["sha256"]:
+            fail(f"collected live keyboard scenario digest does not match: {name}")
 
     checks = status["report_checks"]
     expected_report_checks = {

@@ -11,10 +11,11 @@ current patch queue was adapted.
 The active patches are:
 
 1. `wayland-initial-window-state`;
-2. `wayland-empty-damage-throttle`;
-3. `video-pipeline-cleanup-race`;
-4. `debian-libva-codecs-package`;
-5. `upstream-test-quarantine` (test-only duty case).
+2. `wayland-client-keymap-sync`;
+3. `wayland-empty-damage-throttle`;
+4. `video-pipeline-cleanup-race`;
+5. `debian-libva-codecs-package`;
+6. `upstream-test-quarantine` (test-only duty case).
 
 `stacks/develop.toml` applies them in integration order. `develop` here is the
 stable queue slug, not a requirement that every consumer run from the Git branch
@@ -167,13 +168,18 @@ make -C fork-maintenance live-wait RUN=develop-hardware-01
 make -C fork-maintenance live-xpra-opengl-hardware \
   STACK=develop RUN=develop-opengl-hardware-01
 make -C fork-maintenance live-wait RUN=develop-opengl-hardware-01
+
+make -C fork-maintenance live-wayland-keyboard \
+  CASE=wayland-client-keymap-sync RUN=develop-wayland-keyboard-01
+make -C fork-maintenance live-wait RUN=develop-wayland-keyboard-01
 ```
 
-The six public live wrappers are positive acceptance gates: Zed RGB,
+The seven public live wrappers are positive acceptance gates: Zed RGB,
 adaptive-alpha Zed H.264, RGB detach, RGB transport-loss fault injection, and
-the separate multi-window Vulkan and native-Wayland OpenGL hardware-H.264
-profiles. They fix every acceptance dimension and require a nonempty reviewed
-selection; clean-source and picture-fallback diagnostics cannot publish `PASS`.
+the standalone native-Wayland client-keymap regression plus the separate
+multi-window Vulkan and native-Wayland OpenGL hardware-H.264 profiles. They fix
+every acceptance dimension and require a nonempty reviewed selection;
+clean-source and picture-fallback diagnostics cannot publish `PASS`.
 Their client-only network/quality overlay comes from
 [`profiles.yml`](profiles.yml), whose declared default is used unless
 `NETWORK_PROFILE=<name>` is supplied. All other static Xpra arguments come from
@@ -228,8 +234,8 @@ must be removed or narrowed in the quarantine case.
 
 Every explicit upstream rebase then requires the complete current validation,
 even if every patch applied without a textual refresh: offline fork-control
-tests, tests-only controls for both production cases, patched focused and native
-gates, all three complete upstream workflow legs, and all six fixed positive
+tests, tests-only controls for every production case, patched focused and native
+gates, all three complete upstream workflow legs, and all seven fixed positive
 live profiles. A new upstream-suite failure enters the single quarantine only
 after the exact module reproduces on the clean rebased source in the same mode;
 the clean quarantine gates and patched matrix are rerun after that change.
