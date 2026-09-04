@@ -317,7 +317,7 @@ libyuv_smoke_test() {
 }
 
 check_focused_native_modules() {
-    local xpra_dir converter events display gates_output keyboard output smoke_mode smoke_test
+    local xpra_dir clipboard compositor converter events display gates_output keyboard output smoke_mode smoke_test
     xpra_dir=$(installed_xpra_dir)
     test -n "$xpra_dir"
     cd "$WORK/tests/unittests"
@@ -341,21 +341,25 @@ PY
     fi
 
     if grep -Fx wayland <<<"$gates_output" >/dev/null; then
+        clipboard=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'clipboard*.so' -print -quit)
+        compositor=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'compositor*.so' -print -quit)
         events=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'events*.so' -print -quit)
         display=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'display*.so' -print -quit)
         keyboard=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'keyboard*.so' -print -quit)
+        check_elf "$clipboard"
+        check_elf "$compositor"
         check_elf "$events"
         check_elf "$display"
         check_elf "$keyboard"
-        output=$(ldd -r "$events" "$display" "$keyboard" 2>&1 || true)
+        output=$(ldd -r "$clipboard" "$compositor" "$events" "$display" "$keyboard" 2>&1 || true)
         printf '%s\n' "$output"
         if grep -E 'not found|undefined symbol: (wl_list_insert|wl_list_remove|wl_display_flush_clients)' <<<"$output"; then
             return 2
         fi
         PYTHONPATH=".:${xpra_dir%/xpra}" python3 - <<'PY'
-from xpra.wayland.server import display, events, keyboard
+from xpra.wayland.server import clipboard, compositor, display, events, keyboard
 
-print(display, events, keyboard)
+print(clipboard, compositor, display, events, keyboard)
 PY
     fi
 }
@@ -391,7 +395,7 @@ run_focused() {
         extra_args+=' --with-csc_libyuv --with-argb'
     fi
     if grep -Fx wayland <<<"$gates_output" >/dev/null; then
-        extra_args+=' --with-keyboard --with-wayland_server'
+        extra_args+=' --with-keyboard --with-wayland_server --with-clipboard --with-dmabuf'
     fi
     cd "$WORK"
     CFLAGS='-O0 -g0' \
@@ -408,17 +412,20 @@ run_wayland() {
     cd "$WORK"
     CFLAGS='-O0 -g0' \
     CXXFLAGS='-O0 -g0' \
-    EXTRA_ARGS='--minimal --with-modules --with-server --with-keyboard --with-wayland_server' \
+    EXTRA_ARGS='--minimal --with-modules --with-server --with-keyboard --with-wayland_server --with-clipboard --with-dmabuf' \
         python3 setup.py unittests unit/wayland/linkage_test.py
 
-    local xpra_dir events display keyboard output
+    local xpra_dir clipboard compositor events display keyboard output
     xpra_dir=$(installed_xpra_dir)
+    clipboard=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'clipboard*.so' -print -quit)
+    compositor=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'compositor*.so' -print -quit)
     events=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'events*.so' -print -quit)
     display=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'display*.so' -print -quit)
     keyboard=$(find "$xpra_dir/wayland/server" -maxdepth 1 -name 'keyboard*.so' -print -quit)
-    test -n "$events" && test -n "$display" && test -n "$keyboard"
-    readelf -d "$events" "$display" "$keyboard" | grep -E 'File:|NEEDED.*libwayland-server\.so\.0'
-    output=$(ldd -r "$events" "$display" "$keyboard" 2>&1 || true)
+    test -n "$clipboard" && test -n "$compositor" && test -n "$events" && test -n "$display" && test -n "$keyboard"
+    readelf -d "$clipboard" "$compositor" "$events" "$display" "$keyboard" \
+        | grep -E 'File:|NEEDED.*libwayland-server\.so\.0'
+    output=$(ldd -r "$clipboard" "$compositor" "$events" "$display" "$keyboard" 2>&1 || true)
     printf '%s\n' "$output"
     if grep -E 'not found|undefined symbol: (wl_list_insert|wl_list_remove|wl_display_flush_clients)' <<<"$output"; then
         return 2

@@ -31,9 +31,18 @@ PROFILE_FIELDS = frozenset(
 )
 ROLE_FIELDS = {
     "server": frozenset(
-        {"base", "commands", "diagnostics", "lifecycle", "transports"}
+        {
+            "base",
+            "clipboard",
+            "commands",
+            "diagnostics",
+            "lifecycle",
+            "transports",
+        }
     ),
-    "client": frozenset({"base", "commands", "diagnostics", "transports"}),
+    "client": frozenset(
+        {"base", "clipboard", "commands", "diagnostics", "transports"}
+    ),
 }
 ROLE_COMMANDS = {
     "server": frozenset({"info", "version"}),
@@ -45,6 +54,7 @@ TRANSPORT_POLICIES = {
         {"strict", "adaptive-alpha", "fallback-auto", "fallback-h264"}
     ),
 }
+CLIPBOARD_POLICIES = ("both", "to-server", "off")
 PROFILE_OPTION_PREFIXES = (
     "--auto-refresh-delay=",
     "--bandwidth-limit=",
@@ -53,6 +63,12 @@ PROFILE_OPTION_PREFIXES = (
     "--quality=",
     "--refresh-rate=",
     "--speed=",
+)
+CLIPBOARD_OPTION_PREFIXES = (
+    "--clipboard=",
+    "--clipboard-direction=",
+    "--input-devices=",
+    "--xsettings=",
 )
 
 
@@ -273,14 +289,26 @@ def load_live_cli(path: Path = LIVE_CLI_PATH) -> dict[str, dict[str, Any]]:
         raise LiveConfigError("live CLI configuration schema is inconsistent")
     result: dict[str, dict[str, Any]] = {}
     all_options: list[str] = []
+    non_clipboard_options: list[str] = []
     for role, expected_fields in ROLE_FIELDS.items():
         role_payload = payload.get(role)
         if not isinstance(role_payload, dict) or set(role_payload) != expected_fields:
             raise LiveConfigError(f"live CLI {role} fields are inconsistent")
         role_result: dict[str, Any] = {}
-        for block in expected_fields - {"commands", "transports"}:
+        for block in expected_fields - {"clipboard", "commands", "transports"}:
             options = _option_list(role_payload[block], label=f"{role}.{block}")
             role_result[block] = options
+            all_options.extend(options)
+            non_clipboard_options.extend(options)
+        clipboard = role_payload.get("clipboard")
+        if not isinstance(clipboard, dict) or tuple(clipboard) != CLIPBOARD_POLICIES:
+            raise LiveConfigError(f"live CLI {role} clipboard policies are inconsistent")
+        clipboard_result = {
+            policy: _option_list(options, label=f"{role}.clipboard.{policy}")
+            for policy, options in clipboard.items()
+        }
+        role_result["clipboard"] = clipboard_result
+        for options in clipboard_result.values():
             all_options.extend(options)
         commands = role_payload.get("commands")
         if not isinstance(commands, dict) or set(commands) != ROLE_COMMANDS[role]:
@@ -292,6 +320,7 @@ def load_live_cli(path: Path = LIVE_CLI_PATH) -> dict[str, dict[str, Any]]:
         role_result["commands"] = command_result
         for options in command_result.values():
             all_options.extend(options)
+            non_clipboard_options.extend(options)
         transports = role_payload.get("transports")
         if not isinstance(transports, dict) or set(transports) != set(TRANSPORT_POLICIES):
             raise LiveConfigError(f"live CLI {role} transports are inconsistent")
@@ -319,12 +348,21 @@ def load_live_cli(path: Path = LIVE_CLI_PATH) -> dict[str, dict[str, Any]]:
                 "policies": policy_result,
             }
             all_options.extend(common)
+            non_clipboard_options.extend(common)
             for options in policy_result.values():
                 all_options.extend(options)
+                non_clipboard_options.extend(options)
         role_result["transports"] = transport_result
         result[role] = role_result
     if any(option.startswith(PROFILE_OPTION_PREFIXES) for option in all_options):
         raise LiveConfigError("profile-managed client arguments are forbidden in live CLI blocks")
+    if any(
+        option.startswith(CLIPBOARD_OPTION_PREFIXES)
+        for option in non_clipboard_options
+    ):
+        raise LiveConfigError(
+            "clipboard-managed arguments are forbidden outside live CLI clipboard blocks"
+        )
     if result["client"]["base"].count("--bandwidth-detection=no") != 1:
         raise LiveConfigError("client base must disable bandwidth detection exactly once")
     if any("bandwidth-detection" in option for option in all_options if option != "--bandwidth-detection=no"):
@@ -367,6 +405,19 @@ def transport_options(
     except KeyError as error:
         raise LiveConfigError(
             f"unsupported live CLI transport: {role}.{encoding}.{policy}"
+        ) from error
+
+
+def clipboard_options(
+    role: str,
+    policy: str,
+    path: Path = LIVE_CLI_PATH,
+) -> tuple[str, ...]:
+    try:
+        return load_live_cli(path)[role]["clipboard"][policy]
+    except KeyError as error:
+        raise LiveConfigError(
+            f"unsupported live CLI clipboard policy: {role}.{policy}"
         ) from error
 
 

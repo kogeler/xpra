@@ -32,6 +32,7 @@ from profiles import (
     NETWORK_PROFILES,
     ProfileError,
     validate_profile,
+    validate_profile_selection,
 )
 
 INFRA_ROOT = Path(__file__).resolve().parent
@@ -58,6 +59,7 @@ SELECTION_TOOL = MAINTENANCE_ROOT / "infra" / "upstream-tests" / "selection.py"
 HARNESS_INPUTS = (
     INFRA_ROOT / ".containerignore",
     INFRA_ROOT / "Containerfile",
+    INFRA_ROOT / "clipboard_fixture_common.py",
     INFRA_ROOT / "empty_damage_fixture.c",
     INFRA_ROOT / "interaction_fixture.py",
     INFRA_ROOT / "job.py",
@@ -66,9 +68,12 @@ HARNESS_INPUTS = (
     INFRA_ROOT / "requirements.txt",
     INFRA_ROOT / "run.py",
     INFRA_ROOT / "start_hardware_fixture.sh",
+    INFRA_ROOT / "start_wayland_clipboard_fixture.sh",
     INFRA_ROOT / "start_wayland_keyboard_fixture.sh",
     INFRA_ROOT / "start_zed.sh",
     INFRA_ROOT / "wayland_keyboard_fixture.py",
+    INFRA_ROOT / "wayland_clipboard_fixture.py",
+    INFRA_ROOT / "x11_clipboard_fixture.py",
     INFRA_ROOT / "xkb_xtest_driver.c",
     INFRA_ROOT / "xwd_to_png.py",
     SELECTION_TOOL,
@@ -749,8 +754,25 @@ def validate_input_provenance(
         raise JobError("live-job input provenance has the wrong harness digest")
     if provenance.get("server_selection") != (selection or "master"):
         raise JobError("live-job input provenance has the wrong server selection")
-    if provenance.get("client_selection") != "master":
+    expected_client_selection = selection if application == "clipboard" else "master"
+    if provenance.get("client_selection") != expected_client_selection:
         raise JobError("live-job input provenance has the wrong client selection")
+    if application == "clipboard" and any(
+        provenance.get(client_key) != provenance.get(server_key)
+        for client_key, server_key in (
+            ("client_context_archive_sha256", "server_context_archive_sha256"),
+            ("client_context_sha256", "server_context_sha256"),
+            (
+                "client_selection_resolution_sha256",
+                "server_selection_resolution_sha256",
+            ),
+            ("client_selection_sha256", "server_selection_sha256"),
+        )
+    ):
+        raise JobError(
+            "live-job clipboard provenance does not bind the same selected source "
+            "to both endpoints"
+        )
     inputs_path = provenance.get("path")
     if inputs_path != str(RESULT_ROOT / run / "inputs"):
         raise JobError("live-job input provenance has the wrong owned path")
@@ -1445,6 +1467,10 @@ def _start_locked(args: argparse.Namespace, run: str) -> int:
             alpha_scenarios=args.alpha_scenarios,
             network_profile_name=args.network_profile,
         )
+        validate_profile_selection(
+            application=args.application,
+            selection=args.selection,
+        )
     except ProfileError as error:
         raise JobError(str(error)) from error
     if not RUNNER.is_file() or RUNNER.is_symlink():
@@ -1867,7 +1893,7 @@ def image_provenance_validation(
         "client": {
             "context": provenance["client_context_sha256"],
             "role": "client-image",
-            "selection": "master",
+            "selection": provenance["client_selection"],
         },
         "server": {
             "context": provenance["server_context_sha256"],
@@ -1996,6 +2022,73 @@ def gtk_fixture_artifact_evidence_matches(
     )
 
 
+def clipboard_fixture_artifact_evidence_matches(
+    embedded: dict[str, Any],
+    scenario_root: Path,
+    runner: Any,
+    expected_policy: str,
+) -> bool:
+    """Recompute one clipboard scenario from its fixed-marker authority files."""
+    interaction = embedded.get("interaction")
+    classification = embedded.get("classification")
+    boundaries = (
+        classification.get("boundaries")
+        if isinstance(classification, dict)
+        else None
+    )
+    classified_checks = (
+        boundaries.get("interaction") if isinstance(boundaries, dict) else None
+    )
+    if (
+        not isinstance(interaction, dict)
+        or set(interaction)
+        != {
+            "attempted",
+            "checks",
+            "client_alive_after_changes",
+            "local",
+            "owner",
+            "policy",
+            "wayland",
+            "xfixes",
+        }
+        or interaction.get("attempted") is not True
+        or interaction.get("policy") != expected_policy
+        or embedded.get("clipboard_policy") != expected_policy
+        or not isinstance(embedded.get("client"), dict)
+        or embedded["client"].get("clipboard_options")
+        != list(live_config.clipboard_options("client", expected_policy))
+        or not isinstance(embedded.get("server"), dict)
+        or embedded["server"].get("clipboard_options")
+        != list(live_config.clipboard_options("server", expected_policy))
+    ):
+        return False
+    checks = interaction.get("checks")
+    if (
+        not isinstance(checks, dict)
+        or set(checks) != set(runner.CLIPBOARD_LIVE_CHECK_NAMES)
+        or not all(type(value) is bool for value in checks.values())
+    ):
+        return False
+    try:
+        recomputed = runner.clipboard_interaction_checks(
+            interaction,
+            scenario_root,
+        )
+        artifacts_match = runner.clipboard_artifact_evidence_matches(
+            interaction,
+            scenario_root,
+        )
+    except (OSError, TypeError, ValueError, runner.LabFailure):
+        return False
+    return bool(
+        artifacts_match
+        and recomputed == checks
+        and classified_checks == checks
+        and all(checks.values())
+    )
+
+
 def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
     runner = live_runner_module()
     root = report.parent
@@ -2017,6 +2110,14 @@ def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
         if not isinstance(name, str) or not NAME_RE.fullmatch(name) or name in names:
             return False
         names.append(name)
+    clipboard_policies: tuple[str, ...] = ()
+    if payload.get("application") == "clipboard":
+        clipboard_policies = tuple(runner.CLIPBOARD_POLICIES)
+        expected_names = tuple(
+            f"clipboard-{policy}" for policy in clipboard_policies
+        )
+        if tuple(names) != expected_names:
+            return False
     expected_top_level = {"inputs", "report.json", *names}
     if {path.name for path in root.iterdir()} != expected_top_level:
         return False
@@ -2031,7 +2132,9 @@ def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
             keyboard_scenario_sha256 = sha256_file(keyboard_path)
         except (OSError, ValueError, runner.LabFailure):
             return False
-    for embedded, name in zip(scenarios, names, strict=True):
+    for scenario_index, (embedded, name) in enumerate(
+        zip(scenarios, names, strict=True)
+    ):
         scenario_root = root / name
         scenario_report = scenario_root / "report.json"
         ensure_private_regular(scenario_report)
@@ -2099,6 +2202,13 @@ def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
             )
         ):
             return False
+        if clipboard_policies and not clipboard_fixture_artifact_evidence_matches(
+            embedded,
+            scenario_root,
+            runner,
+            clipboard_policies[scenario_index],
+        ):
+            return False
         if keyboard_scenario is not None:
             interaction = embedded.get("interaction")
             evidence = (
@@ -2148,6 +2258,25 @@ def network_profile_validation(
     )
 
 
+def clipboard_profile_validation(payload: dict[str, Any]) -> bool:
+    """Bind the aggregate clipboard comparison to its exact policy scenarios."""
+    if payload.get("application") != "clipboard":
+        return True
+    scenarios = payload.get("scenarios")
+    comparison = payload.get("comparison")
+    expected = {
+        f"clipboard-{policy}": policy
+        for policy in live_runner_module().CLIPBOARD_POLICIES
+    }
+    return bool(
+        isinstance(scenarios, list)
+        and [scenario.get("clipboard_policy") for scenario in scenarios]
+        == list(expected.values())
+        and isinstance(comparison, dict)
+        and comparison.get("clipboard_policies") == expected
+    )
+
+
 def report_validation(
     run: str,
     record: dict[str, Any],
@@ -2184,7 +2313,8 @@ def report_validation(
         and invocation.get("alpha_scenarios") == record["alpha_scenarios"],
         "application": payload.get("application") == record["application"]
         and isinstance(invocation, dict)
-        and invocation.get("application") == record["application"],
+        and invocation.get("application") == record["application"]
+        and clipboard_profile_validation(payload),
         "encoding": payload.get("encoding") == record["encoding"],
         "h264_client_policy": payload.get("h264_client_policy")
         == record["h264_client_policy"]
