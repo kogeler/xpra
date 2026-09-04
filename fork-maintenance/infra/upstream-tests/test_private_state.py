@@ -167,12 +167,12 @@ class UpstreamMakeContractTest(unittest.TestCase):
         )
         self.assertIn("if ! gates_output=$(selected_gate_names); then", entrypoint)
         self.assertIn(
-            "extra_args+=' --with-keyboard --with-wayland_server'",
+            "extra_args+=' --with-keyboard --with-wayland_server --with-clipboard --with-dmabuf'",
             entrypoint,
         )
         self.assertIn(
             "EXTRA_ARGS='--minimal --with-modules --with-server "
-            "--with-keyboard --with-wayland_server'",
+            "--with-keyboard --with-wayland_server --with-clipboard --with-dmabuf'",
             entrypoint,
         )
         self.assertGreaterEqual(
@@ -184,7 +184,21 @@ class UpstreamMakeContractTest(unittest.TestCase):
         )
         self.assertGreaterEqual(
             entrypoint.count(
-                "from xpra.wayland.server import display, events, keyboard"
+                'clipboard=$(find "$xpra_dir/wayland/server" '
+                "-maxdepth 1 -name 'clipboard*.so' -print -quit)"
+            ),
+            2,
+        )
+        self.assertGreaterEqual(
+            entrypoint.count(
+                'compositor=$(find "$xpra_dir/wayland/server" '
+                "-maxdepth 1 -name 'compositor*.so' -print -quit)"
+            ),
+            2,
+        )
+        self.assertGreaterEqual(
+            entrypoint.count(
+                "from xpra.wayland.server import clipboard, compositor, display, events, keyboard"
             ),
             1,
         )

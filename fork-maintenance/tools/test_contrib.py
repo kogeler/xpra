@@ -6230,6 +6230,7 @@ class ManifestTest(unittest.TestCase):
                 "wayland-empty-damage-throttle",
                 "wayland-initial-window-state",
                 "video-pipeline-cleanup-race",
+                "x11-client-clipboard-events",
             },
         )
         quarantine = cases["upstream-test-quarantine"]
@@ -6255,6 +6256,7 @@ class ManifestTest(unittest.TestCase):
             (
                 "wayland-initial-window-state",
                 "wayland-client-keymap-sync",
+                "x11-client-clipboard-events",
                 "wayland-empty-damage-throttle",
                 "video-pipeline-cleanup-race",
                 "debian-libva-codecs-package",
@@ -6266,6 +6268,10 @@ class ManifestTest(unittest.TestCase):
         cases = contrib.load_cases()
         stack = contrib.load_stacks(cases)["develop"]
         self.assertEqual(cases["video-pipeline-cleanup-race"].required_gates, ())
+        self.assertEqual(
+            cases["x11-client-clipboard-events"].required_gates,
+            ("live-x11-clipboard",),
+        )
         self.assertEqual(
             cases["wayland-initial-window-state"].required_gates,
             (
