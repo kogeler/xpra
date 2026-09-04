@@ -28,6 +28,7 @@ from typing import Any
 TOOLS_ROOT = Path(__file__).resolve().parents[2] / "tools"
 sys.path.insert(0, str(TOOLS_ROOT))
 
+import clipboard_fixture_common
 import container_payload
 import live_config
 import PIL
@@ -36,6 +37,7 @@ from PIL import Image, ImageChops, ImageStat
 from profiles import (
     ALPHA_SCENARIOS,
     APPLICATIONS,
+    CLIPBOARD_POLICIES,
     DEFAULT_NETWORK_PROFILE,
     H264_ACCEPTANCE_POLICIES,
     H264_CLIENT_POLICIES,
@@ -45,6 +47,7 @@ from profiles import (
     ProfileError,
     scenario_specs,
     validate_profile,
+    validate_profile_selection,
 )
 from xwd_to_png import decode_xwd, save_alpha_visualization
 
@@ -68,6 +71,10 @@ SERVER_PORT = 14500
 CLIENT_PROXY_PORT = 14501
 CLIENT_DISPLAY = ":0"
 WAIT_SECONDS = 60.0
+CLIPBOARD_MONITOR_SECONDS = 12.0
+CLIPBOARD_SETTLE_SECONDS = 0.5
+CLIPBOARD_JSONL_BYTES = 1024 * 1024
+CLIPBOARD_JSONL_EVENTS = 128
 EXPECTED_PILLOW_VERSION = "12.1.1"
 INTERACTION_READY_TITLE = "Xpra Hardware Interaction Ready"
 INTERACTION_CLICKED_TITLE = "Xpra Hardware Interaction Clicked"
@@ -85,10 +92,61 @@ EMPTY_DAMAGE_CLICK_MARKER = "/tmp/xpra-empty-damage-child-clicked"
 EMPTY_DAMAGE_INPUT_DEADLINE_SECONDS = 3.0
 KEYBOARD_FIXTURE_TITLE = "Xpra Wayland Keyboard Fixture"
 KEYBOARD_SCENARIO_BASENAME = "live-wayland-keyboard.json"
+CLIPBOARD_FIXTURE_TITLE = "Xpra Wayland Clipboard Fixture"
+CLIPBOARD_OWNER_COMMAND = "/tmp/xpra-x11-clipboard-owner-command"
+CLIPBOARD_MONITOR_COMMAND = "/tmp/xpra-x11-clipboard-monitor-command"
+WAYLAND_CLIPBOARD_COMMAND = "/tmp/xpra-wayland-clipboard-command"
+CLIPBOARD_CLIENT_SURVIVAL_ARTIFACT = "clipboard-client-survival.identity.json"
+CLIPBOARD_COMMAND_PUBLISHER = r"""
+import os
+import pathlib
+import secrets
+import sys
+
+path = pathlib.Path(sys.argv[1])
+payload = (sys.argv[2] + "\n").encode("ascii")
+partial = path.with_name(f".{path.name}.{secrets.token_hex(16)}.partial")
+descriptor = -1
+try:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(partial, flags, 0o600)
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written <= 0:
+            raise OSError("short clipboard command write")
+        offset += written
+    os.fsync(descriptor)
+    os.close(descriptor)
+    descriptor = -1
+    os.link(partial, path, follow_symlinks=False)
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+    partial.unlink(missing_ok=True)
+"""
+CLIPBOARD_LIVE_CHECK_NAMES = (
+    "local_initial_targets",
+    "local_initial_marker",
+    "initial_forward_policy",
+    "local_updated_targets",
+    "local_updated_marker",
+    "owner_xid_stable",
+    "ownership_timestamp_advanced",
+    "updated_forward_policy",
+    "repeated_forward_policy",
+    "client_survived_owner_changes",
+    "reverse_policy",
+    "event_sequence_exact",
+    "fixture_processes_clean",
+    "no_plaintext_marker_artifacts",
+)
 LEGACY_SOURCE_VARIANT_SELECTORS = {"master": ()}
 HARNESS_INPUTS = (
     INFRA_ROOT / ".containerignore",
     INFRA_ROOT / "Containerfile",
+    INFRA_ROOT / "clipboard_fixture_common.py",
     INFRA_ROOT / "empty_damage_fixture.c",
     INFRA_ROOT / "interaction_fixture.py",
     INFRA_ROOT / "job.py",
@@ -97,9 +155,12 @@ HARNESS_INPUTS = (
     INFRA_ROOT / "requirements.txt",
     INFRA_ROOT / "run.py",
     INFRA_ROOT / "start_hardware_fixture.sh",
+    INFRA_ROOT / "start_wayland_clipboard_fixture.sh",
     INFRA_ROOT / "start_wayland_keyboard_fixture.sh",
     INFRA_ROOT / "start_zed.sh",
     INFRA_ROOT / "wayland_keyboard_fixture.py",
+    INFRA_ROOT / "wayland_clipboard_fixture.py",
+    INFRA_ROOT / "x11_clipboard_fixture.py",
     INFRA_ROOT / "xkb_xtest_driver.c",
     INFRA_ROOT / "xwd_to_png.py",
     SELECTION_TOOL,
@@ -112,12 +173,16 @@ HARNESS_INPUTS = (
 BUILD_CONTEXT_INPUTS = (
     INFRA_ROOT / ".containerignore",
     INFRA_ROOT / "Containerfile",
+    INFRA_ROOT / "clipboard_fixture_common.py",
     INFRA_ROOT / "empty_damage_fixture.c",
     INFRA_ROOT / "interaction_fixture.py",
     INFRA_ROOT / "start_hardware_fixture.sh",
+    INFRA_ROOT / "start_wayland_clipboard_fixture.sh",
     INFRA_ROOT / "start_wayland_keyboard_fixture.sh",
     INFRA_ROOT / "start_zed.sh",
     INFRA_ROOT / "wayland_keyboard_fixture.py",
+    INFRA_ROOT / "wayland_clipboard_fixture.py",
+    INFRA_ROOT / "x11_clipboard_fixture.py",
     INFRA_ROOT / "xkb_xtest_driver.c",
     PAYLOAD_HELPER,
 )
@@ -271,6 +336,7 @@ SERVER_ARTIFACT_PATTERNS = (
     re.compile(r"opengl\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"interaction\.(?:exit|identity\.json|stderr|stdout)"),
     re.compile(r"keyboard-fixture\.(?:exit|pid|stderr|stdout)"),
+    re.compile(r"clipboard-fixture\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"empty-damage\.(?:exit|pid|stderr|stdout)"),
 )
 CLIENT_ARTIFACT_PATTERNS = (
@@ -279,6 +345,7 @@ CLIENT_ARTIFACT_PATTERNS = (
     re.compile(r"sway(?:\..+|-child\.env)"),
     re.compile(r"xwayland-xdpyinfo\.txt"),
     re.compile(r"(?:xvfb|openbox|picom)\..+"),
+    re.compile(r"clipboard-(?:consumer-[a-z0-9-]+|monitor|owner)\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"(?:root|window|interaction)-.+"),
     re.compile(r"empty-damage-.+"),
 )
@@ -421,6 +488,7 @@ def replace_private_json(path: Path, payload: dict[str, Any]) -> None:
 class Scenario:
     name: str
     disable_alpha: bool
+    clipboard_policy: str | None = None
 
 
 def transport_encoding_options(
@@ -448,6 +516,14 @@ def static_cli_options(role: str, block: str) -> list[str]:
     """Load one tracked static Xpra option block for command assembly."""
     try:
         return list(live_config.static_cli_options(role, block))
+    except live_config.LiveConfigError as error:
+        raise LabFailure(str(error)) from error
+
+
+def clipboard_cli_options(role: str, policy: str) -> list[str]:
+    """Load one role-specific clipboard policy from the tracked CLI authority."""
+    try:
+        return list(live_config.clipboard_options(role, policy))
     except live_config.LiveConfigError as error:
         raise LabFailure(str(error)) from error
 
@@ -972,6 +1048,623 @@ def wait_for_container_artifact(
     wait_for(description, lambda: container_artifact_exists(container, relative))
     pull_container_artifacts(container, directory, (relative,))
     return directory / _artifact_relative(relative)
+
+
+def parse_clipboard_jsonl_text(data: str, label: str) -> list[dict[str, Any]]:
+    """Parse one bounded fixture JSONL stream without accepting loose records."""
+    if len(data.encode("utf-8")) > CLIPBOARD_JSONL_BYTES:
+        raise LabFailure(f"clipboard fixture evidence is too large: {label}")
+    for marker in clipboard_fixture_common.MARKERS.values():
+        if marker in data:
+            raise LabFailure(f"clipboard fixture exposed marker text: {label}")
+    lines = data.splitlines()
+    if not lines or len(lines) > CLIPBOARD_JSONL_EVENTS:
+        raise LabFailure(f"clipboard fixture record count is invalid: {label}")
+    records: list[dict[str, Any]] = []
+    previous_monotonic_ns = 0
+    for sequence, line in enumerate(lines):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise LabFailure(f"clipboard fixture JSON is invalid: {label}") from error
+        monotonic_ns = record.get("monotonic_ns") if isinstance(record, dict) else None
+        if (
+            not isinstance(record, dict)
+            or type(record.get("schema")) is not int
+            or record.get("schema") != 1
+            or type(record.get("sequence")) is not int
+            or record.get("sequence") != sequence
+            or type(monotonic_ns) is not int
+            or monotonic_ns <= previous_monotonic_ns
+            or not isinstance(record.get("event"), str)
+            or not record["event"]
+        ):
+            raise LabFailure(f"clipboard fixture record is inconsistent: {label}")
+        previous_monotonic_ns = monotonic_ns
+        records.append(record)
+    return records
+
+
+def read_container_clipboard_records(
+    container: str,
+    relative: str,
+) -> list[dict[str, Any]]:
+    """Read a live bounded fixture stream from an owned container."""
+    relative = _artifact_relative(relative)
+    if container_artifact_size(container, relative) > CLIPBOARD_JSONL_BYTES:
+        raise LabFailure(f"clipboard fixture evidence is too large: {relative}")
+    result = podman_exec(
+        container,
+        ["cat", f"/artifacts/{relative}"],
+        announce=False,
+    )
+    return parse_clipboard_jsonl_text(result.stdout, relative)
+
+
+def read_clipboard_records(path: Path) -> list[dict[str, Any]]:
+    """Read one collected clipboard fixture authority file."""
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > CLIPBOARD_JSONL_BYTES:
+        raise LabFailure(f"clipboard fixture authority is invalid: {path}")
+    return parse_clipboard_jsonl_text(
+        path.read_text(encoding="utf-8", errors="strict"),
+        path.name,
+    )
+
+
+def wait_for_clipboard_event_count(
+    container: str,
+    relative: str,
+    event: str,
+    count: int,
+    description: str,
+) -> list[dict[str, Any]]:
+    """Wait for an exact fixture event count and return the current stream."""
+    records: list[dict[str, Any]] = []
+
+    def reached() -> bool:
+        nonlocal records
+        if not container_artifact_exists(container, relative):
+            return False
+        try:
+            current = read_container_clipboard_records(container, relative)
+        except LabFailure:
+            return False
+        observed = sum(record.get("event") == event for record in current)
+        if observed > count:
+            raise LabFailure(f"clipboard fixture emitted duplicate {event} events")
+        records = current
+        return observed == count
+
+    wait_for(description, reached)
+    return records
+
+
+def write_clipboard_command(container: str, path: str, command: str) -> None:
+    """Publish one fixed fixture command without shell interpolation."""
+    marker_ids = clipboard_fixture_common.marker_ids()
+    allowed_by_path = {
+        CLIPBOARD_MONITOR_COMMAND: {"stop"},
+        CLIPBOARD_OWNER_COMMAND: {
+            "quit",
+            *(f"set:{marker_id}" for marker_id in marker_ids),
+        },
+        WAYLAND_CLIPBOARD_COMMAND: {
+            "quit",
+            *(f"{operation}:{marker_id}" for operation in ("own", "paste") for marker_id in marker_ids),
+        },
+    }
+    if command not in allowed_by_path.get(path, set()):
+        raise LabFailure("invalid clipboard fixture command")
+    podman_exec(
+        container,
+        ["python3", "-c", CLIPBOARD_COMMAND_PUBLISHER, path, command],
+    )
+
+
+def _clipboard_marker_fields(record: dict[str, Any]) -> dict[str, Any]:
+    names = {
+        "expected_length",
+        "expected_sha256",
+        "marker_id",
+        "matches",
+        "observed_length",
+        "observed_sha256",
+    }
+    return {name: record.get(name) for name in names}
+
+
+def _clipboard_marker_valid(
+    record: dict[str, Any],
+    marker_id: str,
+    *,
+    matches: bool,
+    require_absent: bool = False,
+) -> bool:
+    observed = (
+        clipboard_fixture_common.marker_text(marker_id)
+        if matches
+        else None
+    )
+    expected = clipboard_fixture_common.marker_summary(marker_id, observed)
+    return bool(
+        _clipboard_marker_fields(record) == expected
+        and (not require_absent or record.get("observed_length") is None)
+    )
+
+
+def _clipboard_conversion_valid(
+    record: object,
+    marker_id: str,
+    *,
+    owner_xid: int | None = None,
+) -> bool:
+    if not isinstance(record, dict) or record.get("event") != "conversion-result":
+        return False
+    targets = record.get("targets")
+    text = record.get("text")
+    marker = record.get("marker")
+    known_targets = record.get("known_targets")
+    if not all(isinstance(value, dict) for value in (targets, text, marker, known_targets)):
+        return False
+    target_events = targets.get("events")
+    text_events = text.get("events")
+    event_types = lambda events: {
+        event.get("type") for event in events if isinstance(event, dict)
+    }
+    owners_match = (
+        owner_xid is None
+        or (
+            record.get("owner_before_xid") == owner_xid
+            and record.get("owner_after_xid") == owner_xid
+        )
+    )
+    return bool(
+        record.get("backend") == "x11"
+        and record.get("owner_stable") is True
+        and owners_match
+        and known_targets.get("UTF8_STRING") is True
+        and targets.get("completed") is True
+        and targets.get("overflow") is False
+        and isinstance(target_events, list)
+        and {"PropertyNotify", "SelectionNotify"} <= event_types(target_events)
+        and isinstance(targets.get("selection_notify"), dict)
+        and targets["selection_notify"].get("send_event") is True
+        and text.get("completed") is True
+        and text.get("overflow") is False
+        and isinstance(text_events, list)
+        and {"PropertyNotify", "SelectionNotify"} <= event_types(text_events)
+        and isinstance(text.get("selection_notify"), dict)
+        and text["selection_notify"].get("send_event") is True
+        and _clipboard_marker_valid(marker, marker_id, matches=True)
+    )
+
+
+def _clipboard_decimal_artifact(path: Path, *, positive: bool) -> int | None:
+    if path.is_symlink() or not path.is_file():
+        return None
+    value = path.read_text(encoding="ascii", errors="strict")
+    pattern = r"[1-9][0-9]*\n" if positive else r"0\n"
+    return int(value) if re.fullmatch(pattern, value) else None
+
+
+def _clipboard_artifacts_hide_markers(directory: Path) -> bool:
+    markers = tuple(
+        value.encode("utf-8")
+        for value in clipboard_fixture_common.MARKERS.values()
+    )
+    overlap = max(map(len, markers)) - 1
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        tail = b""
+        with path.open("rb") as stream:
+            while block := stream.read(1024 * 1024):
+                payload = tail + block
+                if any(marker in payload for marker in markers):
+                    return False
+                tail = payload[-overlap:]
+    return True
+
+
+def _clipboard_client_survival_from_artifact(directory: Path) -> bool:
+    """Validate the exact Xpra client identity before and after owner changes."""
+    path = directory / CLIPBOARD_CLIENT_SURVIVAL_ARTIFACT
+    try:
+        ensure_private_regular_file(path)
+        raw = path.read_bytes()
+        if not raw or len(raw) > 16 * 1024 or b"\0" in raw:
+            return False
+        payload = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_json_object_without_duplicates,
+        )
+    except (LabFailure, OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict) or set(payload) != {"after", "before", "schema"}:
+        return False
+    before = payload.get("before")
+    after = payload.get("after")
+    client_pid = _clipboard_decimal_artifact(directory / "client.pid", positive=True)
+    return bool(
+        type(payload.get("schema")) is int
+        and payload["schema"] == 1
+        and valid_process_identity(before)
+        and valid_process_identity(after)
+        and before == after
+        and client_pid == before["pid"]
+    )
+
+
+def _clipboard_fixture_processes_clean(directory: Path) -> bool:
+    pid_names = ("clipboard-fixture.pid", "clipboard-monitor.pid", "clipboard-owner.pid")
+    exit_names = (
+        "clipboard-fixture.exit",
+        "clipboard-monitor.exit",
+        "clipboard-owner.exit",
+        "clipboard-consumer-initial.exit",
+        "clipboard-consumer-repeat.exit",
+        "clipboard-consumer-reverse.exit",
+        "clipboard-consumer-updated.exit",
+    )
+    stderr_names = tuple(name.replace(".exit", ".stderr") for name in exit_names)
+    stdout_names = (
+        "clipboard-fixture.stdout",
+        "clipboard-monitor.stdout",
+        "clipboard-owner.stdout",
+        "clipboard-consumer-initial.stdout",
+        "clipboard-consumer-repeat.stdout",
+        "clipboard-consumer-reverse.stdout",
+        "clipboard-consumer-updated.stdout",
+    )
+    expected_names = {
+        CLIPBOARD_CLIENT_SURVIVAL_ARTIFACT,
+        *pid_names,
+        *exit_names,
+        *stderr_names,
+        *stdout_names,
+    }
+    observed_names = {
+        path.name
+        for path in directory.iterdir()
+        if path.name.startswith("clipboard-")
+    }
+    return bool(
+        observed_names == expected_names
+        and all(_clipboard_decimal_artifact(directory / name, positive=True) for name in pid_names)
+        and all(
+            _clipboard_decimal_artifact(directory / name, positive=False) == 0
+            for name in exit_names
+        )
+        and all(
+            (directory / name).is_file()
+            and not (directory / name).is_symlink()
+            and (directory / name).stat().st_size == 0
+            for name in stderr_names
+        )
+    )
+
+
+def clipboard_interaction_checks(
+    interaction: dict[str, Any],
+    directory: Path,
+) -> dict[str, bool]:
+    """Derive the exact clipboard acceptance checks from structured evidence."""
+    policy = interaction.get("policy")
+    owner = interaction.get("owner")
+    wayland = interaction.get("wayland")
+    xfixes = interaction.get("xfixes")
+    local = interaction.get("local", {})
+    if (
+        policy not in CLIPBOARD_POLICIES
+        or not isinstance(owner, dict)
+        or not isinstance(wayland, dict)
+        or not isinstance(xfixes, dict)
+        or not isinstance(local, dict)
+    ):
+        return dict.fromkeys(CLIPBOARD_LIVE_CHECK_NAMES, False)
+    owner_records = owner.get("records", [])
+    wayland_records = wayland.get("records", [])
+    xfixes_records = xfixes.get("records", [])
+    if not all(
+        isinstance(records, list)
+        and all(isinstance(record, dict) for record in records)
+        for records in (owner_records, wayland_records, xfixes_records)
+    ):
+        return dict.fromkeys(CLIPBOARD_LIVE_CHECK_NAMES, False)
+    owner_events = [record.get("event") for record in owner_records]
+    wayland_events = [record.get("event") for record in wayland_records]
+    xfixes_events = [record.get("event") for record in xfixes_records]
+    owner_sequence = (
+        "owner-ready",
+        "owner-updated",
+        "owner-updated",
+        "owner-command-accepted",
+        "owner-stopping",
+    )
+    wayland_sequence = (
+        "ready",
+        "paste-requested",
+        "paste-result",
+        "paste-requested",
+        "paste-result",
+        "paste-requested",
+        "paste-result",
+        "owner-armed",
+        "owner-set",
+        "owner-confirmed",
+        "escape-received",
+        "closed",
+    )
+    expected_notification_count = 3 if policy == "both" else 2
+    expected_xfixes_sequence = [
+        "monitor-ready",
+        *("xfixes-selection-notify" for _ in range(expected_notification_count)),
+        "monitor-result",
+    ]
+    event_sequence_exact = bool(
+        owner_events == list(owner_sequence)
+        and wayland_events == list(wayland_sequence)
+        and xfixes_events == expected_xfixes_sequence
+    )
+    ready = owner_records[0] if len(owner_records) == len(owner_sequence) else {}
+    updates = owner_records[1:3] if len(owner_records) == len(owner_sequence) else []
+    owner_stopping = (
+        owner_records[4] if len(owner_records) == len(owner_sequence) else {}
+    )
+    owner_xid = ready.get("clipboard_owner_xid")
+    owner_xid_valid = type(owner_xid) is int and owner_xid > 0
+    owner_xid_stable = bool(
+        owner_xid_valid
+        and ready.get("owner_valid") is True
+        and len(updates) == 2
+        and [record.get("marker_id") for record in updates] == ["two", "one"]
+        and all(
+            record.get("same_clipboard_owner_xid") is True
+            and record.get("same_primary_owner_xid") is True
+            and record.get("clipboard_owner_xid") == owner_xid
+            and record.get("previous_clipboard_owner_xid") == owner_xid
+            for record in updates
+        )
+    )
+    notifications = [
+        record for record in xfixes_records
+        if record.get("event") == "xfixes-selection-notify"
+    ]
+    monitor_ready = (
+        xfixes_records[0]
+        if len(xfixes_records) == expected_notification_count + 2
+        else {}
+    )
+    monitor_result = (
+        xfixes_records[-1]
+        if len(xfixes_records) == expected_notification_count + 2
+        else {}
+    )
+    notification_payloads = [
+        {
+            key: value
+            for key, value in record.items()
+            if key not in {"event", "monotonic_ns", "schema", "sequence"}
+        }
+        for record in notifications
+    ]
+    local_notifications = notifications[:2]
+    local_timestamps_advanced = bool(
+        len(local_notifications) == 2
+        and all(
+            record.get("selection_is_clipboard") is True
+            and record.get("subtype") == 0
+            and record.get("owner_xid") == owner_xid
+            and type(record.get("selection_timestamp")) is int
+            and record["selection_timestamp"] > 0
+            for record in local_notifications
+        )
+        and local_notifications[1]["selection_timestamp"]
+        > local_notifications[0]["selection_timestamp"]
+    )
+    monitor_evidence_exact = bool(
+        len(notifications) == expected_notification_count
+        and monitor_ready.get("owner_before_xid") == owner_xid
+        and monitor_ready.get("subscribed_window_xids")
+        == [monitor_ready.get("root_xid")]
+        and monitor_result.get("event_count") == expected_notification_count
+        and monitor_result.get("events") == notification_payloads
+        and monitor_result.get("overflow") is False
+        and monitor_result.get("stop_requested") is True
+    )
+    paste_results = [
+        record for record in wayland_records if record.get("event") == "paste-result"
+    ]
+    forward = policy in {"both", "to-server"}
+    forward_valid = [
+        _clipboard_marker_valid(
+            record,
+            marker_id,
+            matches=forward,
+            require_absent=not forward,
+        )
+        and record.get("within_entry_bound") is forward
+        for record, marker_id in zip(paste_results, ("one", "two", "one"), strict=False)
+    ]
+    paste_requests = [
+        record for record in wayland_records if record.get("event") == "paste-requested"
+    ]
+    wayland_ready = wayland_records[0] if len(wayland_records) == len(wayland_sequence) else {}
+    wayland_owner_armed = (
+        wayland_records[7] if len(wayland_records) == len(wayland_sequence) else {}
+    )
+    wayland_owner_set = (
+        wayland_records[8] if len(wayland_records) == len(wayland_sequence) else {}
+    )
+    wayland_owner_confirmed = (
+        wayland_records[9] if len(wayland_records) == len(wayland_sequence) else {}
+    )
+    wayland_closed = (
+        wayland_records[11] if len(wayland_records) == len(wayland_sequence) else {}
+    )
+    owner_pid = _clipboard_decimal_artifact(
+        directory / "clipboard-owner.pid",
+        positive=True,
+    )
+    fixture_pid = _clipboard_decimal_artifact(
+        directory / "clipboard-fixture.pid",
+        positive=True,
+    )
+    owner_confirmation_valid = bool(
+        wayland_owner_confirmed.get("event") == "owner-confirmed"
+        and _clipboard_marker_valid(wayland_owner_confirmed, "three", matches=True)
+        and wayland_owner_confirmed.get("command_id") == 4
+    )
+    structure_exact = bool(
+        event_sequence_exact
+        and _clipboard_marker_valid(ready, "one", matches=True)
+        and len(updates) == 2
+        and _clipboard_marker_valid(updates[0], "two", matches=True)
+        and _clipboard_marker_valid(updates[1], "one", matches=True)
+        and [record.get("marker_id") for record in paste_requests]
+        == ["one", "two", "one"]
+        and [record.get("request_id") for record in paste_requests] == [1, 2, 3]
+        and [record.get("command_id") for record in paste_requests] == [1, 2, 3]
+        and [record.get("request_id") for record in paste_results] == [1, 2, 3]
+        and [record.get("command_id") for record in paste_results] == [1, 2, 3]
+        and wayland_ready.get("backend") == "wayland"
+        and wayland_ready.get("title") == CLIPBOARD_FIXTURE_TITLE
+        and wayland_owner_armed.get("command_id") == 4
+        and wayland_owner_armed.get("marker_id") == "three"
+        and _clipboard_marker_valid(wayland_owner_set, "three", matches=True)
+        and wayland_owner_set.get("command_id") == 4
+        and owner_confirmation_valid
+        and owner_pid == ready.get("pid") == owner_stopping.get("pid")
+        and fixture_pid == wayland_ready.get("pid") == wayland_closed.get("pid")
+    )
+    reverse = local.get("reverse")
+    reverse_observed_owner = (
+        reverse.get("owner_before_xid") if isinstance(reverse, dict) else None
+    )
+    reverse_owner_xid = (
+        reverse_observed_owner
+        if policy == "both"
+        and type(reverse_observed_owner) is int
+        and reverse_observed_owner > 0
+        and reverse_observed_owner != owner_xid
+        else owner_xid if policy in {"to-server", "off"} and owner_xid_valid else None
+    )
+    reverse_notification = notifications[2] if len(notifications) == 3 else {}
+    if policy == "both":
+        reverse_route_valid = bool(
+            monitor_evidence_exact
+            and local_timestamps_advanced
+            and reverse_owner_xid is not None
+            and reverse_notification.get("selection_is_clipboard") is True
+            and reverse_notification.get("subtype") == 0
+            and reverse_notification.get("owner_xid") == reverse_owner_xid
+            and type(reverse_notification.get("selection_timestamp")) is int
+            and reverse_notification["selection_timestamp"]
+            > local_notifications[1]["selection_timestamp"]
+            and monitor_result.get("owner_after_xid") == reverse_owner_xid
+        )
+    else:
+        reverse_route_valid = bool(
+            monitor_evidence_exact
+            and policy in {"to-server", "off"}
+            and len(notifications) == 2
+            and monitor_result.get("owner_after_xid") == owner_xid
+        )
+    checks = {
+        "local_initial_targets": _clipboard_conversion_valid(
+            local.get("initial"), "one", owner_xid=owner_xid if owner_xid_valid else None
+        ),
+        "local_initial_marker": _clipboard_conversion_valid(
+            local.get("initial"), "one", owner_xid=owner_xid if owner_xid_valid else None
+        ),
+        "initial_forward_policy": len(forward_valid) == 3 and forward_valid[0],
+        "local_updated_targets": _clipboard_conversion_valid(
+            local.get("updated"), "two", owner_xid=owner_xid if owner_xid_valid else None
+        ),
+        "local_updated_marker": _clipboard_conversion_valid(
+            local.get("updated"), "two", owner_xid=owner_xid if owner_xid_valid else None
+        ),
+        "owner_xid_stable": owner_xid_stable,
+        "ownership_timestamp_advanced": (
+            local_timestamps_advanced and monitor_evidence_exact
+        ),
+        "updated_forward_policy": len(forward_valid) == 3 and forward_valid[1],
+        "repeated_forward_policy": bool(
+            len(forward_valid) == 3
+            and forward_valid[2]
+            and _clipboard_conversion_valid(
+                local.get("repeat"),
+                "one",
+                owner_xid=owner_xid if owner_xid_valid else None,
+            )
+        ),
+        "client_survived_owner_changes": interaction.get(
+            "client_alive_after_changes"
+        ) is True and _clipboard_client_survival_from_artifact(directory),
+        "reverse_policy": bool(
+            reverse_route_valid
+            and owner_confirmation_valid
+            and _clipboard_conversion_valid(
+                reverse,
+                "three" if policy == "both" else "one",
+                owner_xid=reverse_owner_xid,
+            )
+        ),
+        "event_sequence_exact": structure_exact,
+        "fixture_processes_clean": _clipboard_fixture_processes_clean(directory),
+        "no_plaintext_marker_artifacts": _clipboard_artifacts_hide_markers(directory),
+    }
+    return {name: bool(checks[name]) for name in CLIPBOARD_LIVE_CHECK_NAMES}
+
+
+def _clipboard_evidence_from_artifacts(
+    directory: Path,
+    policy: str,
+) -> dict[str, Any]:
+    local: dict[str, dict[str, Any]] = {}
+    for name in ("initial", "updated", "repeat", "reverse"):
+        records = read_clipboard_records(
+            directory / f"clipboard-consumer-{name}.stdout"
+        )
+        if len(records) != 1:
+            raise LabFailure("clipboard consumer emitted an unexpected record count")
+        local[name] = records[0]
+    evidence: dict[str, Any] = {
+        "attempted": True,
+        "client_alive_after_changes": _clipboard_client_survival_from_artifact(
+            directory
+        ),
+        "local": local,
+        "owner": {
+            "records": read_clipboard_records(directory / "clipboard-owner.stdout")
+        },
+        "policy": policy,
+        "wayland": {
+            "records": read_clipboard_records(directory / "clipboard-fixture.stdout")
+        },
+        "xfixes": {
+            "records": read_clipboard_records(directory / "clipboard-monitor.stdout")
+        },
+    }
+    evidence["checks"] = clipboard_interaction_checks(evidence, directory)
+    return evidence
+
+
+def clipboard_artifact_evidence_matches(
+    interaction: object,
+    directory: Path,
+) -> bool:
+    """Rebuild clipboard evidence from collected authority artifacts."""
+    if not isinstance(interaction, dict):
+        return False
+    try:
+        expected = _clipboard_evidence_from_artifacts(
+            directory,
+            str(interaction.get("policy")),
+        )
+    except (LabFailure, OSError, UnicodeError, ValueError):
+        return False
+    return expected == interaction and all(expected["checks"].values())
 
 
 def send_zed_payload(
@@ -2220,6 +2913,50 @@ def resolve_patch_selection(
     )
 
 
+def client_selection_for_application(
+    application: str,
+    server_selection: PatchSelection,
+) -> PatchSelection:
+    """Select the client source required by one live application boundary."""
+    if application == "clipboard":
+        return server_selection
+    return resolve_patch_selection(None, "master")
+
+
+def validate_endpoint_contexts(
+    application: str,
+    server_context: BuildContext,
+    client_context: BuildContext,
+) -> None:
+    """Fail closed when a live profile binds the wrong endpoint selection."""
+    server = server_context.selection
+    client = client_context.selection
+    if application != "clipboard":
+        if client.name != "master" or client.selectors or client.patches:
+            raise LabFailure("live client must use the clean embedded source")
+        return
+    selection_fields = (
+        "case_slugs",
+        "digest",
+        "name",
+        "patches",
+        "selector_digests",
+        "selectors",
+    )
+    if any(getattr(client, field) != getattr(server, field) for field in selection_fields):
+        raise LabFailure("clipboard endpoints do not use the same selected patch queue")
+    if (
+        client_context.digest != server_context.digest
+        or client_context.resolution != server_context.resolution
+        or client_context.manifest != server_context.manifest
+        or (
+            client_context.archive_sha256 is not None
+            and client_context.archive_sha256 != server_context.archive_sha256
+        )
+    ):
+        raise LabFailure("clipboard endpoint build contexts are not identical")
+
+
 def ensure_patch_selection_current(selection: PatchSelection) -> None:
     for selector, expected in selection.selector_digests:
         observed = selection_output(selector, "digest")
@@ -2859,7 +3596,10 @@ def freeze_owned_inputs(
     try:
         snapshot = create_source_snapshot(state_root, temporary_root=freeze_root)
         server_selection = resolve_patch_selection(selection_name, None)
-        client_selection = resolve_patch_selection(None, "master")
+        client_selection = client_selection_for_application(
+            application,
+            server_selection,
+        )
         keyboard_scenario = (
             selected_keyboard_scenario(server_selection)
             if application == "keyboard"
@@ -2871,12 +3611,17 @@ def freeze_owned_inputs(
             server_selection,
             temporary_root=freeze_root,
         )
-        client_context = prepare_build_context(
-            state_root,
-            snapshot,
-            client_selection,
-            temporary_root=freeze_root,
+        client_context = (
+            server_context
+            if application == "clipboard"
+            else prepare_build_context(
+                state_root,
+                snapshot,
+                client_selection,
+                temporary_root=freeze_root,
+            )
         )
+        validate_endpoint_contexts(application, server_context, client_context)
         input_manifest_sha256, _zed_archive, _zed_archive_sha256 = (
             snapshot_build_inputs(
                 result_directory,
@@ -3443,7 +4188,7 @@ def pixel_error_limit(application: str, encoding: str) -> float:
     """Return the exact per-profile client/server image tolerance."""
     if encoding == "h264":
         return 15.0
-    if application in {"gtk", "keyboard"}:
+    if application in {"clipboard", "gtk", "keyboard"}:
         # GTK text rasterization can differ by one intensity level at glyph edges
         # between the server pixels and the X11 client capture.  Keep the static
         # Zed RGB proof byte-exact and scope this bounded tolerance to the tracked
@@ -6417,6 +7162,12 @@ def application_contract(application: str) -> tuple[str, tuple[str, ...], str]:
             (KEYBOARD_FIXTURE_TITLE,),
             "keyboard-fixture.pid",
         )
+    if application == "clipboard":
+        return (
+            "/opt/xpra-fork-maintenance/start_wayland_clipboard_fixture.sh",
+            (CLIPBOARD_FIXTURE_TITLE,),
+            "clipboard-fixture.pid",
+        )
     if application in MULTIWINDOW_HARDWARE_APPLICATIONS:
         fixture = hardware_fixture_spec(application)
         return fixture.command, fixture.title_patterns, fixture.pid_file
@@ -6430,6 +7181,245 @@ def application_contract(application: str) -> tuple[str, tuple[str, ...], str]:
         f"python3 {INTERACTION_FIXTURE_SCRIPT}",
         ("xpra hardware interaction ready",),
         INTERACTION_IDENTITY_ARTIFACT,
+    )
+
+
+def start_x11_clipboard_owner(client: str) -> None:
+    """Start the pre-existing local X11 owner used by the clipboard profile."""
+    script = (
+        "umask 077; "
+        f"env DISPLAY={CLIENT_DISPLAY} GDK_BACKEND=x11 NO_AT_BRIDGE=1 "
+        "python3 /opt/xpra-fork-maintenance/x11_clipboard_fixture.py "
+        f"owner one --command-file={CLIPBOARD_OWNER_COMMAND} "
+        ">/artifacts/clipboard-owner.stdout "
+        "2>/artifacts/clipboard-owner.stderr & "
+        "child=$!; printf '%s\\n' \"$child\" >/artifacts/clipboard-owner.pid; "
+        "status=0; wait \"$child\" || status=$?; "
+        "printf '%s\\n' \"$status\" >/artifacts/clipboard-owner.exit; "
+        "exit \"$status\""
+    )
+    podman_exec(client, ["bash", "-lc", script], detach=True)
+    wait_for_clipboard_event_count(
+        client,
+        "clipboard-owner.stdout",
+        "owner-ready",
+        1,
+        "local X11 clipboard owner",
+    )
+
+
+def start_x11_clipboard_monitor(client: str) -> None:
+    """Start an independent root XFixes subscription for timestamp evidence."""
+    script = (
+        "umask 077; "
+        f"env DISPLAY={CLIENT_DISPLAY} "
+        "python3 /opt/xpra-fork-maintenance/x11_clipboard_fixture.py "
+        f"monitor --root --timeout={CLIPBOARD_MONITOR_SECONDS} "
+        f"--stop-file={CLIPBOARD_MONITOR_COMMAND} "
+        ">/artifacts/clipboard-monitor.stdout "
+        "2>/artifacts/clipboard-monitor.stderr & "
+        "child=$!; printf '%s\\n' \"$child\" >/artifacts/clipboard-monitor.pid; "
+        "status=0; wait \"$child\" || status=$?; "
+        "printf '%s\\n' \"$status\" >/artifacts/clipboard-monitor.exit; "
+        "exit \"$status\""
+    )
+    podman_exec(client, ["bash", "-lc", script], detach=True)
+    wait_for_clipboard_event_count(
+        client,
+        "clipboard-monitor.stdout",
+        "monitor-ready",
+        1,
+        "independent XFixes clipboard monitor",
+    )
+
+
+def stop_x11_clipboard_monitor(client: str) -> None:
+    """Stop the XFixes monitor only after the reverse clipboard boundary."""
+    write_clipboard_command(client, CLIPBOARD_MONITOR_COMMAND, "stop")
+    wait_for(
+        "independent XFixes clipboard monitor exit",
+        lambda: container_artifact_exists(client, "clipboard-monitor.exit"),
+    )
+
+
+def run_x11_clipboard_consumer(
+    client: str,
+    marker_id: str,
+    name: str,
+) -> None:
+    """Run one ordinary raw X11 TARGETS and UTF8 conversion."""
+    if name not in {"initial", "updated", "repeat", "reverse"}:
+        raise LabFailure(f"invalid clipboard consumer name: {name}")
+    if marker_id not in clipboard_fixture_common.marker_ids():
+        raise LabFailure(f"invalid clipboard marker ID: {marker_id}")
+    script = (
+        "umask 077; status=0; "
+        f"env DISPLAY={CLIENT_DISPLAY} "
+        "python3 /opt/xpra-fork-maintenance/x11_clipboard_fixture.py "
+        f"convert {marker_id} --timeout=5 "
+        f">/artifacts/clipboard-consumer-{name}.stdout "
+        f"2>/artifacts/clipboard-consumer-{name}.stderr || status=$?; "
+        f"printf '%s\\n' \"$status\" >/artifacts/clipboard-consumer-{name}.exit; "
+        "exit 0"
+    )
+    podman_exec(client, ["bash", "-lc", script])
+
+
+def request_wayland_clipboard_paste(
+    server: str,
+    marker_id: str,
+    count: int,
+) -> None:
+    write_clipboard_command(
+        server,
+        WAYLAND_CLIPBOARD_COMMAND,
+        f"paste:{marker_id}",
+    )
+    wait_for_clipboard_event_count(
+        server,
+        "clipboard-fixture.stdout",
+        "paste-result",
+        count,
+        f"native-Wayland clipboard paste {count}",
+    )
+
+
+def update_x11_clipboard_owner(
+    client: str,
+    marker_id: str,
+    count: int,
+) -> None:
+    write_clipboard_command(
+        client,
+        CLIPBOARD_OWNER_COMMAND,
+        f"set:{marker_id}",
+    )
+    wait_for_clipboard_event_count(
+        client,
+        "clipboard-owner.stdout",
+        "owner-updated",
+        count,
+        f"local X11 clipboard owner update {count}",
+    )
+
+
+def exercise_x11_clipboard(
+    server: str,
+    client: str,
+    client_pid: int,
+    window_id: str,
+    policy: str,
+    directory: Path,
+) -> dict[str, Any]:
+    """Exercise initial, repeated, directional, and raw X11 boundaries."""
+    if policy not in CLIPBOARD_POLICIES:
+        raise LabFailure(f"invalid clipboard policy: {policy}")
+    wait_for_clipboard_event_count(
+        server,
+        "clipboard-fixture.stdout",
+        "ready",
+        1,
+        "native-Wayland clipboard fixture",
+    )
+    time.sleep(CLIPBOARD_SETTLE_SECONDS)
+    request_wayland_clipboard_paste(server, "one", 1)
+
+    client_before_changes = container_process_identity(client, client_pid)
+    if client_before_changes is None:
+        raise LabFailure("Xpra client exited before clipboard owner changes")
+    start_x11_clipboard_monitor(client)
+    update_x11_clipboard_owner(client, "two", 1)
+    run_x11_clipboard_consumer(client, "two", "updated")
+    time.sleep(CLIPBOARD_SETTLE_SECONDS)
+    request_wayland_clipboard_paste(server, "two", 2)
+
+    update_x11_clipboard_owner(client, "one", 2)
+    run_x11_clipboard_consumer(client, "one", "repeat")
+    time.sleep(CLIPBOARD_SETTLE_SECONDS)
+    request_wayland_clipboard_paste(server, "one", 3)
+    client_after_changes = require_process_identity(
+        client,
+        client_before_changes,
+        role="Xpra client after clipboard owner changes",
+    )
+    replace_private_json(
+        directory / CLIPBOARD_CLIENT_SURVIVAL_ARTIFACT,
+        {
+            "after": client_after_changes,
+            "before": client_before_changes,
+            "schema": 1,
+        },
+    )
+
+    write_clipboard_command(
+        server,
+        WAYLAND_CLIPBOARD_COMMAND,
+        "own:three",
+    )
+    wait_for_clipboard_event_count(
+        server,
+        "clipboard-fixture.stdout",
+        "owner-armed",
+        1,
+        "native-Wayland clipboard owner arm",
+    )
+    podman_exec(
+        client,
+        [
+            "env",
+            f"DISPLAY={CLIENT_DISPLAY}",
+            "xdotool",
+            "windowactivate",
+            "--sync",
+            window_id,
+            "key",
+            "F8",
+        ],
+    )
+    wait_for_clipboard_event_count(
+        server,
+        "clipboard-fixture.stdout",
+        "owner-set",
+        1,
+        "native-Wayland clipboard owner request",
+    )
+    wait_for_clipboard_event_count(
+        server,
+        "clipboard-fixture.stdout",
+        "owner-confirmed",
+        1,
+        "native-Wayland clipboard compositor confirmation",
+    )
+    if policy == "both":
+        wait_for_clipboard_event_count(
+            client,
+            "clipboard-monitor.stdout",
+            "xfixes-selection-notify",
+            3,
+            "reverse X11 clipboard ownership",
+        )
+    reverse_marker = "three" if policy == "both" else "one"
+    run_x11_clipboard_consumer(client, reverse_marker, "reverse")
+    stop_x11_clipboard_monitor(client)
+    wait_for_clipboard_event_count(
+        client,
+        "clipboard-monitor.stdout",
+        "monitor-result",
+        1,
+        "independent XFixes clipboard result",
+    )
+    return {
+        "attempted": True,
+        "policy": policy,
+    }
+
+
+def stop_x11_clipboard_owner(client: str) -> None:
+    """Stop the auxiliary owner and require its normal completion artifact."""
+    write_clipboard_command(client, CLIPBOARD_OWNER_COMMAND, "quit")
+    wait_for(
+        "local X11 clipboard owner exit",
+        lambda: container_artifact_exists(client, "clipboard-owner.exit"),
     )
 
 
@@ -10651,6 +11641,16 @@ def classify_boundaries(
             name: check_schema_exact and keyboard_checks.get(name) is True
             for name in KEYBOARD_LIVE_CHECK_NAMES
         }
+    elif args.application == "clipboard":
+        clipboard_checks = interaction.get("checks", {})
+        check_schema_exact = bool(
+            isinstance(clipboard_checks, dict)
+            and tuple(clipboard_checks) == CLIPBOARD_LIVE_CHECK_NAMES
+        )
+        interaction_checks = {
+            name: check_schema_exact and clipboard_checks.get(name) is True
+            for name in CLIPBOARD_LIVE_CHECK_NAMES
+        }
     else:
         interaction_checks = {"not_required_for_vulkan_control": True}
     ordered: dict[str, dict[str, bool]] = {
@@ -10739,6 +11739,10 @@ def run_scenario(
     zed_archive: Path | None,
     zed_archive_sha256: str | None,
 ) -> dict[str, Any]:
+    if (args.application == "clipboard") != (
+        scenario.clipboard_policy in CLIPBOARD_POLICIES
+    ):
+        raise LabFailure("clipboard application and direction policy do not match")
     if (args.application == "keyboard") != (
         isinstance(keyboard_scenario, dict)
         and isinstance(keyboard_scenario_sha256, str)
@@ -10998,6 +12002,9 @@ def run_scenario(
             hardware=args.encoding == "h264",
             render_node=args.render_node,
         )
+        if args.application == "clipboard":
+            start_x11_clipboard_owner(client)
+            run_x11_clipboard_consumer(client, "one", "initial")
         if args.application == "keyboard":
             assert keyboard_scenario is not None
             # Seed the clean client's real X11 display from scenario data
@@ -11029,6 +12036,12 @@ def run_scenario(
             *encoding_options,
             *static_cli_options("server", "diagnostics"),
         ]
+        if args.application == "clipboard":
+            if scenario.clipboard_policy is None:
+                raise LabFailure("clipboard scenario has no direction policy")
+            server_command.extend(
+                clipboard_cli_options("server", scenario.clipboard_policy)
+            )
         server_environment = [
             "XPRA_SCREEN_UPDATES_DIRECTORY=/artifacts/screen-updates",
         ]
@@ -11125,6 +12138,12 @@ def run_scenario(
             *client_encoding_options,
             *static_cli_options("client", "diagnostics"),
         ]
+        if args.application == "clipboard":
+            if scenario.clipboard_policy is None:
+                raise LabFailure("clipboard scenario has no direction policy")
+            client_command.extend(
+                clipboard_cli_options("client", scenario.clipboard_policy)
+            )
         client_environment = [f"DISPLAY={CLIENT_DISPLAY}"]
         if scenario.disable_alpha:
             client_environment.append("XPRA_ALPHA=0")
@@ -11498,6 +12517,17 @@ def run_scenario(
                 keyboard_scenario,
                 keyboard_scenario_sha256,
             )
+        elif args.application == "clipboard":
+            if scenario.clipboard_policy is None:
+                raise LabFailure("clipboard scenario has no direction policy")
+            interaction = exercise_x11_clipboard(
+                server,
+                client,
+                client_pid,
+                window_id,
+                scenario.clipboard_policy,
+                directory,
+            )
 
         lifecycle: dict[str, Any] = {"mode": args.lifecycle}
         if application_identity is not None:
@@ -11531,7 +12561,7 @@ def run_scenario(
                 podman_exec(
                     server, ["kill", "-TERM", str(application_pid)], check=False
                 )
-            elif args.application == "keyboard":
+            elif args.application in {"clipboard", "keyboard"}:
                 podman_exec(
                     client,
                     [
@@ -11732,6 +12762,8 @@ def run_scenario(
             )
             lifecycle["server_exited_after_application"] = True
 
+        if args.application == "clipboard":
+            stop_x11_clipboard_owner(client)
         workloads_exited = True
         pull_all_container_artifacts(server, directory, "server")
         collected_containers.add(server)
@@ -11745,6 +12777,13 @@ def run_scenario(
                 directory,
                 keyboard_scenario,
                 keyboard_scenario_sha256,
+            )
+        elif args.application == "clipboard":
+            if scenario.clipboard_policy is None:
+                raise LabFailure("clipboard scenario has no direction policy")
+            interaction = _clipboard_evidence_from_artifacts(
+                directory,
+                scenario.clipboard_policy,
             )
         if args.application == "opengl":
             application_activity["opengl"] = load_opengl_evidence(
@@ -11935,11 +12974,17 @@ def run_scenario(
             "classification": classification,
             "client": {
                 "alpha_disabled": scenario.disable_alpha,
+                "clipboard_options": (
+                    clipboard_cli_options("client", scenario.clipboard_policy)
+                    if scenario.clipboard_policy is not None
+                    else []
+                ),
                 "compositor": compositor,
                 "network_options": client_network_options(args.network_profile),
                 "os_release": operating_systems["client"],
                 "version": versions["client"],
             },
+            "clipboard_policy": scenario.clipboard_policy,
             "encoding": args.encoding,
             "h264_client_policy": args.h264_client_policy,
             "hardware": hardware,
@@ -11960,6 +13005,11 @@ def run_scenario(
             "network_profile": args.network_profile,
             "result": "completed",
             "server": {
+                "clipboard_options": (
+                    clipboard_cli_options("server", scenario.clipboard_policy)
+                    if scenario.clipboard_policy is not None
+                    else []
+                ),
                 "os_release": operating_systems["server"],
                 "version": versions["server"],
             },
@@ -12196,6 +13246,10 @@ def main() -> int:
             alpha_scenarios=args.alpha_scenarios,
             network_profile_name=args.network_profile,
         )
+        validate_profile_selection(
+            application=args.application,
+            selection=args.selection,
+        )
     except ProfileError as error:
         raise LabFailure(str(error)) from error
     if args.selection is None:
@@ -12208,6 +13262,9 @@ def main() -> int:
     static_cli_options("server", "diagnostics")
     static_cli_options("client", "base")
     static_cli_options("client", "diagnostics")
+    for role in ("server", "client"):
+        for policy in CLIPBOARD_POLICIES:
+            clipboard_cli_options(role, policy)
     client_network_options(args.network_profile)
     if args.run_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.run_id):
         raise LabFailure(f"invalid run ID: {args.run_id!r}")
@@ -12278,9 +13335,17 @@ def main() -> int:
         keyboard_scenario_sha256 = bound.keyboard_scenario_sha256
         if args.selection != (None if server_selection.name == "master" else server_selection.name):
             raise LabFailure("bound live selection does not match the invocation")
+        validate_endpoint_contexts(
+            args.application,
+            server_context,
+            client_context,
+        )
     else:
         server_selection = resolve_patch_selection(args.selection, args.source_variant)
-        client_selection = resolve_patch_selection(None, "master")
+        client_selection = client_selection_for_application(
+            args.application,
+            server_selection,
+        )
         keyboard_scenario_input = (
             selected_keyboard_scenario(server_selection)
             if args.application == "keyboard"
@@ -12298,7 +13363,16 @@ def main() -> int:
             snapshot,
             server_selection,
         )
-        client_context = prepare_build_context(state_root, snapshot, client_selection)
+        client_context = (
+            server_context
+            if args.application == "clipboard"
+            else prepare_build_context(state_root, snapshot, client_selection)
+        )
+        validate_endpoint_contexts(
+            args.application,
+            server_context,
+            client_context,
+        )
         result_directory.mkdir(mode=0o700, exist_ok=False)
         ensure_private_directory(result_directory)
         input_manifest_sha256, zed_archive, zed_archive_sha256 = snapshot_build_inputs(
@@ -12333,7 +13407,14 @@ def main() -> int:
     client_context_digest = client_context.digest
     selection_tag = re.sub(r"[^a-z0-9_.-]+", "-", server_selection.name).strip("-")
     server_suffix = f"{commit[:12]}-{selection_tag}-{server_context_digest[:12]}"
-    client_suffix = f"{commit[:12]}-master-{client_context_digest[:12]}"
+    client_selection_tag = re.sub(
+        r"[^a-z0-9_.-]+",
+        "-",
+        client_selection.name,
+    ).strip("-")
+    client_suffix = (
+        f"{commit[:12]}-{client_selection_tag}-{client_context_digest[:12]}"
+    )
     server_image = f"localhost/xpra-fork-maintenance-live-server:{server_suffix}"
     client_image = f"localhost/xpra-fork-maintenance-live-client:{client_suffix}"
     if not args.skip_build:
@@ -12390,13 +13471,19 @@ def main() -> int:
     if tree_sha256(result_directory / "inputs") != input_tree_sha256:
         raise LabFailure("frozen live inputs changed before scenario execution")
 
-    scenarios = [
-        Scenario(name, disable_alpha)
-        for name, disable_alpha in scenario_specs(
-            alpha_scenarios=args.alpha_scenarios,
-            lifecycle=args.lifecycle,
-        )
-    ]
+    if args.application == "clipboard":
+        scenarios = [
+            Scenario(f"clipboard-{policy}", False, policy)
+            for policy in CLIPBOARD_POLICIES
+        ]
+    else:
+        scenarios = [
+            Scenario(name, disable_alpha)
+            for name, disable_alpha in scenario_specs(
+                alpha_scenarios=args.alpha_scenarios,
+                lifecycle=args.lifecycle,
+            )
+        ]
     aggregate: dict[str, Any] = {
         "application": args.application,
         "encoding": args.encoding,
@@ -12495,6 +13582,14 @@ def main() -> int:
             "all_scenarios_rendered": bool(appearances)
             and all(appearance == "rendered" for appearance in appearances.values()),
             "appearances": appearances,
+            "clipboard_policies": (
+                {
+                    report["name"]: report["clipboard_policy"]
+                    for report in aggregate["scenarios"]
+                }
+                if args.application == "clipboard"
+                else {}
+            ),
             "lifecycle": args.lifecycle,
         }
         aggregate["result"] = "passed" if passed else "failed"

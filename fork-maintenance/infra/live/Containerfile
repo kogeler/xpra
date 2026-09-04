@@ -99,6 +99,7 @@ RUN python3 setup.py install \
         --with-argb_encoder \
         --with-cairo \
         --with-client \
+        --with-clipboard \
         --with-csc_libyuv \
         --with-data \
         --with-dmabuf \
@@ -212,23 +213,31 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=server-build /opt/xpra-install/ /
+COPY clipboard_fixture_common.py /opt/xpra-fork-maintenance/clipboard_fixture_common.py
 COPY interaction_fixture.py /opt/xpra-fork-maintenance/interaction_fixture.py
+COPY wayland_clipboard_fixture.py /opt/xpra-fork-maintenance/wayland_clipboard_fixture.py
 COPY wayland_keyboard_fixture.py /opt/xpra-fork-maintenance/wayland_keyboard_fixture.py
 COPY container_payload.py /opt/xpra-fork-maintenance/container_payload.py
 COPY start_hardware_fixture.sh /opt/xpra-fork-maintenance/start_hardware_fixture.sh
+COPY start_wayland_clipboard_fixture.sh /opt/xpra-fork-maintenance/start_wayland_clipboard_fixture.sh
 COPY start_wayland_keyboard_fixture.sh /opt/xpra-fork-maintenance/start_wayland_keyboard_fixture.sh
 COPY start_zed.sh /opt/xpra-fork-maintenance/start_zed.sh
 
 RUN test -d /usr/local/share/xpra/css \
+    && chmod 0644 /opt/xpra-fork-maintenance/clipboard_fixture_common.py \
     && chmod 0644 /opt/xpra-fork-maintenance/interaction_fixture.py \
+    && chmod 0644 /opt/xpra-fork-maintenance/wayland_clipboard_fixture.py \
     && chmod 0644 /opt/xpra-fork-maintenance/wayland_keyboard_fixture.py \
     && chmod 0755 /opt/xpra-fork-maintenance/start_hardware_fixture.sh \
+    && chmod 0755 /opt/xpra-fork-maintenance/start_wayland_clipboard_fixture.sh \
     && chmod 0755 /opt/xpra-fork-maintenance/start_wayland_keyboard_fixture.sh \
     && chmod 0755 /opt/xpra-fork-maintenance/start_zed.sh \
     && chmod 0755 /opt/xpra-fork-maintenance/container_payload.py \
     && xpra --version \
     && python3 -c 'from xpra.codecs.libva import decoder, encoder' \
     && python3 -c 'from xpra.codecs.libyuv import converter' \
+    && python3 -c 'from xpra.clipboard import core' \
+    && python3 -c 'from xpra.wayland.server.clipboard import WaylandClipboard' \
     && python3 -c 'from xpra.wayland.server import compositor' \
     && test -x /usr/local/bin/xpra-empty-damage-fixture
 
@@ -245,6 +254,8 @@ WORKDIR /home/lab
 RUN test -r /opt/xpra-fork-maintenance/interaction_fixture.py \
     && python3 -c "open('/opt/xpra-fork-maintenance/interaction_fixture.py', 'rb').read(1)" \
     && test -r /opt/xpra-fork-maintenance/wayland_keyboard_fixture.py \
+    && test -r /opt/xpra-fork-maintenance/wayland_clipboard_fixture.py \
+    && test -x /opt/xpra-fork-maintenance/start_wayland_clipboard_fixture.sh \
     && test -x /opt/xpra-fork-maintenance/start_wayland_keyboard_fixture.sh \
     && test -x /usr/local/bin/xpra-empty-damage-fixture
 
@@ -304,6 +315,7 @@ RUN python3 setup.py install \
         --with-argb_encoder \
         --with-cairo \
         --with-client \
+        --with-clipboard \
         --with-csc_libyuv \
         --with-data \
         --with-dmabuf \
@@ -336,6 +348,7 @@ RUN package_dir="$(find /opt/xpra-install/usr/local/lib -type d -name dist-packa
 FROM docker.io/library/debian:13-slim AS client
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG XPRA_SELECTION
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
@@ -399,15 +412,27 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=client-build /opt/xpra-install/ /
+COPY clipboard_fixture_common.py /opt/xpra-fork-maintenance/clipboard_fixture_common.py
 COPY container_payload.py /opt/xpra-fork-maintenance/container_payload.py
+COPY x11_clipboard_fixture.py /opt/xpra-fork-maintenance/x11_clipboard_fixture.py
 
 RUN test -d /usr/local/share/xpra/css \
+    && chmod 0644 /opt/xpra-fork-maintenance/clipboard_fixture_common.py \
     && chmod 0755 /opt/xpra-fork-maintenance/container_payload.py \
+    && chmod 0644 /opt/xpra-fork-maintenance/x11_clipboard_fixture.py \
     && xpra --version \
     && python3 -c 'from xpra.codecs.libva import decoder, encoder' \
     && python3 -c 'from xpra.codecs.libyuv import converter' \
-    && XPRA_RESOURCES_DIR=/usr/local/share/xpra \
-        xvfb-run --auto-servernum python3 -c 'from xpra.client.gtk3 import client_base' \
+    && python3 -c 'from xpra.clipboard import core' \
+    && if [ "$XPRA_SELECTION" = "cases/x11-client-clipboard-events" ]; then \
+        XPRA_RESOURCES_DIR=/usr/local/share/xpra \
+            xvfb-run --auto-servernum python3 -c \
+            'from xpra.client.gtk3 import client_base; from xpra.x11.common import has_pywindow_lookup; from xpra.x11.gtk import bindings, display_source; from xpra.x11.selection.clipboard import X11Clipboard; assert has_pywindow_lookup()'; \
+       else \
+        XPRA_RESOURCES_DIR=/usr/local/share/xpra \
+            xvfb-run --auto-servernum python3 -c \
+            'from xpra.client.gtk3 import client_base'; \
+       fi \
     && test -x /usr/local/bin/xpra-xkb-xtest-driver
 
 RUN useradd --create-home --uid 1001 --shell /bin/bash lab \

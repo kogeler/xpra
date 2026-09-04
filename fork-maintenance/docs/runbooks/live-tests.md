@@ -52,7 +52,7 @@ Before publishing the main live owner, `live-start` first publishes inspectable
 `jobs/live/<RUN>.freeze-prelaunch.json`, then launches and durably publishes
 `jobs/live/<RUN>.freeze.json` for the separate input-freeze process. That
 process creates one private staging tree containing the content-verified
-embedded-source archive, a complete frozen harness, server and clean-client
+embedded-source archive, a complete frozen harness, server and client
 selection snapshots with their resolutions, validated server/client build-
 context tar archives and tree digests, and a Zed archive when selected. A
 manifest and `SHA256SUMS` bind the complete input tree. Only after validation is
@@ -74,7 +74,8 @@ shell code:
 make -C fork-maintenance live-profile-list
 ```
 
-Pass any name returned above to any of the seven public live wrappers:
+Pass any name returned above to any of the seven complete-stack wrappers or to
+the case-only clipboard wrapper:
 
 ```bash
 make -C fork-maintenance live-h264 \
@@ -89,17 +90,18 @@ repeated in every profile.
 
 [`live-cli.yml`](../../live-cli.yml) is the sole source of all other static
 Xpra arguments. It groups them by server/client role, then by base, lifecycle,
-diagnostics, subcommand, or transport, with encoding and policy below each
-transport. The runner adds only genuinely dynamic values such as endpoint,
-session name, child command, display, and selected device. Do not duplicate a
-tracked YAML value in Python, Make, or a unit-test assertion.
+diagnostics, subcommand, clipboard direction, or transport, with encoding and
+policy below each transport. The runner adds only genuinely dynamic values
+such as endpoint, session name, child command, display, and selected device. Do
+not duplicate a tracked YAML value in Python, Make, or a unit-test assertion.
 
-The standard acceptance ladder runs each public wrapper once with the YAML
-default. Selecting the other profiles is optional coverage, not a larger
-mandatory release matrix. It changes only client tuning: all codec, hardware,
-pixel, input, lifecycle, and cleanup gates remain identical and must still pass.
-The strict loader, both YAML files, and the selected profile name are frozen and
-hash-bound before the worker starts.
+The standard acceptance ladder runs each complete-stack wrapper once with the
+YAML default and runs every case-owned wrapper declared by a retained
+production manifest separately. Selecting the other network profiles is
+optional coverage, not a larger mandatory release matrix. It changes only
+client tuning: all codec, hardware, pixel, input, lifecycle, and cleanup gates
+remain identical and must still pass. The strict loader, both YAML files, and
+the selected profile name are frozen and hash-bound before the worker starts.
 
 The main worker reads only those run-owned inputs, so later source, harness,
 queue, or application-directory edits cannot change the run. Image cache tags
@@ -140,13 +142,15 @@ Every named live acceptance run requires one nonempty reviewed `CASE` or
 `STACK` selection. A clean-source diagnostic is not live acceptance and must
 use the isolated/unit diagnostic paths; it cannot publish a live `PASS`.
 
-The complete public positive set is exactly `live-rgb`, `live-h264`,
+The complete-stack positive set is exactly `live-rgb`, `live-h264`,
 `live-xpra-detach`, `live-xpra-transport-loss`, `live-xpra-hardware`, and
 `live-xpra-opengl-hardware`, plus `live-wayland-keyboard`. Fail-closed unit
 fixtures prove that invalid evidence is rejected; every named live target
 itself must prove its intended Xpra behavior and finish positive. Their
 acceptance dimensions are fixed;
 `NETWORK_PROFILE` is the orthogonal client-only tuning overlay described above.
+`live-x11-clipboard` is an additional case-only positive gate and does not
+change this seven-profile stack set.
 
 ## Native-Wayland client keymap synchronization
 
@@ -204,6 +208,68 @@ processes and the same established TCP connection remain active. The fixture
 must close through the forwarded window, exit zero, and drive the normal
 application-exit lifecycle. A plausible packet-only report without the entry
 observations fails closed.
+
+## X11 client to native-Wayland clipboard synchronization
+
+Run the clipboard case through its dedicated wrapper; it accepts neither
+another case nor a stack selection:
+
+```bash
+make -C fork-maintenance live-x11-clipboard \
+  CASE=x11-client-clipboard-events RUN=x11-client-clipboard-events-live-01
+make -C fork-maintenance live-wait \
+  RUN=x11-client-clipboard-events-live-01
+make -C fork-maintenance live-status \
+  RUN=x11-client-clipboard-events-live-01
+make -C fork-maintenance live-logs \
+  RUN=x11-client-clipboard-events-live-01
+make -C fork-maintenance live-remove \
+  RUN=x11-client-clipboard-events-live-01
+make -C fork-maintenance live-status \
+  RUN=x11-client-clipboard-events-live-01
+```
+
+The wrapper fixes RGB, application-exit, strict H.264 policy, and the default
+alpha scenario. Unlike the seven complete-stack profiles, this client-side
+regression builds the exact selected case source for both the Debian 13 X11
+client and Ubuntu 26.04 native-Wayland server. Input freeze and final
+collection require identical selection, resolution, context, and immutable
+image provenance at both endpoints. The client CLI is taken only from
+`live-cli.yml` and fixes `xsettings=no` and `input-devices=noxi2`; this keeps
+unrelated XSettings and XI2 filter owners from masking a missing clipboard
+filter lease.
+
+One named run owns three fresh Xpra sessions, in fixed `both`, `to-server`, and
+`off` order. In each session the X11 fixture first owns `CLIPBOARD`, while an
+independent raw X11 converter proves `TARGETS` and the exact first marker
+without using Xpra. Updating the same owner object to the second marker must
+retain its owner XID, advance the XFixes ownership timestamp, and remain
+locally convertible. The owner then restores the first marker through the same
+XID, proving that repeated updates do not return stale data. The
+native-Wayland GTK fixture observes all three forward policy results. `both`
+and `to-server` must deliver the initial, changed, and restored markers without
+reconnecting; `off` must deliver none. A separate third marker owned by the
+native-Wayland fixture must return to X11 only under `both`: `to-server` and
+`off` must not enable the reverse direction. An exact procfs identity artifact
+must prove that the same Xpra client process survives both owner changes in
+every session.
+
+For the reverse phase, the private command only arms the Wayland owner. The
+runner sends F8 through the forwarded Xpra window, the fixture claims inside
+that key callback with a current Wayland input serial, and a compositor-driven
+`owner-change` record confirms the claim. Keep the root XFixes monitor running
+until after the raw reverse conversion: require a third owner transition and
+the same new owner XID in `both`, but exactly the two original same-XID forward
+transitions and the original raw owner in `to-server` and `off`. Do not replace
+these event authorities with a fixed settle delay.
+
+The fixture accepts only fixed, non-sensitive marker identifiers. Retained
+runtime evidence contains event sequence, advertised targets, owner XIDs and
+timestamps, policy decisions, lengths, SHA-256 digests, and equality booleans;
+it must not contain marker plaintext or sample the operator's clipboard. The
+ordinary rendering/pixel, input, application-exit, container/network, and
+owned-cleanup checks still apply. A local conversion alone, an empty initial
+token, a reconnect, a longer timeout, or polling cannot satisfy the gate.
 
 ## RGB control
 

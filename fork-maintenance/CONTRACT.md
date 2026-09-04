@@ -206,10 +206,11 @@ Only these active cases are retained:
 
 1. `wayland-initial-window-state`;
 2. `wayland-client-keymap-sync`;
-3. `wayland-empty-damage-throttle`;
-4. `video-pipeline-cleanup-race`;
-5. `debian-libva-codecs-package`;
-6. `upstream-test-quarantine`.
+3. `x11-client-clipboard-events`;
+4. `wayland-empty-damage-throttle`;
+5. `video-pipeline-cleanup-race`;
+6. `debian-libva-codecs-package`;
+7. `upstream-test-quarantine`.
 
 ## Stack contract
 
@@ -578,7 +579,7 @@ A live start first publishes
 `jobs/live/<RUN>.freeze-prelaunch.json`, then launches and durably publishes the
 owned input-freeze process record. Before the main live owner exists, that
 process freezes one source archive, the complete harness, server and
-clean-client selection snapshots plus resolutions, both validated context
+client selection snapshots plus resolutions, both validated context
 archives/tree digests, the optional Zed archive, and the manifest/checksum tree
 below run-owned staging. The validated tree is atomically published as
 `live-results/<RUN>/inputs`; the main worker launches from the frozen harness
@@ -599,7 +600,8 @@ The two tracked YAML files at the maintenance root are the sole value authority
 for live Xpra command options. `profiles.yml` declares the named client-side
 quality/network profiles and its `default_profile`; `live-cli.yml` declares
 static blocks grouped by server/client role, command concern, transport,
-encoding, and policy. The common client `bandwidth-detection=no` setting belongs
+encoding, clipboard direction, and policy. The common client
+`bandwidth-detection=no` setting belongs
 to the static client base, while minimum quality/speed, auto-refresh delay,
 refresh rate, and bandwidth limit come only from the selected network profile.
 Those profile values are never passed to the server.
@@ -613,7 +615,18 @@ must not copy concrete profile names, arguments, or values into assertions.
 Both YAML files and the loader are part of the frozen harness digest. The main
 owner and final report bind the selected network-profile name.
 
-Every public live wrapper accepts `NETWORK_PROFILE=<name>`. Omitting it uses
+The seven complete-stack profiles bind the selected case or stack to the
+server and the clean embedded source to the client. The case-only
+`live-x11-clipboard` profile instead requires
+`CASE=x11-client-clipboard-events` and binds that exact selected source and
+resolution to both endpoints; its client-side production boundary cannot be
+tested with the ordinary clean-client image. The frozen input and final report
+must prove these endpoint identities rather than infer them from image tags.
+The final client-image preflight follows the same split: every selection must
+import the ordinary GTK client, while only the exact clipboard case may require
+its patch-owned X11 GTK adapter symbol and helper importability.
+
+Every positive live wrapper accepts `NETWORK_PROFILE=<name>`. Omitting it uses
 the `default_profile` declared only in `profiles.yml`. The normal required
 seven-gate acceptance ladder runs once with that default. Other tracked
 network profiles exercise the same positive gates on operator request; they do
@@ -876,7 +889,8 @@ both live master refs and rebases onto that commit. Publication and testing of
 the unchanged current base do not imply that refresh.
 
 CI never invokes a `live-*` target and cannot satisfy RGB, render-node,
-Wayland hardware-H.264, Vulkan, input, detach, or transport-loss acceptance.
+Wayland hardware-H.264, Vulkan, input, clipboard, detach, or transport-loss
+acceptance.
 Those profiles require the local physical environment. The hosted Actions job
 is the outer foreground lifecycle and log owner for `ci-upstream-tests`; local
 acceptance jobs continue to use unique named runner lifecycles and local
@@ -929,15 +943,55 @@ whether the removed guard still blocks them. Any change to a downstream input
 or execution path restores the normal validation ladder.
 
 The live runner keeps direct Xpra boundaries distinct from SSH orchestration.
-Its exact positive set is Zed RGB, adaptive-alpha Zed H.264, RGB detach, RGB
-direct-TCP transport-loss fault injection, native-Wayland client-keymap input,
-multi-window Vulkan/input hardware H.264, and multi-window native-Wayland
-OpenGL/input hardware H.264. Each fixed
-Make wrapper binds every profile dimension and every named job requires a
-nonempty reviewed case or stack selection. Foreground, clean-source, and
+Its exact complete-stack positive set is Zed RGB, adaptive-alpha Zed H.264,
+RGB detach, RGB direct-TCP transport-loss fault injection, native-Wayland
+client-keymap input, multi-window Vulkan/input hardware H.264, and multi-window
+native-Wayland OpenGL/input hardware H.264. Each fixed Make wrapper binds every
+profile dimension and every named job requires the exact nonempty reviewed
+selection allowed by that profile. Foreground, clean-source, and
 picture-fallback probes are diagnostic and cannot publish acceptance. A
 positive fault-injection profile first proves rendering and input, then proves
 the intended disconnect and survival behavior.
+
+The additional positive `live-x11-clipboard` gate is case-only and is not an
+eighth complete-stack profile. Its wrapper requires exactly
+`CASE=x11-client-clipboard-events` with no stack selection and fixes
+`APPLICATION=clipboard`, `LIFECYCLE=application-exit`, `ENCODING=rgb`, strict
+H.264 policy, and the default alpha scenario. The selected case source and
+resolution must be identical at the native-Wayland server and X11 client
+endpoints. The client command uses the YAML-owned `xsettings=no` and
+`input-devices=noxi2` settings so an unrelated subsystem cannot lend the
+clipboard helper a global X11 event-filter lease.
+
+One clipboard run creates fresh sessions for `both`, `to-server`, and `off`.
+Every session first proves through an independent raw X11 consumer that the
+fixture owns `CLIPBOARD`, advertises the expected targets, and returns the
+exact fixed marker locally. Two forward updates retain one owner XID, advance
+the selection timestamp, and must cross without reconnecting when policy
+allows. `both` additionally transfers the native-Wayland owner's fixed reverse
+marker; `to-server` must block that reverse transfer; `off` must block both
+directions while the local X11 controls remain green. The selected Xpra client
+must survive the owner changes, and cleanup must remove only run-owned
+subscriptions, windows, processes, containers, and network state.
+
+The native-Wayland command only arms the reverse owner. A real F8 key must
+cross the Xpra input path, and the fixture must call `Gtk.Clipboard.set_text`
+inside that key callback so the request carries a current compositor serial.
+The API call is not acceptance: a subsequent compositor-driven owner-change
+record must confirm ownership. The root XFixes monitor starts before the two
+local updates and stops only after reverse conversion. It records a third
+owner transition whose XID matches the raw reverse consumer for `both`, and
+exactly the original two same-XID transitions for `to-server` and `off`.
+A fixed sleep, an unconfirmed owner call, or a monitor stopped before reverse
+is not valid policy evidence.
+
+Clipboard fixture source contains only fixed public non-sensitive markers.
+Runtime evidence names marker IDs and records bounded event order, targets,
+owner XIDs, timestamps, lengths, SHA-256 digests, policy outcomes, and equality
+booleans; collected endpoint logs and reports must not expose marker text or
+arbitrary operator clipboard contents. Rendering, input, lifecycle, and owned
+cleanup remain positive acceptance boundaries rather than substitutes for the
+clipboard assertions.
 
 The detach and transport-loss profiles identify their GTK application only
 from `interaction.identity.json`, atomically published by that fixture from its

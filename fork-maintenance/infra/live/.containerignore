@@ -1,5 +1,6 @@
 *
 !Containerfile
+!clipboard_fixture_common.py
 !container_payload.py
 !empty_damage_fixture.c
 !interaction_fixture.py
@@ -9,7 +10,10 @@
 !source
 !source/**
 !start_hardware_fixture.sh
+!start_wayland_clipboard_fixture.sh
 !start_wayland_keyboard_fixture.sh
 !start_zed.sh
 !wayland_keyboard_fixture.py
+!wayland_clipboard_fixture.py
+!x11_clipboard_fixture.py
 !xkb_xtest_driver.c
