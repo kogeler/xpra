@@ -178,6 +178,7 @@ The currently retained active cases are:
 
 - `wayland-initial-window-state`;
 - `wayland-client-keymap-sync`;
+- `x11-client-clipboard-events`;
 - `wayland-empty-damage-throttle`;
 - `video-pipeline-cleanup-race`;
 - `debian-libva-codecs-package`;
@@ -408,11 +409,21 @@ use the selected render node and AMD Mesa/Radeon hardware driver rather than a
 software renderer, and produce changing nonuniform client frames. This
 complements the Vulkan gate; neither is a substitute for the other.
 
-The only named positive live profiles are Zed RGB, adaptive-alpha Zed H.264,
-RGB detach, RGB transport-loss fault injection, native-Wayland client-keymap
-input, multi-window Vulkan hardware, and multi-window OpenGL hardware. Their
-Make wrappers fix every acceptance dimension and require a nonempty reviewed
-case or stack selection. The
+The fixed complete-stack positive live profiles remain Zed RGB, adaptive-alpha
+Zed H.264, RGB detach, RGB transport-loss fault injection, native-Wayland
+client-keymap input, multi-window Vulkan hardware, and multi-window OpenGL
+hardware. The additional `live-x11-clipboard` gate is case-only: it requires
+`CASE=x11-client-clipboard-events`, applies that selected source to both the
+X11 client and native-Wayland server endpoint, disables the unrelated client
+XSettings and XI2 paths, and runs fresh `both`, `to-server`, and `off` sessions.
+Its Wayland reverse owner is armed by a private command but claims inside a real
+F8 event delivered through Xpra, then requires a compositor `owner-change`
+confirmation. The root XFixes monitor remains active through that phase: it
+must record a third takeover matching the raw reverse consumer under `both`
+and exactly the two local same-XID updates under `to-server` and `off`.
+It is not an eighth complete-stack profile. The Make wrappers fix every
+acceptance dimension and require the exact reviewed selection allowed by their
+profile. The
 orthogonal client-only `NETWORK_PROFILE` is loaded from
 `fork-maintenance/profiles.yml`; its YAML default is used for the normal seven
 gates. Static Xpra arguments come only from `fork-maintenance/live-cli.yml`.

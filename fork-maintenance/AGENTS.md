@@ -190,10 +190,18 @@ render-node descriptor, AMD Mesa/Radeon mapping, non-software renderer metadata,
 and changing nonuniform forwarded frames. The Vulkan and OpenGL primary gates
 are independent positive proofs.
 
-The exact public live acceptance set is Zed RGB, adaptive-alpha Zed H.264, RGB
-detach, RGB transport-loss fault injection, native-Wayland client-keymap input,
-multi-window Vulkan hardware, and multi-window OpenGL hardware. Their fixed
-Make wrappers require a nonempty reviewed case or stack. `profiles.yml` alone
+The exact complete-stack live acceptance set is Zed RGB, adaptive-alpha Zed
+H.264, RGB detach, RGB transport-loss fault injection, native-Wayland
+client-keymap input, multi-window Vulkan hardware, and multi-window OpenGL
+hardware. The separate positive `live-x11-clipboard` gate is owned only by
+`x11-client-clipboard-events`: it selects that case at both endpoints and is
+not added to the seven-profile stack set. Its native-Wayland reverse source is
+armed by a private command, claims only inside a real F8 callback delivered
+through Xpra, and must receive a compositor owner-change confirmation. The
+same root XFixes monitor covers both forward updates and that reverse boundary,
+with three owner events for `both` and exactly two for `to-server` and `off`.
+Their fixed Make wrappers require the
+exact nonempty reviewed selection allowed by each profile. `profiles.yml` alone
 supplies the selectable client network/quality overlay and its default;
 `live-cli.yml` alone supplies static server/client Xpra arguments. Do not
 duplicate their concrete values in Python, Make, or unit-test assertions.
@@ -314,8 +322,9 @@ and does not require or mutate a named remote or ref.
 
 Keep direct Xpra behavior separate from SSH or parent-product orchestration.
 The live runner owns direct-TCP detach, abrupt transport loss, RGB, adaptive
-Wayland H.264, and multi-window hardware profiles. Do not replace these with
-foreground one-off commands when deciding whether a patch is ready.
+Wayland H.264, multi-window hardware, and the case-only X11-to-native-Wayland
+clipboard gate. Do not replace these with foreground one-off commands when
+deciding whether a patch is ready.
 
 Invoke job lifecycle operations only through the root Makefile targets. Never
 signal recorded process groups or call destructive Podman commands directly for

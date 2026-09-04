@@ -1,0 +1,40 @@
+schema = 1
+slug = "x11-client-clipboard-events"
+kind = "production"
+title = "Restore X11 client clipboard synchronization"
+commit_subject = "Restore X11 client clipboard synchronization"
+patch_sha256 = "13b5ca63f3ef017acd4049d77b51ef083592b8dd04d14330d06838ba3b4f803f"
+dependencies = []
+paths = [
+  "setup.py",
+  "tests/unittests/unit/client/subsystem/clipboard_test.py",
+  "tests/unittests/unit/clipboard_core_test.py",
+  "tests/unittests/unit/wayland/clipboard_test.py",
+  "tests/unittests/unit/x11/common_test.py",
+  "xpra/clipboard/proxy.py",
+  "xpra/clipboard/timeout.py",
+  "xpra/wayland/server/clipboard.pyx",
+  "xpra/wayland/server/compositor.pyx",
+  "xpra/x11/common.py",
+  "xpra/x11/gtk/__init__.py",
+  "xpra/x11/gtk/bindings.pyx",
+  "xpra/x11/selection/clipboard.py",
+  "xpra/x11/selection/proxy.py",
+]
+
+[tests]
+list = [
+  "unit.clipboard_core_test",
+  "unit.client.subsystem.clipboard_test",
+  "unit.x11.common_test",
+  "unit.wayland.clipboard_test",
+  "wayland",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = [
+  "live-x11-clipboard",
+]

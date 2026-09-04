@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from live_config import CLIPBOARD_POLICIES as CONFIGURED_CLIPBOARD_POLICIES
 from live_config import (
     LiveConfigError,
     load_network_profiles,
@@ -12,14 +13,24 @@ from live_config import (
     network_profile_names,
 )
 
-APPLICATIONS = ("zed", "hardware", "opengl", "vkcube", "gtk", "keyboard")
+CLIPBOARD_POLICIES = CONFIGURED_CLIPBOARD_POLICIES
+CLIPBOARD_CASE_SELECTION = "cases/x11-client-clipboard-events"
+APPLICATIONS = (
+    "zed",
+    "hardware",
+    "opengl",
+    "vkcube",
+    "gtk",
+    "keyboard",
+    "clipboard",
+)
 LIFECYCLES = ("application-exit", "detach", "transport-loss")
 ENCODINGS = ("rgb", "h264")
 H264_ACCEPTANCE_POLICIES = ("strict", "adaptive-alpha")
 H264_FALLBACK_POLICIES = ("fallback-auto", "fallback-h264")
 H264_CLIENT_POLICIES = H264_ACCEPTANCE_POLICIES + H264_FALLBACK_POLICIES
 ALPHA_SCENARIOS = ("default", "disabled", "both")
-LIVE_ACCEPTANCE_PROFILES = frozenset(
+STACK_LIVE_ACCEPTANCE_PROFILES = frozenset(
     {
         ("zed", "application-exit", "rgb", "strict", "default"),
         ("zed", "application-exit", "h264", "adaptive-alpha", "default"),
@@ -29,6 +40,12 @@ LIVE_ACCEPTANCE_PROFILES = frozenset(
         ("opengl", "application-exit", "h264", "adaptive-alpha", "default"),
         ("keyboard", "application-exit", "rgb", "strict", "default"),
     }
+)
+CASE_ONLY_LIVE_ACCEPTANCE_PROFILES = frozenset(
+    {("clipboard", "application-exit", "rgb", "strict", "default")}
+)
+LIVE_ACCEPTANCE_PROFILES = (
+    STACK_LIVE_ACCEPTANCE_PROFILES | CASE_ONLY_LIVE_ACCEPTANCE_PROFILES
 )
 DEFAULT_NETWORK_PROFILE = load_network_profiles()[0]
 NETWORK_PROFILES = network_profile_names()
@@ -73,6 +90,15 @@ def validate_profile(
         raise ProfileError(f"unsupported live acceptance profile: {profile!r}")
 
 
+def validate_profile_selection(*, application: str, selection: str) -> None:
+    """Bind case-only live profiles to their exact reviewed selection."""
+    if application == "clipboard" and selection != CLIPBOARD_CASE_SELECTION:
+        raise ProfileError(
+            "clipboard live acceptance requires selection "
+            f"{CLIPBOARD_CASE_SELECTION}"
+        )
+
+
 def scenario_specs(
     *, alpha_scenarios: str, lifecycle: str
 ) -> tuple[tuple[str, bool], ...]:
@@ -99,6 +125,7 @@ def main() -> int:
         nargs="?",
         default=DEFAULT_NETWORK_PROFILE,
     )
+    parser.add_argument("--selection", required=True)
     args = parser.parse_args()
     try:
         validate_profile(
@@ -108,6 +135,10 @@ def main() -> int:
             h264_client_policy=args.h264_client_policy,
             alpha_scenarios=args.alpha_scenarios,
             network_profile_name=args.network_profile,
+        )
+        validate_profile_selection(
+            application=args.application,
+            selection=args.selection,
         )
     except ProfileError as error:
         print(f"error: {error}", file=sys.stderr)

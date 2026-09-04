@@ -1277,9 +1277,13 @@ production case and run every live gate in its `required_gates` with that exact
 `CASE=<case>` selection. If two cases
 declare the same gate, run it once for each case: the atomic selections prove
 different patch boundaries. A case with an empty list contributes no live run
-here. After retirement, omit that retired case's patched run: the corresponding
-gate in the resulting stack-wide seven-profile matrix is the replacement
-proof, subject to the keyboard scenario-ownership boundary above. Current
+here. After retirement, omit that retired case's patched run only when its
+behavior has another durable acceptance route. A gate also present in the
+stack-wide seven-profile matrix uses that stack result as the replacement
+proof, subject to the keyboard scenario-ownership boundary above. A case-only
+wrapper whose selection guard names the retired case must be migrated or
+retired atomically, and the upstream replacement must receive another
+supported durable proof; the boundary cannot silently disappear. Current
 manifest-to-Make mappings are:
 
 A case may declare a gate only when its exact `CASE=<case>` selection can
@@ -1298,6 +1302,7 @@ boundaries remain mandatory only in the complete-stack matrix below.
 | --- | --- |
 | `live-rgb` | `live-rgb` |
 | `live-wayland-keyboard` | `live-wayland-keyboard` |
+| `live-x11-clipboard` | `live-x11-clipboard` |
 | `live-wayland-h264-hardware` | `live-xpra-hardware` |
 | `live-wayland-opengl-h264-hardware` | `live-xpra-opengl-hardware` |
 
