@@ -92,6 +92,109 @@ def server_identity(pid: int = 8) -> dict[str, object]:
     }
 
 
+def client_identity(pid: int = 404) -> dict[str, object]:
+    argv = [
+        "/usr/bin/python3",
+        "/usr/bin/xpra",
+        "attach",
+        f"tcp://xpra-server:{live_run.SERVER_PORT}",
+    ]
+    return {
+        "argv": argv,
+        "cmdline_sha256": hashlib.sha256(
+            b"\0".join(os.fsencode(argument) for argument in argv) + b"\0"
+        ).hexdigest(),
+        "pid": pid,
+        "schema": 1,
+        "start_ticks": "777777",
+    }
+
+
+def clipboard_interaction(policy: str) -> dict[str, object]:
+    checks = {name: True for name in live_run.CLIPBOARD_LIVE_CHECK_NAMES}
+    return {
+        "attempted": True,
+        "checks": checks,
+        "client_alive_after_changes": True,
+        "local": {
+            "initial": {},
+            "repeat": {},
+            "reverse": {},
+            "updated": {},
+        },
+        "owner": {"records": []},
+        "policy": policy,
+        "wayland": {"records": []},
+        "xfixes": {"records": []},
+    }
+
+
+def clipboard_event(
+    sequence: int,
+    event: str,
+    **values: object,
+) -> dict[str, object]:
+    return {
+        "event": event,
+        "monotonic_ns": (sequence + 1) * 1_000,
+        "schema": 1,
+        "sequence": sequence,
+        **values,
+    }
+
+
+def clipboard_conversion(marker_id: str, owner_xid: int) -> dict[str, object]:
+    selection_notify = {
+        "property_atom": 31,
+        "requestor_xid": 41,
+        "selection_atom": 51,
+        "send_event": True,
+        "target_atom": 61,
+        "time": 71,
+        "type": "SelectionNotify",
+    }
+    conversion = {
+        "completed": True,
+        "events": [
+            {
+                "atom_id": 31,
+                "send_event": False,
+                "state": 0,
+                "time": 70,
+                "type": "PropertyNotify",
+                "window_xid": 41,
+            },
+            selection_notify,
+        ],
+        "overflow": False,
+        "selection_notify": selection_notify,
+        "target": "TARGETS",
+        "value": {"value_complete": True},
+    }
+    text = copy.deepcopy(conversion)
+    text["target"] = "UTF8_STRING"
+    return clipboard_event(
+        0,
+        "conversion-result",
+        backend="x11",
+        known_targets={"STRING": True, "UTF8_STRING": True},
+        marker=live_run.clipboard_fixture_common.marker_summary(
+            marker_id,
+            live_run.clipboard_fixture_common.marker_text(marker_id),
+        ),
+        owner_after_xid=owner_xid,
+        owner_before_xid=owner_xid,
+        owner_stable=True,
+        requestor_xid=41,
+        targets=conversion,
+        text=text,
+    )
+
+
+def clipboard_jsonl(records: list[dict[str, object]]) -> str:
+    return "".join(json.dumps(record, sort_keys=True) + "\n" for record in records)
+
+
 def execute_container_log_probe(
     root: Path,
 ) -> object:
@@ -228,6 +331,328 @@ class LiveJobTest(unittest.TestCase):
             "selection": "stacks/develop",
             "supervisor_sha256": job.sha256_file(job.SUPERVISOR),
         }
+
+    def clipboard_record(self, run: str) -> dict[str, object]:
+        record = self.record(run)
+        record["application"] = "clipboard"
+        provenance = record["input_provenance"]
+        provenance["zed_archive_sha256"] = None
+        provenance["zed_binary_sha256"] = None
+        provenance["client_selection"] = provenance["server_selection"]
+        for client_key, server_key in (
+            ("client_context_archive_sha256", "server_context_archive_sha256"),
+            ("client_context_sha256", "server_context_sha256"),
+            (
+                "client_selection_resolution_sha256",
+                "server_selection_resolution_sha256",
+            ),
+            ("client_selection_sha256", "server_selection_sha256"),
+        ):
+            provenance[client_key] = provenance[server_key]
+        return record
+
+    def make_clipboard_evidence_tree(
+        self,
+        run: str,
+        record: dict[str, object],
+    ) -> tuple[dict[str, object], Path]:
+        report = job.result_path(run)
+        report.parent.mkdir(parents=True)
+        report.parent.chmod(0o700)
+        inputs = report.parent / "inputs"
+        inputs.mkdir()
+        inputs.chmod(0o700)
+        report.write_text("{}\n", encoding="utf-8")
+        report.chmod(0o600)
+        scenarios: list[dict[str, object]] = []
+        scenario_digests: dict[str, str] = {}
+        lifecycle = {
+            "client_exit_status": 0,
+            "client_exited_after_server": True,
+            "mode": "application-exit",
+            "server_exited_after_application": True,
+        }
+        lifecycle_checks = live_run.lifecycle_boundary_checks(
+            "application-exit",
+            lifecycle,
+        )
+        for policy in live_run.CLIPBOARD_POLICIES:
+            name = f"clipboard-{policy}"
+            scenario_root = report.parent / name
+            scenario_root.mkdir()
+            scenario_root.chmod(0o700)
+            artifact = scenario_root / "evidence.txt"
+            artifact.write_text("digest-only clipboard evidence\n", encoding="utf-8")
+            artifact.chmod(0o600)
+            interaction = clipboard_interaction(policy)
+            scenario: dict[str, object] = {
+                "artifact_collection_passed": True,
+                "artifact_sha256": {
+                    "evidence.txt": job.sha256_file(artifact),
+                },
+                "classification": {
+                    "boundaries": {
+                        "interaction": interaction["checks"],
+                        "lifecycle": lifecycle_checks,
+                    }
+                },
+                "cleanup": {"passed": True},
+                "client": {
+                    "clipboard_options": list(
+                        live_run.live_config.clipboard_options("client", policy)
+                    )
+                },
+                "clipboard_policy": policy,
+                "interaction": interaction,
+                "lifecycle": lifecycle,
+                "lifecycle_profile": "application-exit",
+                "name": name,
+                "result": "passed",
+                "server": {
+                    "clipboard_options": list(
+                        live_run.live_config.clipboard_options("server", policy)
+                    )
+                },
+            }
+            scenario_report = scenario_root / "report.json"
+            scenario_report.write_text(
+                json.dumps(scenario, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            scenario_report.chmod(0o600)
+            scenarios.append(scenario)
+            scenario_digests[name] = job.sha256_file(scenario_report)
+        payload: dict[str, object] = {
+            "application": "clipboard",
+            "lifecycle_profile": "application-exit",
+            "scenario_report_sha256": scenario_digests,
+            "scenarios": scenarios,
+            "source": record["input_provenance"],
+        }
+        return payload, report
+
+    def make_clipboard_fixture_artifacts(
+        self,
+        root: Path,
+        policy: str,
+    ) -> dict[str, object]:
+        root.mkdir(parents=True)
+        root.chmod(0o700)
+        owner_pid = 101
+        fixture_pid = 202
+        monitor_pid = 303
+        xpra_client_identity = client_identity()
+        owner_xid = 401
+        primary_owner_xid = 402
+        root_xid = 501
+
+        def summary(marker_id: str, *, matches: bool = True) -> dict[str, object]:
+            observed = (
+                live_run.clipboard_fixture_common.marker_text(marker_id)
+                if matches
+                else None
+            )
+            return live_run.clipboard_fixture_common.marker_summary(
+                marker_id,
+                observed,
+            )
+
+        owner_records = [
+            clipboard_event(
+                0,
+                "owner-ready",
+                backend="x11",
+                clipboard_owner_xid=owner_xid,
+                owner_valid=True,
+                pid=owner_pid,
+                primary_owner_xid=primary_owner_xid,
+                **summary("one"),
+            ),
+            clipboard_event(
+                1,
+                "owner-updated",
+                clipboard_owner_xid=owner_xid,
+                previous_clipboard_owner_xid=owner_xid,
+                previous_primary_owner_xid=primary_owner_xid,
+                primary_owner_xid=primary_owner_xid,
+                same_clipboard_owner_xid=True,
+                same_primary_owner_xid=True,
+                **summary("two"),
+            ),
+            clipboard_event(
+                2,
+                "owner-updated",
+                clipboard_owner_xid=owner_xid,
+                previous_clipboard_owner_xid=owner_xid,
+                previous_primary_owner_xid=primary_owner_xid,
+                primary_owner_xid=primary_owner_xid,
+                same_clipboard_owner_xid=True,
+                same_primary_owner_xid=True,
+                **summary("one"),
+            ),
+            clipboard_event(3, "owner-command-accepted", operation="quit"),
+            clipboard_event(
+                4,
+                "owner-stopping",
+                clipboard_owner_xid=owner_xid,
+                marker_id="one",
+                pid=owner_pid,
+                primary_owner_xid=primary_owner_xid,
+            ),
+        ]
+        forward = policy in {"both", "to-server"}
+        wayland_records = [
+            clipboard_event(
+                0,
+                "ready",
+                backend="wayland",
+                pid=fixture_pid,
+                title=live_run.CLIPBOARD_FIXTURE_TITLE,
+            )
+        ]
+        sequence = 1
+        for request_id, marker_id in enumerate(("one", "two", "one"), 1):
+            wayland_records.extend(
+                (
+                    clipboard_event(
+                        sequence,
+                        "paste-requested",
+                        command_id=request_id,
+                        marker_id=marker_id,
+                        request_id=request_id,
+                    ),
+                    clipboard_event(
+                        sequence + 1,
+                        "paste-result",
+                        command_id=request_id,
+                        request_id=request_id,
+                        within_entry_bound=forward,
+                        **summary(marker_id, matches=forward),
+                    ),
+                )
+            )
+            sequence += 2
+        wayland_records.extend(
+            (
+                clipboard_event(
+                    7,
+                    "owner-armed",
+                    command_id=4,
+                    marker_id="three",
+                ),
+                clipboard_event(
+                    8,
+                    "owner-set",
+                    command_id=4,
+                    **summary("three"),
+                ),
+                clipboard_event(
+                    9,
+                    "owner-confirmed",
+                    command_id=4,
+                    **summary("three"),
+                ),
+                clipboard_event(10, "escape-received"),
+                clipboard_event(11, "closed", pid=fixture_pid),
+            )
+        )
+        reverse_marker = "three" if policy == "both" else "one"
+        reverse_owner_xid = 601 if policy == "both" else owner_xid
+        notification_pairs = [(601, owner_xid), (701, owner_xid)]
+        if policy == "both":
+            notification_pairs.append((801, reverse_owner_xid))
+        notification_values = [
+            {
+                "owner_xid": notification_owner,
+                "selection_is_clipboard": True,
+                "selection_timestamp": timestamp,
+                "send_event": False,
+                "subtype": 0,
+                "timestamp": timestamp + 1,
+                "window_xid": root_xid,
+            }
+            for timestamp, notification_owner in notification_pairs
+        ]
+        xfixes_records = [
+            clipboard_event(
+                0,
+                "monitor-ready",
+                event_base=87,
+                owner_before_xid=owner_xid,
+                root_xid=root_xid,
+                subscribed_window_xids=[root_xid],
+            ),
+            *(
+                clipboard_event(
+                    index,
+                    "xfixes-selection-notify",
+                    **values,
+                )
+                for index, values in enumerate(notification_values, 1)
+            ),
+            clipboard_event(
+                len(notification_values) + 1,
+                "monitor-result",
+                event_count=len(notification_values),
+                events=notification_values,
+                overflow=False,
+                owner_after_xid=reverse_owner_xid,
+                stop_requested=True,
+                subscribed_window_xids=[root_xid],
+            ),
+        ]
+        stdout_records = {
+            "clipboard-consumer-initial.stdout": [
+                clipboard_conversion("one", owner_xid)
+            ],
+            "clipboard-consumer-repeat.stdout": [
+                clipboard_conversion("one", owner_xid)
+            ],
+            "clipboard-consumer-reverse.stdout": [
+                clipboard_conversion(reverse_marker, reverse_owner_xid)
+            ],
+            "clipboard-consumer-updated.stdout": [
+                clipboard_conversion("two", owner_xid)
+            ],
+            "clipboard-fixture.stdout": wayland_records,
+            "clipboard-monitor.stdout": xfixes_records,
+            "clipboard-owner.stdout": owner_records,
+        }
+        for name, records in stdout_records.items():
+            path = root / name
+            path.write_text(clipboard_jsonl(records), encoding="utf-8")
+            path.chmod(0o600)
+        for name, pid in {
+            "client.pid": xpra_client_identity["pid"],
+            "clipboard-fixture.pid": fixture_pid,
+            "clipboard-monitor.pid": monitor_pid,
+            "clipboard-owner.pid": owner_pid,
+        }.items():
+            path = root / name
+            path.write_text(f"{pid}\n", encoding="ascii")
+            path.chmod(0o600)
+        for stem in (
+            "clipboard-consumer-initial",
+            "clipboard-consumer-repeat",
+            "clipboard-consumer-reverse",
+            "clipboard-consumer-updated",
+            "clipboard-fixture",
+            "clipboard-monitor",
+            "clipboard-owner",
+        ):
+            for suffix, contents in (("exit", "0\n"), ("stderr", "")):
+                path = root / f"{stem}.{suffix}"
+                path.write_text(contents, encoding="ascii")
+                path.chmod(0o600)
+        live_run.replace_private_json(
+            root / live_run.CLIPBOARD_CLIENT_SURVIVAL_ARTIFACT,
+            {
+                "after": xpra_client_identity,
+                "before": xpra_client_identity,
+                "schema": 1,
+            },
+        )
+        return live_run._clipboard_evidence_from_artifacts(root, policy)
 
     def freeze_prelaunch(self, run: str, *, job_id: str = JOB_ID) -> dict[str, object]:
         return {
@@ -652,6 +1077,34 @@ class LiveJobTest(unittest.TestCase):
         with self.assertRaisesRegex(job.JobError, "requires one non-empty"):
             job.start(args)
 
+    def test_start_rejects_the_wrong_clipboard_selection(self) -> None:
+        args = Namespace(
+            alpha_scenarios="default",
+            application="clipboard",
+            encoding="rgb",
+            h264_client_policy="strict",
+            lifecycle="application-exit",
+            network_profile=job.DEFAULT_NETWORK_PROFILE,
+            render_node=None,
+            run="clipboard-selection",
+            selection="",
+            zed_directory=None,
+        )
+        for selection in (
+            "stacks/develop",
+            "cases/wayland-client-keymap-sync",
+        ):
+            args.selection = selection
+            with (
+                self.subTest(selection=selection),
+                patch.object(job, "validate_selector"),
+                self.assertRaisesRegex(
+                    job.JobError,
+                    "clipboard live acceptance requires selection",
+                ),
+            ):
+                job._start_locked(args, args.run)
+
     def test_start_holds_the_lifecycle_lock_through_owner_publication(self) -> None:
         args = Namespace(run="locked-start")
         events: list[str] = []
@@ -991,6 +1444,72 @@ class LiveJobTest(unittest.TestCase):
         self.assertEqual(status["exit_code"], 0)
         self.assertTrue(status["report_checks"]["background_supervisor_sha256"])
 
+    def test_clipboard_provenance_binds_the_selected_source_to_both_endpoints(
+        self,
+    ) -> None:
+        run = "clipboard-provenance"
+        record = self.clipboard_record(run)
+        provenance = record["input_provenance"]
+        self.assertIs(
+            job.validate_input_provenance(
+                provenance,
+                application="clipboard",
+                run=run,
+                selection=str(record["selection"]),
+                harness_digest=str(record["harness_sha256"]),
+            ),
+            provenance,
+        )
+        for field in (
+            "client_context_archive_sha256",
+            "client_context_sha256",
+            "client_selection",
+            "client_selection_resolution_sha256",
+            "client_selection_sha256",
+        ):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(provenance)
+                changed[field] = "master" if field == "client_selection" else "0" * 64
+                with self.assertRaisesRegex(
+                    job.JobError,
+                    "client selection|same selected source",
+                ):
+                    job.validate_input_provenance(
+                        changed,
+                        application="clipboard",
+                        run=run,
+                        selection=str(record["selection"]),
+                        harness_digest=str(record["harness_sha256"]),
+                    )
+
+    def test_image_provenance_uses_each_frozen_endpoint_selection(self) -> None:
+        record = self.clipboard_record("clipboard-images")
+        provenance = record["input_provenance"]
+        images = {
+            role: {
+                "build_context_sha256": provenance[f"{role}_context_sha256"],
+                "id": "sha256:" + ("1" if role == "client" else "2") * 64,
+                "labels": {
+                    "io.xpra.fork-maintenance.context": provenance[
+                        f"{role}_context_sha256"
+                    ],
+                    "io.xpra.fork-maintenance.owner": "live",
+                    "io.xpra.fork-maintenance.role": f"{role}-image",
+                    "io.xpra.fork-maintenance.source": provenance["source_commit"],
+                },
+                "selection": provenance[f"{role}_selection"],
+                "tag": f"localhost/{role}:test",
+            }
+            for role in ("client", "server")
+        }
+        self.assertTrue(
+            job.image_provenance_validation({"images": images}, provenance)
+        )
+        images["client"]["selection"] = "master"
+        self.assertFalse(
+            job.image_provenance_validation({"images": images}, provenance)
+        )
+
     def test_collect_records_a_completed_failure(self) -> None:
         run = "failed"
         record = self.record(run)
@@ -1064,6 +1583,290 @@ class LiveJobTest(unittest.TestCase):
         )
         _result, _digest, checks = job.report_validation(run, record)
         self.assertFalse(checks["evidence_tree"])
+
+    def test_clipboard_jsonl_parser_rejects_sequence_schema_and_time_mutations(
+        self,
+    ) -> None:
+        records = [
+            clipboard_event(0, "ready"),
+            clipboard_event(1, "completed"),
+        ]
+        self.assertEqual(
+            live_run.parse_clipboard_jsonl_text(
+                clipboard_jsonl(records),
+                "clipboard-test.stdout",
+            ),
+            records,
+        )
+        mutations = {
+            "schema": lambda value: value[0].__setitem__("schema", 2),
+            "sequence": lambda value: value[1].__setitem__("sequence", 0),
+            "timestamp": lambda value: value[1].__setitem__("monotonic_ns", 1_000),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                changed = copy.deepcopy(records)
+                mutate(changed)
+                with self.assertRaises(live_run.LabFailure):
+                    live_run.parse_clipboard_jsonl_text(
+                        clipboard_jsonl(changed),
+                        "clipboard-test.stdout",
+                    )
+
+    def test_clipboard_artifact_helpers_accept_exact_policy_matrix(self) -> None:
+        for policy in live_run.CLIPBOARD_POLICIES:
+            with self.subTest(policy=policy):
+                root = self.root / f"clipboard-{policy}"
+                interaction = self.make_clipboard_fixture_artifacts(root, policy)
+                self.assertEqual(
+                    tuple(interaction["checks"]),
+                    live_run.CLIPBOARD_LIVE_CHECK_NAMES,
+                )
+                self.assertTrue(all(interaction["checks"].values()))
+                self.assertTrue(
+                    live_run.clipboard_artifact_evidence_matches(interaction, root)
+                )
+
+    def test_clipboard_artifact_helpers_bind_pids_and_exact_artifact_set(
+        self,
+    ) -> None:
+        def mutate_client_pid(root: Path) -> None:
+            (root / "client.pid").write_text("999\n", encoding="ascii")
+
+        def mutate_owner_pid(root: Path) -> None:
+            (root / "clipboard-owner.pid").write_text("999\n", encoding="ascii")
+
+        def mutate_fixture_pid(root: Path) -> None:
+            (root / "clipboard-fixture.pid").write_text("999\n", encoding="ascii")
+
+        def remove_exit(root: Path) -> None:
+            (root / "clipboard-monitor.exit").unlink()
+
+        def add_artifact(root: Path) -> None:
+            (root / "clipboard-unexpected.stdout").write_text("", encoding="ascii")
+
+        def add_owner_stderr(root: Path) -> None:
+            (root / "clipboard-owner.stderr").write_text(
+                "synthetic fixture warning\n",
+                encoding="ascii",
+            )
+
+        def mutate_survival_identity(root: Path) -> None:
+            path = root / live_run.CLIPBOARD_CLIENT_SURVIVAL_ARTIFACT
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["after"]["start_ticks"] = "888888"
+            live_run.replace_private_json(path, payload)
+
+        mutations = {
+            "client-pid": (mutate_client_pid, "client_survived_owner_changes"),
+            "owner-pid": (mutate_owner_pid, "event_sequence_exact"),
+            "fixture-pid": (mutate_fixture_pid, "event_sequence_exact"),
+            "missing-exit": (remove_exit, "fixture_processes_clean"),
+            "owner-stderr": (add_owner_stderr, "fixture_processes_clean"),
+            "unexpected-artifact": (add_artifact, "fixture_processes_clean"),
+            "survival-identity": (
+                mutate_survival_identity,
+                "client_survived_owner_changes",
+            ),
+        }
+        for name, (mutate, failed_check) in mutations.items():
+            with self.subTest(name=name):
+                root = self.root / f"clipboard-artifact-{name}"
+                interaction = self.make_clipboard_fixture_artifacts(root, "both")
+                mutate(root)
+                checks = live_run.clipboard_interaction_checks(interaction, root)
+                self.assertFalse(checks[failed_check])
+                self.assertFalse(
+                    live_run.clipboard_artifact_evidence_matches(interaction, root)
+                )
+
+    def test_clipboard_artifact_helpers_reject_plaintext_marker(self) -> None:
+        for name in ("client-debug.txt", "report.json"):
+            with self.subTest(name=name):
+                root = self.root / f"clipboard-plaintext-{name}"
+                interaction = self.make_clipboard_fixture_artifacts(root, "both")
+                marker_log = root / name
+                marker_log.write_text(
+                    live_run.clipboard_fixture_common.marker_text("two"),
+                    encoding="utf-8",
+                )
+                marker_log.chmod(0o600)
+                checks = live_run.clipboard_interaction_checks(interaction, root)
+                self.assertFalse(checks["no_plaintext_marker_artifacts"])
+                self.assertFalse(
+                    live_run.clipboard_artifact_evidence_matches(interaction, root)
+                )
+
+    def test_clipboard_blocked_reverse_requires_original_owner(self) -> None:
+        for policy in ("to-server", "off"):
+            with self.subTest(policy=policy):
+                root = self.root / f"clipboard-reverse-{policy}"
+                interaction = self.make_clipboard_fixture_artifacts(root, policy)
+                changed = copy.deepcopy(interaction)
+                reverse = changed["local"]["reverse"]
+                reverse["owner_before_xid"] = 999
+                reverse["owner_after_xid"] = 999
+                reverse_path = root / "clipboard-consumer-reverse.stdout"
+                reverse_path.write_text(
+                    clipboard_jsonl([reverse]),
+                    encoding="utf-8",
+                )
+                checks = live_run.clipboard_interaction_checks(changed, root)
+                self.assertFalse(checks["reverse_policy"])
+                changed["checks"] = checks
+                self.assertFalse(
+                    live_run.clipboard_artifact_evidence_matches(changed, root)
+                )
+
+    def test_clipboard_reverse_requires_confirmation_and_exact_xfixes_route(
+        self,
+    ) -> None:
+        for policy in live_run.CLIPBOARD_POLICIES:
+            with self.subTest(policy=policy, mutation="confirmation"):
+                root = self.root / f"clipboard-confirmation-{policy}"
+                interaction = self.make_clipboard_fixture_artifacts(root, policy)
+                changed = copy.deepcopy(interaction)
+                changed["wayland"]["records"][9]["event"] = "owner-unconfirmed"
+                checks = live_run.clipboard_interaction_checks(changed, root)
+                self.assertFalse(checks["reverse_policy"])
+                self.assertFalse(checks["event_sequence_exact"])
+
+            with self.subTest(policy=policy, mutation="xfixes"):
+                root = self.root / f"clipboard-xfixes-{policy}"
+                interaction = self.make_clipboard_fixture_artifacts(root, policy)
+                changed = copy.deepcopy(interaction)
+                records = changed["xfixes"]["records"]
+                if policy == "both":
+                    del records[3]
+                else:
+                    records.insert(
+                        -1,
+                        clipboard_event(
+                            3,
+                            "xfixes-selection-notify",
+                            owner_xid=999,
+                            selection_is_clipboard=True,
+                            selection_timestamp=801,
+                            send_event=False,
+                            subtype=0,
+                            timestamp=802,
+                            window_xid=501,
+                        ),
+                    )
+                checks = live_run.clipboard_interaction_checks(changed, root)
+                self.assertFalse(checks["reverse_policy"])
+                self.assertFalse(checks["event_sequence_exact"])
+
+    def test_clipboard_evidence_recomputes_exact_classified_checks(self) -> None:
+        interaction = clipboard_interaction("both")
+        embedded = {
+            "client": {
+                "clipboard_options": list(
+                    live_run.live_config.clipboard_options("client", "both")
+                )
+            },
+            "clipboard_policy": "both",
+            "classification": {
+                "boundaries": {"interaction": interaction["checks"]}
+            },
+            "interaction": interaction,
+            "server": {
+                "clipboard_options": list(
+                    live_run.live_config.clipboard_options("server", "both")
+                )
+            },
+        }
+        scenario_root = self.root / "clipboard-both"
+        with (
+            patch.object(
+                live_run,
+                "clipboard_interaction_checks",
+                return_value=interaction["checks"],
+            ) as recompute,
+            patch.object(
+                live_run,
+                "clipboard_artifact_evidence_matches",
+                return_value=True,
+            ) as artifacts,
+        ):
+            self.assertTrue(
+                job.clipboard_fixture_artifact_evidence_matches(
+                    embedded,
+                    scenario_root,
+                    live_run,
+                    "both",
+                )
+            )
+        recompute.assert_called_once_with(interaction, scenario_root)
+        artifacts.assert_called_once_with(interaction, scenario_root)
+
+        mutations = {
+            "classified": lambda value: value["classification"]["boundaries"].__setitem__(
+                "interaction", {}
+            ),
+            "extra-check": lambda value: value["interaction"]["checks"].__setitem__(
+                "unreviewed", True
+            ),
+            "false-check": lambda value: value["interaction"]["checks"].__setitem__(
+                live_run.CLIPBOARD_LIVE_CHECK_NAMES[0], False
+            ),
+            "policy": lambda value: value["interaction"].__setitem__(
+                "policy", "off"
+            ),
+            "shape": lambda value: value["interaction"].__setitem__(
+                "unreviewed", True
+            ),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                changed = copy.deepcopy(embedded)
+                mutate(changed)
+                with (
+                    patch.object(
+                        live_run,
+                        "clipboard_interaction_checks",
+                        return_value=changed["interaction"]["checks"],
+                    ),
+                    patch.object(
+                        live_run,
+                        "clipboard_artifact_evidence_matches",
+                        return_value=True,
+                    ),
+                ):
+                    self.assertFalse(
+                        job.clipboard_fixture_artifact_evidence_matches(
+                            changed,
+                            scenario_root,
+                            live_run,
+                            "both",
+                        )
+                    )
+
+    def test_clipboard_evidence_requires_exact_policy_scenario_order(self) -> None:
+        run = "clipboard-scenario-order"
+        record = self.clipboard_record(run)
+        job.prepare_private_state()
+        payload, report = self.make_clipboard_evidence_tree(run, record)
+
+        def recompute(interaction: dict[str, object], _root: Path) -> object:
+            return interaction["checks"]
+
+        with (
+            patch.object(
+                live_run,
+                "clipboard_interaction_checks",
+                side_effect=recompute,
+            ),
+            patch.object(
+                live_run,
+                "clipboard_artifact_evidence_matches",
+                return_value=True,
+            ),
+            patch.object(job, "input_checksum_validation", return_value=True),
+        ):
+            self.assertTrue(job.evidence_tree_validation(payload, report))
+            payload["scenarios"] = list(reversed(payload["scenarios"]))
+            self.assertFalse(job.evidence_tree_validation(payload, report))
 
     def test_report_validation_binds_gtk_lifecycle_authority_files(self) -> None:
         def rewrite_report(run: str, payload: dict[str, object]) -> None:
@@ -3173,14 +3976,32 @@ class LiveTransportProfileTest(unittest.TestCase):
                 )
 
         configured = live_run.live_config.load_live_cli()
+        server_diagnostics = configured["server"]["diagnostics"]
+        self.assertEqual(len(server_diagnostics), 2)
+        self.assertEqual(server_diagnostics[0], "-d")
+        server_debug_categories = server_diagnostics[1].split(",")
+        self.assertIn("wayland", server_debug_categories)
+        self.assertEqual(server_debug_categories.count("-clipboard"), 1)
+        self.assertEqual(server_debug_categories[-1], "-clipboard")
+        profiles_module = sys.modules["profiles"]
         for role, blocks in configured.items():
             for block, options in blocks.items():
-                if block in {"commands", "transports"}:
+                if block in {"clipboard", "commands", "transports"}:
                     continue
                 with self.subTest(role=role, block=block):
                     self.assertEqual(
                         live_run.static_cli_options(role, block),
                         list(options),
+                    )
+            self.assertEqual(
+                tuple(blocks["clipboard"]),
+                profiles_module.CLIPBOARD_POLICIES,
+            )
+            for policy, options in blocks["clipboard"].items():
+                with self.subTest(role=role, clipboard_policy=policy):
+                    self.assertEqual(
+                        live_run.live_config.clipboard_options(role, policy),
+                        options,
                     )
             for command, options in blocks["commands"].items():
                 with self.subTest(role=role, command=command):
@@ -3215,6 +4036,148 @@ class LiveTransportProfileTest(unittest.TestCase):
         self.assertIn(live_run.LIVE_CONFIG_MODULE, harness)
         self.assertIn(live_run.NETWORK_PROFILES_CONFIG, harness)
         self.assertIn(live_run.LIVE_CLI_CONFIG, harness)
+
+    def test_clipboard_command_publication_is_atomic_and_no_replace(self) -> None:
+        with patch.object(live_run, "podman_exec") as podman_exec:
+            live_run.write_clipboard_command(
+                "clipboard-client",
+                live_run.CLIPBOARD_OWNER_COMMAND,
+                "set:two",
+            )
+        podman_exec.assert_called_once()
+        container, command = podman_exec.call_args.args
+        self.assertEqual(container, "clipboard-client")
+        self.assertEqual(command[:2], ["python3", "-c"])
+        self.assertEqual(command[2], live_run.CLIPBOARD_COMMAND_PUBLISHER)
+        self.assertEqual(
+            command[3:],
+            [live_run.CLIPBOARD_OWNER_COMMAND, "set:two"],
+        )
+
+        with patch.object(live_run, "podman_exec") as monitor_exec:
+            live_run.write_clipboard_command(
+                "clipboard-client",
+                live_run.CLIPBOARD_MONITOR_COMMAND,
+                "stop",
+            )
+        monitor_exec.assert_called_once_with(
+            "clipboard-client",
+            [
+                "python3",
+                "-c",
+                live_run.CLIPBOARD_COMMAND_PUBLISHER,
+                live_run.CLIPBOARD_MONITOR_COMMAND,
+                "stop",
+            ],
+        )
+
+        script = compile(command[2], "<clipboard-command-publisher>", "exec")
+
+        def publish(path: Path) -> None:
+            with patch.object(sys, "argv", ["-c", str(path), "set:two"]):
+                exec(script, {"__name__": "__main__"})  # noqa: S102
+
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            path = directory / "command"
+            real_fsync = os.fsync
+            real_link = os.link
+            state = {"fsynced": False, "linked": False}
+
+            def fsync(descriptor: int) -> None:
+                self.assertEqual(os.fstat(descriptor).st_mode & 0o777, 0o600)
+                state["fsynced"] = True
+                real_fsync(descriptor)
+
+            def link(source: Path, destination: Path, **kwargs: object) -> None:
+                self.assertTrue(state["fsynced"])
+                self.assertFalse(Path(destination).exists())
+                self.assertEqual(Path(source).read_bytes(), b"set:two\n")
+                self.assertEqual(Path(source).stat().st_mode & 0o777, 0o600)
+                state["linked"] = True
+                real_link(source, destination, **kwargs)
+
+            with (
+                patch.object(os, "fsync", side_effect=fsync),
+                patch.object(os, "link", side_effect=link),
+            ):
+                publish(path)
+            self.assertTrue(state["linked"])
+            self.assertEqual(path.read_bytes(), b"set:two\n")
+            self.assertEqual(list(directory.glob(".command.*.partial")), [])
+
+            path.write_bytes(b"existing\n")
+            with self.assertRaises(FileExistsError):
+                publish(path)
+            self.assertEqual(path.read_bytes(), b"existing\n")
+            self.assertEqual(list(directory.glob(".command.*.partial")), [])
+
+        with (
+            patch.object(live_run, "podman_exec") as rejected_exec,
+            self.assertRaisesRegex(
+                live_run.LabFailure,
+                "invalid clipboard fixture command",
+            ),
+        ):
+            live_run.write_clipboard_command(
+                "clipboard-client",
+                "/tmp/xpra-unowned-command",
+                "set:two",
+            )
+        rejected_exec.assert_not_called()
+
+        with (
+            patch.object(live_run, "podman_exec") as rejected_exec,
+            self.assertRaisesRegex(
+                live_run.LabFailure,
+                "invalid clipboard fixture command",
+            ),
+        ):
+            live_run.write_clipboard_command(
+                "clipboard-client",
+                live_run.CLIPBOARD_OWNER_COMMAND,
+                "paste:one",
+            )
+        rejected_exec.assert_not_called()
+
+    def test_x11_clipboard_owner_disables_unavailable_at_spi_bridge(self) -> None:
+        with (
+            patch.object(live_run, "podman_exec") as podman_exec,
+            patch.object(
+                live_run,
+                "wait_for_clipboard_event_count",
+            ) as wait_for_event,
+        ):
+            live_run.start_x11_clipboard_owner("clipboard-client")
+
+        podman_exec.assert_called_once()
+        container, command = podman_exec.call_args.args
+        self.assertEqual(container, "clipboard-client")
+        self.assertEqual(command[:2], ["bash", "-lc"])
+        self.assertIn(
+            "env DISPLAY=:0 GDK_BACKEND=x11 NO_AT_BRIDGE=1 python3 ",
+            command[2],
+        )
+        wait_for_event.assert_called_once_with(
+            "clipboard-client",
+            "clipboard-owner.stdout",
+            "owner-ready",
+            1,
+            "local X11 clipboard owner",
+        )
+
+    def test_clipboard_fixture_uses_input_serial_without_focus_animation(self) -> None:
+        source = (LIVE_DIRECTORY / "wayland_clipboard_fixture.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("entry.set_can_focus(False)", source)
+        self.assertNotIn("entry.grab_focus()", source)
+        self.assertIn("event.keyval == Gdk.KEY_F8", source)
+        self.assertIn('clipboard.connect("owner-change", clipboard_owner_changed)', source)
+        self.assertIn("GLib.idle_add(publish_owner_confirmation)", source)
+        self.assertIn('"owner-armed"', source)
+        self.assertIn('"owner-set"', source)
+        self.assertIn('"owner-confirmed"', source)
 
     def test_tracked_live_configuration_parser_fails_closed_generically(self) -> None:
         for source in (
@@ -3271,7 +4234,7 @@ class LiveTransportProfileTest(unittest.TestCase):
                                 self.assertEqual(len(set(outcomes)), 1)
 
     def test_supported_xpra_only_profiles_are_exact(self) -> None:
-        expected = {
+        expected_stack = {
             ("keyboard", "application-exit", "rgb", "strict", "default"),
             ("zed", "application-exit", "rgb", "strict", "default"),
             ("zed", "application-exit", "h264", "adaptive-alpha", "default"),
@@ -3292,6 +4255,20 @@ class LiveTransportProfileTest(unittest.TestCase):
             ("gtk", "detach", "rgb", "strict", "default"),
             ("gtk", "transport-loss", "rgb", "strict", "default"),
         }
+        expected_case_only = {
+            ("clipboard", "application-exit", "rgb", "strict", "default"),
+        }
+        profiles_module = sys.modules["profiles"]
+        self.assertEqual(
+            profiles_module.STACK_LIVE_ACCEPTANCE_PROFILES,
+            expected_stack,
+        )
+        self.assertEqual(
+            profiles_module.CASE_ONLY_LIVE_ACCEPTANCE_PROFILES,
+            expected_case_only,
+        )
+        self.assertFalse(expected_stack & expected_case_only)
+        expected = expected_stack | expected_case_only
         observed = set()
         for application in live_run.APPLICATIONS:
             for lifecycle in live_run.LIFECYCLES:
@@ -3318,6 +4295,64 @@ class LiveTransportProfileTest(unittest.TestCase):
                                     continue
                                 observed.add(values)
         self.assertEqual(observed, expected)
+
+    def test_clipboard_profile_requires_its_exact_case_selection(self) -> None:
+        profiles_module = sys.modules["profiles"]
+        exact = "cases/x11-client-clipboard-events"
+        self.assertEqual(profiles_module.CLIPBOARD_CASE_SELECTION, exact)
+        profiles_module.validate_profile_selection(
+            application="clipboard",
+            selection=exact,
+        )
+        for selection in (
+            "stacks/develop",
+            "cases/wayland-client-keymap-sync",
+        ):
+            with (
+                self.subTest(selection=selection),
+                self.assertRaisesRegex(
+                    live_run.ProfileError,
+                    "clipboard live acceptance requires selection",
+                ),
+            ):
+                profiles_module.validate_profile_selection(
+                    application="clipboard",
+                    selection=selection,
+                )
+
+        profile_argv = [
+            "profiles.py",
+            "clipboard",
+            "application-exit",
+            "rgb",
+            "strict",
+            "default",
+        ]
+        with patch.object(
+            sys,
+            "argv",
+            [*profile_argv, "--selection", exact],
+        ):
+            self.assertEqual(profiles_module.main(), 0)
+        for selection in (
+            "stacks/develop",
+            "cases/wayland-client-keymap-sync",
+        ):
+            stderr = StringIO()
+            with (
+                self.subTest(cli_selection=selection),
+                patch.object(
+                    sys,
+                    "argv",
+                    [*profile_argv, "--selection", selection],
+                ),
+                patch.object(sys, "stderr", stderr),
+            ):
+                self.assertEqual(profiles_module.main(), 2)
+            self.assertIn(
+                "clipboard live acceptance requires selection",
+                stderr.getvalue(),
+            )
 
     def test_public_live_clis_do_not_advertise_fallback_diagnostics(self) -> None:
         with (
@@ -3420,6 +4455,13 @@ class LiveTransportProfileTest(unittest.TestCase):
                 "H264_CLIENT_POLICY=strict",
                 "ALPHA_SCENARIOS=default",
             ),
+            "live-x11-clipboard": (
+                "APPLICATION=clipboard",
+                "LIFECYCLE=application-exit",
+                "ENCODING=rgb",
+                "H264_CLIENT_POLICY=strict",
+                "ALPHA_SCENARIOS=default",
+            ),
             "live-xpra-detach": (
                 "APPLICATION=gtk",
                 "LIFECYCLE=detach",
@@ -3451,7 +4493,7 @@ class LiveTransportProfileTest(unittest.TestCase):
         }
         for target, values in expected.items():
             with self.subTest(target=target):
-                recipe = makefile.split(f"{target}:\n", 1)[1].split("\n\n", 1)[0]
+                recipe = makefile.split(f"{target}:", 1)[1].split("\n\n", 1)[0]
                 for value in values:
                     self.assertIn(value, recipe)
 
@@ -3460,7 +4502,19 @@ class LiveTransportProfileTest(unittest.TestCase):
             makefile,
         )
         self.assertIn('--selection "$${XPRA_FORK_SELECTOR}"', makefile)
+        options_check = makefile.split("live-options-check:\n", 1)[1].split(
+            "\n\n", 1
+        )[0]
+        self.assertIn('--selection "$${XPRA_FORK_SELECTOR}"', options_check)
         self.assertNotIn("live-start: optional-selector-check", makefile)
+        clipboard_policy = makefile.split(
+            "live-x11-clipboard-policy-check:\n", 1
+        )[1].split("\n\n", 1)[0]
+        self.assertIn(
+            '"$${XPRA_FORK_CASE}" = x11-client-clipboard-events',
+            clipboard_policy,
+        )
+        self.assertIn('test -z "$${XPRA_FORK_STACK}"', clipboard_policy)
 
     def test_runner_and_input_freeze_reject_a_clean_server_selection(self) -> None:
         with self.assertRaisesRegex(live_run.LabFailure, "requires one non-empty"):
@@ -3483,6 +4537,36 @@ class LiveTransportProfileTest(unittest.TestCase):
         ):
             live_run.main()
         self.assertEqual(clean_runner_exit.exception.code, 2)
+
+    def test_runner_rejects_the_wrong_clipboard_selection(self) -> None:
+        for selection in (
+            "stacks/develop",
+            "cases/wayland-client-keymap-sync",
+        ):
+            with (
+                self.subTest(selection=selection),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "run.py",
+                        "--application",
+                        "clipboard",
+                        "--selection",
+                        selection,
+                    ],
+                ),
+                patch.object(
+                    live_run.PIL,
+                    "__version__",
+                    live_run.EXPECTED_PILLOW_VERSION,
+                ),
+                self.assertRaisesRegex(
+                    live_run.LabFailure,
+                    "clipboard live acceptance requires selection",
+                ),
+            ):
+                live_run.main()
 
     def test_zed_h264_stimulus_retries_until_sustained_positive_production(
         self,
@@ -5559,6 +6643,31 @@ class LiveTransportProfileTest(unittest.TestCase):
         )
         self.assertIn("test -x /usr/local/bin/xpra-empty-damage-fixture", server)
 
+    def test_client_image_scopes_clipboard_adapter_preflight_to_its_case(self) -> None:
+        source = (LIVE_DIRECTORY / "Containerfile").read_text(encoding="utf-8")
+        client = source.split(
+            "FROM docker.io/library/debian:13-slim AS client\n",
+            1,
+        )[1]
+        case_selection = sys.modules["profiles"].CLIPBOARD_CASE_SELECTION
+        case_guard = f'[ "$XPRA_SELECTION" = "{case_selection}" ]'
+        conditional = client.split(f"if {case_guard}; then", 1)[1].split(
+            "       fi \\\n",
+            1,
+        )[0]
+        case_branch, clean_branch = conditional.split("       else \\\n", 1)
+        client_import = "from xpra.client.gtk3 import client_base"
+        adapter_check = "from xpra.x11.common import has_pywindow_lookup"
+        helper_import = "from xpra.x11.selection.clipboard import X11Clipboard"
+        self.assertIn("ARG XPRA_SELECTION", client)
+        self.assertIn(case_guard, client)
+        self.assertIn(client_import, case_branch)
+        self.assertIn(adapter_check, case_branch)
+        self.assertIn(helper_import, case_branch)
+        self.assertIn(client_import, clean_branch)
+        self.assertNotIn(adapter_check, clean_branch)
+        self.assertNotIn(helper_import, clean_branch)
+
     def test_frame_alpha_states_are_parsed_and_bound_to_exact_windows(self) -> None:
         server_log = (
             "prefix window 0x1 frame pixel format=BGRX, want-alpha=False\n"
@@ -5959,11 +7068,39 @@ class LiveTransportProfileTest(unittest.TestCase):
 
     def test_pixel_tolerance_is_scoped_to_the_owning_profile(self) -> None:
         self.assertEqual(live_run.pixel_error_limit("zed", "rgb"), 0.0)
+        self.assertEqual(live_run.pixel_error_limit("clipboard", "rgb"), 1.0)
         self.assertEqual(live_run.pixel_error_limit("gtk", "rgb"), 1.0)
         self.assertEqual(live_run.pixel_error_limit("keyboard", "rgb"), 1.0)
         self.assertEqual(live_run.pixel_error_limit("hardware", "h264"), 15.0)
         self.assertEqual(live_run.pixel_error_limit("opengl", "h264"), 15.0)
         self.assertEqual(live_run.pixel_error_limit("vkcube", "rgb"), 0.0)
+
+    def test_clipboard_pixel_tolerance_rejects_structural_stale_region(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            source = live_run.Image.new("RGB", (100, 100), (0, 0, 0))
+            observed = source.copy()
+            observed.paste((6, 6, 6), (25, 25, 75, 75))
+            source_path = directory / "source.png"
+            direct_path = directory / "direct.png"
+            focused_path = directory / "focused.png"
+            source.save(source_path)
+            observed.save(direct_path)
+            observed.save(focused_path)
+
+            evidence, _source_image = live_run.pixel_pipeline_evidence(
+                directory,
+                [source_path.name],
+                direct_path,
+                focused_path,
+                live_run.pixel_error_limit("clipboard", "rgb"),
+            )
+
+        self.assertFalse(evidence["matching_server_frame"])
+        self.assertGreater(
+            evidence["comparisons"][0]["direct"]["mean_absolute_error"],
+            1.0,
+        )
 
     def test_hardware_application_uses_observable_vulkan_boundaries(self) -> None:
         checks = live_run.application_boundary_checks(

@@ -55,7 +55,8 @@ export XPRA_FORK_ZED_DIRECTORY := $(ZED_DIRECTORY)
 export XPRA_FORK_SELECTOR := $(SELECTOR)
 
 AUTOMATION_PYTHON := $(shell find tools infra cases -type f -name '*.py' -print 2>/dev/null | sort)
-AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_wayland_keyboard_fixture.sh \
+AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_wayland_clipboard_fixture.sh \
+	infra/live/start_wayland_keyboard_fixture.sh \
 	infra/live/start_zed.sh \
 	infra/upstream-tests/entrypoint.sh
 
@@ -77,7 +78,8 @@ AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_waylan
 	test-full test-full-cython test-full-no-compat \
 	live-profile-list live-start live-status live-logs live-wait live-collect live-remove live-abort \
 	live-rgb live-h264 live-xpra-detach live-xpra-transport-loss live-xpra-hardware \
-	live-xpra-opengl-hardware live-wayland-keyboard \
+	live-xpra-opengl-hardware live-wayland-keyboard live-x11-clipboard \
+	live-x11-clipboard-policy-check \
 	deb-start deb-status deb-logs deb-wait deb-collect deb-remove deb-abort
 
 help:
@@ -139,6 +141,7 @@ help:
 		'make -C fork-maintenance live-profile-list' \
 		'    List tracked client network profiles; profiles.yml supplies the default' \
 		'make -C fork-maintenance live-xpra-opengl-hardware STACK=develop RUN=unique-name' \
+		'make -C fork-maintenance live-x11-clipboard CASE=x11-client-clipboard-events RUN=unique-name' \
 		'make -C fork-maintenance live-wait RUN=unique-name' \
 		'make -C fork-maintenance live-abort RUN=unique-name' \
 		'    Run or abort a durable physical-GPU profile; outputs stay below .artifacts/' \
@@ -354,7 +357,8 @@ live-options-check:
 	@$(PYTHON) infra/live/profiles.py \
 		"$${XPRA_FORK_APPLICATION}" "$${XPRA_FORK_LIFECYCLE}" \
 		"$${XPRA_FORK_ENCODING}" "$${XPRA_FORK_H264_CLIENT_POLICY}" \
-		"$${XPRA_FORK_ALPHA_SCENARIOS}" "$${XPRA_FORK_NETWORK_PROFILE}"
+		"$${XPRA_FORK_ALPHA_SCENARIOS}" "$${XPRA_FORK_NETWORK_PROFILE}" \
+		--selection "$${XPRA_FORK_SELECTOR}"
 
 live-profile-list:
 	@$(LIVE_CONFIG) list-profiles
@@ -440,6 +444,18 @@ live-xpra-opengl-hardware:
 live-wayland-keyboard:
 	@$(MAKE) --no-print-directory live-start \
 		APPLICATION=keyboard LIFECYCLE=application-exit ENCODING=rgb \
+		H264_CLIENT_POLICY=strict ALPHA_SCENARIOS=default
+
+live-x11-clipboard-policy-check:
+	@test "$${XPRA_FORK_CASE}" = x11-client-clipboard-events \
+		&& test -z "$${XPRA_FORK_STACK}" || { \
+		printf '%s\n' 'live-x11-clipboard requires CASE=x11-client-clipboard-events and no STACK' >&2; \
+		exit 2; \
+	}
+
+live-x11-clipboard: live-x11-clipboard-policy-check
+	@$(MAKE) --no-print-directory live-start \
+		APPLICATION=clipboard LIFECYCLE=application-exit ENCODING=rgb \
 		H264_CLIENT_POLICY=strict ALPHA_SCENARIOS=default
 
 deb-policy-check:

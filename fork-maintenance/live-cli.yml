@@ -23,7 +23,17 @@ server:
     - "--html=off"
   diagnostics:
     - "-d"
-    - "wayland,damage,encoding,encoder,argb,keyboard"
+    - "wayland,damage,encoding,encoder,argb,keyboard,-clipboard"
+  clipboard:
+    both:
+      - "--clipboard=yes"
+      - "--clipboard-direction=both"
+    to-server:
+      - "--clipboard=yes"
+      - "--clipboard-direction=to-server"
+    off:
+      - "--clipboard=no"
+      - "--clipboard-direction=disabled"
   commands:
     version:
       - "--version"
@@ -61,6 +71,23 @@ client:
   diagnostics:
     - "-d"
     - "draw,paint,cairo,window,gtk,alpha,libva,keyboard"
+  # Keep unrelated XSettings and XI2 filter leases out of the clipboard gate.
+  clipboard:
+    both:
+      - "--clipboard=yes"
+      - "--clipboard-direction=both"
+      - "--xsettings=no"
+      - "--input-devices=noxi2"
+    to-server:
+      - "--clipboard=yes"
+      - "--clipboard-direction=to-server"
+      - "--xsettings=no"
+      - "--input-devices=noxi2"
+    off:
+      - "--clipboard=no"
+      - "--clipboard-direction=disabled"
+      - "--xsettings=no"
+      - "--input-devices=noxi2"
   commands:
     version:
       - "--version"
