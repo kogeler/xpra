@@ -6,12 +6,15 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import unicodedata
 import unittest
 from argparse import Namespace
+from collections.abc import Callable
 from contextlib import contextmanager, redirect_stdout
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -386,6 +389,7 @@ class LiveJobTest(unittest.TestCase):
             artifact.chmod(0o600)
             interaction = clipboard_interaction(policy)
             scenario: dict[str, object] = {
+                "application": "clipboard",
                 "artifact_collection_passed": True,
                 "artifact_sha256": {
                     "evidence.txt": job.sha256_file(artifact),
@@ -403,6 +407,8 @@ class LiveJobTest(unittest.TestCase):
                     )
                 },
                 "clipboard_policy": policy,
+                "encoding": "rgb",
+                "h264_client_policy": "strict",
                 "interaction": interaction,
                 "lifecycle": lifecycle,
                 "lifecycle_profile": "application-exit",
@@ -424,6 +430,8 @@ class LiveJobTest(unittest.TestCase):
             scenario_digests[name] = job.sha256_file(scenario_report)
         payload: dict[str, object] = {
             "application": "clipboard",
+            "encoding": "rgb",
+            "h264_client_policy": "strict",
             "lifecycle_profile": "application-exit",
             "scenario_report_sha256": scenario_digests,
             "scenarios": scenarios,
@@ -654,6 +662,1052 @@ class LiveJobTest(unittest.TestCase):
         )
         return live_run._clipboard_evidence_from_artifacts(root, policy)
 
+    def make_subsurface_fixture_artifacts(
+        self, root: Path, *, coalesced: bool = False,
+        startup_captures: tuple[int, int] = (1, 1),
+    ) -> dict[str, object]:
+        root.mkdir(parents=True)
+        root.chmod(0o700)
+        parent_wids = {"primary": 1, "secondary": 5}
+        child_wids = {"lower": 2, "upper": 3, "reparented-upper": 3}
+        role_ids = {**parent_wids, **child_wids}
+        role_wires = live_run._subsurface_role_wires(parent_wids, child_wids)
+        fixture_pid = 202
+        primary_extra, secondary_extra = (count - 1 for count in startup_captures)
+        sequence_offset = 2 * primary_extra + secondary_extra
+
+        def private_text(path: Path, value: str) -> None:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.write_text(value, encoding="utf-8")
+            path.chmod(0o600)
+
+        def private_bytes(path: Path, value: bytes) -> None:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.write_bytes(value)
+            path.chmod(0o600)
+
+        # Actual fixture patterns are cross-checked against compiled C below;
+        # synthetic protocol evidence reuses that independently bound oracle.
+        primary = live_run._subsurface_fixture_image("primary")
+        secondary = live_run._subsurface_fixture_image("secondary")
+        lower_one = live_run._subsurface_fixture_image("lower-one")
+        lower_two = live_run._subsurface_fixture_image("lower-two")
+        lower_three = live_run._subsurface_fixture_image("lower-three")
+        lower_four = live_run._subsurface_fixture_image("lower-four")
+        continuous_one = live_run._subsurface_fixture_image("lower-continuous-one")
+        upper = live_run._subsurface_fixture_image("upper")
+        source_images = {
+            "primary": primary,
+            "secondary": secondary,
+            "lower-one": lower_one,
+            "lower-two": lower_two,
+            "lower-three": lower_three,
+            "lower-four": lower_four,
+            "lower-continuous-one": continuous_one,
+            "upper": upper,
+        }
+        update_groups: dict[int, int] = {
+            wid: 100 * (index + 1)
+            for index, wid in enumerate(
+                (*parent_wids.values(), *dict.fromkeys(child_wids.values()))
+            )
+        }
+        packet_records: dict[int, dict[str, object]] = {}
+
+        def save_update(
+            role: str,
+            sequence: int,
+            geometry: tuple[int, int, int, int],
+            image_name: str,
+            *,
+            reset: tuple[int, int, int, int] | None = None,
+            composite: bool,
+            transaction: tuple[int, int, int, int, int] | None = None,
+            source_origin: tuple[int, int] = (0, 0),
+            startup: bool = False,
+        ) -> dict[str, object]:
+            if not startup:
+                sequence += sequence_offset
+                if transaction is not None:
+                    transaction = (transaction[0] + primary_extra, *transaction[1:])
+            source_wid = {
+                **parent_wids,
+                **child_wids,
+            }[role]
+            group = update_groups[source_wid]
+            update_groups[source_wid] += 1
+            group_root = root / "screen-updates" / str(source_wid) / str(group)
+            group_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            for private_directory in (
+                root / "screen-updates",
+                root / "screen-updates" / str(source_wid),
+                group_root,
+            ):
+                private_directory.chmod(0o700)
+            child = role in live_run.SUBSURFACE_CHILD_ROLES
+            encoding = "rgb32" if child or composite else "rgb24"
+            child_formats = tuple(sorted(live_run.SUBSURFACE_CHILD_FORMATS))
+            opaque_composite_formats = tuple(
+                value
+                for value in sorted(live_run.SUBSURFACE_COMPOSITE_FORMATS)
+                if value.endswith("X")
+            )
+            rgb_format = (
+                child_formats[sequence % len(child_formats)]
+                if child
+                else opaque_composite_formats[sequence % len(opaque_composite_formats)]
+                if composite
+                else min(live_run.SUBSURFACE_BASELINE_RGB24_FORMATS)
+            )
+            options: dict[str, object] = {"rgb_format": rgb_format}
+            if not composite:
+                options.update({"backing-epoch": 0, "flush": 0})
+            if composite:
+                if transaction is None:
+                    raise AssertionError("composite update requires a transaction")
+                (
+                    transaction_id,
+                    stage_index,
+                    stage_count,
+                    topology_epoch,
+                    backing_epoch,
+                ) = transaction
+                options["subsurface-composite"] = live_run.SUBSURFACE_COMPOSITE_MODE
+                options.update(
+                    {
+                        "flush": stage_count - stage_index - 1,
+                        "subsurface-backing-epoch": backing_epoch,
+                        "subsurface-stage-count": stage_count,
+                        "subsurface-stage-index": stage_index,
+                        "subsurface-topology-epoch": topology_epoch,
+                        "subsurface-transaction-id": transaction_id,
+                    }
+                )
+            if reset is not None:
+                options["subsurface-reset"] = list(reset)
+            width, height = geometry[2:]
+            source_x, source_y = source_origin
+            full_source = source_images[image_name].convert("RGBA")
+            if (
+                source_x < 0
+                or source_y < 0
+                or source_x + width > full_source.width
+                or source_y + height > full_source.height
+            ):
+                raise AssertionError("synthetic saved packet crop is invalid")
+            source_image = full_source.crop(
+                (source_x, source_y, source_x + width, source_y + height)
+            )
+            bytes_per_pixel = 4 if encoding == "rgb32" else 3
+            stride = width * bytes_per_pixel + (4 if sequence % 2 else 0)
+            payload = bytearray()
+            pixels = source_image.tobytes()
+            for row in range(height):
+                for column in range(width):
+                    offset = (row * width + column) * 4
+                    red, green, blue, alpha = pixels[offset : offset + 4]
+                    channels = {
+                        "BGR": (blue, green, red),
+                        "BGRA": (blue, green, red, alpha),
+                        "BGRX": (blue, green, red, 0x5A),
+                        "RGBA": (red, green, blue, alpha),
+                        "RGBX": (red, green, blue, 0xA5),
+                    }[rgb_format]
+                    payload.extend(channels)
+                payload.extend(b"\xC3" * (stride - width * bytes_per_pixel))
+            packet = {
+                "encoding": encoding,
+                "file": f"0.{encoding}",
+                "h": geometry[3],
+                "options": options,
+                "sequence": sequence,
+                "stride": stride,
+                "w": geometry[2],
+                "x": geometry[0],
+                "y": geometry[1],
+            }
+            info_path = group_root / "0.info"
+            private_text(info_path, json.dumps(packet, sort_keys=True))
+            payload_path = group_root / f"0.{encoding}"
+            private_bytes(payload_path, bytes(payload))
+            packet_records[sequence] = {
+                **packet,
+                "role": role,
+                "source_wid": source_wid,
+                "wire_wid": role_wires[role],
+            }
+            return {
+                "packet_info": info_path.relative_to(root).as_posix(),
+                "packet_info_sha256": live_run.sha256_file(info_path),
+                "packet_payload": payload_path.relative_to(root).as_posix(),
+                "payload_bytes": len(payload),
+                "payload_sha256": live_run.sha256_file(payload_path),
+                "role": role,
+                "sequences": [sequence],
+            }
+
+        for index in range(primary_extra):
+            save_update(
+                "primary", index * 2 + 1,
+                (0, 0, *live_run.SUBSURFACE_PARENT_DIMENSIONS["primary"]),
+                "primary", reset=live_run.SUBSURFACE_TRANSACTION_RESETS["initial"],
+                composite=True, transaction=(index + 1, 0, 2, 1, 0), startup=True,
+            )
+            save_update(
+                "lower", index * 2 + 2,
+                live_run.SUBSURFACE_PHASE_GEOMETRIES[("initial", "lower")],
+                "lower-one", composite=True,
+                transaction=(index + 1, 1, 2, 1, 0), startup=True,
+            )
+        for index in range(secondary_extra):
+            save_update(
+                "secondary", 2 * primary_extra + index + 1,
+                (0, 0, *live_run.SUBSURFACE_PARENT_DIMENSIONS["secondary"]),
+                "secondary", composite=False, startup=True,
+            )
+
+        parent_sources = {
+            "primary": {
+                key: value
+                for key, value in save_update(
+                    "primary",
+                    1,
+                    (0, 0, *live_run.SUBSURFACE_PARENT_DIMENSIONS["primary"]),
+                    "primary",
+                    reset=live_run.SUBSURFACE_TRANSACTION_RESETS["initial"],
+                    composite=True,
+                    transaction=(1, 0, 2, 1, 0),
+                ).items()
+                if key != "role"
+            },
+            "secondary": {
+                key: value
+                for key, value in save_update(
+                    "secondary",
+                    2,
+                    (0, 0, *live_run.SUBSURFACE_PARENT_DIMENSIONS["secondary"]),
+                    "secondary",
+                    composite=False,
+                ).items()
+                if key != "role"
+            },
+        }
+        phase_payloads = {
+            "initial": (
+                ("lower", 3, "lower-one"),
+            ),
+            "changed": (
+                ("primary", 4, "primary"),
+                ("lower", 5, "lower-two"),
+            ),
+            "restored": (
+                ("primary", 6, "primary"),
+                ("lower", 7, "lower-one"),
+            ),
+            "moved": (
+                ("primary", 8, "primary"),
+                ("lower", 9, "lower-one"),
+            ),
+            "stacked": (
+                ("primary", 10, "primary"),
+                ("lower", 11, "lower-one"),
+                ("upper", 12, "upper"),
+            ),
+            "lower-updated": (
+                ("primary", 13, "primary"),
+                ("lower", 14, "lower-two"),
+                ("upper", 15, "upper"),
+            ),
+            "lower-frame-one": (
+                ("primary", 16, "primary"),
+                ("lower", 17, "lower-three"),
+                ("upper", 18, "upper"),
+            ),
+            "lower-frame-two": (
+                ("primary", 19, "primary"),
+                ("lower", 20, "lower-four"),
+                ("upper", 21, "upper"),
+            ),
+            "lower-destroyed": (
+                ("primary", 31, "primary"),
+                ("upper", 32, "upper"),
+            ),
+            "upper-detached": (
+                ("primary", 33, "primary"),
+            ),
+            "reparented": (
+                ("secondary", 34, "secondary"),
+                ("reparented-upper", 35, "upper"),
+            ),
+        }
+        phases: dict[str, dict[str, object]] = {}
+        topology_epochs = {
+            "initial": 1,
+            "changed": 1,
+            "restored": 1,
+            "moved": 2,
+            "stacked": 3,
+            "lower-updated": 3,
+            "lower-frame-one": 3,
+            "lower-frame-two": 3,
+            "lower-destroyed": 4,
+            "upper-detached": 5,
+            "reparented": 6,
+        }
+        continuous_capture_count = 3
+        continuous_generation_count = 5 if coalesced else 3
+        transaction_ids = {
+            phase: index
+            + (
+                continuous_capture_count
+                if phase
+                in ("lower-destroyed", "upper-detached", "reparented")
+                else 0
+            )
+            for index, phase in enumerate(live_run.SUBSURFACE_PHASES, start=1)
+        }
+        for phase in live_run.SUBSURFACE_PHASES:
+            transaction_id = transaction_ids[phase]
+            specs = phase_payloads[phase]
+            stage_count = len(specs) + (1 if phase == "initial" else 0)
+            first_stage = 1 if phase == "initial" else 0
+            streams = []
+            for stage_index, (role, sequence, image_name) in enumerate(
+                specs,
+                start=first_stage,
+            ):
+                streams.append(
+                    save_update(
+                        role,
+                        sequence,
+                        live_run.SUBSURFACE_PHASE_GEOMETRIES[(phase, role)],
+                        image_name,
+                        reset=(
+                            live_run.SUBSURFACE_TRANSACTION_RESETS[phase]
+                            if stage_index == 0
+                            else None
+                        ),
+                        composite=True,
+                        source_origin=live_run.SUBSURFACE_PHASE_SOURCE_ORIGINS[
+                            (phase, role)
+                        ],
+                        transaction=(
+                            transaction_id,
+                            stage_index,
+                            stage_count,
+                            topology_epochs[phase],
+                            0,
+                        ),
+                    )
+                )
+            phases[phase] = {"streams": streams}
+
+        continuous_specs = (
+            ("primary", "primary"),
+            ("lower", "lower-three"),
+            ("upper", "upper"),
+        )
+        sequence = 22
+        for generation in range(1, continuous_capture_count + 1):
+            lower_image = "lower-continuous-one" if generation % 2 else "lower-four"
+            for stage_index, (role, default_image) in enumerate(continuous_specs):
+                image_name = lower_image if role == "lower" else default_image
+                save_update(
+                    role,
+                    sequence,
+                    live_run.SUBSURFACE_CONTINUOUS_GEOMETRY,
+                    image_name,
+                    reset=(
+                        live_run.SUBSURFACE_CONTINUOUS_GEOMETRY
+                        if stage_index == 0
+                        else None
+                    ),
+                    composite=True,
+                    source_origin=live_run.SUBSURFACE_CONTINUOUS_SOURCE_ORIGINS[role],
+                    transaction=(8 + generation, stage_index, 3, 3, 0),
+                )
+                sequence += 1
+
+        events = [
+            {
+                "event": "ready",
+                "lower_attach_count": 1,
+                "lower_buffer_dimensions": list(
+                    live_run.SUBSURFACE_LOWER_BUFFER_DIMENSIONS
+                ),
+                "lower_buffer_id": 201,
+                "lower_buffer_scale": live_run.SUBSURFACE_LOWER_BUFFER_SCALE,
+                "lower_commit_count": 1,
+                "lower_dimensions": list(live_run.SUBSURFACE_LOWER_DIMENSIONS),
+                "lower_offset": list(live_run.SUBSURFACE_INITIAL_OFFSET),
+                "lower_state_id": 1,
+                "lower_surface_id": 101,
+                "monotonic_ns": 1_000,
+                "parent_dimensions": list(
+                    live_run.SUBSURFACE_PARENT_DIMENSIONS["primary"]
+                ),
+                "parents_alive": 2,
+                "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                "secondary_parent_dimensions": list(
+                    live_run.SUBSURFACE_PARENT_DIMENSIONS["secondary"]
+                ),
+                "sequence": 0,
+            },
+            {
+                "event": "lower-state",
+                "lower_attach_count": 2,
+                "lower_buffer_id": 203,
+                "lower_buffer_scale": live_run.SUBSURFACE_LOWER_BUFFER_SCALE,
+                "lower_commit_count": 2,
+                "lower_state_id": 2,
+                "lower_surface_id": 101,
+                "monotonic_ns": 2_000,
+                "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                "sequence": 1,
+                "update_index": 1,
+                "upper_attach_count": 0,
+                "upper_commit_count": 0,
+            },
+            {
+                "event": "lower-state",
+                "lower_attach_count": 3,
+                "lower_buffer_id": 204,
+                "lower_buffer_scale": live_run.SUBSURFACE_LOWER_BUFFER_SCALE,
+                "lower_commit_count": 3,
+                "lower_state_id": 1,
+                "lower_surface_id": 101,
+                "monotonic_ns": 3_000,
+                "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                "sequence": 2,
+                "update_index": 2,
+                "upper_attach_count": 0,
+                "upper_commit_count": 0,
+            },
+            {
+                "event": "lower-moved",
+                "from_offset": list(live_run.SUBSURFACE_INITIAL_OFFSET),
+                "lower_attach_count": 3,
+                "lower_buffer_scale": live_run.SUBSURFACE_LOWER_BUFFER_SCALE,
+                "lower_commit_count": 3,
+                "lower_surface_id": 101,
+                "monotonic_ns": 4_000,
+                "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                "sequence": 3,
+                "to_offset": list(live_run.SUBSURFACE_MOVED_OFFSET),
+            },
+            {
+                "event": "sibling-created",
+                "lower_offset": list(live_run.SUBSURFACE_MOVED_OFFSET),
+                "monotonic_ns": 5_000,
+                "overlap": list(live_run.SUBSURFACE_OVERLAP_GEOMETRY),
+                "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                "sequence": 4,
+                "stacking": ["lower", "upper"],
+                "upper_attach_count": 1,
+                "upper_buffer_id": 202,
+                "upper_buffer_transform": live_run.SUBSURFACE_UPPER_BUFFER_TRANSFORM,
+                "upper_commit_count": 1,
+                "upper_dimensions": list(live_run.SUBSURFACE_UPPER_DIMENSIONS),
+                "upper_offset": list(live_run.SUBSURFACE_UPPER_OFFSET),
+                "upper_precommitted_before_role": True,
+                "upper_surface_id": 102,
+            },
+            {
+                "event": "lower-updated-under-upper",
+                "lower_attach_count": 4,
+                "lower_buffer_id": 205,
+                "lower_buffer_scale": live_run.SUBSURFACE_LOWER_BUFFER_SCALE,
+                "lower_commit_count": 4,
+                "lower_state_id": 2,
+                "lower_surface_id": 101,
+                "monotonic_ns": 6_000,
+                "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                "sequence": 5,
+                "update_index": 3,
+                "upper_attach_count": 1,
+                "upper_commit_count": 1,
+            },
+            {
+                "event": "lower-frame-generation",
+                "frame_callback_data": 41,
+                "frame_callback_id": 301,
+                "frame_done_count": 1,
+                "generation_id": 1,
+                "lower_attach_count": 5,
+                "lower_buffer_id": 206,
+                "lower_buffer_scale": live_run.SUBSURFACE_LOWER_BUFFER_SCALE,
+                "lower_commit_count": 5,
+                "lower_state_id": 3,
+                "lower_surface_id": 101,
+                "monotonic_ns": 7_000,
+                "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                "sequence": 6,
+                "update_index": 4,
+                "upper_attach_count": 1,
+                "upper_commit_count": 1,
+            },
+            {
+                "event": "lower-frame-generation",
+                "frame_callback_data": 42,
+                "frame_callback_id": 302,
+                "frame_done_count": 2,
+                "generation_id": 2,
+                "lower_attach_count": 6,
+                "lower_buffer_id": 207,
+                "lower_buffer_scale": live_run.SUBSURFACE_LOWER_BUFFER_SCALE,
+                "lower_commit_count": 6,
+                "lower_state_id": 4,
+                "lower_surface_id": 101,
+                "monotonic_ns": 8_000,
+                "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                "sequence": 7,
+                "update_index": 5,
+                "upper_attach_count": 1,
+                "upper_commit_count": 1,
+            },
+            {
+                "continuous_buffer_ids": [208, 207],
+                "continuous_generation_count": 0,
+                "event": "continuous-start",
+                "frame_callback_pending": True,
+                "frame_callback_ready": False,
+                "frame_done_count": 2,
+                "lower_attach_count": 6,
+                "lower_buffer_id": 207,
+                "lower_commit_count": 6,
+                "lower_state_id": 4,
+                "lower_surface_id": 101,
+                "lower_update_count": 5,
+                "monotonic_ns": 9_000,
+                "producer_active": True,
+                "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                "sequence": 8,
+                "upper_attach_count": 1,
+                "upper_commit_count": 1,
+            },
+            *(
+                {
+                    "continuous_generation_id": generation,
+                    "event": "continuous-generation",
+                    "frame_callback_data": 42 + generation,
+                    "frame_callback_id": 302 + generation,
+                    "frame_done_count": 2 + generation,
+                    "lower_attach_count": 6 + generation,
+                    "lower_buffer_id": 208 if generation % 2 else 207,
+                    "lower_buffer_scale": live_run.SUBSURFACE_LOWER_BUFFER_SCALE,
+                    "lower_commit_count": 6 + generation,
+                    "lower_state_id": 3 if generation % 2 else 4,
+                    "lower_surface_id": 101,
+                    "lower_update_count": 5 + generation,
+                    "monotonic_ns": (9 + generation) * 1_000,
+                    "producer_active": True,
+                    "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                    "sequence": 8 + generation,
+                    "upper_attach_count": 1,
+                    "upper_commit_count": 1,
+                }
+                for generation in range(1, continuous_generation_count + 1)
+            ),
+            {
+                "continuous_buffer_ids": [208, 207],
+                "continuous_generation_count": continuous_generation_count,
+                "event": "continuous-stop",
+                "frame_done_count": 2 + continuous_generation_count,
+                "lower_attach_count": 6 + continuous_generation_count,
+                "lower_buffer_id": 208,
+                "lower_commit_count": 6 + continuous_generation_count,
+                "lower_state_id": 3,
+                "lower_surface_id": 101,
+                "lower_update_count": 5 + continuous_generation_count,
+                "monotonic_ns": 13_000,
+                "pending_callback_cancelled": True,
+                "producer_active": False,
+                "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                "sequence": 12,
+                "terminal_callback_completed": False,
+                "terminal_callback_data": 0,
+                "terminal_callback_id": 999,
+                "upper_attach_count": 1,
+                "upper_commit_count": 1,
+            },
+            {
+                "event": "sibling-click",
+                "monotonic_ns": 14_000,
+                "parent_coordinates": list(
+                    live_run.SUBSURFACE_POINTER_PARENT_COORDINATES
+                ),
+                "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                "sequence": 13,
+                "surface_coordinates": [
+                    float(value)
+                    for value in live_run.SUBSURFACE_POINTER_SURFACE_COORDINATES
+                ],
+                "target": "upper",
+            },
+            {
+                "event": "lower-destroyed",
+                "lower_update_count": 5 + continuous_generation_count,
+                "monotonic_ns": 15_000,
+                "parents_alive": 2,
+                "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                "sequence": 14,
+                "upper_alive": True,
+            },
+            {
+                "event": "upper-detached",
+                "lower_destroyed": True,
+                "monotonic_ns": 16_000,
+                "old_parent": "primary",
+                "parents_alive": 2,
+                "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                "sequence": 15,
+                "upper_attach_count": 1,
+                "upper_buffer_id": 202,
+                "upper_buffer_transform": live_run.SUBSURFACE_UPPER_BUFFER_TRANSFORM,
+                "upper_commit_count": 1,
+                "upper_precommitted_before_role": True,
+                "upper_surface_id": 102,
+            },
+            {
+                "event": "upper-reparented",
+                "monotonic_ns": 17_000,
+                "new_offset": list(live_run.SUBSURFACE_REPARENT_OFFSET),
+                "new_parent": "secondary",
+                "parents_alive": 2,
+                "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                "sequence": 16,
+                "upper_attach_count": 1,
+                "upper_buffer_id": 202,
+                "upper_buffer_transform": live_run.SUBSURFACE_UPPER_BUFFER_TRANSFORM,
+                "upper_commit_count": 1,
+                "upper_precommitted_before_role": True,
+                "upper_reattach_parent_committed": True,
+                "upper_reattach_without_child_commit": True,
+                "upper_surface_id": 102,
+            },
+            {
+                "click_count": 1,
+                "event": "exit",
+                "lower_destroyed": True,
+                "lower_update_count": 5 + continuous_generation_count,
+                "monotonic_ns": 18_000,
+                "parents_alive": 2,
+                "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                "sequence": 17,
+                "upper_reparented": True,
+            },
+        ]
+        for index, event in enumerate(events):
+            event["sequence"] = index
+            event["monotonic_ns"] = (index + 1) * 50_000_000
+        private_text(
+            root / "subsurface-fixture.stdout",
+            "".join(json.dumps(event, sort_keys=True) + "\n" for event in events),
+        )
+        private_text(root / "subsurface-fixture.stderr", "")
+        private_text(root / "subsurface-fixture.pid", f"{fixture_pid}\n")
+        private_text(root / "subsurface-fixture.exit", "0\n")
+        click_time = next(event["monotonic_ns"] for event in events
+                          if event["event"] == "sibling-click")
+        live_run.replace_private_json(
+            root / live_run.SUBSURFACE_POINTER_TIMING_ARTIFACT,
+            {
+                "completed_monotonic_ns": click_time + 500,
+                "deadline_ns": live_run.SUBSURFACE_INPUT_DEADLINE_NS,
+                "elapsed_ns": 1_000,
+                "fixture_event_monotonic_ns": next(
+                    event["monotonic_ns"]
+                    for event in events
+                    if event["event"] == "sibling-click"
+                ),
+                "schema": 1,
+                "started_monotonic_ns": click_time - 500,
+            },
+        )
+
+        child_packet_counts = {
+            "initial": {"lower": 1},
+            "changed": {"lower": 2},
+            "restored": {"lower": 3},
+            "moved": {"lower": 4},
+            "stacked": {"lower": 5, "upper": 1},
+            "lower-updated": {"lower": 6, "upper": 2},
+            "lower-frame-one": {"lower": 7, "upper": 3},
+            "lower-frame-two": {"lower": 8, "upper": 4},
+            "lower-destroyed": {
+                "upper": 5 + continuous_capture_count,
+            },
+            "upper-detached": {},
+            "reparented": {"reparented-upper": 1},
+        }
+        next_sequences = {
+            "initial": 4,
+            "changed": 6,
+            "restored": 8,
+            "moved": 10,
+            "stacked": 13,
+            "lower-updated": 16,
+            "lower-frame-one": 19,
+            "lower-frame-two": 22,
+            "lower-destroyed": 33,
+            "upper-detached": 34,
+            "reparented": 36,
+        }
+
+        def parent_info_lines(before_sequence: int) -> list[str]:
+            values = []
+            for role, wid in parent_wids.items():
+                prefix = f"client.0.window.windows.{wid}.damage"
+                count = sum(packet["role"] == role and sequence < before_sequence
+                            for sequence, packet in packet_records.items())
+                values.extend((f"{prefix}.ack-pending=0", f"{prefix}.encoding-pending=0",
+                               f"{prefix}.packets_sent={count}"))
+            return values
+
+        for phase in live_run.SUBSURFACE_PHASES:
+            expected_children = live_run._subsurface_expected_children(
+                phase,
+                parent_wids,
+                child_wids,
+            )
+            children = {
+                child_wids[role]: (
+                    child_packet_counts[phase][role] + (primary_extra if role == "lower" else 0),
+                    *expected_children[child_wids[role]],
+                )
+                for role, _parent_role, _offset in live_run.SUBSURFACE_PHASE_CHILD_LAYOUTS[
+                    phase
+                ]
+            }
+            active_sources = len(live_run.SUBSURFACE_PARENT_ROLES) + len(children)
+            next_sequence = next_sequences[phase] + sequence_offset
+            lines = [
+                f"windows.{parent_wids['primary']}.title={live_run.SUBSURFACE_FIXTURE_TITLE}",
+                (
+                    f"windows.{parent_wids['secondary']}.title="
+                    f"{live_run.SUBSURFACE_REPARENT_TARGET_TITLE}"
+                ),
+                f"client.0.window.damage.next-packet-sequence={next_sequence}",
+                "client.0.window.damage.ack-owners=0",
+                "client.0.window.damage.subsurface-pending=0",
+                "client.0.window.damage.subsurface-inflight=0",
+                f"client.0.window.damage.active-pixel-sources={active_sources}",
+                *parent_info_lines(next_sequence),
+            ]
+            for child_wid, (packets_sent, parent_wid, offset) in children.items():
+                prefix = (
+                    f"client.0.window.windows.{parent_wid}."
+                    f"subsurfaces.{child_wid}"
+                )
+                lines.extend(
+                    (
+                        f"{prefix}.offset={tuple(offset)!r}",
+                        f"{prefix}.info.damage.ack-pending=0",
+                        f"{prefix}.info.damage.encoding-pending=0",
+                        f"{prefix}.info.damage.packets_sent={packets_sent}",
+                    )
+                )
+            private_text(
+                root / live_run.SUBSURFACE_INFO_ARTIFACTS[phase],
+                "\n".join(lines) + "\n",
+            )
+
+        continuous_children = {
+            child_wids["lower"]: (
+                8 + primary_extra + continuous_capture_count,
+                parent_wids["primary"],
+                list(live_run.SUBSURFACE_MOVED_OFFSET),
+            ),
+            child_wids["upper"]: (
+                4 + continuous_capture_count,
+                parent_wids["primary"],
+                list(live_run.SUBSURFACE_UPPER_OFFSET),
+            ),
+        }
+        continuous_lines = [
+            f"windows.{parent_wids['primary']}.title={live_run.SUBSURFACE_FIXTURE_TITLE}",
+            (
+                f"windows.{parent_wids['secondary']}.title="
+                f"{live_run.SUBSURFACE_REPARENT_TARGET_TITLE}"
+            ),
+            f"client.0.window.damage.next-packet-sequence={31 + sequence_offset}",
+            "client.0.window.damage.ack-owners=0",
+            "client.0.window.damage.active-pixel-sources=4",
+            "client.0.window.damage.subsurface-pending=0",
+            "client.0.window.damage.subsurface-inflight=0",
+            *parent_info_lines(31 + sequence_offset),
+        ]
+        for child_wid, (packets_sent, parent_wid, offset) in continuous_children.items():
+            child_prefix = (
+                f"client.0.window.windows.{parent_wid}.subsurfaces.{child_wid}"
+            )
+            continuous_lines.extend(
+                (
+                    f"{child_prefix}.offset={tuple(offset)!r}",
+                    f"{child_prefix}.info.damage.ack-pending=0",
+                    f"{child_prefix}.info.damage.encoding-pending=0",
+                    f"{child_prefix}.info.damage.packets_sent={packets_sent}",
+                )
+            )
+        private_text(
+            root / live_run.SUBSURFACE_CONTINUOUS_INFO_ARTIFACT,
+            "\n".join(continuous_lines) + "\n",
+        )
+
+        child_sequences = tuple(
+            sequence
+            for sequence, packet in sorted(packet_records.items())
+            if packet["role"] in live_run.SUBSURFACE_CHILD_ROLES
+        )
+        server_lines: list[str] = []
+        map_barriers = []
+        for role, other in (("secondary", "primary"), ("primary", "secondary")):
+            wid = parent_wids[role]
+            server_lines.extend((
+                f"_focus({wid}, ()) current focus={parent_wids[other]}",
+                f"focus: wid={wid:#x}, state=True, window=WaylandWindow({wid:#x}), surface=Surface({wid} : fixture)",
+            ))
+            map_barriers.append({
+                "role": role, "wire_wid": wid, "client_xid": str(4096 + wid),
+                "server_log_start": 0,
+            })
+        for record in map_barriers:
+            record["server_log_end"] = len(("\n".join(server_lines) + "\n").encode())
+        live_run.replace_private_json(
+            root / live_run.SUBSURFACE_STARTUP_BARRIERS_ARTIFACT,
+            {"schema": 1, "activation_order": ["secondary", "primary"], "parents": map_barriers},
+        )
+        secondary_wid = parent_wids["secondary"]
+        secondary_width, secondary_height = live_run.SUBSURFACE_PARENT_DIMENSIONS["secondary"]
+        for request in range(2):
+            event = (
+                "using existing 1 delayed regions created 1ms ago"
+                if request and secondary_extra == 0
+                else f"scheduling batching expiry for sequence {request + 1} in 0 ms"
+            )
+            server_lines.append(
+                f"do_damage(0, 0, {secondary_width}, {secondary_height}, {{}}) "
+                f"wid={secondary_wid:#x}, {event}"
+            )
+            if request or secondary_extra:
+                server_lines.append(
+                    f"process_damage_region: wid={secondary_wid:#x}, sequence={request + 2}, "
+                    f"adding pixel data to encode queue ( {secondary_width}x{secondary_height} - rgb32)"
+                )
+        live_run.replace_private_json(
+            root / live_run.SUBSURFACE_STARTUP_DAMAGE_ARTIFACT,
+            {"schema": 1, "server_log_end": len(("\n".join(server_lines) + "\n").encode())},
+        )
+        for sequence in child_sequences:
+            packet = packet_records[sequence]
+            server_lines.extend(
+                (
+                    (
+                        f"subsurface draw packet sequence {sequence} from source "
+                        f"window 0x{packet['source_wid']:x} published as wire window "
+                        f"0x{packet['wire_wid']:x} using {packet['encoding']}"
+                    ),
+                    (
+                        f"draw acknowledgement sequence {sequence} for wire window "
+                        f"0x{packet['wire_wid']:x} routed to subsurface window "
+                        f"0x{packet['source_wid']:x}"
+                    ),
+                )
+            )
+        server_lines.extend(
+            (
+                (
+                    "Wayland pointer target "
+                    f"root={parent_wids['primary']:#x} "
+                    f"surface={child_wids['upper']:#x} "
+                    "local="
+                    f"{live_run.SUBSURFACE_POINTER_SURFACE_COORDINATES[0]:.3f},"
+                    f"{live_run.SUBSURFACE_POINTER_SURFACE_COORDINATES[1]:.3f}"
+                ),
+                (
+                    "click(1, True, "
+                    f"{live_run.SUBSURFACE_POINTER_SURFACE_COORDINATES!r})"
+                ),
+                (
+                    "click(1, False, "
+                    f"{live_run.SUBSURFACE_POINTER_SURFACE_COORDINATES!r})"
+                ),
+            )
+        )
+        private_text(root / "server.stderr", "\n".join(server_lines) + "\n")
+        client_lines: list[str] = []
+        for sequence in sorted(packet_records):
+            packet = packet_records[sequence]
+            client_lines.append(
+                f"process_draw: 14 bytes for window {packet['wire_wid']}, sequence "
+                f"{sequence:8d}, {packet['w']}x{packet['h']} at "
+                f"{packet['x']},{packet['y']} using {packet['encoding']} "
+                "encoding with options=typedict({})"
+            )
+        client_lines.extend(
+            (
+                (
+                    "_button_action(1, fixture, True) "
+                    f"wid=0x{parent_wids['primary']:x} / focus=1 / "
+                    f"window wid=0x{parent_wids['primary']:x}"
+                ),
+                (
+                    "_button_action(1, fixture, False) "
+                    f"wid=0x{parent_wids['primary']:x} / focus=1 / "
+                    f"window wid=0x{parent_wids['primary']:x}"
+                ),
+            )
+        )
+        private_text(root / "client.stdout", "\n".join(client_lines) + "\n")
+        private_text(root / "client.stderr", "")
+
+        for phase in live_run.SUBSURFACE_PHASES:
+            captures = {
+                "primary": primary.convert("RGBA"),
+                "secondary": secondary.convert("RGBA"),
+            }
+            phase_images = {
+                role: source_images[image_name]
+                for role, _sequence, image_name in phase_payloads[phase]
+            }
+            for child_role, parent_role, offset in (
+                live_run.SUBSURFACE_PHASE_CHILD_LAYOUTS[phase]
+            ):
+                captures[parent_role] = live_run._subsurface_source_over(
+                    captures[parent_role],
+                    phase_images[child_role],
+                    offset,
+                )
+            for role, image in captures.items():
+                path = root / live_run.subsurface_client_rgb_artifact(role, phase)
+                image.save(path, format="PNG")
+                path.chmod(0o600)
+
+        continuous_backings = {
+            "primary": primary.convert("RGBA"),
+            "secondary": secondary.convert("RGBA"),
+        }
+        continuous_backings["primary"] = live_run._subsurface_source_over(
+            continuous_backings["primary"],
+            lower_four,
+            live_run.SUBSURFACE_MOVED_OFFSET,
+        )
+        continuous_backings["primary"] = live_run._subsurface_source_over(
+            continuous_backings["primary"],
+            upper,
+            live_run.SUBSURFACE_UPPER_OFFSET,
+        )
+        continuous_x, continuous_y, continuous_width, continuous_height = (
+            live_run.SUBSURFACE_CONTINUOUS_GEOMETRY
+        )
+        for generation in range(1, continuous_capture_count + 1):
+            lower_image = continuous_one if generation % 2 else lower_four
+            continuous_backings["primary"].paste(
+                live_run.Image.new(
+                    "RGBA",
+                    (continuous_width, continuous_height),
+                    (0, 0, 0, 0),
+                ),
+                (continuous_x, continuous_y),
+            )
+            for role, source in (
+                ("primary", primary.convert("RGBA")),
+                ("lower", lower_image),
+                ("upper", upper),
+            ):
+                source_x, source_y = live_run.SUBSURFACE_CONTINUOUS_SOURCE_ORIGINS[
+                    role
+                ]
+                crop = source.crop(
+                    (
+                        source_x,
+                        source_y,
+                        source_x + continuous_width,
+                        source_y + continuous_height,
+                    )
+                )
+                continuous_backings["primary"] = live_run._subsurface_source_over(
+                    continuous_backings["primary"],
+                    crop,
+                    (continuous_x, continuous_y),
+                )
+        for role, image in continuous_backings.items():
+            path = root / live_run.subsurface_client_rgb_artifact(
+                role,
+                live_run.SUBSURFACE_CONTINUOUS_FINAL_PHASE,
+            )
+            image.save(path, format="PNG")
+            path.chmod(0o600)
+
+        source_updates = {
+            role: live_run._subsurface_saved_updates(root, role_ids[role])
+            for role in ("primary", "secondary", "lower", "upper")
+        }
+        active_snapshot = live_run._subsurface_continuous_transaction_snapshot(
+            root,
+            source_updates,
+            {**parent_wids, **child_wids},
+            after_sequence=21 + sequence_offset,
+            before_sequence=29 + sequence_offset,
+        )
+        drained_snapshot = live_run._subsurface_continuous_transaction_snapshot(
+            root,
+            source_updates,
+            {**parent_wids, **child_wids},
+            after_sequence=21 + sequence_offset,
+            before_sequence=31 + sequence_offset,
+        )
+        stop_event = next(event for event in events if event["event"] == "continuous-stop")
+        live_run.replace_private_json(
+            root / live_run.SUBSURFACE_CONTINUOUS_LIVENESS_ARTIFACT,
+            {
+                "active": {
+                    "fixture_event_monotonic_ns": events[11]["monotonic_ns"],
+                    "fixture_event_sequence": 11,
+                    "fixture_generation_count": continuous_capture_count,
+                    "fixture_process_alive": True,
+                    "initial_fixture_generation_count": 2,
+                    "observation_started_monotonic_ns": events[10]["monotonic_ns"] + 1,
+                    "observed_monotonic_ns": events[11]["monotonic_ns"] + 250,
+                    "packet_cut_before_sequence": 29 + sequence_offset,
+                    "producer_active": True,
+                    "snapshot": active_snapshot,
+                    "stop_marker_absent": True,
+                },
+                "drained": {
+                    "fixture_event_monotonic_ns": stop_event["monotonic_ns"],
+                    "fixture_event_sequence": stop_event["sequence"],
+                    "fixture_generation_count": continuous_generation_count,
+                    "observed_monotonic_ns": stop_event["monotonic_ns"] + 250,
+                    "producer_active": False,
+                    "snapshot": drained_snapshot,
+                },
+                "schema": 3,
+                "stop_requested_monotonic_ns": events[11]["monotonic_ns"] + 500,
+            },
+        )
+
+        interaction: dict[str, object] = {
+            "attempted": True,
+            "checks": dict.fromkeys(live_run.SUBSURFACE_LIVE_CHECK_NAMES, False),
+            "child_wids": child_wids,
+            "evidence": {},
+            "fixture_pid": fixture_pid,
+            "parent_sources": parent_sources,
+            "parent_wids": parent_wids,
+            "phases": phases,
+        }
+        interaction["evidence"] = live_run.subsurface_artifact_observations(
+            root,
+            parent_wids=parent_wids,
+            child_wids=child_wids,
+            fixture_pid=fixture_pid,
+            parent_sources=parent_sources,
+            phases=phases,
+        )
+        interaction["checks"] = live_run.subsurface_interaction_checks(interaction)
+        return interaction
+
     def freeze_prelaunch(self, run: str, *, job_id: str = JOB_ID) -> dict[str, object]:
         return {
             "application": "hardware",
@@ -795,6 +1849,7 @@ class LiveJobTest(unittest.TestCase):
             "artifact_collection_passed": True,
             "artifact_sha256": artifact_sha256,
             "client": {
+                "alpha_disabled": False,
                 "network_options": list(
                     live_run.live_config.network_profile(
                         str(record["network_profile"])
@@ -810,7 +1865,9 @@ class LiveJobTest(unittest.TestCase):
                 }
             },
             "cleanup": {"passed": True},
+            "encoding": "rgb",
             "hardware": hardware,
+            "h264_client_policy": "strict",
             "lifecycle": lifecycle,
             "lifecycle_profile": lifecycle_profile,
             "name": "default-alpha",
@@ -942,6 +1999,17 @@ class LiveJobTest(unittest.TestCase):
         provenance["zed_archive_sha256"] = None
         provenance["zed_binary_sha256"] = None
         provenance["server_selection"] = args.selection
+        selected = live_run.PatchSelection(
+            case_slugs=(),
+            digest="a" * 64,
+            kind="stack",
+            name=args.selection,
+            patches=(),
+            required_gates=(),
+            selector_digests=((args.selection, "a" * 64),),
+            selectors=(args.selection,),
+        )
+        bound = Mock(server_context=Mock(selection=selected))
 
         def launch(**kwargs: object) -> dict[str, object]:
             captured.append(dict(kwargs))
@@ -962,6 +2030,11 @@ class LiveJobTest(unittest.TestCase):
 
         with (
             patch.object(job, "validate_selector"),
+            patch.object(
+                job.live_run,
+                "resolve_patch_selection",
+                return_value=selected,
+            ),
             patch.object(job.background_job, "launch", side_effect=launch),
             patch.object(
                 job.background_job,
@@ -969,7 +2042,7 @@ class LiveJobTest(unittest.TestCase):
                 return_value={"state": "completed", "exit_code": 0},
             ),
             patch.object(job, "load_freeze_result", return_value=provenance),
-            patch.object(job.live_run, "load_bound_inputs"),
+            patch.object(job.live_run, "load_bound_inputs", return_value=bound),
             patch.object(job, "cleanup_freeze_state"),
         ):
             self.assertEqual(job.start(args), 0)
@@ -1007,6 +2080,115 @@ class LiveJobTest(unittest.TestCase):
             record["job_id"],
         )
 
+    def test_start_rejects_invalid_frozen_admission_before_main_launch(self) -> None:
+        selection_name = "cases/video-pipeline-cleanup-race"
+        host_selection = live_run.PatchSelection(
+            case_slugs=("video-pipeline-cleanup-race",),
+            digest="a" * 64,
+            kind="case",
+            name=selection_name,
+            patches=(),
+            required_gates=("live-wayland-h264-hardware",),
+            selector_digests=((selection_name, "a" * 64),),
+            selectors=(selection_name,),
+        )
+        frozen_selection = live_run.PatchSelection(
+            case_slugs=host_selection.case_slugs,
+            digest="b" * 64,
+            kind="case",
+            name=selection_name,
+            patches=(),
+            required_gates=(),
+            selector_digests=((selection_name, "b" * 64),),
+            selectors=(selection_name,),
+        )
+        bound = Mock(server_context=Mock(selection=frozen_selection))
+
+        def launch_recorder(
+            records: list[dict[str, object]],
+        ) -> object:
+            def launch(**kwargs: object) -> dict[str, object]:
+                record = dict(kwargs["record"])
+                harness = Path(record["staging"]) / "inputs" / "harness"
+                for source in job.HARNESS_INPUTS:
+                    destination = harness / source.relative_to(job.MAINTENANCE_ROOT)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(source.read_bytes())
+                record["process"] = {"pid": 12345}
+                records.append(record)
+                return record
+
+            return launch
+
+        for suffix, loader, message in (
+            (
+                "changed-gate",
+                Mock(return_value=bound),
+                "does not declare required gate live-wayland-h264-hardware",
+            ),
+            (
+                "invalid-snapshot",
+                Mock(side_effect=live_run.LabFailure("frozen selection is invalid")),
+                "frozen selection is invalid",
+            ),
+        ):
+            args = Namespace(
+                alpha_scenarios="default",
+                application="hardware",
+                encoding="h264",
+                h264_client_policy="adaptive-alpha",
+                lifecycle="application-exit",
+                network_profile=job.DEFAULT_NETWORK_PROFILE,
+                render_node=None,
+                run=f"frozen-admission-{suffix}",
+                selection=selection_name,
+                zed_directory=None,
+            )
+            provenance = self.record(args.run)["input_provenance"]
+            provenance["path"] = str(job.RESULT_ROOT / args.run / "inputs")
+            provenance["zed_archive_sha256"] = None
+            provenance["zed_binary_sha256"] = None
+            provenance["server_selection"] = args.selection
+            launches: list[dict[str, object]] = []
+
+            with (
+                self.subTest(frozen_failure=suffix),
+                patch.object(job, "validate_selector"),
+                patch.object(
+                    job.live_run,
+                    "resolve_patch_selection",
+                    return_value=host_selection,
+                ),
+                patch.object(
+                    job.background_job,
+                    "launch",
+                    side_effect=launch_recorder(launches),
+                ),
+                patch.object(
+                    job.background_job,
+                    "wait_process",
+                    return_value={"state": "completed", "exit_code": 0},
+                ),
+                patch.object(job, "load_freeze_result", return_value=provenance),
+                patch.object(job.live_run, "load_bound_inputs", loader),
+                patch.object(
+                    job,
+                    "freeze_process_state",
+                    return_value={"state": "completed", "exit_code": 0},
+                ),
+                patch.object(job, "cleanup_freeze_state") as cleanup,
+                self.assertRaisesRegex(job.JobError, message),
+            ):
+                job.start(args)
+
+            self.assertEqual(len(launches), 1)
+            cleanup.assert_called_once_with(
+                launches[0],
+                remove_input_directories=True,
+            )
+            self.assertFalse(job.record_path(args.run).exists())
+            self.assertFalse(job.freeze_prelaunch_path(args.run).exists())
+
     def test_main_launch_retention_preserves_frozen_inputs_and_prelaunch(self) -> None:
         args = Namespace(
             alpha_scenarios="default",
@@ -1025,6 +2207,17 @@ class LiveJobTest(unittest.TestCase):
         provenance["zed_archive_sha256"] = None
         provenance["zed_binary_sha256"] = None
         provenance["server_selection"] = args.selection
+        selected = live_run.PatchSelection(
+            case_slugs=(),
+            digest="a" * 64,
+            kind="stack",
+            name=args.selection,
+            patches=(),
+            required_gates=(),
+            selector_digests=((args.selection, "a" * 64),),
+            selectors=(args.selection,),
+        )
+        bound = Mock(server_context=Mock(selection=selected))
         launches = 0
 
         def launch(**kwargs: object) -> dict[str, object]:
@@ -1043,6 +2236,11 @@ class LiveJobTest(unittest.TestCase):
 
         with (
             patch.object(job, "validate_selector"),
+            patch.object(
+                job.live_run,
+                "resolve_patch_selection",
+                return_value=selected,
+            ),
             patch.object(job.background_job, "launch", side_effect=launch),
             patch.object(
                 job.background_job,
@@ -1050,7 +2248,7 @@ class LiveJobTest(unittest.TestCase):
                 return_value={"state": "completed", "exit_code": 0},
             ),
             patch.object(job, "load_freeze_result", return_value=provenance),
-            patch.object(job.live_run, "load_bound_inputs"),
+            patch.object(job.live_run, "load_bound_inputs", return_value=bound),
             patch.object(job, "cleanup_freeze_state") as cleanup,
             self.assertRaisesRegex(job.JobError, "retained"),
         ):
@@ -1095,15 +2293,78 @@ class LiveJobTest(unittest.TestCase):
             "cases/wayland-client-keymap-sync",
         ):
             args.selection = selection
+            selected = live_run.PatchSelection(
+                case_slugs=(),
+                digest="a" * 64,
+                kind="stack" if selection.startswith("stacks/") else "case",
+                name=selection,
+                patches=(),
+                required_gates=("live-wayland-keyboard",),
+                selector_digests=((selection, "a" * 64),),
+                selectors=(selection,),
+            )
             with (
                 self.subTest(selection=selection),
                 patch.object(job, "validate_selector"),
+                patch.object(
+                    job.live_run,
+                    "resolve_patch_selection",
+                    return_value=selected,
+                ),
+                patch.object(job.background_job, "launch") as launch,
                 self.assertRaisesRegex(
                     job.JobError,
                     "clipboard live acceptance requires selection",
                 ),
             ):
                 job._start_locked(args, args.run)
+            launch.assert_not_called()
+
+    def test_start_rejects_undeclared_case_gates_before_input_freeze(self) -> None:
+        selection = "cases/video-pipeline-cleanup-race"
+        selected = live_run.PatchSelection(
+            case_slugs=("video-pipeline-cleanup-race",),
+            digest="a" * 64,
+            kind="case",
+            name=selection,
+            patches=(),
+            required_gates=(),
+            selector_digests=((selection, "a" * 64),),
+            selectors=(selection,),
+        )
+        for application, gate in (
+            ("hardware", "live-wayland-h264-hardware"),
+            ("opengl", "live-wayland-opengl-h264-hardware"),
+        ):
+            args = Namespace(
+                alpha_scenarios="default",
+                application=application,
+                encoding="h264",
+                h264_client_policy="adaptive-alpha",
+                lifecycle="application-exit",
+                network_profile=job.DEFAULT_NETWORK_PROFILE,
+                render_node=None,
+                run=f"undeclared-{application}-gate",
+                selection=selection,
+                zed_directory=None,
+            )
+            with (
+                self.subTest(application=application),
+                patch.object(job, "validate_selector"),
+                patch.object(
+                    job.live_run,
+                    "resolve_patch_selection",
+                    return_value=selected,
+                ),
+                patch.object(job.background_job, "launch") as launch,
+                self.assertRaisesRegex(
+                    job.JobError,
+                    f"does not declare required gate {gate}",
+                ),
+            ):
+                job._start_locked(args, args.run)
+            launch.assert_not_called()
+            self.assertFalse(job.freeze_prelaunch_path(args.run).exists())
 
     def test_start_holds_the_lifecycle_lock_through_owner_publication(self) -> None:
         args = Namespace(run="locked-start")
@@ -1444,43 +2705,108 @@ class LiveJobTest(unittest.TestCase):
         self.assertEqual(status["exit_code"], 0)
         self.assertTrue(status["report_checks"]["background_supervisor_sha256"])
 
-    def test_clipboard_provenance_binds_the_selected_source_to_both_endpoints(
+    def test_evidence_tree_binds_each_embedded_scenario_profile_identity(self) -> None:
+        mutations = {
+            "application": "gtk",
+            "encoding": "h264",
+            "h264_client_policy": "adaptive-alpha",
+        }
+        for field, replacement in mutations.items():
+            with self.subTest(field=field):
+                run = f"scenario-identity-{field.replace('_', '-')}"
+                record = self.record(run)
+                job.prepare_private_state()
+                self.make_report(run, record)
+                report_path = job.result_path(run)
+                payload = json.loads(report_path.read_text(encoding="utf-8"))
+                scenario = payload["scenarios"][0]
+                scenario[field] = replacement
+                scenario_path = report_path.parent / scenario["name"] / "report.json"
+                scenario_path.write_text(
+                    json.dumps(scenario, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                payload["scenario_report_sha256"][scenario["name"]] = job.sha256_file(
+                    scenario_path
+                )
+                report_path.write_text(
+                    json.dumps(payload, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                _result, _digest, checks = job.report_validation(run, record)
+                self.assertFalse(checks["evidence_tree"])
+
+    def test_subsurface_evidence_binds_default_alpha_client_mode(self) -> None:
+        run = "subsurface-default-alpha"
+        record = self.record(run)
+        record["application"] = "subsurface"
+        job.prepare_private_state()
+        self.make_report(run, record)
+        report = job.result_path(run)
+        payload = json.loads(report.read_text(encoding="utf-8"))
+        scenario = payload["scenarios"][0]
+
+        with (
+            patch.object(
+                job,
+                "subsurface_fixture_artifact_evidence_matches",
+                return_value=True,
+            ),
+            patch.object(job, "input_checksum_validation", return_value=True),
+        ):
+            self.assertTrue(job.evidence_tree_validation(payload, report))
+            scenario["client"]["alpha_disabled"] = True
+            scenario_path = report.parent / scenario["name"] / "report.json"
+            scenario_path.write_text(
+                json.dumps(scenario, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            payload["scenario_report_sha256"][scenario["name"]] = job.sha256_file(
+                scenario_path
+            )
+            self.assertFalse(job.evidence_tree_validation(payload, report))
+
+    def test_case_only_provenance_binds_selected_source_to_both_endpoints(
         self,
     ) -> None:
-        run = "clipboard-provenance"
-        record = self.clipboard_record(run)
-        provenance = record["input_provenance"]
-        self.assertIs(
-            job.validate_input_provenance(
+        for application in ("clipboard", "subsurface"):
+            run = f"{application}-provenance"
+            record = self.clipboard_record(run)
+            record["application"] = application
+            provenance = record["input_provenance"]
+            self.assertIs(
+                job.validate_input_provenance(
+                    provenance,
+                    application=application,
+                    run=run,
+                    selection=str(record["selection"]),
+                    harness_digest=str(record["harness_sha256"]),
+                ),
                 provenance,
-                application="clipboard",
-                run=run,
-                selection=str(record["selection"]),
-                harness_digest=str(record["harness_sha256"]),
-            ),
-            provenance,
-        )
-        for field in (
-            "client_context_archive_sha256",
-            "client_context_sha256",
-            "client_selection",
-            "client_selection_resolution_sha256",
-            "client_selection_sha256",
-        ):
-            with self.subTest(field=field):
-                changed = copy.deepcopy(provenance)
-                changed[field] = "master" if field == "client_selection" else "0" * 64
-                with self.assertRaisesRegex(
-                    job.JobError,
-                    "client selection|same selected source",
-                ):
-                    job.validate_input_provenance(
-                        changed,
-                        application="clipboard",
-                        run=run,
-                        selection=str(record["selection"]),
-                        harness_digest=str(record["harness_sha256"]),
+            )
+            for field in (
+                "client_context_archive_sha256",
+                "client_context_sha256",
+                "client_selection",
+                "client_selection_resolution_sha256",
+                "client_selection_sha256",
+            ):
+                with self.subTest(application=application, field=field):
+                    changed = copy.deepcopy(provenance)
+                    changed[field] = (
+                        "master" if field == "client_selection" else "0" * 64
                     )
+                    with self.assertRaisesRegex(
+                        job.JobError,
+                        "client selection|same selected source",
+                    ):
+                        job.validate_input_provenance(
+                            changed,
+                            application=application,
+                            run=run,
+                            selection=str(record["selection"]),
+                            harness_digest=str(record["harness_sha256"]),
+                        )
 
     def test_image_provenance_uses_each_frozen_endpoint_selection(self) -> None:
         record = self.clipboard_record("clipboard-images")
@@ -1867,6 +3193,2032 @@ class LiveJobTest(unittest.TestCase):
             self.assertTrue(job.evidence_tree_validation(payload, report))
             payload["scenarios"] = list(reversed(payload["scenarios"]))
             self.assertFalse(job.evidence_tree_validation(payload, report))
+
+    def test_subsurface_c_pixels_match_independent_oracle_and_damage(self) -> None:
+        source = (LIVE_DIRECTORY / "subsurface_fixture.c").read_text(encoding="utf-8")
+        enum = re.search(r"enum pixel_pattern \{.*?\};", source, re.DOTALL)
+        self.assertIsNotNone(enum)
+        assert enum is not None
+        functions = source.split("static uint32_t premultiplied_argb(", 1)[1].split(
+            "static void create_buffer(", 1,
+        )[0]
+        macros = "\n".join(
+            line for line in source.splitlines()
+            if line.startswith("#define CONTINUOUS_DAMAGE_")
+        )
+        program = (
+            "#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n"
+            + macros + "\n" + enum.group(0)
+            + '\nstatic void fail_message(const char *message) { '
+            'fputs(message, stderr); exit(2); }\n'
+            + "static uint32_t premultiplied_argb(" + functions
+            + "\nint main(int argc, char **argv) {\n"
+            " if (argc != 4) return 2;\n"
+            " int pattern = atoi(argv[1]), width = atoi(argv[2]), height = atoi(argv[3]);\n"
+            " for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {\n"
+            "  uint32_t pixel = pattern_pixel(pattern, x, y);\n"
+            "  unsigned char rgba[] = {pixel >> 16, pixel >> 8, pixel, pixel >> 24};\n"
+            "  if (fwrite(rgba, 1, 4, stdout) != 4) return 3;\n"
+            " }\n return 0;\n}\n"
+        )
+        executable = self.root / "subsurface-pixels"
+        subprocess.run(
+            ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-x", "c", "-",
+             "-o", str(executable)],
+            input=program, text=True, capture_output=True, check=True,
+        )
+        enum_names = [name.strip() for name in enum.group(0).split("{", 1)[1]
+                      .split("}", 1)[0].split(",") if name.strip()]
+        observed = {}
+        for pattern, c_name in (
+            ("primary", "PRIMARY_PARENT"), ("secondary", "SECONDARY_PARENT"),
+            ("lower-one", "LOWER_STATE_ONE"), ("lower-two", "LOWER_STATE_TWO"),
+            ("lower-three", "LOWER_STATE_THREE"), ("lower-four", "LOWER_STATE_FOUR"),
+            ("upper", "UPPER_STATE"), ("lower-continuous-one", "LOWER_CONTINUOUS_ONE"),
+        ):
+            with self.subTest(pattern=pattern):
+                expected = live_run._subsurface_fixture_image(pattern)
+                raw = subprocess.run(
+                    [str(executable), str(enum_names.index(c_name)),
+                     str(expected.width), str(expected.height)],
+                    capture_output=True, check=True,
+                ).stdout
+                self.assertEqual(raw, expected.tobytes())
+                observed[pattern] = live_run.Image.frombytes("RGBA", expected.size, raw)
+        x, y = live_run.SUBSURFACE_CONTINUOUS_SOURCE_ORIGINS["lower"]
+        width, height = live_run.SUBSURFACE_CONTINUOUS_GEOMETRY[2:]
+        difference = live_run.ImageChops.difference(
+            observed["lower-continuous-one"], observed["lower-four"],
+        ).convert("RGB")
+        self.assertEqual(difference.getbbox(), (x, y, x + width, y + height))
+        self.assertEqual(
+            observed["lower-continuous-one"].crop((x, y, x + width, y + height)).tobytes(),
+            observed["lower-three"].crop((x, y, x + width, y + height)).tobytes(),
+        )
+
+    def test_subsurface_c_continuous_scheduler_requires_callback_and_cadence(self) -> None:
+        source = (LIVE_DIRECTORY / "subsurface_fixture.c").read_text(encoding="utf-8")
+        commit = "static void commit_lower_continuous_generation(" + source.split(
+            "static void commit_lower_continuous_generation(", 1,
+        )[1].split("static void stop_lower_continuous_generations(", 1)[0]
+        macros = "\n".join(line for line in source.splitlines()
+                           if line.startswith("#define CONTINUOUS_"))
+        # Execute the real C scheduler, replacing only Wayland marshaling and
+        # its clock. Immediate callbacks must not create a catch-up burst; a
+        # missing callback must still block after the wall-clock deadline.
+        program = r'''
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#define LOWER_BUFFER_SCALE 2
+struct fixture {
+    bool lower_continuous_active, lower_continuous_stopped, lower_frame_ready;
+    unsigned int lower_continuous_generation_count, lower_frame_done_count;
+    unsigned int lower_attach_count, lower_commit_count, lower_update_count;
+    uint32_t lower_frame_callback_id, lower_frame_callback_data;
+    uint64_t lower_continuous_commit_ns;
+    int lower_state;
+    void *lower_surface;
+    struct { void *buffer; } lower_buffers[7];
+};
+static uint64_t clock_ns;
+static uint64_t monotonic_ns(void) __attribute__((unused));
+static uint64_t monotonic_ns(void) { return clock_ns; }
+static void fail_message(const char *message) { fputs(message, stderr); exit(2); }
+static void arm_lower_frame_callback(struct fixture *fixture) { (void) fixture; }
+static void wl_surface_attach(void *surface, void *buffer, int x, int y)
+{ (void) surface; (void) buffer; (void) x; (void) y; }
+static void wl_surface_damage_buffer(void *surface, int x, int y, int w, int h)
+{ (void) surface; (void) x; (void) y; (void) w; (void) h; }
+static void wl_surface_commit(void *surface) { (void) surface; clock_ns += 7000000; }
+static void emit_continuous_generation(struct fixture *f, unsigned int b,
+                                      uint32_t id, uint32_t data, uint64_t committed_ns)
+{
+    (void) b; (void) id; (void) data;
+    if (committed_ns != f->lower_continuous_commit_ns || committed_ns + 7000000 != clock_ns)
+        fail_message("scheduler and event must share the pre-marshaling timestamp");
+}
+'''
+        program += macros + "\n" + commit + r'''
+int main(int argc, char **argv) {
+    (void) argv;
+    struct fixture fixture = {.lower_continuous_active = true};
+    if (argc > 1) {
+        clock_ns = UINT64_C(10000000000);
+        commit_lower_continuous_generation(&fixture);
+        return 99;
+    }
+    const uint64_t offsets[] = {0, 1, 49999999, 50000000, 500000000,
+                               500000001, 549999999, 550000000};
+    const unsigned int expected[] = {1, 1, 1, 2, 3, 3, 3, 4};
+    for (unsigned int index = 0; index < sizeof(offsets) / sizeof(offsets[0]); ++index) {
+        clock_ns = UINT64_C(1000000000) + offsets[index];
+        fixture.lower_frame_ready = true;
+        fixture.lower_frame_done_count = 3 + fixture.lower_continuous_generation_count;
+        commit_lower_continuous_generation(&fixture);
+        if (fixture.lower_continuous_generation_count != expected[index]) {
+            fprintf(stderr, "sample %u: emitted %u generations, expected %u\n",
+                    index, fixture.lower_continuous_generation_count, expected[index]);
+            return 3;
+        }
+    }
+    return 0;
+}
+'''
+        executable = self.root / "subsurface-continuous-scheduler"
+        subprocess.run(
+            ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-x", "c", "-",
+             "-o", str(executable)], input=program, text=True, capture_output=True, check=True,
+        )
+        result = subprocess.run([str(executable)], text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        missing = subprocess.run([str(executable), "missing-callback"],
+                                 text=True, capture_output=True, check=False)
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn("not callback-ready", missing.stderr)
+
+    def test_subsurface_continuous_timeline_rejects_unpaced_burst(self) -> None:
+        interaction = self.make_subsurface_fixture_artifacts(self.root / "subsurface-unpaced")
+        events = copy.deepcopy(interaction["evidence"]["events"])
+        for sequence, event in enumerate(events):
+            event["monotonic_ns"] = (sequence + 1) * 1_000
+        with self.assertRaisesRegex(live_run.LabFailure, "cadence"):
+            live_run.validate_subsurface_fixture_events(events)
+        with self.assertRaisesRegex(live_run.LabFailure, "cadence"):
+            live_run._subsurface_continuous_event_prefix(events[:12], stopped=False)
+
+    def test_subsurface_coalesces_uncaptured_generations_with_exact_final_state(self) -> None:
+        root = self.root / "subsurface-coalesced"
+        interaction = self.make_subsurface_fixture_artifacts(root, coalesced=True)
+        continuous = interaction["evidence"]["continuous"]
+        self.assertEqual(continuous["liveness"]["drained"]["fixture_generation_count"], 5)
+        self.assertEqual(len(continuous["transactions"]["complete_transactions"]), 3)
+        self.assertTrue(all(interaction["checks"].values()), interaction["checks"])
+        self.assertTrue(live_run.subsurface_artifact_evidence_matches(interaction, root))
+        for field in ("subsurface_pending", "subsurface_inflight"):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(interaction)
+                changed["evidence"]["continuous"]["info"][field] = 1
+                checks = live_run.subsurface_interaction_checks(changed)
+                self.assertFalse(checks["continuous_transactions_complete"])
+
+    def test_subsurface_initial_and_map_damage_keep_complete_startup_history(self) -> None:
+        for primary, secondary in ((1, 1), (1, 2), (2, 1), (2, 2)):
+            with self.subTest(primary=primary, secondary=secondary):
+                root = self.root / f"subsurface-startup-{primary}-{secondary}"
+                interaction = self.make_subsurface_fixture_artifacts(
+                    root, startup_captures=(primary, secondary),
+                )
+                self.assertTrue(all(interaction["checks"].values()), interaction["checks"])
+                self.assertTrue(live_run.subsurface_artifact_evidence_matches(interaction, root))
+
+                startup = interaction["evidence"]["startup"]
+                self.assertEqual(len(startup["transactions"]), primary)
+                self.assertEqual(len(startup["secondary"]), secondary)
+                self.assertEqual(startup["packet_count"], 2 * primary + secondary)
+
+    def test_subsurface_startup_rejects_dropped_or_malformed_earlier_history(self) -> None:
+        root = self.root / "subsurface-startup-history"
+        interaction = self.make_subsurface_fixture_artifacts(root, startup_captures=(2, 2))
+        mutations = (
+            lambda value: value["evidence"]["startup"]["transactions"].pop(0),
+            lambda value: value["evidence"]["source_updates"]["1"]["updates"].pop(0),
+            lambda value: value["evidence"]["source_updates"]["5"]["updates"].pop(0),
+            lambda value: value["evidence"]["source_updates"]["2"]["updates"][0]["options"].__setitem__(
+                "subsurface-transaction-id", True,
+            ),
+            lambda value: value["evidence"]["source_updates"]["1"]["updates"][0]["options"].__setitem__(
+                "subsurface-stage-index", 1,
+            ),
+            lambda value: value["evidence"]["source_updates"]["1"]["updates"][0]["options"].__setitem__(
+                "subsurface-backing-epoch", -1,
+            ),
+            lambda value: value["evidence"]["source_updates"]["5"]["updates"][0]["options"].__setitem__(
+                "backing-epoch", -1,
+            ),
+            lambda value: value["evidence"]["source_updates"]["5"]["updates"][0]["options"].__setitem__(
+                "backing-epoch", 1,
+            ),
+            lambda value: value["evidence"]["source_updates"]["5"]["updates"][0]["options"].__setitem__(
+                "flush", 1,
+            ),
+            lambda value: value["evidence"]["stream"]["client_draws"].pop(0),
+            lambda value: value["evidence"]["stream"]["acknowledgements"].pop(0),
+            lambda value: value["evidence"]["info"]["initial"]["children"]["2"].__setitem__(
+                "packets_sent", 1,
+            ),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                changed = copy.deepcopy(interaction)
+                mutate(changed)
+                self.assertFalse(all(live_run.subsurface_interaction_checks(changed).values()))
+        # Recompute from changed on-disk bytes, not merely self-reported hashes.
+        # The final secondary packet is still correct; the earlier one is not.
+        earlier = root / interaction["evidence"]["startup"]["secondary"][0]["packet_payload"]
+        payload = earlier.read_bytes()
+        earlier.write_bytes(bytes((payload[0] ^ 1,)) + payload[1:])
+        with self.assertRaisesRegex(live_run.LabFailure, "secondary packet differs"):
+            live_run.subsurface_artifact_observations(
+                root, parent_wids=interaction["parent_wids"], child_wids=interaction["child_wids"],
+                fixture_pid=interaction["fixture_pid"], parent_sources=interaction["parent_sources"],
+                phases=interaction["phases"],
+            )
+
+    def test_subsurface_startup_rejects_a_third_unexplained_capture(self) -> None:
+        for primary, secondary in ((3, 1), (1, 3)):
+            with (
+                self.subTest(primary=primary, secondary=secondary),
+                self.assertRaisesRegex(live_run.LabFailure, "initial/map capture bound"),
+            ):
+                self.make_subsurface_fixture_artifacts(
+                    self.root / f"subsurface-third-{primary}-{secondary}",
+                    startup_captures=(primary, secondary),
+                )
+
+    def test_subsurface_startup_requires_new_focus_handlers_for_both_parents(self) -> None:
+        windows = {"primary": "4097", "secondary": "4098"}
+        for anchor in ("primary", "secondary"):
+            root = self.root / f"subsurface-map-barriers-{anchor}"
+            root.mkdir(mode=0o700)
+            first = "secondary" if anchor == "primary" else "primary"
+            actions = []
+
+            def wait_for_handler(description, ready, actions=actions, first=first):
+                if description.endswith("initial parent focus"):
+                    self.assertFalse(actions)
+                    self.assertTrue(ready())
+                    return
+                self.assertEqual(len(actions), 1 if first in description else 2)
+                # Visibility and queued map packets are insufficient. Only a
+                # fresh server UI handler can advance to the next activation.
+                self.assertFalse(ready())
+                self.assertTrue(ready())
+                return True
+
+            initial_matches = (True,) if anchor == "primary" else (False, True)
+            with (
+                self.subTest(anchor=anchor),
+                patch.object(live_run, "podman_exec",
+                             side_effect=lambda *args, actions=actions: actions.append(args[1][-1])),
+                patch.object(live_run, "container_process_exists", return_value=True),
+                patch.object(live_run, "container_artifact_size", side_effect=(10, 200)),
+                patch.object(live_run, "container_artifact_suffix_matches",
+                             side_effect=(*initial_matches, False, True, False, True)) as matches,
+                patch.object(live_run, "wait_for", side_effect=wait_for_handler),
+            ):
+                live_run._establish_subsurface_startup_barriers(
+                    "server", 11, "client", 12, root, {"primary": 1, "secondary": 2}, windows,
+                )
+            self.assertEqual(actions, [windows[first], windows[anchor]])
+            self.assertTrue(all(call.args[2] == 10 for call in matches.call_args_list[len(initial_matches):]))
+            metadata = json.loads((root / live_run.SUBSURFACE_STARTUP_BARRIERS_ARTIFACT).read_text())
+            self.assertEqual(metadata["activation_order"], [first, anchor])
+            records = metadata["parents"]
+            self.assertEqual([record["wire_wid"] for record in records], [2, 1])
+            self.assertEqual([record["server_log_start"] for record in records], [10, 10])
+            self.assertEqual([record["server_log_end"] for record in records], [200, 200])
+
+    def test_subsurface_startup_same_focus_handler_is_a_valid_map_barrier(self) -> None:
+        root = self.root / "subsurface-same-focus"
+        interaction = self.make_subsurface_fixture_artifacts(root)
+        path = root / "server.stderr"
+        text = path.read_text()
+        # Native Wayland returns after its _focus entry when the requested
+        # target is already current. No second state=True line is required.
+        text = re.sub(r"focus: wid=[^\n]+", lambda match: " " * len(match[0]), text)
+        path.write_text(text)
+        self.assertEqual(
+            live_run._load_subsurface_startup_barriers(root, interaction["parent_wids"]),
+            interaction["evidence"]["startup_barriers"],
+        )
+
+    def test_subsurface_startup_parent_queue_must_drain(self) -> None:
+        root = self.root / "subsurface-parent-queue"
+        interaction = self.make_subsurface_fixture_artifacts(root)
+        for role in live_run.SUBSURFACE_PARENT_ROLES:
+            for field in ("ack_pending", "encoding_pending", "packets_sent"):
+                with self.subTest(role=role, field=field):
+                    changed = copy.deepcopy(interaction)
+                    changed["evidence"]["info"]["initial"]["parents"][role][field] += 1
+                    self.assertFalse(all(live_run.subsurface_interaction_checks(changed).values()))
+        initial = root / live_run.SUBSURFACE_INFO_ARTIFACTS["initial"]
+        text = initial.read_text()
+        key = f"client.0.window.windows.{interaction['parent_wids']['secondary']}.damage.ack-pending"
+        if f"{key}=" in text:
+            text = re.sub(rf"{re.escape(key)}=0", f"{key}=1", text)
+        else:
+            text += f"{key}=1\n"
+        initial.write_text(text)
+        changed = copy.deepcopy(interaction)
+        changed["evidence"] = live_run.subsurface_artifact_observations(
+            root, parent_wids=interaction["parent_wids"], child_wids=interaction["child_wids"],
+            fixture_pid=interaction["fixture_pid"], parent_sources=interaction["parent_sources"],
+            phases=interaction["phases"],
+        )
+        self.assertFalse(all(live_run.subsurface_interaction_checks(changed).values()))
+
+    def test_subsurface_startup_requires_both_ordinary_requests_to_leave_batching(self) -> None:
+        request0 = b"do_damage(0, 0, 360, 260, {}) wid=0x2, scheduling batching expiry for sequence 1 in 0 ms\n"
+        request1 = b"do_damage(0, 0, 360, 260, {}) wid=0x2, scheduling batching expiry for sequence 2 in 31 ms\n"
+        merged1 = b"do_damage(0, 0, 360, 260, {}) wid=0x2, using existing 1 delayed regions created 1ms ago\n"
+        capture0 = b"process_damage_region: wid=0x2, sequence=2, adding pixel data to encode queue ( 360x260 - rgb32)\n"
+        capture1 = b"process_damage_region: wid=0x2, sequence=3, adding pixel data to encode queue ( 360x260 - rgb32)\n"
+        for captures, log in (
+            (1, request0 + merged1 + capture0),
+            (2, request0 + capture0 + request1 + capture1),
+        ):
+            with self.subTest(captures=captures):
+                result = live_run._subsurface_secondary_startup_damage(log, 2, captures)
+                self.assertTrue(live_run._subsurface_startup_damage_metadata(result, captures))
+                self.assertEqual(len(result["captures"]), captures)
+        for captures, log in (
+            (1, request0 + capture0),  # map request has not run
+            (1, request0 + capture0 + request1),  # map damage is still delayed
+            (1, request0 + merged1),  # coalesced damage has not been captured
+            (2, capture0 + request0 + request1 + capture1),
+            (2, request0 + request1 + capture0 + capture1),
+            (2, request0 + capture0 + request1 + capture1.replace(b"360x260", b"359x260")),
+            (2, request0 + capture0 + request1 + capture1.replace(b"wid=0x2", b"wid=0x3")),
+        ):
+            with self.subTest(log=log), self.assertRaises(live_run.LabFailure):
+                live_run._subsurface_secondary_startup_damage(log, 2, captures)
+
+    def test_subsurface_startup_cannot_reuse_old_focus_or_a_missing_map_barrier(self) -> None:
+        root = self.root / "subsurface-old-focus"
+        interaction = self.make_subsurface_fixture_artifacts(root)
+        path = root / live_run.SUBSURFACE_STARTUP_BARRIERS_ARTIFACT
+        value = json.loads(path.read_text())
+        # Move the first slice beyond its actual handler. The old log line is
+        # still present, but it cannot confirm the new activation interval.
+        for record in value["parents"]:
+            record["server_log_start"] = record["server_log_end"] - 1
+        live_run.replace_private_json(path, value)
+        self.assertFalse(live_run.subsurface_artifact_evidence_matches(interaction, root))
+        with self.assertRaisesRegex(live_run.LabFailure, "fresh server focus/map barrier"):
+            live_run._load_subsurface_startup_barriers(root, interaction["parent_wids"])
+
+    def test_subsurface_capture_timeline_preserves_source_order_and_terminal_state(self) -> None:
+        generations = [{"lower_state_id": state} for state in (3, 4, 3, 4, 3)]
+        for captured, final, expected in (
+            ((3, 4, 3), True, True), ((4, 3), True, True),
+            ((3, 3, 3), True, True), ((3, 4), False, True),
+            ((3, 4), True, False), ((4, 4, 4, 3), True, False),
+            ((3, 4, 3, 4, 3, 4), False, False), ((True,), False, False),
+        ):
+            with self.subTest(captured=captured, final=final):
+                self.assertIs(
+                    live_run._subsurface_capture_timeline_matches(
+                        [{"lower_state_id": state} for state in captured],
+                        generations, final=final,
+                    ), expected,
+                )
+
+    def test_subsurface_active_proof_rechecks_producer_after_packet_collection(self) -> None:
+        generations = [{"lower_state_id": state} for state in (3, 4)]
+        snapshot = {
+            "complete_transactions": [
+                {"lower_state_id": state,
+                 "packets": [{"role": "lower", "payload_sha256": str(state) * 64}]}
+                for state in (3, 4)
+            ],
+            "inflight_transaction": None,
+            "packet_count": 6,
+        }
+        with (
+            patch.object(live_run, "container_process_exists", return_value=True),
+            patch.object(live_run, "read_container_subsurface_events", return_value=[
+                {"monotonic_ns": 1_000_000_000} for _ in range(9)
+            ]),
+            patch.object(live_run.time, "monotonic_ns", return_value=1_100_000_000),
+            patch.object(live_run, "_subsurface_continuous_event_prefix", side_effect=[
+                (generations, None),
+                (generations * (live_run.SUBSURFACE_CONTINUOUS_MAX_GENERATIONS // 2), None),
+            ]),
+            patch.object(live_run, "synchronize_subsurface_saved_updates",
+                         return_value={"updates": [{"sequence": 28}]}),
+            patch.object(live_run, "_subsurface_continuous_transaction_snapshot", return_value=snapshot),
+            patch.object(live_run, "podman_exec", return_value=completed([])),
+            patch.object(live_run, "wait_for", side_effect=lambda _name, check, **_kwargs: check()),
+            self.assertRaisesRegex(live_run.LabFailure, "active safety cap"),
+        ):
+            live_run._wait_subsurface_continuous_active(
+                "server", 1, "client", 2, 3, self.root,
+                {"primary": 1, "secondary": 2, "lower": 3, "upper": 4}, 21,
+            )
+
+    def test_subsurface_active_observation_requires_progress_within_its_budget(self) -> None:
+        # These are actual schema-bound fixture events, not a replacement for
+        # the disputed cadence/prefix parser. Only process/artifact I/O is fake.
+        base = 1_000_000_000
+        names = ("ready", "lower-state", "lower-state", "lower-moved", "sibling-created",
+                 "lower-updated-under-upper", "lower-frame-generation",
+                 "lower-frame-generation", "continuous-start")
+        records = [{"event": name, "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                    "sequence": sequence, "monotonic_ns": base + sequence * 50_000_000}
+                   for sequence, name in enumerate(names)]
+        records.extend({"event": "continuous-generation", "schema": live_run.SUBSURFACE_FIXTURE_SCHEMA,
+                        "sequence": 8 + generation, "monotonic_ns": base + (8 + generation) * 50_000_000,
+                        "continuous_generation_id": generation, "producer_active": True,
+                        "lower_state_id": 3 if generation % 2 else 4}
+                       for generation in range(1, 4))
+        snapshot = {
+            "complete_transactions": [
+                {"lower_state_id": state,
+                 "packets": [{"role": "lower", "payload_sha256": str(state) * 64}]}
+                for state in (3, 4)
+            ], "inflight_transaction": None, "packet_count": 6,
+        }
+        for scenario in ("progress", "progress-during-capture", "progress-between-polls",
+                         "stalled", "late-before", "late-after"):
+            clock = [records[10]["monotonic_ns"] + 1]
+            calls = 0
+
+            def read_events(_server: str, current_scenario: str = scenario,
+                            current_clock: list[int] = clock) -> list[dict[str, object]]:
+                nonlocal calls
+                calls += 1
+                if current_scenario == "late-before" or (calls > 1 and current_scenario == "late-after"):
+                    current_clock[0] = records[8]["monotonic_ns"] + 5_000_000_001
+                advanced = calls > (2 if current_scenario == "progress-between-polls" else 1)
+                if advanced and current_scenario.startswith("progress"):
+                    current_clock[0] = records[11]["monotonic_ns"] + 1
+                return records[:12 if advanced and current_scenario != "stalled" else 11]
+
+            def one_observation(_name: str, check: Callable[[], bool], **_kwargs: object) -> None:
+                if not check() and not check():
+                    raise live_run.LabFailure("observation did not advance")
+
+            captured = copy.deepcopy(snapshot)
+            if scenario == "progress-during-capture":
+                captured["complete_transactions"].append(copy.deepcopy(captured["complete_transactions"][0]))
+                captured["packet_count"] = 9
+
+            with (
+                self.subTest(scenario=scenario),
+                patch.object(live_run, "container_process_exists", return_value=True),
+                patch.object(live_run, "read_container_subsurface_events", side_effect=read_events),
+                patch.object(live_run.time, "monotonic_ns", side_effect=lambda current=clock: current[0]),
+                patch.object(live_run, "synchronize_subsurface_saved_updates",
+                             return_value={"updates": [{"sequence": 28}]}),
+                patch.object(live_run, "_subsurface_continuous_transaction_snapshot", return_value=captured),
+                patch.object(live_run, "podman_exec", return_value=completed([])),
+                patch.object(live_run, "wait_for", side_effect=one_observation),
+            ):
+                if scenario.startswith("progress"):
+                    result = live_run._wait_subsurface_continuous_active(
+                        "server", 1, "client", 2, 3, self.root,
+                        {"primary": 1, "secondary": 2, "lower": 3, "upper": 4}, 21,
+                    )
+                    self.assertEqual(result["fixture_generation_count"], 3)
+                    self.assertEqual(result["initial_fixture_generation_count"], 2)
+                else:
+                    with self.assertRaisesRegex(live_run.LabFailure, "deadline|did not advance"):
+                        live_run._wait_subsurface_continuous_active(
+                            "server", 1, "client", 2, 3, self.root,
+                            {"primary": 1, "secondary": 2, "lower": 3, "upper": 4}, 21,
+                        )
+
+    def test_subsurface_active_observer_uses_one_packet_frontier(self) -> None:
+        directory = self.root / "subsurface-serial-cut"
+        interaction = self.make_subsurface_fixture_artifacts(directory, coalesced=True)
+        roles = {**interaction["parent_wids"], **interaction["child_wids"]}
+        roles = {role: roles[role] for role in ("primary", "secondary", "lower", "upper")}
+        updates = {role: live_run._subsurface_saved_updates(directory, wid)
+                   for role, wid in roles.items()}
+        # Reuse real canonical packet bytes for a fourth continuous capture.
+        # The first primary inventory stops at the third stage0, while the
+        # later child inventories legitimately include the fourth transaction.
+        for role in ("lower", "upper"):
+            template = next(packet for packet in updates[role]["updates"]
+                            if packet["sequence"] == {"primary": 25, "lower": 26, "upper": 27}[role])
+            info = json.loads((directory / template["relative_info"]).read_text())
+            info["sequence"] += 6
+            info["options"]["subsurface-transaction-id"] += 2
+            target = directory / f"screen-updates/{roles[role]}/999"
+            target.mkdir(mode=0o700)
+            payload = directory / live_run._subsurface_saved_payload_relative(template)
+            (target / "0.info").write_text(json.dumps(info))
+            (target / "0.info").chmod(0o600)
+            (target / info["file"]).write_bytes(payload.read_bytes())
+            (target / info["file"]).chmod(0o600)
+        for role, wid in roles.items():
+            current = live_run._subsurface_saved_updates(directory, wid)
+            current["updates"] = [packet for packet in current["updates"]
+                                  if packet["sequence"] <= (28 if role == "primary" else 30)
+                                  or (role != "primary" and "/999/" in packet["relative_info"])]
+            updates[role] = current
+        with self.assertRaisesRegex(live_run.LabFailure, "stage is invalid"):
+            live_run._subsurface_continuous_transaction_snapshot(directory, updates, roles, after_sequence=21)
+        expected = live_run._subsurface_continuous_transaction_snapshot(
+            directory, updates, roles, after_sequence=21, before_sequence=29,
+        )
+        self.assertEqual(len(expected["complete_transactions"]), 2)
+        self.assertEqual(len(expected["inflight_transaction"]["packets"]), 1)
+        events = interaction["evidence"]["events"]
+        samples = iter((events[:12], events[:14]))
+        clock = [events[11]["monotonic_ns"] + 1]
+
+        def read_events(_server: str) -> list[dict[str, object]]:
+            value = next(samples)
+            clock[0] = value[-1]["monotonic_ns"] + 1
+            return value
+
+        def observe_once(_name: str, check: Callable[[], bool], **_kwargs: object) -> None:
+            if not check():
+                raise live_run.LabFailure("serial inventories prevented active observation")
+
+        with (
+            patch.object(live_run, "container_process_exists", return_value=True),
+            patch.object(live_run, "read_container_subsurface_events", side_effect=read_events),
+            patch.object(live_run.time, "monotonic_ns", side_effect=lambda: clock[0]),
+            patch.object(live_run, "synchronize_subsurface_saved_updates",
+                         side_effect=lambda _server, _directory, wid: updates[next(role for role in roles if roles[role] == wid)]),
+            patch.object(live_run, "podman_exec", return_value=completed([])),
+            patch.object(live_run, "wait_for", side_effect=observe_once),
+        ):
+            active = live_run._wait_subsurface_continuous_active(
+                "server", 1, "client", 2, 3, directory, roles, 21,
+            )
+        self.assertEqual(active["packet_cut_before_sequence"], 29)
+        self.assertEqual(active["snapshot"], expected)
+        broken = copy.deepcopy(updates)
+        broken["lower"]["updates"] = [packet for packet in broken["lower"]["updates"]
+                                       if packet["sequence"] != 23]
+        with self.assertRaisesRegex(live_run.LabFailure, "stage is invalid"):
+            live_run._subsurface_continuous_transaction_snapshot(
+                directory, broken, roles, after_sequence=21, before_sequence=29,
+            )
+
+    def test_subsurface_active_diagnostics_retain_bounded_failure_context(self) -> None:
+        output = StringIO()
+
+        def exhaust_observations(_name: str, check: Callable[[], bool], **_kwargs: object) -> None:
+            for _ in range(65):
+                check()
+
+        with (
+            redirect_stdout(output),
+            patch.object(live_run, "container_process_exists", return_value=True),
+            patch.object(live_run, "read_container_subsurface_events", return_value=[]),
+            patch.object(live_run, "wait_for", side_effect=exhaust_observations),
+            self.assertRaisesRegex(live_run.LabFailure, "attempt bound"),
+        ):
+            live_run._wait_subsurface_continuous_active(
+                "server", 1, "client", 2, 3, self.root,
+                {"primary": 1, "secondary": 2, "lower": 3, "upper": 4}, 21,
+            )
+        prefix = "SUBSURFACE_CONTINUOUS_OBSERVATION "
+        records = [json.loads(line.removeprefix(prefix)) for line in output.getvalue().splitlines()]
+        self.assertEqual(len(records), 64)
+        for attempt, record in enumerate(records, 1):
+            self.assertEqual(record["attempt"], attempt)
+            self.assertFalse(record["accepted"])
+            self.assertEqual(record["stage"], "initial-source-prefix")
+            self.assertEqual(record["reason"], "subsurface continuous fixture prefix is incomplete")
+            self.assertEqual(record["roles"], {})
+            self.assertLessEqual(record["started_monotonic_ns"], record["finished_monotonic_ns"])
+
+    def test_subsurface_client_parent_identities_preserve_actual_decorated_titles(self) -> None:
+        expected = {
+            "primary": ("101", live_run.SUBSURFACE_FIXTURE_TITLE + " on owned-server"),
+            "secondary": ("102", live_run.SUBSURFACE_REPARENT_TARGET_TITLE + " on owned-server"),
+        }
+        for change in (None, "xid", "title", "missing"):
+            observed = dict(expected)
+            if change == "xid":
+                observed["primary"] = ("103", expected["primary"][1])
+            elif change == "title":
+                observed["primary"] = ("101", expected["primary"][1] + " changed")
+            elif change == "missing":
+                del observed["primary"]
+            output = StringIO()
+            listing = "".join(f"{xid}\t{title}\n" for xid, title in observed.values())
+            with (self.subTest(change=change), redirect_stdout(output),
+                  patch.object(live_run, "podman_exec", return_value=completed([], listing))):
+                if change is None:
+                    live_run._require_subsurface_client_parent_identities("client", expected)
+                else:
+                    with self.assertRaisesRegex(live_run.LabFailure, "client mapped XID or WM title"):
+                        live_run._require_subsurface_client_parent_identities("client", expected)
+            record = json.loads(output.getvalue().removeprefix("SUBSURFACE_CLIENT_PARENT_IDENTITIES "))
+            self.assertEqual(record["phase"], "final")
+            self.assertEqual(record["expected"], {role: list(value) for role, value in expected.items()})
+            self.assertEqual(record["observed"],
+                             {role: list(observed[role]) if role in observed else None for role in expected})
+        long_expected = dict(expected)
+        long_expected["primary"] = ("101", expected["primary"][1] + "x" * 400)
+        listing = "101\t" + long_expected["primary"][1] + "changed\n"
+        listing += "102\t" + expected["secondary"][1] + "\n"
+        output = StringIO()
+        with (redirect_stdout(output),
+              patch.object(live_run, "podman_exec", return_value=completed([], listing)),
+              self.assertRaisesRegex(live_run.LabFailure, "client mapped XID or WM title")):
+            live_run._require_subsurface_client_parent_identities("client", long_expected)
+        record = json.loads(output.getvalue().removeprefix("SUBSURFACE_CLIENT_PARENT_IDENTITIES "))
+        self.assertEqual(len(record["observed"]["primary"][1]), 256)
+        self.assertEqual(record["observed"]["primary"], record["expected"]["primary"])
+
+    def test_subsurface_source_oracle_rejects_rebound_wrong_pixels(self) -> None:
+        root = self.root / "subsurface-wrong-source"
+        interaction = self.make_subsurface_fixture_artifacts(root)
+        metadata = next(
+            value for value in interaction["phases"]["stacked"]["streams"]
+            if value["role"] == "upper"
+        )
+        payload_path = root / metadata["packet_payload"]
+        payload = bytearray(payload_path.read_bytes())
+        payload[0] ^= 1
+        payload_path.write_bytes(payload)
+        metadata["payload_sha256"] = live_run.sha256_file(payload_path)
+        with self.assertRaisesRegex(live_run.LabFailure, "differs from fixture pixels"):
+            live_run.subsurface_artifact_observations(
+                root, parent_wids=interaction["parent_wids"],
+                child_wids=interaction["child_wids"], fixture_pid=interaction["fixture_pid"],
+                parent_sources=interaction["parent_sources"], phases=interaction["phases"],
+            )
+
+    def test_subsurface_topology_full_repairs_and_local_removals_are_distinct(self) -> None:
+        interaction = self.make_subsurface_fixture_artifacts(self.root / "subsurface-topology-boundaries")
+        # These explicit fixture canvas/footprint boundaries are independent of
+        # the geometry table which generates the synthetic packet artifacts.
+        expected = {
+            "stacked": {"primary": (0, 0, 420, 300), "lower": (48, 110, 220, 140),
+                        "upper": (150, 150, 160, 100)},
+            "lower-destroyed": {"primary": (48, 110, 220, 140), "upper": (150, 150, 118, 100)},
+            "upper-detached": {"primary": (150, 150, 160, 100)},
+            "reparented": {"secondary": (0, 0, 360, 260), "reparented-upper": (80, 70, 160, 100)},
+        }
+        role_ids = {**interaction["parent_wids"], **interaction["child_wids"]}
+        for phase, roles in expected.items():
+            for role, geometry in roles.items():
+                with self.subTest(phase=phase, role=role):
+                    binding = next(item for item in interaction["phases"][phase]["streams"] if item["role"] == role)
+                    packet = next(item for item in interaction["evidence"]["source_updates"][str(role_ids[role])]["updates"]
+                                  if item["sequence"] == binding["sequences"][0])
+                    self.assertEqual(tuple(packet[key] for key in ("x", "y", "w", "h")), geometry)
+                    if role in interaction["parent_wids"]:
+                        self.assertEqual(packet["options"]["subsurface-reset"], list(geometry))
+        self.assertTrue(all(interaction["checks"].values()))
+
+    def test_subsurface_topology_rejects_partial_new_role_backing_repairs(self) -> None:
+        interaction = self.make_subsurface_fixture_artifacts(self.root / "subsurface-partial-topology")
+        role_ids = {**interaction["parent_wids"], **interaction["child_wids"]}
+        for phase, role, partial in (
+            ("stacked", "primary", (150, 150, 160, 100)),
+            ("stacked", "lower", (150, 150, 118, 100)),
+            ("reparented", "secondary", (80, 70, 160, 100)),
+        ):
+            with self.subTest(phase=phase, role=role):
+                changed = copy.deepcopy(interaction)
+                binding = next(item for item in changed["phases"][phase]["streams"] if item["role"] == role)
+                packet = next(item for item in changed["evidence"]["source_updates"][str(role_ids[role])]["updates"]
+                              if item["sequence"] == binding["sequences"][0])
+                packet.update(zip(("x", "y", "w", "h"), partial, strict=True))
+                if role in interaction["parent_wids"]:
+                    packet["options"]["subsurface-reset"] = list(partial)
+                self.assertFalse(live_run.subsurface_interaction_checks(changed)["atomic_transaction_contract_exact"])
+
+    def test_subsurface_parsers_accept_exact_fixture_and_stream_authorities(
+        self,
+    ) -> None:
+        root = self.root / "subsurface-parsers"
+        interaction = self.make_subsurface_fixture_artifacts(root)
+        evidence = interaction["evidence"]
+        self.assertEqual(
+            interaction["child_wids"]["reparented-upper"],
+            interaction["child_wids"]["upper"],
+        )
+        self.assertEqual(
+            [event["event"] for event in evidence["events"]],
+            [
+                "ready",
+                "lower-state",
+                "lower-state",
+                "lower-moved",
+                "sibling-created",
+                "lower-updated-under-upper",
+                "lower-frame-generation",
+                "lower-frame-generation",
+                "continuous-start",
+                "continuous-generation",
+                "continuous-generation",
+                "continuous-generation",
+                "continuous-stop",
+                "sibling-click",
+                "lower-destroyed",
+                "upper-detached",
+                "upper-reparented",
+                "exit",
+            ],
+        )
+        self.assertEqual(
+            evidence["events"][0]["lower_buffer_scale"],
+            live_run.SUBSURFACE_LOWER_BUFFER_SCALE,
+        )
+        self.assertEqual(
+            evidence["events"][0]["lower_buffer_dimensions"],
+            list(live_run.SUBSURFACE_LOWER_BUFFER_DIMENSIONS),
+        )
+        self.assertEqual(
+            evidence["events"][4]["upper_buffer_transform"],
+            live_run.SUBSURFACE_UPPER_BUFFER_TRANSFORM,
+        )
+        self.assertIs(
+            evidence["events"][4]["upper_precommitted_before_role"],
+            True,
+        )
+        self.assertIs(
+            next(
+                event
+                for event in evidence["events"]
+                if event["event"] == "upper-reparented"
+            )["upper_reattach_without_child_commit"],
+            True,
+        )
+        detached = next(
+            event for event in evidence["events"] if event["event"] == "upper-detached"
+        )
+        reparented = next(
+            event for event in evidence["events"] if event["event"] == "upper-reparented"
+        )
+        self.assertEqual(reparented["upper_commit_count"], detached["upper_commit_count"])
+        self.assertEqual(
+            evidence["pointer_timing"],
+            {
+                "completed_monotonic_ns": 700_000_500,
+                "deadline_ns": live_run.SUBSURFACE_INPUT_DEADLINE_NS,
+                "elapsed_ns": 1_000,
+                "fixture_event_monotonic_ns": 700_000_000,
+                "schema": 1,
+                "started_monotonic_ns": 699_999_500,
+            },
+        )
+        self.assertEqual(
+            evidence["stream"]["input"],
+            {
+                "client_ordered": True,
+                "client_press": True,
+                "client_release": True,
+                "server_leaf_coordinates": True,
+                "server_leaf_surface": True,
+                "server_ordered": True,
+                "server_press": True,
+                "server_release": True,
+                "server_root_coordinates": True,
+                "server_root_wire": True,
+            },
+        )
+        self.assertEqual(
+            evidence["stream"]["publications"],
+            [
+                {
+                    "encoding": "rgb32",
+                    "sequence": sequence,
+                    "source_wid": source_wid,
+                    "wire_wid": wire_wid,
+                }
+                for sequence, source_wid, wire_wid in (
+                    (3, 2, 1),
+                    (5, 2, 1),
+                    (7, 2, 1),
+                    (9, 2, 1),
+                    (11, 2, 1),
+                    (12, 3, 1),
+                    (14, 2, 1),
+                    (15, 3, 1),
+                    (17, 2, 1),
+                    (18, 3, 1),
+                    (20, 2, 1),
+                    (21, 3, 1),
+                    (23, 2, 1),
+                    (24, 3, 1),
+                    (26, 2, 1),
+                    (27, 3, 1),
+                    (29, 2, 1),
+                    (30, 3, 1),
+                    (32, 3, 1),
+                    (35, 3, 5),
+                )
+            ],
+        )
+        self.assertEqual(
+            [record["generation_id"] for record in evidence["frame_generations"]],
+            [1, 2],
+        )
+        self.assertEqual(
+            [record["frame_done_count"] for record in evidence["frame_generations"]],
+            [1, 2],
+        )
+        self.assertEqual(
+            {record["source_wid"] for record in evidence["frame_generations"]},
+            {interaction["child_wids"]["lower"]},
+        )
+        self.assertEqual(
+            len({record["payload_sha256"] for record in evidence["frame_generations"]}),
+            len(live_run.SUBSURFACE_FRAME_PHASES),
+        )
+        self.assertEqual(
+            evidence["info"]["initial"]["children"]["2"]["offset"],
+            list(live_run.SUBSURFACE_INITIAL_OFFSET),
+        )
+        self.assertEqual(
+            evidence["info"]["reparented"]["children"]["3"]["parent_wid"],
+            5,
+        )
+        self.assertEqual(
+            evidence["info"]["reparented"]["children"]["3"]["packets_sent"],
+            1,
+        )
+        transactions = [
+            (
+                packet["options"]["subsurface-transaction-id"],
+                packet["options"]["subsurface-stage-index"],
+                packet["options"]["subsurface-stage-count"],
+                packet["options"]["flush"],
+            )
+            for source in evidence["source_updates"].values()
+            for packet in source["updates"]
+            if "subsurface-transaction-id" in packet["options"]
+        ]
+        self.assertIn((1, 0, 2, 1), transactions)
+        self.assertIn((1, 1, 2, 0), transactions)
+        self.assertIn((12, 0, 2, 1), transactions)
+        self.assertIn((12, 1, 2, 0), transactions)
+        self.assertEqual(
+            len(evidence["continuous"]["transactions"]["complete_transactions"]),
+            3,
+        )
+        self.assertIsNone(
+            evidence["continuous"]["transactions"]["inflight_transaction"]
+        )
+        self.assertEqual(
+            len(
+                evidence["continuous"]["liveness"]["active"]["snapshot"][
+                    "complete_transactions"
+                ]
+            ),
+            live_run.SUBSURFACE_CONTINUOUS_MIN_GENERATIONS,
+        )
+        self.assertIsNotNone(
+            evidence["continuous"]["liveness"]["active"]["snapshot"][
+                "inflight_transaction"
+            ]
+        )
+        self.assertEqual(
+            {
+                packet["options"]["rgb_format"]
+                for source in evidence["source_updates"].values()
+                for packet in source["updates"]
+                if "subsurface-transaction-id" in packet["options"]
+            },
+            set(live_run.SUBSURFACE_COMPOSITE_FORMATS),
+        )
+        self.assertEqual(
+            evidence["source_updates"]["5"]["updates"][0]["encoding"],
+            "rgb24",
+        )
+        self.assertTrue(
+            all(
+                "screenshots" not in source
+                for source in evidence["source_updates"].values()
+            )
+        )
+        self.assertTrue(all(interaction["checks"].values()))
+        self.assertTrue(
+            live_run.subsurface_artifact_evidence_matches(interaction, root)
+        )
+
+        pending_start = copy.deepcopy(evidence["events"])
+        start_event = next(
+            event for event in pending_start if event["event"] == "continuous-start"
+        )
+        start_event.update(
+            {
+                "frame_callback_pending": True,
+                "frame_callback_ready": False,
+                "frame_done_count": 2,
+            }
+        )
+        live_run.validate_subsurface_fixture_events(pending_start)
+        pending_interaction = copy.deepcopy(interaction)
+        pending_interaction["evidence"]["events"] = pending_start
+        self.assertTrue(
+            all(live_run.subsurface_interaction_checks(pending_interaction).values())
+        )
+
+        completed_terminal = copy.deepcopy(evidence["events"])
+        stop_event = next(
+            event for event in completed_terminal if event["event"] == "continuous-stop"
+        )
+        stop_event.update(
+            {
+                "frame_done_count": stop_event["frame_done_count"] + 1,
+                "pending_callback_cancelled": False,
+                "terminal_callback_completed": True,
+                "terminal_callback_data": 123,
+                "terminal_callback_id": 456,
+            }
+        )
+        live_run.validate_subsurface_fixture_events(completed_terminal)
+        completed_interaction = copy.deepcopy(interaction)
+        completed_interaction["evidence"]["events"] = completed_terminal
+        self.assertTrue(
+            all(live_run.subsurface_interaction_checks(completed_interaction).values())
+        )
+        stop_event["pending_callback_cancelled"] = True
+        with self.assertRaisesRegex(live_run.LabFailure, "continuous stop"):
+            live_run.validate_subsurface_fixture_events(completed_terminal)
+
+        def fixture_events_with_generations(count: int) -> list[dict[str, object]]:
+            source = evidence["events"]
+            result = copy.deepcopy(source[:9])
+            templates = source[9:11]
+            continuous_ids = source[12]["continuous_buffer_ids"]
+            for generation in range(1, count + 1):
+                event = copy.deepcopy(templates[(generation - 1) % 2])
+                event.update(
+                    {
+                        "continuous_generation_id": generation,
+                        "frame_callback_data": 2_000 + generation,
+                        "frame_callback_id": 1_000 + generation,
+                        "frame_done_count": 2 + generation,
+                        "lower_attach_count": 6 + generation,
+                        "lower_buffer_id": continuous_ids[(generation - 1) % 2],
+                        "lower_commit_count": 6 + generation,
+                        "lower_state_id": 3 if generation % 2 else 4,
+                        "lower_update_count": 5 + generation,
+                    }
+                )
+                result.append(event)
+            stop = copy.deepcopy(source[12])
+            stop.update(
+                {
+                    "continuous_generation_count": count,
+                    "frame_done_count": 2 + count,
+                    "lower_attach_count": 6 + count,
+                    "lower_buffer_id": continuous_ids[(count - 1) % 2],
+                    "lower_commit_count": 6 + count,
+                    "lower_state_id": 3 if count % 2 else 4,
+                    "lower_update_count": 5 + count,
+                }
+            )
+            result.append(stop)
+            for event in copy.deepcopy(source[13:]):
+                if "lower_update_count" in event:
+                    event["lower_update_count"] = 5 + count
+                result.append(event)
+            for sequence, event in enumerate(result):
+                event["sequence"] = sequence
+                event["monotonic_ns"] = (sequence + 1) * 50_000_000
+            return result
+
+        for generation_count in (
+            live_run.SUBSURFACE_CONTINUOUS_MIN_GENERATIONS,
+            live_run.SUBSURFACE_CONTINUOUS_MAX_GENERATIONS,
+        ):
+            with self.subTest(continuous_generation_count=generation_count):
+                live_run.validate_subsurface_fixture_events(
+                    fixture_events_with_generations(generation_count)
+                )
+        with self.assertRaisesRegex(live_run.LabFailure, "generation count"):
+            live_run.validate_subsurface_fixture_events(
+                fixture_events_with_generations(
+                    live_run.SUBSURFACE_CONTINUOUS_MIN_GENERATIONS - 1
+                )
+            )
+        with self.assertRaisesRegex(live_run.LabFailure, "generation count"):
+            live_run.validate_subsurface_fixture_events(
+                fixture_events_with_generations(
+                    live_run.SUBSURFACE_CONTINUOUS_MAX_GENERATIONS + 1
+                )
+            )
+
+        active_at_cap = copy.deepcopy(evidence["continuous"]["liveness"])
+        active_at_cap["active"]["fixture_generation_count"] = (
+            live_run.SUBSURFACE_CONTINUOUS_MAX_GENERATIONS
+        )
+        with self.assertRaisesRegex(live_run.LabFailure, "liveness state"):
+            live_run.validate_subsurface_continuous_liveness(
+                active_at_cap,
+                live_run.validate_subsurface_fixture_events(evidence["events"]),
+                evidence["continuous"]["transactions"],
+            )
+
+        duplicate = root / "duplicate-events.stdout"
+        duplicate.write_text(
+            '{"event":"ready","event":"ready"}\n',
+            encoding="utf-8",
+        )
+        duplicate.chmod(0o600)
+        with self.assertRaises(live_run.LabFailure):
+            live_run.load_subsurface_fixture_events(duplicate)
+
+        bounded_line = '{"event":"bounded"}\n'
+        maximum_events = live_run.SUBSURFACE_CONTINUOUS_MAX_GENERATIONS + 15
+        self.assertEqual(
+            len(
+                live_run.parse_subsurface_fixture_jsonl_text(
+                    bounded_line * maximum_events,
+                    "bounded",
+                )
+            ),
+            maximum_events,
+        )
+        with self.assertRaisesRegex(live_run.LabFailure, "event count"):
+            live_run.parse_subsurface_fixture_jsonl_text(
+                bounded_line * (maximum_events + 1),
+                "over-bound",
+            )
+
+    def test_subsurface_source_over_uses_exact_premultiplied_wire_math(self) -> None:
+        parent = live_run.Image.new("RGBA", (1, 1), (10, 20, 30, 255))
+        child = live_run.Image.new("RGBA", (1, 1), (64, 32, 16, 128))
+        observed = live_run._subsurface_source_over(parent, child, (0, 0))
+        self.assertEqual(observed.getpixel((0, 0)), (69, 42, 31, 255))
+
+        transparent = live_run.Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+        self.assertEqual(
+            live_run._subsurface_source_over(parent, transparent, (0, 0)).getpixel(
+                (0, 0)
+            ),
+            (10, 20, 30, 255),
+        )
+        with self.assertRaisesRegex(live_run.LabFailure, "not premultiplied"):
+            live_run._subsurface_source_over(
+                parent,
+                live_run.Image.new("RGBA", (1, 1), (129, 0, 0, 128)),
+                (0, 0),
+            )
+
+    def test_subsurface_server_info_accepts_signed_child_offsets(self) -> None:
+        root = self.root / "subsurface-signed-offset"
+        interaction = self.make_subsurface_fixture_artifacts(root)
+        path = root / live_run.SUBSURFACE_INFO_ARTIFACTS["initial"]
+        positive = repr(tuple(live_run.SUBSURFACE_INITIAL_OFFSET))
+        signed = tuple(-value for value in live_run.SUBSURFACE_INITIAL_OFFSET)
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(positive, repr(signed), 1),
+            encoding="utf-8",
+        )
+        parsed = live_run.parse_subsurface_server_info(
+            path,
+            interaction["parent_wids"],
+        )
+        lower_wid = interaction["child_wids"]["lower"]
+        self.assertEqual(parsed["children"][lower_wid]["offset"], list(signed))
+        self.assertEqual(
+            live_run._subsurface_exact_pair(list(signed), dimensions=False),
+            list(signed),
+        )
+        self.assertIsNone(
+            live_run._subsurface_exact_pair(list(signed), dimensions=True)
+        )
+
+    def test_subsurface_classifier_rejects_each_ownership_boundary_mutation(
+        self,
+    ) -> None:
+        interaction = self.make_subsurface_fixture_artifacts(
+            self.root / "subsurface-classifier"
+        )
+
+        def packet_for_sequence(value: dict[str, object], sequence: int) -> dict[str, object]:
+            sources = value["evidence"]["source_updates"]
+            for source in sources.values():
+                for packet in source["updates"]:
+                    if packet["sequence"] == sequence:
+                        return packet
+            raise AssertionError(f"missing synthetic packet sequence {sequence}")
+
+        def set_phase_option(
+            value: dict[str, object],
+            sequences: tuple[int, ...],
+            key: str,
+            option: object,
+        ) -> None:
+            for sequence in sequences:
+                packet_for_sequence(value, sequence)["options"][key] = option
+
+        mutations = {
+            "wire-wid": (
+                lambda value: value["evidence"]["stream"]["publications"][0].__setitem__(
+                    "wire_wid", 9
+                ),
+                "child_packets_target_current_parent",
+            ),
+            "ack-source": (
+                lambda value: value["evidence"]["stream"]["acknowledgements"][0].__setitem__(
+                    "source_wid", 9
+                ),
+                "child_ack_owner_exact",
+            ),
+            "route-order": (
+                lambda value: value["evidence"]["stream"].__setitem__(
+                    "route_order",
+                    list(reversed(value["evidence"]["stream"]["route_order"])),
+                ),
+                "child_ack_owner_exact",
+            ),
+            "sequence-collision": (
+                lambda value: value["phases"]["changed"]["streams"][0].__setitem__(
+                    "sequences", [3]
+                ),
+                "global_damage_sequences_unique",
+            ),
+            "video-child": (
+                lambda value: value["evidence"]["source_updates"]["2"]["updates"][0].__setitem__(
+                    "encoding", "h264"
+                ),
+                "child_transactions_raw_rgb32_only",
+            ),
+            "rgb24-transaction-root": (
+                lambda value: packet_for_sequence(value, 4).__setitem__(
+                    "encoding", "rgb24"
+                ),
+                "atomic_transaction_contract_exact",
+            ),
+            "child-geometry": (
+                lambda value: value["evidence"]["source_updates"]["2"]["updates"][0].__setitem__(
+                    "x", 73
+                ),
+                "child_transactions_raw_rgb32_only",
+            ),
+            "negative-packet-destination": (
+                lambda value: value["evidence"]["source_updates"]["2"]["updates"][0].__setitem__(
+                    "x", -1
+                ),
+                "child_transactions_raw_rgb32_only",
+            ),
+            "pending-ack": (
+                lambda value: value["evidence"]["info"]["changed"]["children"]["2"].__setitem__(
+                    "ack_pending", 1
+                ),
+                "child_ack_drained",
+            ),
+            "pending-composite": (
+                lambda value: value["evidence"]["info"]["changed"].__setitem__(
+                    "subsurface_pending", 1,
+                ),
+                "child_ack_drained",
+            ),
+            "inflight-composite": (
+                lambda value: value["evidence"]["info"]["changed"].__setitem__(
+                    "subsurface_inflight", 1,
+                ),
+                "child_ack_drained",
+            ),
+            "packet-count-jump": (
+                lambda value: value["evidence"]["info"]["changed"]["children"]["2"].__setitem__(
+                    "packets_sent", 3
+                ),
+                "same_lower_updated_repeatedly",
+            ),
+            "stale-pixels": (
+                lambda value: value["evidence"]["pixels"]["comparisons"]["restored"]["primary"]["comparison"].__setitem__(
+                    "exact", False
+                ),
+                "restored_alpha_composite_exact",
+            ),
+            "child-retained": (
+                lambda value: value["evidence"]["info"]["lower-destroyed"].__setitem__(
+                    "children", {"2": {}}
+                ),
+                "lower_source_removed",
+            ),
+            "missing-wire-mode": (
+                lambda value: value["evidence"]["source_updates"]["2"]["updates"][0]["options"].pop(
+                    "subsurface-composite"
+                ),
+                "premultiplied_source_over_wire_contract",
+            ),
+            "duplicate-reset": (
+                lambda value: value["evidence"]["source_updates"]["2"]["updates"][0]["options"].__setitem__(
+                    "subsurface-reset",
+                    list(live_run.SUBSURFACE_PHASE_GEOMETRIES[("initial", "lower")]),
+                ),
+                "atomic_transaction_contract_exact",
+            ),
+            "client-input-order": (
+                lambda value: value["evidence"]["stream"]["input"].__setitem__(
+                    "client_ordered", False
+                ),
+                "client_pointer_path",
+            ),
+            "server-input-coordinates": (
+                lambda value: value["evidence"]["stream"]["input"].__setitem__(
+                    "server_leaf_coordinates", False
+                ),
+                "server_pointer_path",
+            ),
+            "server-input-leaf": (
+                lambda value: value["evidence"]["stream"]["input"].__setitem__(
+                    "server_leaf_surface", False
+                ),
+                "server_pointer_path",
+            ),
+            "server-input-root": (
+                lambda value: value["evidence"]["stream"]["input"].__setitem__(
+                    "server_root_wire", False
+                ),
+                "server_pointer_path",
+            ),
+            "server-input-order": (
+                lambda value: value["evidence"]["stream"]["input"].__setitem__(
+                    "server_ordered", False
+                ),
+                "server_pointer_path",
+            ),
+            "pointer-deadline": (
+                lambda value: value["evidence"]["pointer_timing"].update(
+                    {
+                        "completed_monotonic_ns": (
+                            value["evidence"]["pointer_timing"][
+                                "started_monotonic_ns"
+                            ]
+                            + live_run.SUBSURFACE_INPUT_DEADLINE_NS
+                            + 1
+                        ),
+                        "elapsed_ns": live_run.SUBSURFACE_INPUT_DEADLINE_NS + 1,
+                    }
+                ),
+                "fixture_pointer_path",
+            ),
+            "missing-transaction-id": (
+                lambda value: packet_for_sequence(value, 3)["options"].pop(
+                    "subsurface-transaction-id"
+                ),
+                "atomic_transaction_contract_exact",
+            ),
+            "duplicate-transaction-id": (
+                lambda value: set_phase_option(
+                    value,
+                    (4, 5),
+                    "subsurface-transaction-id",
+                    1,
+                ),
+                "atomic_transaction_contract_exact",
+            ),
+            "stage-index-gap": (
+                lambda value: packet_for_sequence(value, 3)["options"].__setitem__(
+                    "subsurface-stage-index", 2
+                ),
+                "atomic_transaction_contract_exact",
+            ),
+            "stage-count-mismatch": (
+                lambda value: packet_for_sequence(value, 3)["options"].__setitem__(
+                    "subsurface-stage-count", 3
+                ),
+                "atomic_transaction_contract_exact",
+            ),
+            "topology-epoch-mismatch": (
+                lambda value: packet_for_sequence(value, 5)["options"].__setitem__(
+                    "subsurface-topology-epoch", 99
+                ),
+                "atomic_transaction_contract_exact",
+            ),
+            "backing-epoch-mismatch": (
+                lambda value: packet_for_sequence(value, 5)["options"].__setitem__(
+                    "subsurface-backing-epoch", 99
+                ),
+                "atomic_transaction_contract_exact",
+            ),
+            "flush-order-mismatch": (
+                lambda value: packet_for_sequence(value, 3)["options"].__setitem__(
+                    "flush", 1
+                ),
+                "atomic_transaction_contract_exact",
+            ),
+            "non-premultiplied-source": (
+                lambda value: value["evidence"]["pixels"]["alpha"]["initial:lower"].__setitem__(
+                    "premultiplied", False
+                ),
+                "child_sources_have_transparency",
+            ),
+            "frame-generation-payload-digest": (
+                lambda value: value["evidence"]["frame_generations"][0].__setitem__(
+                    "payload_sha256", "0" * 64
+                ),
+                "child_frame_generations_exact",
+            ),
+            "frame-generation-order": (
+                lambda value: value["evidence"].__setitem__(
+                    "frame_generations",
+                    list(reversed(value["evidence"]["frame_generations"])),
+                ),
+                "child_frame_generations_exact",
+            ),
+            "continuous-active-after-stop": (
+                lambda value: value["evidence"]["continuous"]["liveness"][
+                    "active"
+                ].__setitem__(
+                    "observed_monotonic_ns",
+                    value["evidence"]["continuous"]["liveness"][
+                        "stop_requested_monotonic_ns"
+                    ]
+                    + 1,
+                ),
+                "continuous_child_active_liveness",
+            ),
+            "continuous-active-without-progress": (
+                lambda value: value["evidence"]["continuous"]["liveness"]["active"].__setitem__(
+                    "initial_fixture_generation_count",
+                    value["evidence"]["continuous"]["liveness"]["active"]["fixture_generation_count"],
+                ),
+                "continuous_child_active_liveness",
+            ),
+            "continuous-stale-liveness-schema": (
+                lambda value: value["evidence"]["continuous"]["liveness"].__setitem__("schema", 2),
+                "continuous_child_active_liveness",
+            ),
+            "continuous-packet-frontier-shift": (
+                lambda value: value["evidence"]["continuous"]["liveness"]["active"].__setitem__(
+                    "packet_cut_before_sequence",
+                    value["evidence"]["continuous"]["liveness"]["active"]["packet_cut_before_sequence"] + 1,
+                ),
+                "continuous_child_active_liveness",
+            ),
+            "continuous-active-only-before-observation": (
+                lambda value: value["evidence"]["continuous"]["liveness"]["active"].__setitem__(
+                    "observation_started_monotonic_ns",
+                    value["evidence"]["continuous"]["liveness"]["active"]["fixture_event_monotonic_ns"],
+                ),
+                "continuous_child_active_liveness",
+            ),
+            "continuous-stage-flush": (
+                lambda value: packet_for_sequence(value, 23)["options"].__setitem__(
+                    "flush", True
+                ),
+                "continuous_transactions_complete",
+            ),
+            "continuous-callback-accounting": (
+                lambda value: next(
+                    event
+                    for event in value["evidence"]["events"]
+                    if event["event"] == "continuous-stop"
+                ).__setitem__("lower_attach_count", 99),
+                "continuous_callback_accounting_exact",
+            ),
+            "continuous-generation-bool-id": (
+                lambda value: next(
+                    event
+                    for event in value["evidence"]["events"]
+                    if event["event"] == "continuous-generation"
+                ).__setitem__("continuous_generation_id", True),
+                "fixture_event_stream_exact",
+            ),
+            "continuous-final-pixels": (
+                lambda value: value["evidence"]["pixels"]["comparisons"][
+                    live_run.SUBSURFACE_CONTINUOUS_FINAL_PHASE
+                ]["primary"]["comparison"].__setitem__("exact", False),
+                "continuous_final_composite_exact",
+            ),
+            "child-eos": (
+                lambda value: value["evidence"]["stream"]["eos_window_ids"].append(2),
+                "no_child_eos",
+            ),
+            "destroy-refresh-geometry": (
+                lambda value: next(
+                    packet
+                    for packet in value["evidence"]["source_updates"]["1"]["updates"]
+                    if packet["sequence"] == 31
+                ).__setitem__(
+                    "w", 219
+                ),
+                "atomic_transaction_contract_exact",
+            ),
+            "reparent-buffer-changed": (
+                lambda value: next(
+                    event
+                    for event in value["evidence"]["events"]
+                    if event["event"] == "upper-reparented"
+                ).__setitem__("upper_buffer_id", 999),
+                "reparent_preserves_surface_and_buffer",
+            ),
+            "reparent-wid-replaced": (
+                lambda value: value["child_wids"].__setitem__(
+                    "reparented-upper", 4
+                ),
+                "upper_wid_stable_and_role_rebound",
+            ),
+            "reparent-role-wrong-parent": (
+                lambda value: value["evidence"]["info"]["reparented"][
+                    "children"
+                ]["3"].__setitem__("parent_wid", 1),
+                "upper_wid_stable_and_role_rebound",
+            ),
+            "upper-source-retained-while-detached": (
+                lambda value: value["evidence"]["info"]["upper-detached"].__setitem__(
+                    "children", {"3": {}}
+                ),
+                "upper_wid_stable_and_role_rebound",
+            ),
+            "upper-packet-while-detached": (
+                lambda value: value["evidence"]["source_updates"]["3"][
+                    "updates"
+                ].insert(
+                    -1,
+                    {
+                        **copy.deepcopy(
+                            value["evidence"]["source_updates"]["3"]["updates"][-1]
+                        ),
+                        "sequence": 34,
+                    },
+                ),
+                "upper_wid_stable_and_role_rebound",
+            ),
+            "lower-buffer-not-scaled": (
+                lambda value: value["evidence"]["events"][0].__setitem__(
+                    "lower_buffer_scale", 1
+                ),
+                "fixture_event_stream_exact",
+            ),
+            "lower-buffer-not-physical-2x": (
+                lambda value: value["evidence"]["events"][0].__setitem__(
+                    "lower_buffer_dimensions",
+                    list(live_run.SUBSURFACE_LOWER_DIMENSIONS),
+                ),
+                "fixture_event_stream_exact",
+            ),
+            "upper-transform-missing": (
+                lambda value: value["evidence"]["events"][4].__setitem__(
+                    "upper_buffer_transform", "normal"
+                ),
+                "fixture_event_stream_exact",
+            ),
+            "upper-not-precommitted": (
+                lambda value: value["evidence"]["events"][4].__setitem__(
+                    "upper_precommitted_before_role", False
+                ),
+                "fixture_event_stream_exact",
+            ),
+            "upper-reattach-child-commit": (
+                lambda value: next(
+                    event
+                    for event in value["evidence"]["events"]
+                    if event["event"] == "upper-reparented"
+                ).__setitem__("upper_reattach_without_child_commit", False),
+                "fixture_event_stream_exact",
+            ),
+            "upper-reattach-without-parent-commit": (
+                lambda value: next(
+                    event
+                    for event in value["evidence"]["events"]
+                    if event["event"] == "upper-reparented"
+                ).__setitem__("upper_reattach_parent_committed", False),
+                "fixture_event_stream_exact",
+            ),
+        }
+        for name, (mutate, failed_check) in mutations.items():
+            with self.subTest(name=name):
+                changed = copy.deepcopy(interaction)
+                mutate(changed)
+                checks = live_run.subsurface_interaction_checks(changed)
+                self.assertFalse(checks[failed_check])
+
+        malformed = copy.deepcopy(interaction)
+        malformed["child_wids"] = {}
+        self.assertFalse(any(live_run.subsurface_interaction_checks(malformed).values()))
+
+    def test_subsurface_artifact_recomputation_rejects_mutated_authorities(
+        self,
+    ) -> None:
+        def mutate_log(root: Path) -> None:
+            path = root / "server.stderr"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "published as wire window 0x1",
+                    "published as wire window 0x9",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+        def mutate_pointer_log(root: Path) -> None:
+            path = root / "server.stderr"
+            data = path.read_text(encoding="utf-8")
+            match = re.search(
+                r"Wayland pointer target root=0x[0-9a-f]+ "
+                r"surface=0x[0-9a-f]+ local=(?P<x>-?[0-9]+\.[0-9]{3}),",
+                data,
+            )
+            self.assertIsNotNone(match)
+            assert match is not None
+            coordinate = float(match.group("x")) + 1.0
+            path.write_text(
+                data[:match.start("x")]
+                + f"{coordinate:.3f}"
+                + data[match.end("x"):],
+                encoding="utf-8",
+            )
+
+        def mutate_pointer_root(root: Path) -> None:
+            path = root / "server.stderr"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "Wayland pointer target root=0x1 ",
+                    "Wayland pointer target root=0x5 ",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+        def mutate_pointer_surface(root: Path) -> None:
+            path = root / "server.stderr"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    " surface=0x3 local=",
+                    " surface=0x2 local=",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+        def mutate_pointer_timing(root: Path) -> None:
+            path = root / live_run.SUBSURFACE_POINTER_TIMING_ARTIFACT
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["deadline_ns"] -= 1
+            path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+
+        def mutate_info(root: Path) -> None:
+            path = root / live_run.SUBSURFACE_INFO_ARTIFACTS["changed"]
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "damage.ack-pending=0",
+                    "damage.ack-pending=1",
+                ),
+                encoding="utf-8",
+            )
+
+        def mutate_destroyed_info(root: Path) -> None:
+            path = root / live_run.SUBSURFACE_INFO_ARTIFACTS["lower-destroyed"]
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(
+                    "client.0.window.windows.1.subsurfaces.2."
+                    "info.damage.ack-pending=0\n"
+                )
+
+        def mutate_reparented_wid(root: Path) -> None:
+            path = root / live_run.SUBSURFACE_INFO_ARTIFACTS["reparented"]
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    ".subsurfaces.3.",
+                    ".subsurfaces.4.",
+                ),
+                encoding="utf-8",
+            )
+
+        def mutate_pixels(root: Path) -> None:
+            path = root / live_run.subsurface_client_rgb_artifact(
+                "primary",
+                "restored",
+            )
+            with live_run.Image.open(path) as source:
+                image = source.convert("RGB")
+            image.putpixel(live_run.SUBSURFACE_INITIAL_OFFSET, (0, 0, 0))
+            image.save(path, format="PNG")
+
+        def mutate_events(root: Path) -> None:
+            path = root / "subsurface-fixture.stdout"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    '"lower_state_id": 2',
+                    '"lower_state_id": 1',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+        def mutate_continuous_liveness(root: Path) -> None:
+            path = root / live_run.SUBSURFACE_CONTINUOUS_LIVENESS_ARTIFACT
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["active"]["observed_monotonic_ns"] = (
+                value["stop_requested_monotonic_ns"] + 1
+            )
+            path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+
+        def mutate_continuous_event_reference(root: Path) -> None:
+            path = root / live_run.SUBSURFACE_CONTINUOUS_LIVENESS_ARTIFACT
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["active"]["fixture_event_sequence"] = float(
+                value["active"]["fixture_event_sequence"]
+            )
+            path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+
+        def mutate_continuous_active_prefix(root: Path) -> None:
+            path = root / live_run.SUBSURFACE_CONTINUOUS_LIVENESS_ARTIFACT
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["active"]["snapshot"]["complete_transactions"].reverse()
+            path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+
+        def mutate_continuous_empty_inflight(root: Path) -> None:
+            path = root / live_run.SUBSURFACE_CONTINUOUS_LIVENESS_ARTIFACT
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["active"]["snapshot"]["inflight_transaction"]["packets"] = []
+            value["active"]["snapshot"]["packet_count"] = 6
+            path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+
+        def mutate_continuous_active_nested_integer(root: Path) -> None:
+            path = root / live_run.SUBSURFACE_CONTINUOUS_LIVENESS_ARTIFACT
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["active"]["snapshot"]["complete_transactions"][0]["packets"][1][
+                "stage_index"
+            ] = True
+            path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+
+        def mutate_continuous_drained_nested_integer(root: Path) -> None:
+            path = root / live_run.SUBSURFACE_CONTINUOUS_LIVENESS_ARTIFACT
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["drained"]["snapshot"]["complete_transactions"][0]["packets"][0][
+                "source_wid"
+            ] = True
+            path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+
+        def mutate_continuous_info(root: Path) -> None:
+            path = root / live_run.SUBSURFACE_CONTINUOUS_INFO_ARTIFACT
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "damage.ack-pending=0",
+                    "damage.ack-pending=1",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+        def mutate_continuous_pixels(root: Path) -> None:
+            path = root / live_run.subsurface_client_rgb_artifact(
+                "primary",
+                live_run.SUBSURFACE_CONTINUOUS_FINAL_PHASE,
+            )
+            with live_run.Image.open(path) as source:
+                image = source.convert("RGB")
+            coordinate = live_run.SUBSURFACE_CONTINUOUS_GEOMETRY[:2]
+            red, green, blue = image.getpixel(coordinate)
+            image.putpixel(coordinate, ((red + 1) % 256, green, blue))
+            image.save(path, format="PNG")
+
+        def mutate_continuous_packet(root: Path) -> None:
+            path = root / "screen-updates" / "2" / "308" / "0.info"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["options"]["flush"] = True
+            path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+        def mutate_continuous_secondary_source(root: Path) -> None:
+            source = root / "screen-updates" / "1" / "108"
+            target = root / "screen-updates" / "5" / "202"
+            shutil.copytree(source, target)
+            shutil.rmtree(source)
+
+        def mutate_continuous_fixture_fields(root: Path) -> None:
+            path = root / "subsurface-fixture.stdout"
+            records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            next(
+                record
+                for record in records
+                if record["event"] == "continuous-generation"
+            ).pop("producer_active")
+            path.write_text(
+                "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
+                encoding="utf-8",
+            )
+
+        def mutate_wire_contract(root: Path) -> None:
+            path = root / "screen-updates" / "2" / "300" / "0.info"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["options"].pop("subsurface-composite")
+            path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+        def mutate_packet_payload(root: Path) -> None:
+            path = root / "screen-updates" / "2" / "300" / "0.rgb32"
+            payload = bytearray(path.read_bytes())
+            payload[0] ^= 0xFF
+            path.write_bytes(payload)
+
+        def mutate_packet_info(
+            root: Path,
+            callback: Callable[[dict[str, object]], None],
+        ) -> None:
+            path = root / "screen-updates" / "2" / "300" / "0.info"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            callback(payload)
+            path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+        def mark_packet_compressed(root: Path) -> None:
+            mutate_packet_info(root, lambda payload: payload.__setitem__("compressed", "lz4"))
+
+        def mutate_packet_stride(root: Path) -> None:
+            mutate_packet_info(
+                root,
+                lambda payload: payload.__setitem__("stride", payload["stride"] + 4),
+            )
+
+        def mutate_packet_destination(root: Path) -> None:
+            mutate_packet_info(
+                root,
+                lambda payload: payload.__setitem__("x", -1),
+            )
+
+        def mutate_packet_format(root: Path) -> None:
+            mutate_packet_info(
+                root,
+                lambda payload: payload["options"].__setitem__("rgb_format", "ARGB"),
+            )
+
+        def mutate_packet_path(root: Path) -> None:
+            mutate_packet_info(
+                root,
+                lambda payload: payload.__setitem__("file", "../0.rgb32"),
+            )
+
+        def duplicate_packet_field(root: Path) -> None:
+            path = root / "screen-updates" / "2" / "300" / "0.info"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(
+                    "{",
+                    '{"encoding":"rgb24",',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+        def add_unexpected_source(root: Path) -> None:
+            path = root / "screen-updates" / "99"
+            path.mkdir(mode=0o700)
+
+        for name, mutate in {
+            "packet-log": mutate_log,
+            "pointer-log": mutate_pointer_log,
+            "pointer-root": mutate_pointer_root,
+            "pointer-surface": mutate_pointer_surface,
+            "pointer-timing": mutate_pointer_timing,
+            "server-info": mutate_info,
+            "server-info-stale-child": mutate_destroyed_info,
+            "server-info-replaced-reparent-wid": mutate_reparented_wid,
+            "client-pixels": mutate_pixels,
+            "continuous-active-nested-integer": mutate_continuous_active_nested_integer,
+            "continuous-active-prefix": mutate_continuous_active_prefix,
+            "continuous-drained-nested-integer": mutate_continuous_drained_nested_integer,
+            "continuous-empty-inflight": mutate_continuous_empty_inflight,
+            "continuous-event-reference": mutate_continuous_event_reference,
+            "continuous-fixture-fields": mutate_continuous_fixture_fields,
+            "continuous-client-pixels": mutate_continuous_pixels,
+            "continuous-liveness": mutate_continuous_liveness,
+            "continuous-packet": mutate_continuous_packet,
+            "continuous-secondary-source": mutate_continuous_secondary_source,
+            "continuous-server-info": mutate_continuous_info,
+            "fixture-events": mutate_events,
+            "packet-compression": mark_packet_compressed,
+            "packet-duplicate-field": duplicate_packet_field,
+            "packet-destination": mutate_packet_destination,
+            "packet-format": mutate_packet_format,
+            "packet-path": mutate_packet_path,
+            "packet-payload": mutate_packet_payload,
+            "packet-stride": mutate_packet_stride,
+            "source-inventory": add_unexpected_source,
+            "wire-contract": mutate_wire_contract,
+        }.items():
+            with self.subTest(name=name):
+                root = self.root / f"subsurface-artifact-{name}"
+                interaction = self.make_subsurface_fixture_artifacts(root)
+                mutate(root)
+                self.assertFalse(
+                    live_run.subsurface_artifact_evidence_matches(interaction, root)
+                )
+
+    def test_subsurface_artifact_recomputation_ignores_async_source_screenshots(
+        self,
+    ) -> None:
+        root = self.root / "subsurface-artifact-no-screenshot-authority"
+        interaction = self.make_subsurface_fixture_artifacts(root)
+        self.assertEqual(list(root.glob("screen-updates/*/*/screenshot.png")), [])
+        for info_path in root.glob("screen-updates/*/*/0.info"):
+            screenshot = info_path.parent / "screenshot.png"
+            screenshot.write_bytes(b"not an authority")
+            screenshot.chmod(0o600)
+        self.assertTrue(
+            live_run.subsurface_artifact_evidence_matches(interaction, root)
+        )
+        screenshots = ["screen-updates/1/1/screenshot.png"]
+        self.assertEqual(
+            live_run.pixel_pipeline_source_screenshots("subsurface", screenshots),
+            [],
+        )
+        self.assertEqual(
+            live_run.pixel_pipeline_source_screenshots("zed", screenshots),
+            screenshots,
+        )
+        packet_info = tuple(
+            path.relative_to(root).as_posix()
+            for path in sorted((root / "screen-updates" / "1").glob("*/0.info"))
+        )
+        with (
+            patch.object(
+                live_run,
+                "container_artifact_files",
+                return_value=packet_info,
+            ),
+            patch.object(live_run, "pull_container_artifacts") as pull,
+        ):
+            updates = live_run.synchronize_subsurface_saved_updates(
+                "server",
+                root,
+                1,
+            )
+            self.assertTrue(live_run.subsurface_startup_packet_ready("server", root, 1))
+        self.assertNotIn("screenshots", updates)
+        pull.assert_not_called()
+
+    def test_subsurface_collection_excludes_async_source_screenshots(self) -> None:
+        listing = "server.stderr\0screen-updates\0subsurface-fixture.stdout\0"
+        with (
+            patch.object(
+                live_run,
+                "podman_exec",
+                return_value=completed(["find"], listing),
+            ),
+            patch.object(live_run, "pull_container_artifacts") as pull,
+        ):
+            live_run.pull_all_container_artifacts(
+                "server",
+                self.root,
+                "server",
+                include_screen_updates=False,
+            )
+        pull.assert_called_once_with(
+            "server",
+            self.root,
+            ("server.stderr", "subsurface-fixture.stdout"),
+        )
+
+        with patch.object(
+            live_run,
+            "podman_exec",
+            return_value=completed(["find"], "1\0" "5\0" "2\0" "3\0"),
+        ) as execute:
+            self.assertEqual(
+                live_run.container_subsurface_source_wids("server"),
+                {1, 2, 3, 5},
+            )
+        self.assertEqual(
+            execute.call_args.args,
+            (
+                "server",
+                [
+                    "find",
+                    "/artifacts/screen-updates",
+                    "-mindepth",
+                    "1",
+                    "-maxdepth",
+                    "1",
+                    "-printf",
+                    "%f\\0",
+                ],
+            ),
+        )
+        self.assertEqual(execute.call_args.kwargs, {"announce": False})
+        for name, invalid in {
+            "empty": "",
+            "duplicate": "1\0" "1\0",
+            "non-numeric": "screenshot.png\0",
+            "non-positive": "0\0",
+            "out-of-range": f"{2**31}\0",
+        }.items():
+            with (
+                self.subTest(name=name),
+                patch.object(
+                    live_run,
+                    "podman_exec",
+                    return_value=completed(["find"], invalid),
+                ),
+                self.assertRaisesRegex(
+                    live_run.LabFailure,
+                    "subsurface saved source",
+                ),
+            ):
+                live_run.container_subsurface_source_wids("server")
+
+    def test_subsurface_packet_sync_refreshes_an_incomplete_info_sidecar(self) -> None:
+        root = self.root / "subsurface-incomplete-info"
+        self.make_subsurface_fixture_artifacts(root)
+        relative = "screen-updates/2/300/0.info"
+        path = root / relative
+        complete = path.read_bytes()
+        path.write_bytes(b"{\n")
+
+        def refresh(
+            _container: str,
+            _directory: Path,
+            relatives: tuple[str, ...],
+        ) -> None:
+            self.assertEqual(relatives, (relative,))
+            path.write_bytes(complete)
+
+        with (
+            patch.object(
+                live_run,
+                "container_artifact_files",
+                return_value=(relative,),
+            ),
+            patch.object(
+                live_run,
+                "pull_container_artifacts",
+                side_effect=refresh,
+            ) as pull,
+        ):
+            updates = live_run.synchronize_subsurface_saved_updates(
+                "server",
+                root,
+                2,
+            )
+        self.assertEqual(updates["updates"][0]["sequence"], 3)
+        pull.assert_called_once_with("server", root, (relative,))
+
+    def test_subsurface_raw_packet_decoder_rejects_non_raw_authorities(self) -> None:
+        mutations = {
+            "compression": (
+                lambda packet: packet.__setitem__("compressed", "lz4"),
+                "payload is compressed",
+            ),
+            "format": (
+                lambda packet: packet["options"].__setitem__("rgb_format", "ARGB"),
+                "RGB format or stride is invalid",
+            ),
+            "stride": (
+                lambda packet: packet.__setitem__(
+                    "stride", packet["w"] * 4 - 1
+                ),
+                "RGB format or stride is invalid",
+            ),
+            "size": (
+                lambda packet: packet.__setitem__("stride", packet["stride"] + 4),
+                "payload size is invalid",
+            ),
+        }
+        for name, (mutate, message) in mutations.items():
+            with self.subTest(name=name):
+                root = self.root / f"subsurface-raw-{name}"
+                self.make_subsurface_fixture_artifacts(root)
+                info_path = root / "screen-updates" / "2" / "300" / "0.info"
+                info = json.loads(info_path.read_text(encoding="utf-8"))
+                mutate(info)
+                info_path.write_text(json.dumps(info, sort_keys=True), encoding="utf-8")
+                packets = live_run._subsurface_saved_updates(root, 2)["updates"]
+                packet = next(packet for packet in packets if packet["sequence"] == 3)
+                with self.assertRaisesRegex(live_run.LabFailure, message):
+                    live_run._subsurface_raw_packet_image(
+                        root,
+                        packet,
+                        2,
+                        composite=True,
+                    )
+
+        root = self.root / "subsurface-raw-unsafe-path"
+        self.make_subsurface_fixture_artifacts(root)
+        info_path = root / "screen-updates" / "2" / "300" / "0.info"
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        info["file"] = "../0.rgb32"
+        info_path.write_text(json.dumps(info, sort_keys=True), encoding="utf-8")
+        with self.assertRaisesRegex(live_run.LabFailure, "payload path is unsafe"):
+            live_run._subsurface_saved_updates(root, 2)
+
+    def test_subsurface_job_classifier_recomputes_exact_checks(self) -> None:
+        root = self.root / "subsurface-job"
+        interaction = self.make_subsurface_fixture_artifacts(root)
+        embedded = {
+            "classification": {
+                "boundaries": {"interaction": interaction["checks"]}
+            },
+            "interaction": interaction,
+        }
+        embedded = json.loads(json.dumps(embedded, sort_keys=True))
+        self.assertTrue(
+            job.subsurface_fixture_artifact_evidence_matches(
+                embedded,
+                root,
+                live_run,
+            )
+        )
+        for name, mutate in {
+            "classified": lambda value: value["classification"]["boundaries"].__setitem__(
+                "interaction", {}
+            ),
+            "reported": lambda value: value["interaction"]["checks"].__setitem__(
+                "no_child_eos", False
+            ),
+            "extra": lambda value: value["interaction"]["checks"].__setitem__(
+                "unreviewed", True
+            ),
+        }.items():
+            with self.subTest(name=name):
+                changed = copy.deepcopy(embedded)
+                mutate(changed)
+                self.assertFalse(
+                    job.subsurface_fixture_artifact_evidence_matches(
+                        changed,
+                        root,
+                        live_run,
+                    )
+                )
 
     def test_report_validation_binds_gtk_lifecycle_authority_files(self) -> None:
         def rewrite_report(run: str, payload: dict[str, object]) -> None:
@@ -2590,6 +5942,271 @@ class LiveJobTest(unittest.TestCase):
             job.podman_labels("network", "network-id")
 
 class LiveRunnerCleanupTest(unittest.TestCase):
+    @staticmethod
+    def primary_native_capture_rows(*, legacy: bool = False) -> list[str]:
+        prefix = "2026-09-05 11:27:47,912 Surface(1 : empty project)"
+        if legacy:
+            return [
+                prefix + ".capture_pixels: dmabuf 1536x1095 format=0x34325258 modifier=0x20000000056bb03 planes=2",
+                prefix + ".capture_pixels: 0,0 1536x1095 (6727680 bytes)",
+                prefix + "._emit(surface-image, (1, DMABufImageWrapper(0x34325258:(0, 0, 1536, 1095, 32):(6144, 1536):0))) callbacks=[]",
+                "commit wid 1 mapped=True, size=(1536, 1095), rects=[(0, 0, 1536, 1095)], subsurfaces=[]",
+            ]
+        return [
+            prefix + "._emit(surface-snapshot, (1, None)) callbacks=[]",
+            prefix + ".capture_pixels: 0,0 1536x1095 (6727680 bytes)",
+            prefix + "._emit(surface-snapshot, (1, ImageWrapper(RGBX:(0, 0, 1536, 1095, 32):PACKED))) callbacks=[]",
+            "commit wid 1 mapped=True, size=(1536, 1095), rects=((0, 0, 1536, 1095),), subsurfaces=((1, 0, 0, 1536, 1095, 1536, 1095),)",
+        ]
+
+    @staticmethod
+    def primary_native_capture_packets() -> dict[str, object]:
+        return {
+            "window_id": 1,
+            "initial_pixel_format": "RGBX",
+            "updates": [{
+                "encoding": "rgb24", "x": 0, "y": 0, "w": 1536, "h": 1095,
+                "payload_bytes": 6727680, "relative_info": "screen-updates/1/1/0.info",
+                "options": {"window-size": [1536, 1095], "rgb_format": "RGBX"},
+            }],
+        }
+
+    def test_primary_native_capture_accepts_published_legacy_and_normalized_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            for legacy in (False, True):
+                with self.subTest(legacy=legacy):
+                    (directory / "server.stderr").write_text(
+                        "\n".join(self.primary_native_capture_rows(legacy=legacy)) + "\n",
+                        encoding="utf-8",
+                    )
+                    checks = live_run.wayland_capture_checks(
+                        live_run.inspect_logs(directory), self.primary_native_capture_packets(),
+                    )
+                    self.assertTrue(all(checks.values()), checks)
+
+    def test_primary_native_capture_rejects_unowned_incomplete_or_invalid_route(self) -> None:
+        base = self.primary_native_capture_rows(legacy=True)
+        candidates = {
+            "wrong-window": [line.replace("Surface(1 :", "Surface(9 :").replace("(1, DMABuf", "(9, DMABuf").replace("commit wid 1 ", "commit wid 9 ") for line in base],
+            "irrelevant-probe-size": [line.replace("1536x1095", "64x64").replace("6727680", "16384").replace("1536, 1095", "64, 64").replace("(6144, 1536)", "(256, 64)") for line in base],
+            "bad-bytecount": [line.replace("6727680 bytes", "6727679 bytes") for line in base],
+            "unmapped": [line.replace("mapped=True", "mapped=False") for line in base],
+            "wrong-depth": [line.replace("1095, 32)", "1095, 24)") for line in base],
+            "nonzero-origin": [line.replace(":(0, 0, 1536", ":(1, 0, 1536") for line in base],
+            "publication-before-read": [base[0], base[2], base[1], base[3]],
+            "missing-read": [base[0], base[2], base[3]],
+            "missing-native-dmabuf": base[1:],
+            "missing-publication": [base[0], base[1], base[3]],
+            "mismatched-published-id": [line.replace("(1, DMABuf", "(2, DMABuf") for line in base],
+            "mismatched-published-fourcc": [base[0], base[1], base[2].replace("0x34325258", "0x34324258"), base[3]],
+            "mismatched-native-planes": [base[0].replace("planes=2", "planes=1"), *base[1:]],
+            "fds-not-released": [line.replace(":0))) callbacks=", ":2))) callbacks=") for line in base],
+        }
+        normalized = self.primary_native_capture_rows()
+        candidates.update({
+            "normalized-alpha-format": [line.replace("ImageWrapper(RGBX:", "ImageWrapper(RGBA:") for line in normalized],
+            "normalized-bad-bytecount": [line.replace("6727680 bytes", "1 bytes") for line in normalized],
+            "normalized-invalidation-after-read": [*normalized[:2], normalized[0], *normalized[2:]],
+            "normalized-failed-read": [*normalized[:2], "Error: failed to read texture pixels for Surface(1 : empty project)", *normalized[2:]],
+            "normalized-failed-publication": [*normalized[:3], "Error capturing logical root pixels for Surface(1 : empty project)", normalized[3]],
+            "normalized-failed-model-copy": [*normalized[:3], "Error replacing Wayland root snapshot 0x1", normalized[3]],
+            "normalized-unknown-model": [*normalized[:3], "surface-snapshot: unknown toplevel wid=0x1, dropping", normalized[3]],
+            "legacy-unknown-model": [*base[:3], "Warning: cannot update window 1: not found!", base[3]],
+            "normalized-role-unmapped": [*normalized[:2], "Surface(1 : empty project)._emit(unmap, (1,)) callbacks=[]", *normalized[2:]],
+            "normalized-wrong-canvas": [*normalized[:3], normalized[3].replace("size=(1536, 1095)", "size=(1537, 1095)")],
+            "normalized-publication-before-read": [normalized[0], normalized[2], normalized[1], normalized[3]],
+            "normalized-missing-publication": [*normalized[:2], normalized[3]],
+            "fake-legacy-without-native-metadata": [base[1], base[2], base[3]],
+        })
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            for name, lines in candidates.items():
+                with self.subTest(name=name):
+                    (directory / "server.stderr").write_text("\n".join(lines) + "\n", encoding="utf-8")
+                    checks = live_run.wayland_capture_checks(
+                        live_run.inspect_logs(directory), self.primary_native_capture_packets(),
+                    )
+                    self.assertFalse(all(checks.values()), checks)
+
+    def test_native_capture_keeps_raw_logical_and_h264_crop_geometry_separate(self) -> None:
+        rows = self.primary_native_capture_rows()
+        rows[1] = rows[1].replace("1536x1095", "3072x2190").replace("6727680", "26910720")
+        packets = self.primary_native_capture_packets()
+        packets["initial_pixel_format"] = "BGRA"  # Adaptive Zed may begin alpha-bearing.
+        packet = packets["updates"][0]
+        packet["encoding"] = "h264"
+        packet["w"] = 1535  # The existing H.264 edge contract owns the missing pixel.
+        del packet["options"]["rgb_format"]
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            (directory / "server.stderr").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            logs = live_run.inspect_logs(directory)
+            checks = live_run.wayland_capture_checks(logs, packets)
+            self.assertTrue(all(checks.values()), checks)
+            record, = logs["native_wayland_captures"]
+            self.assertEqual(record["kind"], "normalized-texture")
+            self.assertEqual(record["read_size"], [3072, 2190])
+            self.assertEqual(record["logical_size"], [1536, 1095])
+            self.assertEqual(record["read_bytes"], 26910720)
+            self.assertEqual(record["pixel_format"], "RGBX")
+            self.assertNotIn("native_fourcc", record)
+            packet["relative_info"] = "screen-updates/10/1/0.info"
+            self.assertFalse(all(live_run.wayland_capture_checks(logs, packets).values()))
+
+    def test_native_capture_failure_resets_only_owner_and_allows_fresh_capture(self) -> None:
+        rows = self.primary_native_capture_rows()
+        failures = (
+            "Error capturing logical root pixels for Surface(1 : empty project)",
+            "Error replacing Wayland root snapshot 0x1",
+            "surface-snapshot: unknown toplevel wid=0x1, dropping",
+            "Surface(1 : empty project)._emit(unmap, (1,)) callbacks=[]",
+            "Surface(1 : empty project)._emit(destroy, (1,)) callbacks=[]",
+        )
+        for failure in failures:
+            with self.subTest(failure=failure):
+                failed = [*rows[:3], failure, rows[3]]
+                self.assertEqual(live_run.parse_wayland_native_captures("\n".join(failed)), [])
+                recovered = live_run.parse_wayland_native_captures("\n".join([*failed, *rows]))
+                self.assertEqual(len(recovered), 1)
+                self.assertGreater(recovered[0]["read_line"], len(failed))
+                unrelated = failure.replace("Surface(1 :", "Surface(9 :").replace("0x1", "0x9")
+                other_window = live_run.parse_wayland_native_captures("\n".join([*rows[:3], unrelated, rows[3]]))
+                self.assertEqual(len(other_window), 1)
+
+    def test_wayland_commit_counters_accept_both_real_sequence_representations(self) -> None:
+        lines = (
+            (
+                "2026-09-05 10:57:01,799 commit wid 2 mapped=True, size=(360, 240), "
+                "rects=(), subsurfaces=((2, 0, 0, 360, 240, 360, 240),)"
+            ),
+            (
+                "2026-09-05 10:57:01,799 commit wid 3 mapped=True, size=(260, 160), "
+                "rects=(), subsurfaces=((3, 0, 0, 260, 160, 260, 160),)"
+            ),
+            "commit wid 2 mapped=True, size=(360, 240), rects=[], subsurfaces=[]",
+            "commit wid 2 mapped=True, size=(360, 240), rects=[(0, 0, 360, 240)]",
+            "commit wid 3 mapped=True, size=(260, 160), rects=((0, 0, 260, 160),)",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            log = directory / "server.stderr"
+            log.write_text("\n".join(lines), encoding="utf-8")
+            observed = live_run.inspect_logs(directory)
+            self.assertEqual(observed["empty_wayland_commits"], 3)
+            self.assertEqual(observed["nonempty_wayland_commits"], 2)
+            for value in ("unknown", "[]junk", "()junk", "[(0, 0, 0, 1)]", "[False]"):
+                with self.subTest(value=value):
+                    log.write_text(f"commit wid 2 mapped=True, rects={value}\n")
+                    observed = live_run.inspect_logs(directory)
+                    self.assertEqual(observed["empty_wayland_commits"], 0)
+                    self.assertEqual(observed["nonempty_wayland_commits"], 0)
+
+    def test_mapped_empty_commit_uses_actual_bounded_suffix_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            log = directory / "server.stderr"
+
+            def execute(_container: str, command: list[str], **_kwargs: object) -> object:
+                self.assertEqual(command[:2], ["python3", "-c"])
+                arguments = ["-c", str(log), *command[4:]]
+                with patch.object(sys, "argv", arguments):
+                    try:
+                        exec(command[2], {"__name__": "__main__"})  # noqa: S102
+                    except SystemExit as error:
+                        return completed(command, returncode=error.code)
+                self.fail("suffix probe did not publish its result")
+
+            prefix = "old commit wid 2 mapped=True, rects=[]\n"
+            rows = (
+                ("commit wid 2 mapped=True, size=(360, 240), rects=[], subsurfaces=[]", True),
+                ("commit wid 2 mapped=True, size=(360, 240), rects=(), subsurfaces=((2, 0, 0, 360, 240, 360, 240),)", True),
+                ("commit wid 2 mapped=True, rects=()", True),
+                ("commit wid 20 mapped=True, rects=[]", False),
+                ("commit wid 3 mapped=True, rects=[]", False),
+                ("commit wid 2 mapped=False, rects=[]", False),
+                ("commit wid 2 mapped=True, rects=[(0, 0, 1, 1)]", False),
+                ("commit wid 2 mapped=True, rects=((0, 0, 1, 1),)", False),
+                ("commit wid 2 mapped=True, rects=unknown", False),
+                ("commit wid 2 mapped=True, rects=[]junk", False),
+                ("commit wid 2 mapped=True, rects=()junk", False),
+                ("commit wid 2 mapped=True, other_rects=[]", False),
+                ("commit wid 2 mapped=True, rects=\n[]", False),
+                ("recommit wid 2 mapped=True, rects=[]", False),
+                ("no new matching commit", False),
+            )
+            with patch.object(live_run, "podman_exec", side_effect=execute):
+                for row, expected in rows:
+                    with self.subTest(row=row):
+                        log.write_text(prefix + row + "\n", encoding="utf-8")
+                        observed = live_run.container_artifact_suffix_matches(
+                            "server", "server.stderr", len(prefix.encode()),
+                            (live_run.mapped_empty_wayland_commit_pattern(2),),
+                        )
+                        self.assertEqual(observed, expected)
+
+    def test_frame_poll_requires_valid_nonempty_damage_for_exact_window(self) -> None:
+        class ProbeFinished(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            screenshot = directory / "screen-updates" / "1" / "1" / "screenshot.png"
+            screenshot.parent.mkdir(parents=True)
+            screenshot.write_bytes(b"png")
+            for wid, value, expected in (
+                (1, "[(0, 0, 64, 64)]", True),
+                (1, "((0, 0, 64, 64),)", True),
+                (1, "[(0, 0, 32, 32), (32, 32, 32, 32)]", True),
+                (1, "((0, 0, 32, 32), (32, 32, 32, 32))", True),
+                (1, "[]", False),
+                (1, "()", False),
+                (1, "unknown", False),
+                (1, "[(0, 0, 0, 64)]", False),
+                (1, "((0, 0, 64, 64),)junk", False),
+                (10, "[(0, 0, 64, 64)]", False),
+            ):
+                with self.subTest(wid=wid, value=value):
+                    server_log = f"commit wid {wid} rects={value}\nrgb_encode using RGBX\n"
+                    client_log = (
+                        "cairo._do_paint_rgb\nrecord_decode_time(True,\n"
+                        "draw_widget(\ncairo_draw: window size=\n"
+                    )
+
+                    def deltas(
+                        container: str, offsets: dict[str, int],
+                        server_log: str = server_log, client_log: str = client_log,
+                    ) -> dict[str, tuple[int, str]]:
+                        values = {
+                            "server.stderr": server_log if container == "server" else "",
+                            "client.stdout": client_log if container == "client" else "",
+                            "client.stderr": "",
+                        }
+                        return {
+                            name: (offset + len(values[name].encode()), values[name])
+                            for name, offset in offsets.items()
+                        }
+
+                    def wait_once(
+                        _description: str, predicate: object,
+                        expected: bool = expected, **_kwargs: object,
+                    ) -> None:
+                        self.assertEqual(bool(predicate()), expected)  # type: ignore[operator]
+                        raise ProbeFinished
+
+                    with (
+                        patch.object(live_run, "read_container_log_deltas", side_effect=deltas),
+                        patch.object(live_run, "container_artifact_files", return_value=()),
+                        patch.object(live_run, "analyze_png", return_value={"quantized_rgb_colors": 64}),
+                        patch.object(live_run, "wait_for", side_effect=wait_once),
+                        patch.object(live_run, "container_process_exists", return_value=True),
+                        self.assertRaises(ProbeFinished),
+                    ):
+                        live_run.wait_for_frame_boundary(
+                            "server", 101, "client", 202, directory,
+                            "rgb", "strict-hardware", application="zed", expected_xpra_wid=1,
+                        )
+
     def test_image_inspection_accepts_only_exact_maintenance_provenance(self) -> None:
         expected = {
             "io.xpra.fork-maintenance.context": "1" * 64,
@@ -2690,6 +6307,66 @@ class LiveRunnerCleanupTest(unittest.TestCase):
             self.assertEqual(outcome, "success")
             self.assertEqual(read.call_count, 2)
             pull.assert_not_called()
+
+    def test_subsurface_frame_poll_uses_raw_packet_not_async_screenshot(self) -> None:
+        width, height = live_run.SUBSURFACE_PARENT_DIMENSIONS["primary"]
+        server_log = (
+            f"commit wid 1 rects=[(0, 0, {width}, {height})]\n"
+            "rgb_encode using BGRX\n"
+        )
+        client_log = (
+            "cairo._do_paint_rgb\nrecord_decode_time(True,\n"
+            "draw_widget(\ncairo_draw: window size=\n"
+        )
+
+        def deltas(container: str, offsets: dict[str, int]) -> dict[str, tuple[int, str]]:
+            values = {
+                "server.stderr": server_log if container == "server" else "",
+                "client.stdout": client_log if container == "client" else "",
+                "client.stderr": "",
+            }
+            return {
+                name: (offset + len(values[name].encode()), values[name])
+                for name, offset in offsets.items()
+            }
+
+        def wait_once(_description: str, predicate: object, **_kwargs: object) -> None:
+            self.assertTrue(predicate())  # type: ignore[operator]
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch.object(live_run, "read_container_log_deltas", side_effect=deltas),
+            patch.object(
+                live_run,
+                "subsurface_startup_packet_ready",
+                return_value=True,
+            ) as packet_ready,
+            patch.object(
+                live_run,
+                "container_artifact_files",
+                side_effect=AssertionError("async screenshots are not WSSO authority"),
+            ),
+            patch.object(
+                live_run,
+                "analyze_png",
+                side_effect=AssertionError("async screenshots are not WSSO authority"),
+            ),
+            patch.object(live_run, "wait_for", side_effect=wait_once),
+            patch.object(live_run, "container_process_exists", return_value=True),
+        ):
+            outcome = live_run.wait_for_frame_boundary(
+                "server",
+                101,
+                "client",
+                202,
+                Path(raw),
+                "rgb",
+                "strict",
+                application="subsurface",
+                expected_xpra_wid=1,
+            )
+        self.assertEqual(outcome, "success")
+        packet_ready.assert_called_once_with("server", Path(raw), 1)
 
     def test_incremental_log_probe_caps_reads_at_its_fd_size_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -3864,8 +7541,10 @@ class LiveSourceTest(unittest.TestCase):
             selection = live_run.PatchSelection(
                 case_slugs=(),
                 digest="1" * 64,
+                kind="legacy",
                 name="master",
                 patches=(),
+                required_gates=(),
                 selector_digests=(),
                 selectors=(),
             )
@@ -3875,7 +7554,9 @@ class LiveSourceTest(unittest.TestCase):
                 "selection": {
                     "case_slugs": [],
                     "digest": selection.digest,
+                    "kind": selection.kind,
                     "name": selection.name,
+                    "required_gates": [],
                     "resolution": resolution,
                     "selector_digests": {},
                     "selectors": [],
@@ -3959,6 +7640,65 @@ class LiveSourceTest(unittest.TestCase):
                 "does not match its context digest",
             ):
                 live_run._bound_context(inputs, "server", manifest)
+
+    def test_frozen_selection_admission_uses_the_exact_snapshot_root(self) -> None:
+        selected = live_run.resolve_patch_selection(
+            "cases/wayland-empty-damage-throttle",
+            None,
+        )
+        resolution = {"resolution_sha256": "2" * 64}
+        context = live_run.BuildContext(
+            digest="3" * 64,
+            manifest={},
+            patches=selected.patches,
+            path=Path("/unused"),
+            resolution=resolution,
+            selection=selected,
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            inputs = Path(raw) / "inputs"
+            root = inputs / "selections" / "server"
+            root.parent.mkdir(parents=True)
+            live_run.snapshot_patch_selection(root, context)
+            live_run.privatize_regular_tree(inputs)
+            snapshot_root = (
+                root
+                / "validated-manifests"
+                / "0001-cases-wayland-empty-damage-throttle"
+            )
+            observed_roots: list[Path] = []
+            output_at = live_run.selection_output_at
+
+            def frozen_output(
+                lab_root: Path,
+                selector: str,
+                action: str,
+                *arguments: str,
+            ) -> str:
+                observed_roots.append(lab_root)
+                self.assertEqual(lab_root, snapshot_root)
+                return output_at(lab_root, selector, action, *arguments)
+
+            with (
+                patch.object(
+                    live_run,
+                    "MAINTENANCE_ROOT",
+                    Path(raw) / "mutable-host-manifests-must-not-be-read",
+                ),
+                patch.object(
+                    live_run,
+                    "selection_output_at",
+                    side_effect=frozen_output,
+                ),
+            ):
+                live_run._validate_frozen_selection(
+                    inputs,
+                    "server",
+                    selected,
+                    resolution,
+                )
+            self.assertTrue(observed_roots)
+            self.assertEqual(set(observed_roots), {snapshot_root})
 
 
 class LiveTransportProfileTest(unittest.TestCase):
@@ -4257,6 +7997,7 @@ class LiveTransportProfileTest(unittest.TestCase):
         }
         expected_case_only = {
             ("clipboard", "application-exit", "rgb", "strict", "default"),
+            ("subsurface", "application-exit", "rgb", "strict", "default"),
         }
         profiles_module = sys.modules["profiles"]
         self.assertEqual(
@@ -4269,6 +8010,18 @@ class LiveTransportProfileTest(unittest.TestCase):
         )
         self.assertFalse(expected_stack & expected_case_only)
         expected = expected_stack | expected_case_only
+        self.assertEqual(
+            set(profiles_module.LIVE_PROFILE_REQUIRED_GATES),
+            expected,
+        )
+        self.assertEqual(
+            profiles_module.STACK_ONLY_LIVE_ACCEPTANCE_PROFILES,
+            {
+                ("zed", "application-exit", "h264", "adaptive-alpha", "default"),
+                ("gtk", "detach", "rgb", "strict", "default"),
+                ("gtk", "transport-loss", "rgb", "strict", "default"),
+            },
+        )
         observed = set()
         for application in live_run.APPLICATIONS:
             for lifecycle in live_run.LIFECYCLES:
@@ -4302,7 +8055,13 @@ class LiveTransportProfileTest(unittest.TestCase):
         self.assertEqual(profiles_module.CLIPBOARD_CASE_SELECTION, exact)
         profiles_module.validate_profile_selection(
             application="clipboard",
+            lifecycle="application-exit",
+            encoding="rgb",
+            h264_client_policy="strict",
+            alpha_scenarios="default",
             selection=exact,
+            selection_kind="case",
+            required_gates=("live-x11-clipboard",),
         )
         for selection in (
             "stacks/develop",
@@ -4317,7 +8076,15 @@ class LiveTransportProfileTest(unittest.TestCase):
             ):
                 profiles_module.validate_profile_selection(
                     application="clipboard",
+                    lifecycle="application-exit",
+                    encoding="rgb",
+                    h264_client_policy="strict",
+                    alpha_scenarios="default",
                     selection=selection,
+                    selection_kind=(
+                        "stack" if selection.startswith("stacks/") else "case"
+                    ),
+                    required_gates=("live-wayland-keyboard",),
                 )
 
         profile_argv = [
@@ -4353,6 +8120,158 @@ class LiveTransportProfileTest(unittest.TestCase):
                 "clipboard live acceptance requires selection",
                 stderr.getvalue(),
             )
+
+    def test_subsurface_profile_requires_its_exact_case_selection(self) -> None:
+        profiles_module = sys.modules["profiles"]
+        exact = "cases/wayland-subsurface-stream-ownership"
+        self.assertEqual(profiles_module.SUBSURFACE_CASE_SELECTION, exact)
+        profile = ("subsurface", "application-exit", "rgb", "strict", "default")
+        profiles_module.validate_profile_selection(
+            application=profile[0],
+            lifecycle=profile[1],
+            encoding=profile[2],
+            h264_client_policy=profile[3],
+            alpha_scenarios=profile[4],
+            selection=exact,
+            selection_kind="case",
+            required_gates=("live-wayland-subsurface",),
+        )
+        for selection in ("stacks/develop", "cases/wayland-initial-window-state"):
+            with (
+                self.subTest(selection=selection),
+                self.assertRaisesRegex(
+                    live_run.ProfileError,
+                    "subsurface live acceptance requires selection",
+                ),
+            ):
+                profiles_module.validate_profile_selection(
+                    application=profile[0],
+                    lifecycle=profile[1],
+                    encoding=profile[2],
+                    h264_client_policy=profile[3],
+                    alpha_scenarios=profile[4],
+                    selection=selection,
+                    selection_kind=(
+                        "stack" if selection.startswith("stacks/") else "case"
+                    ),
+                    required_gates=("live-wayland-subsurface",),
+                )
+
+    def test_case_and_stack_profiles_require_the_exact_admission_gate(self) -> None:
+        profiles_module = sys.modules["profiles"]
+
+        def validate(
+            profile: tuple[str, str, str, str, str],
+            selection: str,
+            kind: str,
+            gates: tuple[str, ...],
+        ) -> None:
+            application, lifecycle, encoding, policy, alpha = profile
+            profiles_module.validate_profile_selection(
+                application=application,
+                lifecycle=lifecycle,
+                encoding=encoding,
+                h264_client_policy=policy,
+                alpha_scenarios=alpha,
+                selection=selection,
+                selection_kind=kind,
+                required_gates=gates,
+            )
+
+        for profile in profiles_module.STACK_LIVE_ACCEPTANCE_PROFILES:
+            with self.subTest(stack_profile=profile):
+                validate(profile, "stacks/develop", "stack", ())
+        with self.assertRaisesRegex(
+            live_run.ProfileError,
+            "clipboard live acceptance requires selection",
+        ):
+            validate(
+                ("clipboard", "application-exit", "rgb", "strict", "default"),
+                "stacks/develop",
+                "stack",
+                (),
+            )
+
+        accepted_cases = (
+            (
+                ("zed", "application-exit", "rgb", "strict", "default"),
+                "cases/wayland-empty-damage-throttle",
+                "live-rgb",
+            ),
+            (
+                (
+                    "hardware",
+                    "application-exit",
+                    "h264",
+                    "adaptive-alpha",
+                    "default",
+                ),
+                "cases/wayland-initial-window-state",
+                "live-wayland-h264-hardware",
+            ),
+            (
+                (
+                    "opengl",
+                    "application-exit",
+                    "h264",
+                    "adaptive-alpha",
+                    "default",
+                ),
+                "cases/wayland-initial-window-state",
+                "live-wayland-opengl-h264-hardware",
+            ),
+            (
+                ("keyboard", "application-exit", "rgb", "strict", "default"),
+                "cases/wayland-client-keymap-sync",
+                "live-wayland-keyboard",
+            ),
+            (
+                ("clipboard", "application-exit", "rgb", "strict", "default"),
+                "cases/x11-client-clipboard-events",
+                "live-x11-clipboard",
+            ),
+            (
+                ("subsurface", "application-exit", "rgb", "strict", "default"),
+                "cases/wayland-subsurface-stream-ownership",
+                "live-wayland-subsurface",
+            ),
+        )
+        for profile, case, gate in accepted_cases:
+            with self.subTest(case=case, gate=gate):
+                validate(profile, case, "case", (gate,))
+
+        hardware = (
+            "hardware",
+            "application-exit",
+            "h264",
+            "adaptive-alpha",
+            "default",
+        )
+        with self.assertRaisesRegex(
+            live_run.ProfileError,
+            "does not declare required gate live-wayland-h264-hardware",
+        ):
+            validate(
+                hardware,
+                "cases/video-pipeline-cleanup-race",
+                "case",
+                (),
+            )
+        for profile in profiles_module.STACK_ONLY_LIVE_ACCEPTANCE_PROFILES:
+            gate = profiles_module.LIVE_PROFILE_REQUIRED_GATES[profile]
+            with (
+                self.subTest(stack_only_case_profile=profile),
+                self.assertRaisesRegex(
+                    live_run.ProfileError,
+                    f"live profile {gate} requires a stack selection",
+                ),
+            ):
+                validate(
+                    profile,
+                    "cases/wayland-initial-window-state",
+                    "case",
+                    (gate,),
+                )
 
     def test_public_live_clis_do_not_advertise_fallback_diagnostics(self) -> None:
         with (
@@ -4462,6 +8381,13 @@ class LiveTransportProfileTest(unittest.TestCase):
                 "H264_CLIENT_POLICY=strict",
                 "ALPHA_SCENARIOS=default",
             ),
+            "live-wayland-subsurface": (
+                "APPLICATION=subsurface",
+                "LIFECYCLE=application-exit",
+                "ENCODING=rgb",
+                "H264_CLIENT_POLICY=strict",
+                "ALPHA_SCENARIOS=default",
+            ),
             "live-xpra-detach": (
                 "APPLICATION=gtk",
                 "LIFECYCLE=detach",
@@ -4515,6 +8441,14 @@ class LiveTransportProfileTest(unittest.TestCase):
             clipboard_policy,
         )
         self.assertIn('test -z "$${XPRA_FORK_STACK}"', clipboard_policy)
+        subsurface_policy = makefile.split(
+            "live-wayland-subsurface-policy-check:\n", 1
+        )[1].split("\n\n", 1)[0]
+        self.assertIn(
+            '"$${XPRA_FORK_CASE}" = wayland-subsurface-stream-ownership',
+            subsurface_policy,
+        )
+        self.assertIn('test -z "$${XPRA_FORK_STACK}"', subsurface_policy)
 
     def test_runner_and_input_freeze_reject_a_clean_server_selection(self) -> None:
         with self.assertRaisesRegex(live_run.LabFailure, "requires one non-empty"):
@@ -4567,6 +8501,119 @@ class LiveTransportProfileTest(unittest.TestCase):
                 ),
             ):
                 live_run.main()
+
+    def test_runner_rejects_the_wrong_subsurface_selection(self) -> None:
+        for selection in ("stacks/develop", "cases/wayland-initial-window-state"):
+            with (
+                self.subTest(selection=selection),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "run.py",
+                        "--application",
+                        "subsurface",
+                        "--selection",
+                        selection,
+                    ],
+                ),
+                patch.object(
+                    live_run.PIL,
+                    "__version__",
+                    live_run.EXPECTED_PILLOW_VERSION,
+                ),
+                self.assertRaisesRegex(
+                    live_run.LabFailure,
+                    "subsurface live acceptance requires selection",
+                ),
+            ):
+                live_run.main()
+
+    def test_bound_runner_rejects_an_undeclared_frozen_case_gate(self) -> None:
+        selection_name = "cases/video-pipeline-cleanup-race"
+        selected = live_run.PatchSelection(
+            case_slugs=("video-pipeline-cleanup-race",),
+            digest="a" * 64,
+            kind="case",
+            name=selection_name,
+            patches=(),
+            required_gates=(),
+            selector_digests=((selection_name, "a" * 64),),
+            selectors=(selection_name,),
+        )
+        bound = Mock(
+            client_context=Mock(),
+            client_selection=None,
+            input_manifest_sha256="b" * 64,
+            input_tree_sha256="c" * 64,
+            keyboard_scenario=None,
+            keyboard_scenario_sha256=None,
+            server_context=Mock(selection=selected),
+            snapshot=Mock(),
+            zed_archive=None,
+            zed_archive_sha256=None,
+            zed_binary_sha256=None,
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            state_root = Path(raw) / "state"
+            run_id = "bound-undeclared-gate"
+            result = state_root / "live-results" / run_id
+            inputs = result / "inputs"
+            inputs.mkdir(parents=True)
+            for path in (state_root, result.parent, result, inputs):
+                path.chmod(0o700)
+            argv = [
+                "run.py",
+                "--application",
+                "hardware",
+                "--encoding",
+                "h264",
+                "--h264-client-policy",
+                "adaptive-alpha",
+                "--selection",
+                selection_name,
+                "--state-root",
+                str(state_root),
+                "--run-id",
+                run_id,
+                "--render-node",
+                "/dev/null",
+                "--bound-inputs",
+                str(inputs),
+                "--bound-input-manifest-sha256",
+                "b" * 64,
+                "--bound-input-tree-sha256",
+                "c" * 64,
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(
+                    live_run.PIL,
+                    "__version__",
+                    live_run.EXPECTED_PILLOW_VERSION,
+                ),
+                patch.object(live_run.shutil, "which", return_value="/usr/bin/podman"),
+                patch.object(live_run, "load_bound_inputs", return_value=bound) as load,
+                patch.object(
+                    live_run,
+                    "resolve_patch_selection",
+                    side_effect=AssertionError("mutable host selection was consulted"),
+                ) as resolve,
+                patch.object(live_run, "run") as podman_run,
+                self.assertRaisesRegex(
+                    live_run.LabFailure,
+                    "does not declare required gate live-wayland-h264-hardware",
+                ),
+            ):
+                live_run.main()
+
+            load.assert_called_once_with(
+                inputs,
+                expected_manifest_sha256="b" * 64,
+                expected_tree_sha256="c" * 64,
+            )
+            resolve.assert_not_called()
+            podman_run.assert_not_called()
 
     def test_zed_h264_stimulus_retries_until_sustained_positive_production(
         self,
@@ -6180,6 +10227,175 @@ class LiveTransportProfileTest(unittest.TestCase):
         self.assertIn("xpra-xkb-xtest-driver", containerfile)
         self.assertIn("start_wayland_keyboard_fixture.sh", containerfile)
         self.assertIn("wayland_keyboard_fixture.py", containerfile)
+
+    def test_subsurface_fixture_and_container_inventory_are_bound(self) -> None:
+        command, titles, pid_file = live_run.application_contract("subsurface")
+        self.assertEqual(
+            command,
+            "/opt/xpra-fork-maintenance/start_wayland_subsurface_fixture.sh",
+        )
+        self.assertEqual(titles, (live_run.SUBSURFACE_FIXTURE_TITLE,))
+        self.assertEqual(pid_file, "subsurface-fixture.pid")
+        harness_names = {path.name for path in live_run.HARNESS_INPUTS}
+        context_names = {path.name for path in live_run.BUILD_CONTEXT_INPUTS}
+        for name in ("start_wayland_subsurface_fixture.sh", "subsurface_fixture.c"):
+            self.assertIn(name, harness_names)
+            self.assertIn(name, context_names)
+            self.assertIn(
+                f"!{name}",
+                (LIVE_DIRECTORY / ".containerignore").read_text(encoding="utf-8"),
+            )
+        containerfile = (LIVE_DIRECTORY / "Containerfile").read_text(encoding="utf-8")
+        self.assertIn("xpra-subsurface-fixture", containerfile)
+        self.assertIn("start_wayland_subsurface_fixture.sh", containerfile)
+        fixture = (LIVE_DIRECTORY / "subsurface_fixture.c").read_text(
+            encoding="utf-8"
+        )
+
+        def integer_macro(name: str) -> int:
+            match = re.search(rf"^#define {name} ([0-9]+)$", fixture, re.MULTILINE)
+            self.assertIsNotNone(match, name)
+            assert match is not None
+            return int(match.group(1))
+
+        def string_macro(name: str) -> str:
+            match = re.search(rf'^#define {name} "([^"\\]+)"$', fixture, re.MULTILINE)
+            self.assertIsNotNone(match, name)
+            assert match is not None
+            return match.group(1)
+
+        self.assertEqual(
+            integer_macro("SUBSURFACE_FIXTURE_SCHEMA"),
+            live_run.SUBSURFACE_FIXTURE_SCHEMA,
+        )
+        self.assertEqual(integer_macro("CONTINUOUS_MIN_INTERVAL_NS"),
+                         live_run.SUBSURFACE_CONTINUOUS_MIN_INTERVAL_NS)
+        self.assertLess(live_run.SUBSURFACE_CONTINUOUS_ACTIVE_DEADLINE_NS,
+                        (live_run.SUBSURFACE_CONTINUOUS_MAX_GENERATIONS - 1)
+                        * live_run.SUBSURFACE_CONTINUOUS_MIN_INTERVAL_NS)
+        self.assertNotIn(r'\"schema\":3', fixture)
+        self.assertEqual(
+            (integer_macro("PRIMARY_WIDTH"), integer_macro("PRIMARY_HEIGHT")),
+            live_run.SUBSURFACE_PARENT_DIMENSIONS["primary"],
+        )
+        self.assertEqual(
+            (integer_macro("SECONDARY_WIDTH"), integer_macro("SECONDARY_HEIGHT")),
+            live_run.SUBSURFACE_PARENT_DIMENSIONS["secondary"],
+        )
+        self.assertEqual(
+            (integer_macro("LOWER_WIDTH"), integer_macro("LOWER_HEIGHT")),
+            live_run.SUBSURFACE_LOWER_DIMENSIONS,
+        )
+        self.assertEqual(
+            integer_macro("LOWER_BUFFER_SCALE"),
+            live_run.SUBSURFACE_LOWER_BUFFER_SCALE,
+        )
+        self.assertEqual(
+            (integer_macro("LOWER_INITIAL_X"), integer_macro("LOWER_INITIAL_Y")),
+            live_run.SUBSURFACE_INITIAL_OFFSET,
+        )
+        self.assertEqual(
+            (integer_macro("LOWER_MOVED_X"), integer_macro("LOWER_MOVED_Y")),
+            live_run.SUBSURFACE_MOVED_OFFSET,
+        )
+        self.assertEqual(
+            (integer_macro("UPPER_WIDTH"), integer_macro("UPPER_HEIGHT")),
+            live_run.SUBSURFACE_UPPER_DIMENSIONS,
+        )
+        self.assertEqual(
+            (integer_macro("UPPER_X"), integer_macro("UPPER_Y")),
+            live_run.SUBSURFACE_UPPER_OFFSET,
+        )
+        self.assertEqual(
+            (
+                integer_macro("UPPER_REPARENT_X"),
+                integer_macro("UPPER_REPARENT_Y"),
+            ),
+            live_run.SUBSURFACE_REPARENT_OFFSET,
+        )
+        self.assertEqual(
+            string_macro("UPPER_BUFFER_TRANSFORM_NAME"),
+            live_run.SUBSURFACE_UPPER_BUFFER_TRANSFORM,
+        )
+        self.assertEqual(
+            string_macro("PRIMARY_TITLE"),
+            live_run.SUBSURFACE_FIXTURE_TITLE,
+        )
+        self.assertEqual(
+            string_macro("SECONDARY_TITLE"),
+            live_run.SUBSURFACE_REPARENT_TARGET_TITLE,
+        )
+        self.assertEqual(
+            (
+                string_macro("FRAME_GENERATION_ONE_MARKER"),
+                string_macro("FRAME_GENERATION_TWO_MARKER"),
+            ),
+            live_run.SUBSURFACE_FRAME_GENERATION_MARKERS,
+        )
+        self.assertEqual(
+            (
+                string_macro("CONTINUOUS_START_MARKER"),
+                string_macro("CONTINUOUS_STOP_MARKER"),
+            ),
+            (
+                live_run.SUBSURFACE_CONTINUOUS_START_MARKER,
+                live_run.SUBSURFACE_CONTINUOUS_STOP_MARKER,
+            ),
+        )
+        self.assertEqual(
+            integer_macro("CONTINUOUS_MIN_GENERATIONS"),
+            live_run.SUBSURFACE_CONTINUOUS_MIN_GENERATIONS,
+        )
+        self.assertEqual(
+            integer_macro("CONTINUOUS_MAX_GENERATIONS"),
+            live_run.SUBSURFACE_CONTINUOUS_MAX_GENERATIONS,
+        )
+        self.assertEqual(
+            (
+                integer_macro("CONTINUOUS_DAMAGE_X")
+                + live_run.SUBSURFACE_MOVED_OFFSET[0],
+                integer_macro("CONTINUOUS_DAMAGE_Y")
+                + live_run.SUBSURFACE_MOVED_OFFSET[1],
+                integer_macro("CONTINUOUS_DAMAGE_WIDTH"),
+                integer_macro("CONTINUOUS_DAMAGE_HEIGHT"),
+            ),
+            live_run.SUBSURFACE_CONTINUOUS_GEOMETRY,
+        )
+        wrapper = (LIVE_DIRECTORY / "start_wayland_subsurface_fixture.sh").read_text(
+            encoding="utf-8"
+        )
+        for marker in (
+            *live_run.SUBSURFACE_FRAME_GENERATION_MARKERS,
+            live_run.SUBSURFACE_CONTINUOUS_START_MARKER,
+            live_run.SUBSURFACE_CONTINUOUS_STOP_MARKER,
+        ):
+            self.assertIn(marker, wrapper)
+        for authority in (
+            "WL_SHM_FORMAT_ARGB8888",
+            "wl_surface_set_buffer_scale",
+            "logical_x = x / scale",
+            "logical_x = width - logical_x - 1",
+            "WL_OUTPUT_TRANSFORM_180",
+            "wl_subsurface_place_above",
+            "wl_subsurface_set_position",
+            "wl_surface_frame",
+            "wl_callback_add_listener",
+            "lower_frame_done",
+            "lower_frame_ready",
+            "commit_lower_frame_generation",
+            "emit_lower_frame_generation",
+            "commit_lower_continuous_generation",
+            "emit_continuous_generation",
+            "stop_lower_continuous_generations",
+            "Wayland roundtrip failed after role-less upper commit",
+            "Wayland roundtrip failed after upper detach",
+            "Wayland roundtrip failed after parent-only upper reattach",
+            "upper_reattach_without_child_commit",
+            live_run.SUBSURFACE_REPARENT_TARGET_TITLE,
+        ):
+            self.assertIn(authority, fixture)
+        self.assertNotIn("wait_for_generation_marker", fixture)
+        self.assertNotIn("usleep", fixture)
 
     @staticmethod
     def passing_empty_damage_evidence() -> dict[str, object]:
@@ -8787,6 +13003,497 @@ class H264EvidenceTest(unittest.TestCase):
         self.assertTrue(result["complete"])
         self.assertEqual(result["size"], [1596, 1172])
         self.assertEqual(result["encoded_size"], [1064, 780])
+
+
+class LiveFixtureBuildOrderTest(unittest.TestCase):
+    FIXTURES = (
+        (
+            "server",
+            (
+                ("empty_damage_fixture.c", "xpra-empty-damage-fixture"),
+                ("subsurface_fixture.c", "xpra-subsurface-fixture"),
+            ),
+        ),
+        ("client", (("xkb_xtest_driver.c", "xpra-xkb-xtest-driver"),)),
+    )
+
+    def build_instructions(self, role: str) -> list[str]:
+        recipe = (LIVE_DIRECTORY / "Containerfile").read_text(encoding="utf-8")
+        stage = re.search(
+            rf"(?ms)^FROM [^\n]+ AS {role}-build\n(.*?)(?=^FROM |\Z)",
+            recipe,
+        )
+        self.assertIsNotNone(stage, role)
+        assert stage is not None
+        return [
+            line.strip()
+            for line in stage[1].replace("\\\n", "").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+
+    def assert_fixture_boundary(self, role: str, instructions: list[str]) -> None:
+        def position(prefix: str) -> int:
+            matches = [
+                index
+                for index, instruction in enumerate(instructions)
+                if instruction.startswith(prefix)
+            ]
+            self.assertEqual(len(matches), 1, (role, prefix))
+            return matches[0]
+
+        source = position("COPY --from=xpra-source /src/xpra /src/xpra")
+        install = position("RUN python3 setup.py install ")
+        native_tests = position("RUN package_dir=")
+        self.assertLess(source, install)
+        self.assertLess(install, native_tests)
+        for filename, executable in dict(self.FIXTURES)[role]:
+            copied = position(f"COPY {filename} /tmp/{executable}.c")
+            compiled = [
+                index
+                for index, instruction in enumerate(instructions)
+                if instruction.startswith("RUN ")
+                and f"-o /opt/xpra-install/usr/local/bin/{executable}" in instruction
+            ]
+            self.assertEqual(len(compiled), 1)
+            self.assertLess(
+                native_tests,
+                copied,
+                "fixture COPY must not invalidate Xpra install or native checks",
+            )
+            self.assertLess(copied, compiled[0])
+            self.assertIn("cc -std=c11 -O2 -Wall -Wextra -Werror", instructions[compiled[0]])
+            self.assertIn(f"/tmp/{executable}.c", instructions[compiled[0]])
+
+    def test_server_c_fixtures_follow_xpra_install_and_native_checks(self) -> None:
+        self.assert_fixture_boundary("server", self.build_instructions("server"))
+
+    def test_client_c_fixture_follows_xpra_install_and_native_checks(self) -> None:
+        self.assert_fixture_boundary("client", self.build_instructions("client"))
+
+    def test_rejects_fixture_input_or_compilation_before_native_checks(self) -> None:
+        for role, fixtures in self.FIXTURES:
+            for filename, executable in fixtures:
+                for moved_kind in ("COPY", "RUN"):
+                    with self.subTest(role=role, fixture=filename, moved=moved_kind):
+                        instructions = self.build_instructions(role)
+                        moved = next(
+                            instruction
+                            for instruction in instructions
+                            if (
+                                instruction.startswith(f"COPY {filename} ")
+                                if moved_kind == "COPY"
+                                else instruction.startswith("RUN ")
+                                and f"-o /opt/xpra-install/usr/local/bin/{executable}" in instruction
+                            )
+                        )
+                        instructions.remove(moved)
+                        install = next(
+                            index
+                            for index, instruction in enumerate(instructions)
+                            if instruction.startswith("RUN python3 setup.py install ")
+                        )
+                        instructions.insert(install, moved)
+                        with self.assertRaises(AssertionError):
+                            self.assert_fixture_boundary(role, instructions)
+
+
+class PacketSequenceLedgerTest(unittest.TestCase):
+    @staticmethod
+    def global_windows() -> dict[int, dict[str, object]]:
+        # Two ordinary roots share the WSSO connection allocator. Codec frame
+        # numbers and saved damage-group indices remain per primary window.
+        primary = H264EvidenceTest().adaptive_edge_updates()
+        primary["initial_pixel_format"] = "BGRX"
+        for packet, sequence in zip(primary["updates"], (2, 4, 5), strict=True):
+            packet["sequence"] = sequence
+            packet["payload_sha256"] = "a" * 64
+        auxiliary = {
+            "count": 2,
+            "window_id": 2,
+            "encodings": ["webp"],
+            "initial_pixel_format": "BGRA",
+            "updates": [
+                {
+                    "encoding": "webp", "sequence": sequence,
+                    "relative_info": f"screen-updates/2/{100 + index}/0.info",
+                    "x": 0, "y": 0, "w": 64, "h": 64,
+                    "payload_bytes": 32, "payload_sha256": "b" * 64,
+                    "options": {"flush": 0, "window-size": [64, 64]},
+                }
+                for index, sequence in enumerate((1, 3))
+            ],
+        }
+        authority = {
+            "schema": 1, "namespace": "connection-v1",
+            "source_selection_sha256": "c" * 64,
+            "connection": "client.0", "connection_uuid": "owned-connection",
+            "run_id": "sequence-control", "server_uuid": "owned-server",
+            "client_session_id": "owned-session", "connection_time": 100,
+            "endpoint": "owned-endpoint",
+            "server_info_sha256": "d" * 64,
+            "window_ids": [1, 2], "next_packet_sequence": 6,
+        }
+        rows = []
+        for window in (primary, auxiliary):
+            for packet in window["updates"]:
+                rows.append({
+                    "sequence": packet["sequence"],
+                    "window_id": window["window_id"],
+                    "relative_info": packet["relative_info"],
+                    "payload_bytes": packet["payload_bytes"],
+                    "payload_sha256": packet["payload_sha256"],
+                    "packet_sha256": hashlib.sha256(json.dumps(
+                        packet, sort_keys=True, separators=(",", ":"),
+                    ).encode()).hexdigest(),
+                })
+        ledger = {
+            "schema": 1, "authority": authority, "frontier": 6,
+            "packets": sorted(rows, key=lambda row: row["sequence"]),
+        }
+        for window in (primary, auxiliary):
+            window["packet_sequence_ledger"] = ledger
+            window["packet_sequence_span"] = [1, 5]
+        return {1: primary, 2: auxiliary}
+
+    @classmethod
+    def global_updates(cls) -> dict[str, object]:
+        return cls.global_windows()[1]
+
+    @staticmethod
+    def write_info(directory: Path, *, global_mode: bool = True) -> Path:
+        lines = [
+            "uuid=owned-server", "client.0.uuid=stable-client-uuid",
+            "client.0.session-id=owned-session", "client.0.connection_time=100",
+            "client.0.connection.endpoint=owned-endpoint",
+            "client.0.connection.active=True", "client.0.connection.closed=False",
+            "windows.1.title=primary", "windows.2.title=auxiliary",
+        ]
+        if global_mode:
+            lines += ["client.0.window.damage.next-packet-sequence=6", "client.0.window.damage.ack-owners=0"]
+        path = directory / "server-info.txt"
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
+    @staticmethod
+    def authority(info: Path, *, global_mode: bool = True) -> dict[str, object]:
+        return live_run.packet_sequence_authority(
+            info, run_id="sequence-control",
+            selected_case_slugs=("wayland-subsurface-stream-ownership",) if global_mode else (),
+            selection_sha256="c" * 64, expected_window_ids=(1, 2),
+        )
+
+    @classmethod
+    def write_packets(cls, directory: Path) -> dict[int, dict[str, object]]:
+        windows = cls.global_windows()
+        for wid, window in windows.items():
+            for packet in window["updates"]:
+                path = directory / packet["relative_info"]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                payload_name = path.with_suffix(f'.{packet["encoding"]}').name
+                payload = f"owned packet {wid}/{packet['sequence']}".encode()
+                path.with_name(payload_name).write_bytes(payload)
+                raw = {key: value for key, value in packet.items() if key not in {
+                    "relative_info", "payload_bytes", "payload_sha256",
+                }}
+                raw["file"] = payload_name
+                path.write_text(json.dumps(raw))
+            (directory / "screen-updates" / str(wid) / "window.info").write_text(
+                json.dumps({"pixel-format": window["initial_pixel_format"]})
+            )
+        result = {}
+        for wid in windows:
+            result[wid] = live_run.parse_saved_updates(directory, wid)
+            result[wid]["initial_pixel_format"] = windows[wid]["initial_pixel_format"]
+        return result
+
+    def test_global_primary_gaps_are_exact_auxiliary_owners_not_packet_loss(self) -> None:
+        updates = self.global_updates()
+        self.assertEqual([p["sequence"] for p in updates["updates"]], [2, 4, 5])
+        self.assertTrue(live_run.primary_h264_frame_ready(
+            "hardware", "adaptive-alpha", updates,
+        ))
+        self.assertTrue(live_run.h264_with_lossless_rgb_edges(updates))
+
+    def test_global_ledger_rejects_missing_duplicate_foreign_and_changed_packets(self) -> None:
+        def delete_row(value):
+            value["packet_sequence_ledger"]["packets"].pop(2)
+
+        changes = {
+            "missing global owner": delete_row,
+            "duplicate ID": lambda value: value["packet_sequence_ledger"]["packets"][2].update(sequence=2),
+            "foreign WID": lambda value: value["packet_sequence_ledger"]["packets"][2].update(window_id=3),
+            "cross-window path": lambda value: value["packet_sequence_ledger"]["packets"][2].update(relative_info="screen-updates/1/101/0.info"),
+            "wrong payload digest": lambda value: value["updates"][0].update(payload_sha256="f" * 64),
+            "changed geometry": lambda value: value["updates"][0].update(w=1200),
+            "lost leading primary": lambda value: (value["updates"].pop(0), value.update(count=2)),
+            "lost trailing primary": lambda value: (value["updates"].pop(), value.update(count=2)),
+            "incorrect namespace": lambda value: value["packet_sequence_ledger"]["authority"].update(namespace="window-v1"),
+            "unbound span": lambda value: value.pop("packet_sequence_span"),
+            "bad frontier": lambda value: value["packet_sequence_ledger"].update(frontier=7),
+        }
+        for name, change in changes.items():
+            with self.subTest(name=name):
+                updates = self.global_updates()
+                change(updates)
+                self.assertFalse(live_run.primary_h264_frame_ready("hardware", "adaptive-alpha", updates))
+                self.assertFalse(live_run.h264_with_lossless_rgb_edges(updates))
+
+    def test_legacy_namespace_does_not_infer_global_ownership_from_gaps(self) -> None:
+        updates = self.global_updates()
+        updates.pop("packet_sequence_ledger")
+        updates.pop("packet_sequence_span")
+        self.assertFalse(live_run.primary_h264_frame_ready("hardware", "adaptive-alpha", updates))
+        legacy = H264EvidenceTest().adaptive_edge_updates()
+        legacy["initial_pixel_format"] = "BGRX"
+        self.assertTrue(live_run.primary_h264_frame_ready("hardware", "adaptive-alpha", legacy))
+
+    def test_namespace_requires_source_and_owned_connection_runtime_agreement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            info = self.write_info(directory)
+            authority = self.authority(info)
+            self.assertEqual(authority["namespace"], "connection-v1")
+            self.assertEqual(authority["server_info_sha256"], hashlib.sha256(info.read_bytes()).hexdigest())
+            self.assertEqual(authority["client_session_id"], "owned-session")
+            self.assertEqual(authority["server_uuid"], "owned-server")
+            with self.assertRaises(live_run.LabFailure):
+                self.authority(info, global_mode=False)
+            info = self.write_info(directory, global_mode=False)
+            self.assertEqual(self.authority(info, global_mode=False)["namespace"], "window-v1")
+            with self.assertRaises(live_run.LabFailure):
+                self.authority(info)
+            original = self.write_info(directory).read_text()
+            for label, text in (
+                ("missing session", original.replace("client.0.session-id=owned-session\n", "")),
+                ("closed", original.replace("connection.closed=False", "connection.closed=True")),
+                ("duplicate counter", original + "client.0.window.damage.next-packet-sequence=6\n"),
+                ("extra peer", original + "client.1.uuid=other-client\n"),
+                ("extra window", original + "windows.3.title=unowned\n"),
+            ):
+                with self.subTest(label=label):
+                    info.write_text(text)
+                    with self.assertRaises(live_run.LabFailure):
+                        self.authority(info)
+
+    def test_raw_packet_bytes_bind_prefix_and_final_history_without_renumbering(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            authority = self.authority(self.write_info(directory))
+            windows = self.write_packets(directory)
+            before = copy.deepcopy(windows)
+            bound = live_run.bind_packet_sequence_ledger(windows, authority)
+            self.assertEqual(windows, before)
+            self.assertEqual([packet["sequence"] for packet in bound[1]["updates"]], [2, 4, 5])
+            self.assertTrue(live_run.primary_h264_frame_ready("hardware", "adaptive-alpha", bound[1]))
+            self.assertTrue(live_run.only_positive_alpha_capable_packets(bound[2]))
+            with patch.object(live_run, "synchronize_saved_updates", return_value=windows[2]):
+                snapshot = live_run.synchronize_packet_sequence_projection(
+                    "server", directory, 1, authority, primary=windows[1],
+                )
+            live_run.retain_packet_sequence_observation(directory, "readiness", snapshot)
+            live_run.validate_packet_sequence_observations(directory, bound)
+            first = directory / bound[1]["updates"][0]["relative_info"]
+            payload = first.parent / json.loads(first.read_text())["file"]
+            payload.write_bytes(b"changed owned bytes")
+            changed = live_run.parse_saved_updates(directory, 1)
+            changed["initial_pixel_format"] = "BGRX"
+            changed_bound = live_run.bind_packet_sequence_ledger({1: changed, 2: windows[2]}, authority)
+            with self.assertRaises(live_run.LabFailure):
+                live_run.validate_packet_sequence_observations(directory, changed_bound)
+
+    def test_incremental_snapshot_seals_only_complete_prefix_and_preserves_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            authority = self.authority(self.write_info(directory))
+            windows = self.write_packets(directory)
+            partial = copy.deepcopy(windows[1])
+            partial["updates"].pop()
+            partial["count"] = 2
+            with patch.object(live_run, "synchronize_saved_updates", return_value=windows[2]):
+                snapshot = live_run.synchronize_packet_sequence_projection(
+                    "server", directory, 1, authority, primary=partial,
+                )
+            self.assertEqual(snapshot["packet_sequence_ledger"]["frontier"], 3)
+            self.assertEqual(snapshot["packet_sequence_observation"]["observed_frontier"], 5)
+            self.assertEqual([p["sequence"] for p in snapshot["updates"]], [2])
+            self.assertEqual(snapshot["packet_sequence_observation"]["unsealed_primary"][0]["sequence"], 4)
+            live_run.retain_packet_sequence_observation(directory, "readiness", snapshot)
+            final = live_run.bind_packet_sequence_ledger(windows, authority)
+            live_run.validate_packet_sequence_observations(directory, final)
+            malformed = copy.deepcopy(partial)
+            malformed["updates"][1]["options"]["flush"] = 0
+            # A completed but codec-invalid group is not an unpublished tail:
+            # retain it, so the original codec-group validator rejects it.
+            self.assertEqual(live_run._complete_packet_sequence_prefix(malformed["updates"], 1), 2)
+            with patch.object(live_run, "synchronize_saved_updates", return_value=windows[2]):
+                invalid = live_run.synchronize_packet_sequence_projection(
+                    "server", directory, 1, authority, primary=malformed,
+                )
+            self.assertFalse(live_run.primary_h264_frame_ready("hardware", "adaptive-alpha", invalid))
+            malformed["updates"][1]["relative_info"] = "screen-updates/1/101/1.info"
+            with self.assertRaises(live_run.LabFailure):
+                live_run._complete_packet_sequence_prefix(malformed["updates"], 1)
+
+    def test_h264_stream_projects_other_window_ids_without_inventing_codec_edges(self) -> None:
+        updates = self.global_updates()
+        streams = live_run.h264_packet_streams(updates, allow_lossless_rgb_edges=True)
+        self.assertEqual(len(streams), 1)
+        self.assertEqual(streams[0]["packet_sequences"], [2, 5])
+        self.assertEqual(streams[0]["other_window_sequences"], [3])
+        self.assertEqual(streams[0]["interleaved_edge_sequences"], [4])
+        self.assertEqual(streams[0]["packet_count"], 2)
+        self.assertTrue(streams[0]["contiguous_frames"])
+
+    def test_all_h264_history_interval_and_group_consumers_preserve_global_ids(self) -> None:
+        updates = self.global_updates()
+        updates["h264_stimulus"] = {
+            "first_sequence": 2, "baseline_sequence": 2,
+            "last_sequence": 5, "window_size": [1596, 1173],
+        }
+        self.assertTrue(live_run.hardware_h264_history_valid(updates))
+        for name in (
+            "adaptive_h264_production_updates", "hardware_h264_stimulus_updates",
+            "hardware_h264_context_updates", "hardware_h264_production_updates",
+        ):
+            with self.subTest(consumer=name):
+                selected = getattr(live_run, name)(updates)
+                self.assertIsNotNone(selected)
+                self.assertEqual([packet["sequence"] for packet in selected["updates"]], [2, 4, 5])
+                missing = copy.deepcopy(updates)
+                missing["packet_sequence_ledger"]["packets"].pop(2)
+                self.assertIsNone(getattr(live_run, name)(missing))
+        self.assertEqual(live_run.hardware_h264_phase_start_sequence(updates, (1596, 1173)), 2)
+        zed = copy.deepcopy(updates)
+        zed["h264_stimulus"].pop("first_sequence")
+        selected = live_run.zed_h264_stimulus_updates(zed)
+        self.assertEqual([packet["sequence"] for packet in selected["updates"]], [4, 5])
+
+        windows = self.global_windows()
+        authority = windows[1]["packet_sequence_ledger"]["authority"]
+        windows[1]["updates"][-1]["sequence"] = 6
+        extra = copy.deepcopy(windows[2]["updates"][-1])
+        extra.update(sequence=5, relative_info="screen-updates/2/102/0.info")
+        windows[2]["updates"].append(extra)
+        windows[2]["count"] = 3
+        bound = live_run.bind_packet_sequence_ledger(windows, authority)
+        groups = live_run._ordered_saved_damage_groups(
+            bound[1]["updates"], 1, bound[1]["packet_sequence_ledger"],
+        )
+        self.assertEqual([[packet["sequence"] for packet in group] for group in groups], [[2], [4, 6]])
+        self.assertTrue(live_run.h264_with_lossless_rgb_edges(bound[1]))
+        for field, value in (("h", 2), ("y", 1171)):
+            changed = copy.deepcopy(windows)
+            changed[1]["updates"][1][field] = value
+            rebound = live_run.bind_packet_sequence_ledger(changed, authority)
+            self.assertFalse(live_run.h264_with_lossless_rgb_edges(rebound[1]))
+
+    def test_actual_frame_waiter_consumes_global_raw_prefix_and_retains_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            authority = self.authority(self.write_info(directory))
+            self.write_packets(directory)
+            relatives = tuple(path.relative_to(directory).as_posix() for path in directory.glob("screen-updates/**/*.info"))
+            server_log = "commit wid 1 rects=((0, 0, 1596, 1173),)\n"
+            client_log = (
+                "register_window(..) window(0x1)=ClientWindow(0x1)\n"
+                "draw_region(0, 0, 1596, 1172, h264\n"
+                "choose_decoder('h264')=libva\n"
+                "do_video_paint('h264', ImageWrapper(NV12\n"
+                "record_decode_time(True, 1) wid=0x1, h264:\n"
+                "do_present_fbo(\n"
+            )
+
+            def deltas(container, offsets):
+                return {
+                    name: (100, server_log if container == "server" else client_log if name == "client.stdout" else "")
+                    for name in offsets
+                }
+
+            def wait_once(description, predicate, **_kwargs):
+                self.assertEqual(description, "H264 frame outcome")
+                self.assertTrue(predicate())
+
+            with (
+                patch.object(live_run, "read_container_log_deltas", side_effect=deltas),
+                patch.object(live_run, "container_artifact_files", return_value=relatives),
+                patch.object(live_run, "wait_for", side_effect=wait_once),
+                patch.object(live_run, "pull_container_artifacts") as pull,
+            ):
+                self.assertEqual(live_run.wait_for_frame_boundary(
+                    "server", 101, "client", 202, directory, "h264", "adaptive-alpha",
+                    application="hardware", expected_xpra_wid=1, sequence_authority=authority,
+                ), "success")
+                pull.assert_not_called()
+            observation = json.loads((directory / "h264-sequence-observations.json").read_text())["observations"]["readiness"]
+            self.assertEqual(observation["ledger"]["authority"], authority)
+            self.assertEqual(observation["ledger"]["frontier"], 6)
+            self.assertEqual([row["sequence"] for row in observation["ledger"]["packets"]], [1, 2, 3, 4, 5])
+
+    def test_snapshot_cut_cannot_move_when_later_owner_is_sampled(self) -> None:
+        windows = self.global_windows()
+        authority = windows[1]["packet_sequence_ledger"]["authority"]
+
+        def later_owner(_server, _directory, wid):
+            self.assertEqual(wid, 2)
+            future = copy.deepcopy(windows[1]["updates"][0])
+            future.update(sequence=6, relative_info="screen-updates/1/102/0.info")
+            windows[1]["updates"].append(future)
+            return windows[2]
+
+        with patch.object(live_run, "synchronize_saved_updates", side_effect=later_owner):
+            snapshot = live_run.synchronize_packet_sequence_projection(
+                "server", LIVE_DIRECTORY, 1, authority, primary=windows[1],
+            )
+        self.assertEqual(snapshot["packet_sequence_ledger"]["frontier"], 6)
+        self.assertEqual(snapshot["packet_sequence_observation"]["observed_frontier"], 6)
+        self.assertEqual(snapshot["packet_sequence_observation"]["unsealed_primary"], [])
+        self.assertEqual([p["sequence"] for p in snapshot["updates"]], [2, 4, 5])
+
+    def test_complete_prefix_keeps_multiple_flush_groups_in_one_millisecond_bucket(self) -> None:
+        windows = self.global_windows()
+        authority = windows[1]["packet_sequence_ledger"]["authority"]
+        primary = windows[1]
+        for index, packet in enumerate(primary["updates"]):
+            packet["relative_info"] = f"screen-updates/1/100/{index}.info"
+        complete = live_run.bind_packet_sequence_ledger(windows, authority)[1]
+        groups = live_run._ordered_saved_damage_groups(
+            complete["updates"], 1, complete["packet_sequence_ledger"],
+        )
+        self.assertEqual([[p["sequence"] for p in group] for group in groups], [[2], [4, 5]])
+        self.assertEqual(live_run._complete_packet_sequence_prefix(primary["updates"], 1), 3)
+        edge = copy.deepcopy(primary["updates"][1])
+        edge.update(sequence=6, relative_info="screen-updates/1/100/3.info")
+        primary["updates"].append(edge)
+        primary["count"] = 4
+        self.assertEqual(live_run._complete_packet_sequence_prefix(primary["updates"], 1), 3)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            with patch.object(live_run, "synchronize_saved_updates", return_value=windows[2]):
+                snapshot = live_run.synchronize_packet_sequence_projection(
+                    "server", directory, 1, authority, primary=primary,
+                )
+            self.assertEqual(snapshot["packet_sequence_ledger"]["frontier"], 6)
+            self.assertEqual(snapshot["packet_sequence_observation"]["unsealed_primary"][0]["sequence"], 6)
+            live_run.retain_packet_sequence_observation(directory, "readiness", snapshot)
+            last = copy.deepcopy(primary["updates"][2])
+            last.update(sequence=7, relative_info="screen-updates/1/100/4.info")
+            last["options"].update(frame=2)
+            primary["updates"].append(last)
+            primary["count"] = 5
+            final = live_run.bind_packet_sequence_ledger(windows, authority)
+            live_run.validate_packet_sequence_observations(directory, final)
+            self.assertTrue(live_run.h264_with_lossless_rgb_edges(final[1]))
+        for paths in (
+            ["100/0", "100/2", "100/1"],
+            ["100/0", "100/2", "100/3"],
+            ["100/0", "99/0", "99/1"],
+        ):
+            with self.subTest(paths=paths):
+                malformed = copy.deepcopy(primary["updates"][:3])
+                for packet, path in zip(malformed, paths, strict=True):
+                    packet["relative_info"] = f"screen-updates/1/{path}.info"
+                with self.assertRaises(live_run.LabFailure):
+                    live_run._complete_packet_sequence_prefix(malformed, 1)
 
 
 if __name__ == "__main__":

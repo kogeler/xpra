@@ -37,6 +37,7 @@ from PIL import Image, ImageChops, ImageStat
 from profiles import (
     ALPHA_SCENARIOS,
     APPLICATIONS,
+    CLIPBOARD_CASE_SELECTION,
     CLIPBOARD_POLICIES,
     DEFAULT_NETWORK_PROFILE,
     H264_ACCEPTANCE_POLICIES,
@@ -44,6 +45,7 @@ from profiles import (
     H264_FALLBACK_POLICIES,
     LIFECYCLES,
     NETWORK_PROFILES,
+    SUBSURFACE_CASE_SELECTION,
     ProfileError,
     scenario_specs,
     validate_profile,
@@ -90,6 +92,228 @@ EMPTY_DAMAGE_START_MARKER = "/tmp/xpra-empty-damage-pressure-start"
 EMPTY_DAMAGE_PRESSURE_MARKER = "/tmp/xpra-empty-damage-pressure-ready"
 EMPTY_DAMAGE_CLICK_MARKER = "/tmp/xpra-empty-damage-child-clicked"
 EMPTY_DAMAGE_INPUT_DEADLINE_SECONDS = 3.0
+SUBSURFACE_FIXTURE_TITLE = "Xpra Wayland Subsurface Fixture"
+SUBSURFACE_REPARENT_TARGET_TITLE = "Xpra Wayland Subsurface Reparent Target"
+SUBSURFACE_READY_MARKER = "/tmp/xpra-subsurface-ready"
+SUBSURFACE_UPDATE_MARKER = "/tmp/xpra-subsurface-update-two"
+SUBSURFACE_RESTORE_MARKER = "/tmp/xpra-subsurface-restore-one"
+SUBSURFACE_MOVE_MARKER = "/tmp/xpra-subsurface-move-lower"
+SUBSURFACE_STACK_MARKER = "/tmp/xpra-subsurface-create-upper"
+SUBSURFACE_LOWER_UPDATE_MARKER = "/tmp/xpra-subsurface-update-lower-under-upper"
+SUBSURFACE_FRAME_GENERATION_MARKERS = (
+    "/tmp/xpra-subsurface-frame-generation-one",
+    "/tmp/xpra-subsurface-frame-generation-two",
+)
+SUBSURFACE_CONTINUOUS_START_MARKER = "/tmp/xpra-subsurface-continuous-start"
+SUBSURFACE_CONTINUOUS_STOP_MARKER = "/tmp/xpra-subsurface-continuous-stop"
+SUBSURFACE_CLICK_MARKER = "/tmp/xpra-subsurface-upper-clicked"
+SUBSURFACE_DESTROY_LOWER_MARKER = "/tmp/xpra-subsurface-destroy-lower"
+SUBSURFACE_DETACH_UPPER_MARKER = "/tmp/xpra-subsurface-detach-upper"
+SUBSURFACE_REPARENT_UPPER_MARKER = "/tmp/xpra-subsurface-reparent-upper"
+SUBSURFACE_EXIT_MARKER = "/tmp/xpra-subsurface-exit"
+SUBSURFACE_INPUT_DEADLINE_SECONDS = 3.0
+SUBSURFACE_INPUT_DEADLINE_NS = int(SUBSURFACE_INPUT_DEADLINE_SECONDS * 1_000_000_000)
+SUBSURFACE_POINTER_TIMING_ARTIFACT = "subsurface-pointer-timing.json"
+SUBSURFACE_CONTINUOUS_LIVENESS_ARTIFACT = "subsurface-continuous-liveness.json"
+SUBSURFACE_STARTUP_BARRIERS_ARTIFACT = "subsurface-startup-barriers.json"
+SUBSURFACE_STARTUP_DAMAGE_ARTIFACT = "subsurface-startup-damage.json"
+SUBSURFACE_CONTINUOUS_INFO_ARTIFACT = "server-info-subsurface-continuous-final.txt"
+SUBSURFACE_CONTINUOUS_FINAL_PHASE = "continuous-final"
+SUBSURFACE_FIXTURE_SCHEMA = 6
+SUBSURFACE_CONTINUOUS_MIN_GENERATIONS = 2
+SUBSURFACE_CONTINUOUS_MAX_GENERATIONS = 256
+SUBSURFACE_CONTINUOUS_MIN_INTERVAL_NS = 50_000_000
+SUBSURFACE_CONTINUOUS_ACTIVE_DEADLINE_NS = 5_000_000_000
+SUBSURFACE_LOWER_BUFFER_SCALE = 2
+SUBSURFACE_UPPER_BUFFER_TRANSFORM = "180"
+SUBSURFACE_COMPOSITE_MODE = "premultiplied-source-over-v1"
+SUBSURFACE_COMPOSITE_FORMATS = frozenset(("BGRA", "BGRX", "RGBA", "RGBX"))
+SUBSURFACE_CHILD_FORMATS = frozenset(("BGRA", "RGBA"))
+SUBSURFACE_BASELINE_RGB24_FORMATS = frozenset(("BGR", "RGB"))
+SUBSURFACE_PARENT_DIMENSIONS = {
+    "primary": (420, 300),
+    "secondary": (360, 260),
+}
+SUBSURFACE_LOWER_DIMENSIONS = (220, 140)
+SUBSURFACE_LOWER_BUFFER_DIMENSIONS = tuple(
+    value * SUBSURFACE_LOWER_BUFFER_SCALE for value in SUBSURFACE_LOWER_DIMENSIONS
+)
+SUBSURFACE_INITIAL_OFFSET = (72, 64)
+SUBSURFACE_MOVED_OFFSET = (48, 110)
+SUBSURFACE_UPPER_DIMENSIONS = (160, 100)
+SUBSURFACE_UPPER_OFFSET = (150, 150)
+SUBSURFACE_REPARENT_OFFSET = (80, 70)
+SUBSURFACE_POINTER_PARENT_COORDINATES = (
+    SUBSURFACE_UPPER_OFFSET[0] + SUBSURFACE_UPPER_DIMENSIONS[0] // 2,
+    SUBSURFACE_UPPER_OFFSET[1] + SUBSURFACE_UPPER_DIMENSIONS[1] // 2,
+)
+SUBSURFACE_POINTER_SURFACE_COORDINATES = (
+    SUBSURFACE_UPPER_DIMENSIONS[0] // 2,
+    SUBSURFACE_UPPER_DIMENSIONS[1] // 2,
+)
+SUBSURFACE_OVERLAP_GEOMETRY = (
+    SUBSURFACE_UPPER_OFFSET[0],
+    SUBSURFACE_UPPER_OFFSET[1],
+    SUBSURFACE_MOVED_OFFSET[0]
+    + SUBSURFACE_LOWER_DIMENSIONS[0]
+    - SUBSURFACE_UPPER_OFFSET[0],
+    SUBSURFACE_MOVED_OFFSET[1]
+    + SUBSURFACE_LOWER_DIMENSIONS[1]
+    - SUBSURFACE_UPPER_OFFSET[1],
+)
+SUBSURFACE_CONTINUOUS_GEOMETRY = (160, 160, 32, 32)
+SUBSURFACE_CONTINUOUS_SOURCE_ORIGINS = {
+    "primary": SUBSURFACE_CONTINUOUS_GEOMETRY[:2],
+    "lower": (
+        SUBSURFACE_CONTINUOUS_GEOMETRY[0] - SUBSURFACE_MOVED_OFFSET[0],
+        SUBSURFACE_CONTINUOUS_GEOMETRY[1] - SUBSURFACE_MOVED_OFFSET[1],
+    ),
+    "upper": (
+        SUBSURFACE_CONTINUOUS_GEOMETRY[0] - SUBSURFACE_UPPER_OFFSET[0],
+        SUBSURFACE_CONTINUOUS_GEOMETRY[1] - SUBSURFACE_UPPER_OFFSET[1],
+    ),
+}
+SUBSURFACE_MOVE_RESET_GEOMETRY = (
+    min(SUBSURFACE_INITIAL_OFFSET[0], SUBSURFACE_MOVED_OFFSET[0]),
+    min(SUBSURFACE_INITIAL_OFFSET[1], SUBSURFACE_MOVED_OFFSET[1]),
+    max(
+        SUBSURFACE_INITIAL_OFFSET[0] + SUBSURFACE_LOWER_DIMENSIONS[0],
+        SUBSURFACE_MOVED_OFFSET[0] + SUBSURFACE_LOWER_DIMENSIONS[0],
+    )
+    - min(SUBSURFACE_INITIAL_OFFSET[0], SUBSURFACE_MOVED_OFFSET[0]),
+    max(
+        SUBSURFACE_INITIAL_OFFSET[1] + SUBSURFACE_LOWER_DIMENSIONS[1],
+        SUBSURFACE_MOVED_OFFSET[1] + SUBSURFACE_LOWER_DIMENSIONS[1],
+    )
+    - min(SUBSURFACE_INITIAL_OFFSET[1], SUBSURFACE_MOVED_OFFSET[1]),
+)
+SUBSURFACE_PHASES = (
+    "initial",
+    "changed",
+    "restored",
+    "moved",
+    "stacked",
+    "lower-updated",
+    "lower-frame-one",
+    "lower-frame-two",
+    "lower-destroyed",
+    "upper-detached",
+    "reparented",
+)
+SUBSURFACE_PARENT_ROLES = ("primary", "secondary")
+SUBSURFACE_CHILD_ROLES = ("lower", "upper", "reparented-upper")
+SUBSURFACE_FRAME_PHASES = ("lower-frame-one", "lower-frame-two")
+SUBSURFACE_PHASE_TARGET_PARENTS = {
+    phase: "secondary" if phase == "reparented" else "primary"
+    for phase in SUBSURFACE_PHASES
+}
+SUBSURFACE_PHASE_CHILD_LAYOUTS = {
+    "initial": (("lower", "primary", SUBSURFACE_INITIAL_OFFSET),),
+    "changed": (("lower", "primary", SUBSURFACE_INITIAL_OFFSET),),
+    "restored": (("lower", "primary", SUBSURFACE_INITIAL_OFFSET),),
+    "moved": (("lower", "primary", SUBSURFACE_MOVED_OFFSET),),
+    "stacked": (
+        ("lower", "primary", SUBSURFACE_MOVED_OFFSET),
+        ("upper", "primary", SUBSURFACE_UPPER_OFFSET),
+    ),
+    "lower-updated": (
+        ("lower", "primary", SUBSURFACE_MOVED_OFFSET),
+        ("upper", "primary", SUBSURFACE_UPPER_OFFSET),
+    ),
+    **{
+        phase: (
+            ("lower", "primary", SUBSURFACE_MOVED_OFFSET),
+            ("upper", "primary", SUBSURFACE_UPPER_OFFSET),
+        )
+        for phase in SUBSURFACE_FRAME_PHASES
+    },
+    "lower-destroyed": (("upper", "primary", SUBSURFACE_UPPER_OFFSET),),
+    "upper-detached": (),
+    "reparented": (("reparented-upper", "secondary", SUBSURFACE_REPARENT_OFFSET),),
+}
+SUBSURFACE_PHASE_STREAM_ROLES = {
+    phase: (
+        (() if phase == "initial" else (SUBSURFACE_PHASE_TARGET_PARENTS[phase],))
+        + tuple(role for role, _parent, _offset in SUBSURFACE_PHASE_CHILD_LAYOUTS[phase])
+    )
+    for phase in SUBSURFACE_PHASES
+}
+SUBSURFACE_PHASE_GEOMETRIES = {
+    ("initial", "lower"): (*SUBSURFACE_INITIAL_OFFSET, *SUBSURFACE_LOWER_DIMENSIONS),
+    ("changed", "primary"): (*SUBSURFACE_INITIAL_OFFSET, *SUBSURFACE_LOWER_DIMENSIONS),
+    ("changed", "lower"): (*SUBSURFACE_INITIAL_OFFSET, *SUBSURFACE_LOWER_DIMENSIONS),
+    ("restored", "primary"): (*SUBSURFACE_INITIAL_OFFSET, *SUBSURFACE_LOWER_DIMENSIONS),
+    ("restored", "lower"): (*SUBSURFACE_INITIAL_OFFSET, *SUBSURFACE_LOWER_DIMENSIONS),
+    ("moved", "primary"): SUBSURFACE_MOVE_RESET_GEOMETRY,
+    ("moved", "lower"): (*SUBSURFACE_MOVED_OFFSET, *SUBSURFACE_LOWER_DIMENSIONS),
+    # New-role publication reconciles the full root backing. Every intersecting
+    # layer is therefore replayed in full, unlike a later child-only commit.
+    ("stacked", "primary"): (0, 0, *SUBSURFACE_PARENT_DIMENSIONS["primary"]),
+    ("stacked", "lower"): (*SUBSURFACE_MOVED_OFFSET, *SUBSURFACE_LOWER_DIMENSIONS),
+    ("stacked", "upper"): (*SUBSURFACE_UPPER_OFFSET, *SUBSURFACE_UPPER_DIMENSIONS),
+    ("lower-updated", "primary"): (*SUBSURFACE_MOVED_OFFSET, *SUBSURFACE_LOWER_DIMENSIONS),
+    ("lower-updated", "lower"): (*SUBSURFACE_MOVED_OFFSET, *SUBSURFACE_LOWER_DIMENSIONS),
+    ("lower-updated", "upper"): SUBSURFACE_OVERLAP_GEOMETRY,
+    **{
+        (phase, role): geometry
+        for phase in SUBSURFACE_FRAME_PHASES
+        for role, geometry in (
+            ("primary", (*SUBSURFACE_MOVED_OFFSET, *SUBSURFACE_LOWER_DIMENSIONS)),
+            ("lower", (*SUBSURFACE_MOVED_OFFSET, *SUBSURFACE_LOWER_DIMENSIONS)),
+            ("upper", SUBSURFACE_OVERLAP_GEOMETRY),
+        )
+    },
+    ("lower-destroyed", "primary"): (*SUBSURFACE_MOVED_OFFSET, *SUBSURFACE_LOWER_DIMENSIONS),
+    ("lower-destroyed", "upper"): SUBSURFACE_OVERLAP_GEOMETRY,
+    ("upper-detached", "primary"): (*SUBSURFACE_UPPER_OFFSET, *SUBSURFACE_UPPER_DIMENSIONS),
+    # First-child activation also invalidates old ordinary parent packets.
+    ("reparented", "secondary"): (0, 0, *SUBSURFACE_PARENT_DIMENSIONS["secondary"]),
+    ("reparented", "reparented-upper"): (
+        *SUBSURFACE_REPARENT_OFFSET,
+        *SUBSURFACE_UPPER_DIMENSIONS,
+    ),
+}
+SUBSURFACE_TRANSACTION_RESETS = {
+    "initial": (0, 0, *SUBSURFACE_PARENT_DIMENSIONS["primary"]),
+    **{
+        phase: SUBSURFACE_PHASE_GEOMETRIES[(phase, SUBSURFACE_PHASE_STREAM_ROLES[phase][0])]
+        for phase in SUBSURFACE_PHASES
+        if phase != "initial"
+    },
+}
+SUBSURFACE_PHASE_SOURCE_ORIGINS = {
+    (phase, role): (
+        geometry[:2]
+        if role in ("primary", "secondary")
+        else (
+            geometry[0]
+            - next(
+                offset[0]
+                for child_role, _parent, offset in SUBSURFACE_PHASE_CHILD_LAYOUTS[phase]
+                if child_role == role
+            ),
+            geometry[1]
+            - next(
+                offset[1]
+                for child_role, _parent, offset in SUBSURFACE_PHASE_CHILD_LAYOUTS[phase]
+                if child_role == role
+            ),
+        )
+    )
+    for (phase, role), geometry in SUBSURFACE_PHASE_GEOMETRIES.items()
+}
+SUBSURFACE_PHASE_SOURCE_CROPS = {
+    key: (
+        origin[0],
+        origin[1],
+        origin[0] + SUBSURFACE_PHASE_GEOMETRIES[key][2],
+        origin[1] + SUBSURFACE_PHASE_GEOMETRIES[key][3],
+    )
+    for key, origin in SUBSURFACE_PHASE_SOURCE_ORIGINS.items()
+}
+SUBSURFACE_INFO_ARTIFACTS = {
+    phase: f"server-info-subsurface-{phase}.txt" for phase in SUBSURFACE_PHASES
+}
 KEYBOARD_FIXTURE_TITLE = "Xpra Wayland Keyboard Fixture"
 KEYBOARD_SCENARIO_BASENAME = "live-wayland-keyboard.json"
 CLIPBOARD_FIXTURE_TITLE = "Xpra Wayland Clipboard Fixture"
@@ -142,6 +366,44 @@ CLIPBOARD_LIVE_CHECK_NAMES = (
     "fixture_processes_clean",
     "no_plaintext_marker_artifacts",
 )
+SUBSURFACE_LIVE_CHECK_NAMES = (
+    "fixture_event_stream_exact",
+    "two_parent_wire_windows",
+    "internal_child_sources_identified",
+    "same_lower_updated_repeatedly",
+    "lower_moved_without_buffer_attach",
+    "overlapping_sibling_stack_exact",
+    "child_transactions_raw_rgb32_only",
+    "child_packets_target_current_parent",
+    "global_damage_sequences_unique",
+    "child_ack_owner_exact",
+    "child_ack_drained",
+    "child_sources_have_transparency",
+    "premultiplied_source_over_wire_contract",
+    "atomic_transaction_contract_exact",
+    "initial_alpha_composite_exact",
+    "changed_alpha_composite_exact",
+    "restored_alpha_composite_exact",
+    "moved_alpha_composite_exact",
+    "lower_update_preserves_upper",
+    "child_frame_generations_exact",
+    "continuous_child_active_liveness",
+    "continuous_transactions_complete",
+    "continuous_callback_accounting_exact",
+    "continuous_final_composite_exact",
+    "sibling_destroy_restores_parent_and_upper",
+    "upper_detach_restores_primary",
+    "reparent_preserves_surface_and_buffer",
+    "reparent_composite_exact",
+    "client_pointer_path",
+    "server_pointer_path",
+    "fixture_pointer_path",
+    "lower_source_removed",
+    "upper_wid_stable_and_role_rebound",
+    "no_child_eos",
+    "parents_live_until_exit",
+    "fixture_clean_exit",
+)
 LEGACY_SOURCE_VARIANT_SELECTORS = {"master": ()}
 HARNESS_INPUTS = (
     INFRA_ROOT / ".containerignore",
@@ -157,10 +419,12 @@ HARNESS_INPUTS = (
     INFRA_ROOT / "start_hardware_fixture.sh",
     INFRA_ROOT / "start_wayland_clipboard_fixture.sh",
     INFRA_ROOT / "start_wayland_keyboard_fixture.sh",
+    INFRA_ROOT / "start_wayland_subsurface_fixture.sh",
     INFRA_ROOT / "start_zed.sh",
     INFRA_ROOT / "wayland_keyboard_fixture.py",
     INFRA_ROOT / "wayland_clipboard_fixture.py",
     INFRA_ROOT / "x11_clipboard_fixture.py",
+    INFRA_ROOT / "subsurface_fixture.c",
     INFRA_ROOT / "xkb_xtest_driver.c",
     INFRA_ROOT / "xwd_to_png.py",
     SELECTION_TOOL,
@@ -179,10 +443,12 @@ BUILD_CONTEXT_INPUTS = (
     INFRA_ROOT / "start_hardware_fixture.sh",
     INFRA_ROOT / "start_wayland_clipboard_fixture.sh",
     INFRA_ROOT / "start_wayland_keyboard_fixture.sh",
+    INFRA_ROOT / "start_wayland_subsurface_fixture.sh",
     INFRA_ROOT / "start_zed.sh",
     INFRA_ROOT / "wayland_keyboard_fixture.py",
     INFRA_ROOT / "wayland_clipboard_fixture.py",
     INFRA_ROOT / "x11_clipboard_fixture.py",
+    INFRA_ROOT / "subsurface_fixture.c",
     INFRA_ROOT / "xkb_xtest_driver.c",
     PAYLOAD_HELPER,
 )
@@ -338,6 +604,7 @@ SERVER_ARTIFACT_PATTERNS = (
     re.compile(r"keyboard-fixture\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"clipboard-fixture\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"empty-damage\.(?:exit|pid|stderr|stdout)"),
+    re.compile(r"subsurface-fixture\.(?:exit|pid|stderr|stdout)"),
 )
 CLIENT_ARTIFACT_PATTERNS = (
     re.compile(r"client(?:\..+|-va.*)"),
@@ -348,6 +615,7 @@ CLIENT_ARTIFACT_PATTERNS = (
     re.compile(r"clipboard-(?:consumer-[a-z0-9-]+|monitor|owner)\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"(?:root|window|interaction)-.+"),
     re.compile(r"empty-damage-.+"),
+    re.compile(r"subsurface-client-.+"),
 )
 
 
@@ -603,8 +871,10 @@ class SourceSnapshot:
 class PatchSelection:
     case_slugs: tuple[str, ...]
     digest: str
+    kind: str
     name: str
     patches: tuple[Path, ...]
+    required_gates: tuple[str, ...]
     selector_digests: tuple[tuple[str, str], ...]
     selectors: tuple[str, ...]
 
@@ -992,7 +1262,11 @@ def pull_all_container_artifacts(
     container: str,
     destination: Path,
     role: str,
+    *,
+    include_screen_updates: bool = True,
 ) -> None:
+    if type(include_screen_updates) is not bool:
+        raise LabFailure("invalid screen-update collection policy")
     listing = podman_exec(
         container,
         [
@@ -1036,7 +1310,12 @@ def pull_all_container_artifacts(
         raise LabFailure(
             f"unexpected {role} artifact names: {', '.join(sorted(unexpected))}"
         )
-    pull_container_artifacts(container, destination, relatives)
+    selected = tuple(
+        relative
+        for relative in relatives
+        if include_screen_updates or relative != "screen-updates"
+    )
+    pull_container_artifacts(container, destination, selected)
 
 
 def wait_for_container_artifact(
@@ -2822,7 +3101,12 @@ def artifact_sha256(directory: Path) -> dict[str, str]:
     }
 
 
-def selection_output(selector: str, action: str, *arguments: str) -> str:
+def selection_output_at(
+    lab_root: Path,
+    selector: str,
+    action: str,
+    *arguments: str,
+) -> str:
     if not SELECTION_TOOL.is_file() or SELECTION_TOOL.is_symlink():
         raise LabFailure(f"selection validator is unavailable: {SELECTION_TOOL}")
     return run(
@@ -2830,7 +3114,7 @@ def selection_output(selector: str, action: str, *arguments: str) -> str:
             sys.executable,
             str(SELECTION_TOOL),
             "--lab-root",
-            str(MAINTENANCE_ROOT),
+            str(lab_root),
             "--selection",
             selector,
             action,
@@ -2838,6 +3122,10 @@ def selection_output(selector: str, action: str, *arguments: str) -> str:
         ],
         announce=False,
     ).stdout.strip()
+
+
+def selection_output(selector: str, action: str, *arguments: str) -> str:
+    return selection_output_at(MAINTENANCE_ROOT, selector, action, *arguments)
 
 
 def selected_patch_paths(selector: str) -> tuple[Path, ...]:
@@ -2870,9 +3158,15 @@ def resolve_patch_selection(
     if selection_name:
         selectors = (selection_name,)
         name = selection_name
+        kind = selection_output(selection_name, "kind")
+        required_gates = tuple(
+            selection_output(selection_name, "required-gates").splitlines()
+        )
     else:
         name = legacy_variant or "master"
         selectors = LEGACY_SOURCE_VARIANT_SELECTORS[name]
+        kind = "legacy"
+        required_gates = ()
 
     patches: list[Path] = []
     case_slugs: list[str] = []
@@ -2906,11 +3200,38 @@ def resolve_patch_selection(
     return PatchSelection(
         case_slugs=tuple(case_slugs),
         digest=selection_digest,
+        kind=kind,
         name=name,
         patches=tuple(patches),
+        required_gates=required_gates,
         selector_digests=tuple(selector_digests),
         selectors=selectors,
     )
+
+
+def validate_live_profile_selection(
+    *,
+    application: str,
+    lifecycle: str,
+    encoding: str,
+    h264_client_policy: str,
+    alpha_scenarios: str,
+    selection: PatchSelection,
+) -> None:
+    """Apply profile admission to validated selection metadata."""
+    try:
+        validate_profile_selection(
+            application=application,
+            lifecycle=lifecycle,
+            encoding=encoding,
+            h264_client_policy=h264_client_policy,
+            alpha_scenarios=alpha_scenarios,
+            selection=selection.name,
+            selection_kind=selection.kind,
+            required_gates=selection.required_gates,
+        )
+    except ProfileError as error:
+        raise LabFailure(str(error)) from error
 
 
 def client_selection_for_application(
@@ -2918,7 +3239,7 @@ def client_selection_for_application(
     server_selection: PatchSelection,
 ) -> PatchSelection:
     """Select the client source required by one live application boundary."""
-    if application == "clipboard":
+    if application in {"clipboard", "subsurface"}:
         return server_selection
     return resolve_patch_selection(None, "master")
 
@@ -2931,20 +3252,24 @@ def validate_endpoint_contexts(
     """Fail closed when a live profile binds the wrong endpoint selection."""
     server = server_context.selection
     client = client_context.selection
-    if application != "clipboard":
+    if application not in {"clipboard", "subsurface"}:
         if client.name != "master" or client.selectors or client.patches:
             raise LabFailure("live client must use the clean embedded source")
         return
     selection_fields = (
         "case_slugs",
         "digest",
+        "kind",
         "name",
         "patches",
+        "required_gates",
         "selector_digests",
         "selectors",
     )
     if any(getattr(client, field) != getattr(server, field) for field in selection_fields):
-        raise LabFailure("clipboard endpoints do not use the same selected patch queue")
+        raise LabFailure(
+            f"{application} endpoints do not use the same selected patch queue"
+        )
     if (
         client_context.digest != server_context.digest
         or client_context.resolution != server_context.resolution
@@ -2954,7 +3279,7 @@ def validate_endpoint_contexts(
             and client_context.archive_sha256 != server_context.archive_sha256
         )
     ):
-        raise LabFailure("clipboard endpoint build contexts are not identical")
+        raise LabFailure(f"{application} endpoint build contexts are not identical")
 
 
 def ensure_patch_selection_current(selection: PatchSelection) -> None:
@@ -3329,7 +3654,9 @@ def prepare_build_context(
             "selection": {
                 "case_slugs": list(selection.case_slugs),
                 "digest": selection.digest,
+                "kind": selection.kind,
                 "name": selection.name,
+                "required_gates": list(selection.required_gates),
                 "resolution": resolution,
                 "selector_digests": dict(selection.selector_digests),
                 "selectors": list(selection.selectors),
@@ -3397,10 +3724,12 @@ def snapshot_patch_selection(
             {
                 "case_slugs": selection.case_slugs,
                 "digest": selection.digest,
+                "kind": selection.kind,
                 "name": selection.name,
                 "patches": [
                     path.relative_to(MAINTENANCE_ROOT).as_posix() for path in selection.patches
                 ],
+                "required_gates": selection.required_gates,
                 "resolution": context.resolution,
                 "selector_digests": dict(selection.selector_digests),
                 "selectors": selection.selectors,
@@ -3421,6 +3750,26 @@ def snapshot_patch_selection(
             "--destination",
             str(selector_snapshot),
         )
+        frozen_digest = selection_output_at(selector_snapshot, selector, "digest")
+        expected_digest = dict(selection.selector_digests)[selector]
+        if frozen_digest != expected_digest:
+            raise LabFailure(f"frozen selection digest is inconsistent: {selector}")
+        if selection.selectors == (selection.name,):
+            frozen_kind = selection_output_at(selector_snapshot, selector, "kind")
+            frozen_gates = tuple(
+                selection_output_at(
+                    selector_snapshot,
+                    selector,
+                    "required-gates",
+                ).splitlines()
+            )
+            if (
+                frozen_kind != selection.kind
+                or frozen_gates != selection.required_gates
+            ):
+                raise LabFailure(
+                    f"frozen selection admission is inconsistent: {selector}"
+                )
     ensure_patch_selection_current(selection)
 
 
@@ -3613,7 +3962,7 @@ def freeze_owned_inputs(
         )
         client_context = (
             server_context
-            if application == "clipboard"
+            if application in {"clipboard", "subsurface"}
             else prepare_build_context(
                 state_root,
                 snapshot,
@@ -3686,6 +4035,95 @@ def _validated_input_checksums(inputs: Path) -> dict[str, str]:
     return observed
 
 
+def _validate_frozen_selection(
+    inputs: Path,
+    role: str,
+    selection: PatchSelection,
+    resolution: dict[str, Any],
+) -> None:
+    """Replay admission metadata from the immutable selection snapshot."""
+    root = inputs / "selections" / role
+    ensure_private_directory(root)
+    record_path = root / "selection.json"
+    ensure_private_regular_file(record_path)
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise LabFailure(f"frozen {role} selection record is invalid JSON") from error
+    required = {
+        "case_slugs",
+        "digest",
+        "kind",
+        "name",
+        "patches",
+        "required_gates",
+        "resolution",
+        "selector_digests",
+        "selectors",
+    }
+    if not isinstance(record, dict) or set(record) != required:
+        raise LabFailure(f"frozen {role} selection record fields are inconsistent")
+    recorded_patches = record.get("patches")
+    expected_record = {
+        "case_slugs": list(selection.case_slugs),
+        "digest": selection.digest,
+        "kind": selection.kind,
+        "name": selection.name,
+        "required_gates": list(selection.required_gates),
+        "resolution": resolution,
+        "selector_digests": dict(selection.selector_digests),
+        "selectors": list(selection.selectors),
+    }
+    if (
+        any(record.get(key) != value for key, value in expected_record.items())
+        or not isinstance(recorded_patches, list)
+        or not all(isinstance(value, str) for value in recorded_patches)
+    ):
+        raise LabFailure(f"frozen {role} selection record is inconsistent")
+    if selection.selectors == (selection.name,):
+        if selection.kind not in {"case", "stack"}:
+            raise LabFailure(f"frozen {role} named selection kind is inconsistent")
+    elif (
+        selection.kind != "legacy"
+        or selection.required_gates
+        or (not selection.selectors and (selection.case_slugs or recorded_patches))
+    ):
+        raise LabFailure(f"frozen {role} legacy selection admission is inconsistent")
+
+    snapshots = root / "validated-manifests"
+    ensure_private_directory(snapshots)
+    expected_directories = {
+        f"{index:04d}-{selector.replace('/', '-')}"
+        for index, selector in enumerate(selection.selectors, start=1)
+    }
+    if {path.name for path in snapshots.iterdir()} != expected_directories:
+        raise LabFailure(f"frozen {role} selection snapshots are inconsistent")
+    frozen_patches: list[str] = []
+    frozen_cases: list[str] = []
+    for index, selector in enumerate(selection.selectors, start=1):
+        snapshot = snapshots / f"{index:04d}-{selector.replace('/', '-')}"
+        ensure_private_directory(snapshot)
+        expected_digest = dict(selection.selector_digests)[selector]
+        if selection_output_at(snapshot, selector, "digest") != expected_digest:
+            raise LabFailure(f"frozen {role} selection digest is inconsistent")
+        frozen_patches.extend(
+            selection_output_at(snapshot, selector, "patches").splitlines()
+        )
+        frozen_cases.extend(selection_output_at(snapshot, selector, "cases").splitlines())
+        if selection.selectors == (selection.name,):
+            if selection_output_at(snapshot, selector, "kind") != selection.kind:
+                raise LabFailure(f"frozen {role} selection kind is inconsistent")
+            gates = tuple(
+                selection_output_at(snapshot, selector, "required-gates").splitlines()
+            )
+            if gates != selection.required_gates:
+                raise LabFailure(
+                    f"frozen {role} selection required gates are inconsistent"
+                )
+    if frozen_patches != recorded_patches or frozen_cases != list(selection.case_slugs):
+        raise LabFailure(f"frozen {role} selection contents are inconsistent")
+
+
 def _bound_context(inputs: Path, role: str, manifest: dict[str, Any]) -> BuildContext:
     context_manifest_path = inputs / "contexts" / f"{role}.manifest.json"
     ensure_private_regular_file(context_manifest_path)
@@ -3704,6 +4142,8 @@ def _bound_context(inputs: Path, role: str, manifest: dict[str, Any]) -> BuildCo
     resolution = selection_value.get("resolution")
     selection_name = selection_value.get("name")
     selection_digest = selection_value.get("digest")
+    selection_kind = selection_value.get("kind")
+    required_gates = selection_value.get("required_gates")
     if (
         not isinstance(case_slugs, list)
         or not all(isinstance(value, str) for value in case_slugs)
@@ -3721,6 +4161,10 @@ def _bound_context(inputs: Path, role: str, manifest: dict[str, Any]) -> BuildCo
         or not isinstance(selection_name, str)
         or not isinstance(selection_digest, str)
         or not re.fullmatch(r"[0-9a-f]{64}", selection_digest)
+        or selection_kind not in {"case", "stack", "legacy"}
+        or not isinstance(required_gates, list)
+        or not all(isinstance(value, str) for value in required_gates)
+        or len(required_gates) != len(set(required_gates))
     ):
         raise LabFailure(f"frozen {role} selection provenance is invalid")
     context_digest = manifest.get(f"{role}_context_sha256")
@@ -3757,11 +4201,14 @@ def _bound_context(inputs: Path, role: str, manifest: dict[str, Any]) -> BuildCo
     selection = PatchSelection(
         case_slugs=tuple(case_slugs),
         digest=selection_digest,
+        kind=selection_kind,
         name=selection_name,
         patches=(),
+        required_gates=tuple(required_gates),
         selector_digests=tuple((key, selector_digests[key]) for key in selectors),
         selectors=tuple(selectors),
     )
+    _validate_frozen_selection(inputs, role, selection, resolution)
     return BuildContext(
         digest=context_digest,
         manifest=context_manifest,
@@ -4107,6 +4554,16 @@ def compare_rgb_images(reference_path: Path, observed_path: Path) -> dict[str, A
         reference = reference_source.convert("RGB")
     with Image.open(observed_path) as observed_source:
         observed = observed_source.convert("RGB")
+    return compare_rgb_image_values(reference, observed)
+
+
+def compare_rgb_image_values(
+    reference: Image.Image,
+    observed: Image.Image,
+) -> dict[str, Any]:
+    """Compare two loaded images without creating another evidence file."""
+    reference = reference.convert("RGB")
+    observed = observed.convert("RGB")
     if reference.size != observed.size:
         return {
             "exact": False,
@@ -4182,6 +4639,16 @@ def pixel_pipeline_evidence(
         analyze_png(directory / selected["source"]) if selected is not None else None
     )
     return evidence, source_image
+
+
+def pixel_pipeline_source_screenshots(
+    application: str,
+    screenshots: list[str],
+) -> list[str]:
+    """Exclude asynchronous captures from the packet-authoritative WSSO gate."""
+    if application == "subsurface":
+        return []
+    return screenshots
 
 
 def pixel_error_limit(application: str, encoding: str) -> float:
@@ -4587,6 +5054,289 @@ def wait_for_process_exit(
     return process_exit_status(directory, name)
 
 
+def packet_sequence_authority(
+    info_path: Path,
+    *,
+    run_id: str,
+    selected_case_slugs: tuple[str, ...],
+    selection_sha256: str,
+    expected_window_ids: tuple[int, ...],
+) -> dict[str, Any]:
+    """Bind the allocator namespace to frozen source and one real connection."""
+    if not re.fullmatch(r"[0-9a-f]{64}", selection_sha256):
+        raise LabFailure("packet sequence authority has no frozen selection")
+    values: dict[str, str] = {}
+    for line in info_path.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and (key.startswith("client.") or key == "uuid"):
+            if key in values:
+                raise LabFailure(f"duplicate connection information: {key}")
+            values[key] = value
+    connections = {
+        key.removesuffix(".uuid"): value
+        for key, value in values.items()
+        if re.fullmatch(r"client\.[0-9]+\.uuid", key)
+    }
+    client_prefixes = {
+        match.group(1)
+        for key in values
+        if (match := re.match(r"(client\.[0-9]+)\.", key))
+    }
+    if len(connections) != 1 or client_prefixes != set(connections):
+        raise LabFailure("packet sequence authority needs one owned connection")
+    connection, connection_uuid = next(iter(connections.items()))
+    if (
+        not connection_uuid
+        or not run_id
+        or not values.get("uuid")
+        or not values.get(f"{connection}.session-id")
+        or not values.get(f"{connection}.connection.endpoint")
+        or re.fullmatch(r"[0-9]+", values.get(f"{connection}.connection_time", "")) is None
+        or values.get(f"{connection}.connection.active") != "True"
+        or values.get(f"{connection}.connection.closed") != "False"
+        or not expected_window_ids
+        or len(set(expected_window_ids)) != len(expected_window_ids)
+        or any(_exact_int(wid, positive=True) is None for wid in expected_window_ids)
+        or set(server_xpra_window_inventory(info_path)) != set(expected_window_ids)
+    ):
+        raise LabFailure("packet sequence authority has ambiguous connection/windows")
+    global_source = "wayland-subsurface-stream-ownership" in selected_case_slugs
+    counter_key = f"{connection}.window.damage.next-packet-sequence"
+    owners_key = f"{connection}.window.damage.ack-owners"
+    counter = values.get(counter_key)
+    owners = values.get(owners_key)
+    if global_source:
+        if (
+            counter is None or re.fullmatch(r"[1-9][0-9]*", counter) is None
+            or owners is None or re.fullmatch(r"0|[1-9][0-9]*", owners) is None
+        ):
+            raise LabFailure("selected global allocator lacks its runtime authority")
+    elif counter is not None or owners is not None:
+        raise LabFailure("unexpected global allocator on a per-window source selection")
+    return {
+        "schema": 1,
+        "namespace": "connection-v1" if global_source else "window-v1",
+        "source_selection_sha256": selection_sha256,
+        "connection": connection,
+        "connection_uuid": connection_uuid,
+        "run_id": run_id,
+        "server_uuid": values["uuid"],
+        "client_session_id": values[f"{connection}.session-id"],
+        "connection_time": int(values[f"{connection}.connection_time"]),
+        "endpoint": values[f"{connection}.connection.endpoint"],
+        "server_info_sha256": sha256_file(info_path),
+        "window_ids": sorted(expected_window_ids),
+        "next_packet_sequence": int(counter) if counter is not None else None,
+    }
+
+
+def _packet_sequence_fingerprint(packet: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(packet, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _packet_sequence_rows(ledger: Any) -> dict[int, dict[str, Any]] | None:
+    """Validate a finite global prefix; missing IDs are never presumed cancelled."""
+    if not isinstance(ledger, dict) or set(ledger) != {
+        "schema", "authority", "frontier", "packets",
+    } or _exact_int(ledger.get("schema")) != 1:
+        return None
+    authority = ledger.get("authority")
+    if not isinstance(authority, dict) or set(authority) != {
+        "schema", "namespace", "source_selection_sha256", "connection",
+        "connection_uuid", "server_info_sha256", "window_ids", "next_packet_sequence",
+        "run_id", "server_uuid", "client_session_id", "connection_time", "endpoint",
+    }:
+        return None
+    window_ids = authority.get("window_ids")
+    if (
+        _exact_int(authority.get("schema")) != 1
+        or authority.get("namespace") != "connection-v1"
+        or not isinstance(window_ids, list) or not window_ids
+        or any(_exact_int(wid, positive=True) is None for wid in window_ids)
+        or window_ids != sorted(set(window_ids))
+        or not isinstance(authority.get("connection"), str)
+        or not re.fullmatch(r"client\.[0-9]+", authority["connection"])
+        or not isinstance(authority.get("connection_uuid"), str)
+        or not authority["connection_uuid"]
+        or any(
+            not isinstance(authority.get(key), str) or not authority[key]
+            for key in ("run_id", "server_uuid", "client_session_id", "endpoint")
+        )
+        or _exact_int(authority.get("connection_time")) is None
+        or authority["connection_time"] < 0
+        or _exact_int(authority.get("next_packet_sequence"), positive=True) is None
+        or any(
+            not isinstance(authority.get(key), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", authority[key])
+            for key in ("source_selection_sha256", "server_info_sha256")
+        )
+    ):
+        return None
+    rows = ledger.get("packets")
+    frontier = _exact_int(ledger.get("frontier"), positive=True)
+    if not isinstance(rows, list) or not rows or frontier != len(rows) + 1:
+        return None
+    result: dict[int, dict[str, Any]] = {}
+    paths: set[str] = set()
+    for sequence, row in enumerate(rows, 1):
+        if not isinstance(row, dict) or set(row) != {
+            "sequence", "window_id", "relative_info", "payload_bytes",
+            "payload_sha256", "packet_sha256",
+        }:
+            return None
+        wid = _exact_int(row.get("window_id"), positive=True)
+        if (
+            _exact_int(row.get("sequence"), positive=True) != sequence
+            or wid not in window_ids
+            or _exact_int(row.get("payload_bytes"), positive=True) is None
+            or not isinstance(row.get("relative_info"), str)
+            or row.get("relative_info") in paths
+            or not re.fullmatch(
+                rf"screen-updates/{wid}/(?:0|[1-9][0-9]*)/(?:0|[1-9][0-9]*)\.info",
+                row["relative_info"],
+            )
+            or any(
+                not isinstance(row.get(key), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", row[key])
+                for key in ("payload_sha256", "packet_sha256")
+            )
+        ):
+            return None
+        paths.add(row["relative_info"])
+        result[sequence] = row
+    return result
+
+
+def _packet_sequence_range_valid(
+    packets: list[dict[str, Any]],
+    window_id: int,
+    ledger: dict[str, Any] | None = None,
+    *,
+    first: int | None = None,
+    last: int | None = None,
+    rows: dict[int, dict[str, Any]] | None = None,
+) -> bool:
+    if not packets or any(not isinstance(packet, dict) for packet in packets):
+        return False
+    sequences = [_exact_int(packet.get("sequence"), positive=True) for packet in packets]
+    if any(sequence is None for sequence in sequences):
+        return False
+    first = sequences[0] if first is None else first
+    last = sequences[-1] if last is None else last
+    if (
+        _exact_int(first, positive=True) is None
+        or _exact_int(last, positive=True) is None
+        or first > last
+    ):
+        return False
+    if ledger is None:
+        return len(sequences) == last - first + 1 and sequences == list(range(first, last + 1))
+    if rows is None:
+        rows = _packet_sequence_rows(ledger)
+    if rows is None or window_id not in ledger["authority"]["window_ids"]:
+        return False
+    if last >= ledger["frontier"]:
+        return False
+    expected = [
+        sequence for sequence, row in rows.items()
+        if first <= sequence <= last and row["window_id"] == window_id
+    ]
+    if sequences != expected:
+        return False
+    return all(
+        (row := rows[int(packet["sequence"])])["relative_info"] == packet.get("relative_info")
+        and row["payload_bytes"] == packet.get("payload_bytes")
+        and row["payload_sha256"] == packet.get("payload_sha256")
+        and row["packet_sha256"] == _packet_sequence_fingerprint(packet)
+        for packet in packets
+    )
+
+
+def _packet_sequence_updates_valid(updates: dict[str, Any]) -> bool:
+    packets = updates.get("updates")
+    window_id = _exact_int(updates.get("window_id"), positive=True)
+    if not isinstance(packets, list) or window_id is None:
+        return False
+    ledger = updates.get("packet_sequence_ledger")
+    span = updates.get("packet_sequence_span")
+    if ledger is not None:
+        if not isinstance(span, list) or len(span) != 2:
+            return False
+        return _packet_sequence_range_valid(
+            packets, window_id, ledger, first=span[0], last=span[1],
+        )
+    return span is None and _packet_sequence_range_valid(packets, window_id)
+
+
+def _packet_sequence_subset(
+    updates: dict[str, Any], packets: list[dict[str, Any]],
+    *, first: int | None = None, last: int | None = None,
+) -> dict[str, Any]:
+    result = {
+        **updates, "count": len(packets),
+        "encodings": sorted({str(packet.get("encoding")) for packet in packets}),
+        "updates": packets,
+    }
+    if updates.get("packet_sequence_ledger") is not None and packets:
+        result["packet_sequence_span"] = [
+            packets[0]["sequence"] if first is None else first,
+            packets[-1]["sequence"] if last is None else last,
+        ]
+    return result
+
+
+def bind_packet_sequence_ledger(
+    windows: dict[int, dict[str, Any]],
+    authority: dict[str, Any],
+    *, frontier: int | None = None,
+) -> dict[int, dict[str, Any]]:
+    """Bind parsed owned ordinary-root packets without changing their wire IDs."""
+    if set(windows) != set(authority.get("window_ids", ())):
+        raise LabFailure("packet ledger has an unexpected source-window inventory")
+    if authority.get("namespace") == "window-v1":
+        if any(not _packet_sequence_updates_valid(window) for window in windows.values()):
+            raise LabFailure("legacy per-window packet history is not dense")
+        return windows
+    rows = []
+    for wid, window in windows.items():
+        packets = window.get("updates")
+        if window.get("window_id") != wid or not isinstance(packets, list):
+            raise LabFailure("packet ledger source-window identity mismatch")
+        for packet in packets:
+            sequence = _exact_int(packet.get("sequence"), positive=True)
+            if sequence is None:
+                raise LabFailure("packet ledger has an invalid sequence")
+            if frontier is not None and sequence >= frontier:
+                continue
+            rows.append({
+                "sequence": sequence, "window_id": wid,
+                "relative_info": packet.get("relative_info"),
+                "payload_bytes": packet.get("payload_bytes"),
+                "payload_sha256": packet.get("payload_sha256"),
+                "packet_sha256": _packet_sequence_fingerprint(packet),
+            })
+    rows.sort(key=lambda row: row["sequence"])
+    if not rows:
+        raise LabFailure("packet ledger has no published packets")
+    if frontier is None:
+        frontier = rows[-1]["sequence"] + 1
+    ledger = {"schema": 1, "authority": authority, "frontier": frontier, "packets": rows}
+    if _packet_sequence_rows(ledger) is None:
+        raise LabFailure("packet ledger has a missing, duplicate, or unowned global ID")
+    result = {}
+    for wid, window in windows.items():
+        packets = [packet for packet in window["updates"] if packet["sequence"] < frontier]
+        result[wid] = {
+            **_packet_sequence_subset(window, packets),
+            "packet_sequence_ledger": ledger, "packet_sequence_span": [1, frontier - 1],
+        }
+        if packets and not _packet_sequence_updates_valid(result[wid]):
+            raise LabFailure("packet ledger does not bind its full source projection")
+    return result
+
+
 def parse_saved_updates(directory: Path, xpra_wid: int) -> dict[str, Any]:
     updates: list[dict[str, Any]] = []
     window_directory = directory / "screen-updates" / str(xpra_wid)
@@ -4709,6 +5459,150 @@ def saved_window_initial_pixel_format(directory: Path, xpra_wid: int) -> str:
     return pixel_format
 
 
+def _complete_packet_sequence_prefix(packets: list[dict[str, Any]], wid: int) -> int:
+    """Seal whole damage groups; only a genuine unpublished final edge tail waits."""
+    locations = _saved_packet_bucket_locations(packets, wid)
+    if locations is None:
+        raise LabFailure("packet snapshot has malformed saved bucket/index order")
+    offset = 0
+    previous_sequence = 0
+    while offset < len(packets):
+        first = packets[offset]
+        location = locations[offset]
+        options = first.get("options")
+        flush = _exact_int(options.get("flush")) if isinstance(options, dict) else None
+        if flush is None or flush < 0:
+            raise LabFailure("packet snapshot has malformed damage-group order")
+        group = packets[offset:offset + flush + 1]
+        for index, packet in enumerate(group):
+            packet_location = locations[offset + index]
+            packet_options = packet.get("options")
+            sequence = _exact_int(packet.get("sequence"), positive=True)
+            if (
+                packet_location != (location[0], location[1] + index)
+                or sequence is None or sequence <= previous_sequence
+                or not isinstance(packet_options, dict)
+                or _exact_int(packet_options.get("flush")) != flush - index
+                or _exact_int(packet.get("payload_bytes"), positive=True) is None
+            ):
+                raise LabFailure("packet snapshot has a malformed or missing group member")
+            previous_sequence = sequence
+        if len(group) != flush + 1:
+            if not all(_lossless_rgb_edge_kind(packet) is not None for packet in group):
+                raise LabFailure("packet snapshot has an invalid unpublished tail")
+            return offset
+        offset += len(group)
+    return offset
+
+
+def synchronize_packet_sequence_projection(
+    server: str,
+    directory: Path,
+    wid: int,
+    authority: dict[str, Any] | None,
+    *, primary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Freeze the first source cut before sampling any other ordinary root."""
+    primary = primary if primary is not None else synchronize_saved_updates(server, directory, wid)
+    if authority is None or authority.get("namespace") == "window-v1":
+        return primary
+    packets = primary["updates"]
+    end = _complete_packet_sequence_prefix(packets, wid)
+    if not end:
+        raise LabFailure("packet snapshot has no complete primary damage group yet")
+    frontier = packets[end - 1]["sequence"] + 1
+    observed_frontier = packets[-1]["sequence"] + 1
+    unsealed_primary = [
+        {"sequence": packet["sequence"], "relative_info": packet["relative_info"],
+         "packet_sha256": _packet_sequence_fingerprint(packet)}
+        for packet in packets[end:]
+    ]
+    windows = {wid: primary}
+    for other_wid in authority["window_ids"]:
+        if other_wid != wid:
+            windows[other_wid] = synchronize_saved_updates(server, directory, other_wid)
+    result = bind_packet_sequence_ledger(windows, authority, frontier=frontier)[wid]
+    result["packet_sequence_observation"] = {
+        "observed_frontier": observed_frontier,
+        "sealed_frontier": frontier,
+        "unsealed_primary": unsealed_primary,
+    }
+    return result
+
+
+def retain_packet_sequence_observation(directory: Path, label: str, updates: dict[str, Any]) -> None:
+    ledger = updates.get("packet_sequence_ledger")
+    if ledger is None:
+        return
+    if not _packet_sequence_updates_valid(updates):
+        raise LabFailure("cannot retain an invalid packet sequence observation")
+    path = directory / "h264-sequence-observations.json"
+    value = json.loads(path.read_text()) if path.is_file() else {"schema": 1, "observations": {}}
+    observations = value["observations"]
+    if label in observations or len(observations) >= 8:
+        raise LabFailure("packet sequence observation label is repeated or unbounded")
+    observations[label] = {
+        "window_id": updates["window_id"], "ledger": ledger,
+        "observation": updates["packet_sequence_observation"],
+    }
+    replace_private_json(path, value)
+
+
+def validate_packet_sequence_observations(directory: Path, windows: dict[int, dict[str, Any]]) -> None:
+    path = directory / "h264-sequence-observations.json"
+    if not path.is_file():
+        raise LabFailure("global packet sequence readiness evidence is missing")
+    value = json.loads(path.read_text())
+    if (
+        not isinstance(value, dict) or set(value) != {"schema", "observations"}
+        or _exact_int(value.get("schema")) != 1
+        or not isinstance(value.get("observations"), dict)
+        or not 1 <= len(value["observations"]) <= 8
+        or "readiness" not in value["observations"]
+    ):
+        raise LabFailure("invalid packet sequence observations")
+    for retained in value["observations"].values():
+        if (
+            not isinstance(retained, dict) or set(retained) != {"window_id", "ledger", "observation"}
+            or retained.get("window_id") not in windows
+        ):
+            raise LabFailure("packet sequence observation has an unknown owner")
+        ledger = retained.get("ledger")
+        rows = _packet_sequence_rows(ledger)
+        final = windows[retained["window_id"]]["packet_sequence_ledger"]
+        if rows is None or ledger["authority"] != final["authority"] or ledger["packets"] != final["packets"][:len(rows)]:
+            raise LabFailure("final saved packets do not preserve the observed prefix")
+        observation = retained.get("observation")
+        if (
+            not isinstance(observation, dict)
+            or set(observation) != {"observed_frontier", "sealed_frontier", "unsealed_primary"}
+            or observation.get("sealed_frontier") != ledger["frontier"]
+            or _exact_int(observation.get("observed_frontier"), positive=True) is None
+            or observation["observed_frontier"] < ledger["frontier"]
+            or not isinstance(observation.get("unsealed_primary"), list)
+        ):
+            raise LabFailure("invalid sealed packet observation frontier")
+        final_rows = _packet_sequence_rows(final)
+        if final_rows is None:
+            raise LabFailure("final packet sequence ledger is invalid")
+        previous_sequence = ledger["frontier"] - 1
+        for tail in observation["unsealed_primary"]:
+            if (
+                not isinstance(tail, dict) or set(tail) != {"sequence", "relative_info", "packet_sha256"}
+                or _exact_int(tail.get("sequence"), positive=True) is None
+                or not previous_sequence < tail["sequence"] < observation["observed_frontier"]
+            ):
+                raise LabFailure("invalid unpublished primary tail")
+            row = final_rows.get(tail.get("sequence"))
+            if row is None or row["window_id"] != retained["window_id"] or any(
+                row[key] != tail.get(key) for key in ("relative_info", "packet_sha256")
+            ):
+                raise LabFailure("final history lost an observed unpublished primary tail")
+            previous_sequence = tail["sequence"]
+        if previous_sequence != observation["observed_frontier"] - 1:
+            raise LabFailure("observed packet frontier does not match its retained tail")
+
+
 def only_positive_h264_packets(updates: dict[str, Any] | None) -> bool:
     """Return whether one exact window produced only non-empty H.264 updates."""
     if not isinstance(updates, dict):
@@ -4762,12 +5656,11 @@ def only_positive_alpha_capable_packets(updates: dict[str, Any] | None) -> bool:
     ]
     if window_id is None or any(sequence is None for sequence in sequences):
         return False
-    exact_sequences = [int(sequence) for sequence in sequences if sequence is not None]
-    if exact_sequences != list(
-        range(exact_sequences[0], exact_sequences[0] + len(exact_sequences))
-    ):
+    if not _packet_sequence_updates_valid(updates):
         return False
-    return _alpha_safe_warmup_groups_valid(packets, window_id)
+    return _alpha_safe_warmup_groups_valid(
+        packets, window_id, updates.get("packet_sequence_ledger"),
+    )
 
 
 def _exact_int(value: Any, *, positive: bool = False) -> int | None:
@@ -4895,13 +5788,14 @@ def _saved_update_group_location(
     return group, int(index_match.group(1))
 
 
-def _ordered_saved_damage_groups(
-    packets: list[dict[str, Any]],
-    window_id: int,
-) -> list[list[dict[str, Any]]] | None:
+def _saved_packet_bucket_locations(
+    packets: list[dict[str, Any]], window_id: int,
+) -> list[tuple[str, int]] | None:
+    """File indexes belong to rounded-time buckets, not individual flush groups."""
     seen_groups: set[str] = set()
     previous_group = ""
     expected_index = 0
+    locations = []
     for packet in packets:
         location = _saved_update_group_location(packet, window_id)
         sequence = _exact_int(packet.get("sequence"), positive=True)
@@ -4919,6 +5813,21 @@ def _ordered_saved_damage_groups(
         if index != expected_index:
             return None
         expected_index += 1
+        locations.append(location)
+    return locations
+
+
+def _ordered_saved_damage_groups(
+    packets: list[dict[str, Any]],
+    window_id: int,
+    sequence_ledger: dict[str, Any] | None = None,
+) -> list[list[dict[str, Any]]] | None:
+    rows = _packet_sequence_rows(sequence_ledger) if sequence_ledger is not None else None
+    if sequence_ledger is not None and rows is None:
+        return None
+    locations = _saved_packet_bucket_locations(packets, window_id)
+    if locations is None:
+        return None
 
     ordered_groups: list[list[dict[str, Any]]] = []
     offset = 0
@@ -4936,18 +5845,15 @@ def _ordered_saved_damage_groups(
         group_packets = packets[offset : offset + group_length]
         if len(group_packets) != group_length:
             return None
-        first_location = _saved_update_group_location(first, window_id)
-        if first_location is None:
-            return None
-        directory = first_location[0]
+        directory = locations[offset][0]
         if any(
-            (location := _saved_update_group_location(packet, window_id)) is None
-            or location[0] != directory
-            for packet in group_packets
+            location[0] != directory
+            for location in locations[offset:offset + group_length]
         ):
             return None
-        sequences = [int(packet["sequence"]) for packet in group_packets]
-        if sequences != list(range(sequences[0], sequences[0] + len(sequences))):
+        if not _packet_sequence_range_valid(
+            group_packets, window_id, sequence_ledger, rows=rows,
+        ):
             return None
         flushes: list[int] = []
         for packet in group_packets:
@@ -4966,8 +5872,9 @@ def _ordered_saved_damage_groups(
 def _alpha_safe_warmup_groups_valid(
     packets: list[dict[str, Any]],
     window_id: int,
+    sequence_ledger: dict[str, Any] | None = None,
 ) -> bool:
-    groups = _ordered_saved_damage_groups(packets, window_id)
+    groups = _ordered_saved_damage_groups(packets, window_id, sequence_ledger)
     if groups is None:
         return False
     for group in groups:
@@ -5141,12 +6048,9 @@ def adaptive_h264_frame_readiness_valid(
     ]
     if any(sequence is None for sequence in sequences):
         return False
-    exact_sequences = [int(sequence) for sequence in sequences if sequence is not None]
-    if exact_sequences != list(
-        range(exact_sequences[0], exact_sequences[0] + len(exact_sequences))
-    ):
+    if not _packet_sequence_updates_valid(updates):
         return False
-    groups = _ordered_saved_damage_groups(packets, window_id)
+    groups = _ordered_saved_damage_groups(packets, window_id, updates.get("packet_sequence_ledger"))
     if groups is None:
         return False
     h264_group_seen = False
@@ -5170,7 +6074,7 @@ def _h264_damage_groups_valid(updates: dict[str, Any]) -> bool:
         return False
     if not all(isinstance(packet, dict) for packet in packets):
         return False
-    groups = _ordered_saved_damage_groups(packets, window_id)
+    groups = _ordered_saved_damage_groups(packets, window_id, updates.get("packet_sequence_ledger"))
     return groups is not None and _h264_packet_groups_valid(groups)
 
 
@@ -5197,10 +6101,7 @@ def h264_with_lossless_rgb_edges(updates: dict[str, Any] | None) -> bool:
     ]
     if any(sequence is None for sequence in sequences):
         return False
-    exact_sequences = [int(sequence) for sequence in sequences if sequence is not None]
-    if sorted(exact_sequences) != list(
-        range(min(exact_sequences), max(exact_sequences) + 1)
-    ):
+    if not _packet_sequence_updates_valid(updates):
         return False
 
     for packet in packets:
@@ -5247,19 +6148,16 @@ def adaptive_h264_production_updates(
     ]
     if any(sequence is None for sequence in sequences):
         return None
-    exact_sequences = [int(sequence) for sequence in sequences if sequence is not None]
-    if exact_sequences != list(
-        range(exact_sequences[0], exact_sequences[0] + len(exact_sequences))
-    ):
+    if not _packet_sequence_updates_valid(updates):
         return None
-    groups = _ordered_saved_damage_groups(packets, window_id)
+    groups = _ordered_saved_damage_groups(packets, window_id, updates.get("packet_sequence_ledger"))
     if groups is None:
         return None
     h264_groups: list[list[dict[str, Any]]] = []
     for group in groups:
         group_encodings = {str(packet["encoding"]) for packet in group}
         if group_encodings <= {"webp", "rgb32"}:
-            if not _alpha_safe_warmup_groups_valid(group, window_id):
+            if not _alpha_safe_warmup_groups_valid(group, window_id, updates.get("packet_sequence_ledger")):
                 return None
             continue
         if not _h264_readiness_group_valid(group):
@@ -5276,14 +6174,7 @@ def adaptive_h264_production_updates(
     production_packets = [
         packet for group in production_groups for packet in group
     ]
-    return {
-        **updates,
-        "count": len(production_packets),
-        "encodings": sorted(
-            {str(packet["encoding"]) for packet in production_packets}
-        ),
-        "updates": production_packets,
-    }
+    return _packet_sequence_subset(updates, production_packets)
 
 
 def zed_h264_stimulus_updates(
@@ -5327,23 +6218,19 @@ def zed_h264_stimulus_updates(
             and baseline < sequence <= last_sequence
         )
     ]
-    sequences = [int(packet["sequence"]) for packet in selected]
     if (
         not selected
-        or sequences
-        != list(range(baseline + 1, last_sequence + 1))
+        or not _packet_sequence_range_valid(
+            selected, updates.get("window_id"), updates.get("packet_sequence_ledger"),
+            first=baseline + 1, last=last_sequence,
+        )
         or any(
             _packet_window_size(packet) != (window_width, window_height)
             for packet in selected
         )
     ):
         return None
-    return {
-        **updates,
-        "count": len(selected),
-        "encodings": sorted({str(packet.get("encoding")) for packet in selected}),
-        "updates": selected,
-    }
+    return _packet_sequence_subset(updates, selected, first=baseline + 1, last=last_sequence)
 
 
 def hardware_h264_stimulus_updates(
@@ -5388,22 +6275,19 @@ def hardware_h264_stimulus_updates(
             and first_sequence <= sequence <= last_sequence
         )
     ]
-    sequences = [int(packet["sequence"]) for packet in selected]
     if (
         not selected
-        or sequences != list(range(first_sequence, last_sequence + 1))
+        or not _packet_sequence_range_valid(
+            selected, updates.get("window_id"), updates.get("packet_sequence_ledger"),
+            first=first_sequence, last=last_sequence,
+        )
         or any(
             _packet_window_size(packet) != (window_width, window_height)
             for packet in selected
         )
     ):
         return None
-    return {
-        **updates,
-        "count": len(selected),
-        "encodings": sorted({str(packet.get("encoding")) for packet in selected}),
-        "updates": selected,
-    }
+    return _packet_sequence_subset(updates, selected, first=first_sequence, last=last_sequence)
 
 
 def _hardware_complete_packet_prefix(
@@ -5422,7 +6306,7 @@ def _hardware_complete_packet_prefix(
         return None
     for end in range(len(packets), 0, -1):
         prefix = packets[:end]
-        groups = _ordered_saved_damage_groups(prefix, window_id)
+        groups = _ordered_saved_damage_groups(prefix, window_id, updates.get("packet_sequence_ledger"))
         if groups is None:
             continue
         tail = packets[end:]
@@ -5483,10 +6367,8 @@ def hardware_h264_history_valid(updates: dict[str, Any] | None) -> bool:
     ]
     if any(sequence is None for sequence in sequences):
         return False
-    exact_sequences = [int(sequence) for sequence in sequences if sequence is not None]
     if (
-        exact_sequences
-        != list(range(exact_sequences[0], exact_sequences[0] + len(exact_sequences)))
+        not _packet_sequence_updates_valid(updates)
         or set(encodings) != {str(packet.get("encoding")) for packet in packets}
     ):
         return False
@@ -5557,10 +6439,12 @@ def hardware_h264_context_updates(
             and sequence >= first_sequence
         )
     ]
-    sequences = [int(packet["sequence"]) for packet in selected]
     if (
         not selected
-        or sequences != list(range(first_sequence, sequences[-1] + 1))
+        or not _packet_sequence_range_valid(
+            selected, updates.get("window_id"), updates.get("packet_sequence_ledger"),
+            first=first_sequence,
+        )
         or any(
             _exact_int(packet.get("payload_bytes"), positive=True) is None
             or _packet_geometry(packet) is None
@@ -5573,12 +6457,7 @@ def hardware_h264_context_updates(
         )
     ):
         return None
-    return {
-        **updates,
-        "count": len(selected),
-        "encodings": sorted({str(packet.get("encoding")) for packet in selected}),
-        "updates": selected,
-    }
+    return _packet_sequence_subset(updates, selected, first=first_sequence)
 
 
 def hardware_h264_production_updates(
@@ -5617,15 +6496,12 @@ def hardware_h264_production_updates(
     ]
     if any(sequence is None for sequence in sequences):
         return None
-    exact_sequences = [int(sequence) for sequence in sequences if sequence is not None]
-    if exact_sequences != list(
-        range(exact_sequences[0], exact_sequences[0] + len(exact_sequences))
-    ):
+    if not _packet_sequence_updates_valid(exact_updates):
         return None
     window_id = _exact_int(exact_updates.get("window_id"), positive=True)
     if window_id is None:
         return None
-    groups = _ordered_saved_damage_groups(packets, window_id)
+    groups = _ordered_saved_damage_groups(packets, window_id, exact_updates.get("packet_sequence_ledger"))
     if groups is None:
         return None
     first_h264_group = next(
@@ -5640,19 +6516,12 @@ def hardware_h264_production_updates(
     warmup_packets = [
         packet for group in groups[:first_h264_group] for packet in group
     ]
-    if not _alpha_safe_warmup_groups_valid(warmup_packets, window_id):
+    if not _alpha_safe_warmup_groups_valid(warmup_packets, window_id, exact_updates.get("packet_sequence_ledger")):
         return None
     production_packets = [
         packet for group in groups[first_h264_group:] for packet in group
     ]
-    production = {
-        **exact_updates,
-        "count": len(production_packets),
-        "encodings": sorted(
-            {str(packet["encoding"]) for packet in production_packets}
-        ),
-        "updates": production_packets,
-    }
+    production = _packet_sequence_subset(exact_updates, production_packets)
     return production if h264_with_lossless_rgb_edges(production) else None
 
 
@@ -5672,7 +6541,7 @@ def hardware_h264_phase_start_sequence(
         or window_id is None
     ):
         return None
-    groups = _ordered_saved_damage_groups(packets, window_id)
+    groups = _ordered_saved_damage_groups(packets, window_id, updates.get("packet_sequence_ledger"))
     if groups is None:
         return None
     for index in range(len(groups) - 1, -1, -1):
@@ -5703,13 +6572,20 @@ def begin_hardware_h264_stimulus(
     server: str,
     directory: Path,
     xpra_wid: int,
+    *, sequence_authority: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Bind the already-running stable primary stream before auxiliary input."""
     interval: dict[str, Any] | None = None
+    snapshot_error = ""
 
     def stable_phase_ready() -> bool:
-        nonlocal interval
-        updates = synchronize_saved_updates(server, directory, xpra_wid)
+        nonlocal interval, snapshot_error
+        try:
+            updates = synchronize_packet_sequence_projection(server, directory, xpra_wid, sequence_authority)
+        except (LabFailure, OSError, ValueError) as error:
+            snapshot_error = str(error)[:500]
+            return False
+        snapshot_error = ""
         packets = updates.get("updates")
         if (
             not isinstance(packets, list)
@@ -5742,9 +6618,15 @@ def begin_hardware_h264_stimulus(
             "first_sequence": first_sequence,
             "window_size": list(window_size),
         }
+        retain_packet_sequence_observation(directory, "hardware-baseline", updates)
         return True
 
-    wait_for("stable hardware H.264 phase baseline", stable_phase_ready, timeout=15)
+    try:
+        wait_for("stable hardware H.264 phase baseline", stable_phase_ready, timeout=15)
+    except LabFailure as error:
+        if snapshot_error:
+            raise LabFailure(f"{error}; packet sequence snapshot: {snapshot_error}") from error
+        raise
     assert interval is not None
     return interval
 
@@ -5754,13 +6636,20 @@ def finish_hardware_h264_stimulus(
     directory: Path,
     xpra_wid: int,
     interval: dict[str, Any],
+    *, sequence_authority: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Close the exact primary interval while the auxiliary window is alive."""
     completed: dict[str, Any] | None = None
+    snapshot_error = ""
 
     def sustained_phase_ready() -> bool:
-        nonlocal completed
-        updates = synchronize_saved_updates(server, directory, xpra_wid)
+        nonlocal completed, snapshot_error
+        try:
+            updates = synchronize_packet_sequence_projection(server, directory, xpra_wid, sequence_authority)
+        except (LabFailure, OSError, ValueError) as error:
+            snapshot_error = str(error)[:500]
+            return False
+        snapshot_error = ""
         sequences = [
             _exact_int(packet.get("sequence"), positive=True)
             for packet in updates.get("updates", [])
@@ -5784,9 +6673,15 @@ def finish_hardware_h264_stimulus(
             "dominance_checks": checks,
             "metrics": metrics,
         }
+        retain_packet_sequence_observation(directory, "hardware-stimulus", updates)
         return True
 
-    wait_for("sustained dominant hardware H.264 phase", sustained_phase_ready, timeout=15)
+    try:
+        wait_for("sustained dominant hardware H.264 phase", sustained_phase_ready, timeout=15)
+    except LabFailure as error:
+        if snapshot_error:
+            raise LabFailure(f"{error}; packet sequence snapshot: {snapshot_error}") from error
+        raise
     assert completed is not None
     return completed
 
@@ -6208,6 +7103,177 @@ def adaptive_frame_alpha_state_checks(
     }
 
 
+def wayland_commit_damage_pattern(
+    *, empty: bool, wid: int | None = None, mapped: bool | None = None,
+) -> str:
+    """Match the logged damage value, independent of list/tuple storage.
+
+    Native upstream commits use lists; normalized immutable surface-tree
+    commits use tuples. Unknown or malformed values prove neither emptiness
+    nor positive damage. Keep all matching inside one line and one field.
+    """
+    if wid is not None and _exact_int(wid, positive=True) is None:
+        raise LabFailure(f"invalid Wayland commit window ID: {wid!r}")
+    window = str(wid) if wid is not None else r"[1-9][0-9]*"
+    prefix = rf"(?<!\S)commit wid {window}(?= )"
+    if mapped is not None:
+        prefix += f" mapped={mapped},"
+    if empty:
+        value = r"(?:\[\]|\(\))"
+    else:
+        rectangle = r"\(-?[0-9]+, -?[0-9]+, [1-9][0-9]*, [1-9][0-9]*\)"
+        sequence = rf"{rectangle}(?:, {rectangle})*"
+        value = rf"(?:\[{sequence}\]|\({rectangle},\)|\({rectangle}, {sequence}\))"
+    return (
+        prefix + rf"[^\n\r]*?(?<!\S)rects={value}"
+        + r"(?=, [a-zA-Z_][a-zA-Z0-9_-]*=|[\r\n]|$)"
+    )
+
+
+def mapped_empty_wayland_commit_pattern(wid: int) -> str:
+    return wayland_commit_damage_pattern(empty=True, wid=wid, mapped=True)
+
+
+def parse_wayland_native_captures(server_log: str) -> list[dict[str, Any]]:
+    """Bind successful native read/publication/commit, not a packet generation."""
+    surface_line = re.compile(r"(?<!\S)Surface\(([1-9][0-9]*) : [^\n]*\)\.(.+)$")
+    dmabuf_line = re.compile(
+        r"capture_pixels: dmabuf ([0-9]+)x([0-9]+) format=(0x[0-9a-f]+) "
+        r"modifier=(0x[0-9a-f]+) planes=([0-9]+)$"
+    )
+    read_line = re.compile(
+        r"capture_pixels: ([0-9]+),([0-9]+) ([0-9]+)x([0-9]+) \(([0-9]+) bytes\)$"
+    )
+    packed_line = re.compile(
+        r"_emit\(surface-snapshot, \(([1-9][0-9]*), "
+        r"ImageWrapper\(([A-Z0-9]+):\((-?[0-9]+), (-?[0-9]+), "
+        r"([0-9]+), ([0-9]+), ([0-9]+)\):PACKED\)\)\) callbacks="
+    )
+    legacy_line = re.compile(
+        r"_emit\(surface-image, \(([1-9][0-9]*), "
+        r"DMABufImageWrapper\((0x[0-9a-f]+):\((-?[0-9]+), (-?[0-9]+), "
+        r"([0-9]+), ([0-9]+), ([0-9]+)\):(\([0-9, ]+\)):([0-9]+)\)\)\) callbacks="
+    )
+    commit_line = re.compile(
+        r"(?<!\S)commit wid ([1-9][0-9]*) mapped=(True|False), "
+        r"size=\(([0-9]+), ([0-9]+)\),"
+    )
+    positive_commit = re.compile(wayland_commit_damage_pattern(empty=False, mapped=True))
+    pending: dict[int, dict[str, Any]] = {}
+    records: list[dict[str, Any]] = []
+    for number, line in enumerate(server_log.splitlines(), 1):
+        if failure := re.search(
+            r"(?:Error: failed to read texture pixels|Error capturing logical root pixels) "
+            r"for Surface\(([1-9][0-9]*) : [^\n]*\)$",
+            line,
+        ):
+            pending.pop(int(failure[1]), None)
+            continue
+        if failure := re.search(
+            r"(?:Error replacing Wayland root snapshot (0x[0-9a-f]+)"
+            r"|surface-snapshot: unknown toplevel wid=(0x[0-9a-f]+), dropping)$",
+            line,
+        ):
+            pending.pop(int(failure[1] or failure[2], 16), None)
+            continue
+        if failure := re.search(r"Warning: cannot update window ([1-9][0-9]*): not found!$", line):
+            pending.pop(int(failure[1]), None)
+            continue
+        if commit := commit_line.search(line):
+            wid = int(commit[1])
+            state = pending.pop(wid, {})
+            if (
+                state.get("phase") == "published"
+                and commit[2] == "True"
+                and positive_commit.search(line)
+                and state["logical_size"] == [int(commit[3]), int(commit[4])]
+            ):
+                del state["phase"]
+                records.append({**state, "commit_line": number})
+            continue
+        match = surface_line.search(line)
+        if not match:
+            continue
+        wid, body = int(match[1]), match[2]
+        if body.startswith(("_emit(unmap,", "_emit(destroy,")):
+            pending.pop(wid, None)
+            continue
+        if body.startswith("capture_pixels:"):
+            previous = pending.pop(wid, {})
+            if native := dmabuf_line.fullmatch(body):
+                width, height, planes = int(native[1]), int(native[2]), int(native[5])
+                if width > 0 and height > 0 and 1 <= planes <= 4:
+                    pending[wid] = {
+                        "phase": "dmabuf", "native_line": number,
+                        "native_size": [width, height], "native_fourcc": native[3],
+                        "native_modifier": native[4], "native_planes": planes,
+                    }
+                continue
+            if read := read_line.fullmatch(body):
+                x, y, width, height, byte_count = map(int, read.groups())
+                if width > 0 and height > 0 and byte_count == width * height * 4:
+                    state = previous if previous.get("phase") == "dmabuf" else {}
+                    pending[wid] = {
+                        **state, "phase": "read", "window_id": wid,
+                        "read_line": number, "read_origin": [x, y],
+                        "read_size": [width, height], "read_bytes": byte_count,
+                    }
+            continue
+        if not body.startswith(("_emit(surface-snapshot,", "_emit(surface-image,")):
+            continue
+        state = pending.pop(wid, {})
+        if state.get("phase") != "read":
+            continue
+        publication = packed_line.match(body)
+        kind = "normalized-texture"
+        if publication:
+            emitted_wid = int(publication[1])
+            pixel_format: str | None = publication[2]
+            x, y, width, height, depth = map(int, publication.groups()[2:])
+            # This route deliberately does not acquire/export DMA-BUF metadata.
+            if "native_fourcc" in state:
+                continue
+        else:
+            publication = legacy_line.match(body)
+            if not publication:
+                continue
+            kind = "legacy-dmabuf"
+            emitted_wid = int(publication[1])
+            pixel_format = None  # DRM source order is not the downloaded byte order.
+            x, y, width, height, depth = map(int, publication.groups()[2:7])
+            try:
+                strides = ast.literal_eval(publication[8])
+            except (SyntaxError, ValueError):
+                continue
+            if (
+                publication[2] != state.get("native_fourcc")
+                or state.get("native_size") != [width, height]
+                or state["read_origin"] != [0, 0]
+                or state["read_size"] != [width, height]
+                or not isinstance(strides, tuple)
+                or len(strides) != state.get("native_planes")
+                or not all(_exact_int(stride, positive=True) is not None for stride in strides)
+                or int(publication[9]) != 0
+            ):
+                continue
+            # may_download() has closed its duplicated FDs. Original native
+            # strides describe modifier planes, not the packed CPU rowstride.
+            state["native_strides"] = list(strides)
+            state["published_fd_count"] = 0
+        if (
+            emitted_wid != wid or (x, y) != (0, 0) or depth != 32
+            or width <= 0 or height <= 0
+        ):
+            continue
+        pending[wid] = {
+            **state, "phase": "published", "kind": kind,
+            "publication_line": number, "logical_size": [width, height],
+            "published_origin": [x, y], "depth": depth,
+            "pixel_format": pixel_format,
+        }
+    return records
+
+
 def inspect_logs(directory: Path) -> dict[str, Any]:
     server_log = "\n".join(
         path.read_text(encoding="utf-8", errors="replace")
@@ -6224,7 +7290,9 @@ def inspect_logs(directory: Path) -> dict[str, Any]:
         if (directory / "zed.stderr").is_file()
         else ""
     )
-    commit_lines = [line for line in server_log.splitlines() if "commit wid " in line]
+    empty_commit_pattern = re.compile(wayland_commit_damage_pattern(empty=True))
+    nonempty_commit_pattern = re.compile(wayland_commit_damage_pattern(empty=False))
+    commit_lines = server_log.splitlines()
     rgb_error_lines = [
         line
         for line in server_log.splitlines()
@@ -6295,7 +7363,10 @@ def inspect_logs(directory: Path) -> dict[str, Any]:
                 )
             )
         ),
-        "empty_wayland_commits": sum("rects=[]" in line for line in commit_lines),
+        "empty_wayland_commits": sum(
+            bool(empty_commit_pattern.search(line)) for line in commit_lines
+        ),
+        "native_wayland_captures": parse_wayland_native_captures(server_log),
         "frame_alpha_states": parse_frame_alpha_states(server_log),
         "saved_packet_frame_states": parse_saved_packet_frame_states(server_log),
         "gtk_cairo_draws": client_log.count("cairo_draw: window size="),
@@ -6314,7 +7385,7 @@ def inspect_logs(directory: Path) -> dict[str, Any]:
             re.findall(r"\.do_paint_rgb\(rgb,\s*(?:RGB|BGR)", client_log)
         ),
         "nonempty_wayland_commits": sum(
-            "rects=[]" not in line for line in commit_lines
+            bool(nonempty_commit_pattern.search(line)) for line in commit_lines
         ),
         "paint_errors": paint_error_lines[-20:],
         "rgb_encode_errors": rgb_error_lines[-20:],
@@ -6482,6 +7553,13 @@ def h264_packet_streams(
 ) -> list[dict[str, Any]]:
     alpha_mode = allow_alpha_gaps
     edge_mode = allow_lossless_rgb_edges
+    ledger = updates.get("packet_sequence_ledger")
+    sequence_rows = _packet_sequence_rows(ledger) if ledger is not None else None
+    window_id = _exact_int(updates.get("window_id"), positive=True)
+    if ledger is not None and (
+        sequence_rows is None or not _packet_sequence_updates_valid(updates)
+    ):
+        return []
     packets_by_sequence = {
         int(update["sequence"]): update
         for update in updates["updates"]
@@ -6493,7 +7571,17 @@ def h264_packet_streams(
         sequence = int(packet["sequence"])
         if sequence == previous_sequence + 1:
             return True
-        if not edge_mode or sequence <= previous_sequence + 1:
+        if sequence <= previous_sequence + 1:
+            return False
+        owned_intermediate = list(range(previous_sequence + 1, sequence))
+        if sequence_rows is not None:
+            owned_intermediate = [
+                intermediate for intermediate in owned_intermediate
+                if sequence_rows[intermediate]["window_id"] == window_id
+            ]
+            if not owned_intermediate:
+                return True
+        if not edge_mode:
             return False
         window_size = _packet_window_size(packet)
         if window_size is None:
@@ -6512,7 +7600,7 @@ def h264_packet_streams(
                 or allow_window_resize_gaps
                 and _safe_h264_context_gap(packets_by_sequence[intermediate])
             )
-            for intermediate in range(previous_sequence + 1, sequence)
+            for intermediate in owned_intermediate
         )
 
     packets = sorted(
@@ -6545,7 +7633,6 @@ def h264_packet_streams(
             grouped[-1].append(packet)
 
     streams: list[dict[str, Any]] = []
-    window_id = _exact_int(updates.get("window_id"), positive=True)
     for packets_in_stream in grouped:
         first = packets_in_stream[0]
         sequences = [int(packet["sequence"]) for packet in packets_in_stream]
@@ -6612,6 +7699,11 @@ def h264_packet_streams(
                 "transport_sequences": transport_sequences,
             }
         )
+        if sequence_rows is not None:
+            streams[-1]["other_window_sequences"] = [
+                sequence for sequence in transport_sequences
+                if sequence_rows[sequence]["window_id"] != window_id
+            ]
     return streams
 
 
@@ -7168,6 +8260,12 @@ def application_contract(application: str) -> tuple[str, tuple[str, ...], str]:
             (CLIPBOARD_FIXTURE_TITLE,),
             "clipboard-fixture.pid",
         )
+    if application == "subsurface":
+        return (
+            "/opt/xpra-fork-maintenance/start_wayland_subsurface_fixture.sh",
+            (SUBSURFACE_FIXTURE_TITLE,),
+            "subsurface-fixture.pid",
+        )
     if application in MULTIWINDOW_HARDWARE_APPLICATIONS:
         fixture = hardware_fixture_spec(application)
         return fixture.command, fixture.title_patterns, fixture.pid_file
@@ -7423,6 +8521,41 @@ def stop_x11_clipboard_owner(client: str) -> None:
     )
 
 
+def subsurface_startup_packet_ready(
+    server: str,
+    directory: Path,
+    source_wid: int,
+) -> bool:
+    """Prove initial WSSO rendering from its exact raw root packet authority."""
+    updates = synchronize_subsurface_saved_updates(server, directory, source_wid)
+    expected_geometry = (0, 0, *SUBSURFACE_PARENT_DIMENSIONS["primary"])
+    for packet in updates.get("updates", []):
+        if not isinstance(packet, dict):
+            continue
+        options = packet.get("options")
+        if (
+            packet.get("encoding") != "rgb32"
+            or tuple(packet.get(key) for key in ("x", "y", "w", "h"))
+            != expected_geometry
+            or not isinstance(options, dict)
+            or options.get("subsurface-composite") != SUBSURFACE_COMPOSITE_MODE
+            or options.get("subsurface-stage-index") != 0
+            or options.get("subsurface-stage-count") != 2
+            or options.get("subsurface-reset")
+            != list(SUBSURFACE_TRANSACTION_RESETS["initial"])
+        ):
+            continue
+        image = _subsurface_raw_packet_image(
+            directory,
+            packet,
+            source_wid,
+            composite=True,
+        )
+        if analyze_image(image)["quantized_rgb_colors"] > 32:
+            return True
+    return False
+
+
 def wait_for_frame_boundary(
     server: str,
     server_pid: int,
@@ -7434,6 +8567,7 @@ def wait_for_frame_boundary(
     *,
     application: str,
     expected_xpra_wid: int,
+    sequence_authority: dict[str, Any] | None = None,
 ) -> str:
     if _exact_int(expected_xpra_wid, positive=True) is None:
         raise LabFailure(f"invalid expected Xpra window ID: {expected_xpra_wid!r}")
@@ -7445,6 +8579,7 @@ def wait_for_frame_boundary(
     frame_log_bytes = dict.fromkeys(frame_logs, 0)
     incomplete_update_info: set[str] = set()
     incomplete_screenshots: set[str] = set()
+    sequence_snapshot_error = ""
 
     def update_logs(container: str, offsets: dict[str, int]) -> None:
         for name, (next_offset, delta) in read_container_log_deltas(
@@ -7459,52 +8594,63 @@ def wait_for_frame_boundary(
             frame_logs[name] += delta
 
     def reached() -> bool:
-        nonlocal outcome, h264_failure_seen_at
+        nonlocal outcome, h264_failure_seen_at, sequence_snapshot_error
         update_logs(server, server_offsets)
         update_logs(client, client_offsets)
         server_log = frame_logs["server.stderr"]
         client_log = frame_logs["client.stdout"] + frame_logs["client.stderr"]
-        nonempty_commit = any(
-            "rects=[]" not in line
-            for line in server_log.splitlines()
-            if re.search(rf"\bcommit wid {expected_xpra_wid}\b", line)
+        nonempty_commit = bool(
+            re.search(
+                wayland_commit_damage_pattern(empty=False, wid=expected_xpra_wid),
+                server_log,
+            )
         )
         if encoding == "rgb":
-            window_prefix = f"screen-updates/{expected_xpra_wid}/"
-            screenshots = tuple(
-                relative
-                for relative in container_artifact_files(
-                    server, "screen-updates", "screenshot.png"
-                )
-                if relative.startswith(window_prefix)
-            )
-            screenshots_to_pull = tuple(
-                relative
-                for relative in screenshots
-                if not (directory / relative).is_file()
-                or relative in incomplete_screenshots
-            )
-            if screenshots_to_pull:
-                pull_container_artifacts(server, directory, screenshots_to_pull)
             failed = (
                 nonempty_commit
                 and "no compatible rgb format for 'RGBX'!" in server_log
                 and "only: ('BGRX', 'BGRA')" in server_log
             )
-            source_ready = False
-            incomplete_screenshots.clear()
-            for screenshot in directory.glob(
-                f"screen-updates/{expected_xpra_wid}/*/screenshot.png"
-            ):
+            if application == "subsurface":
                 try:
-                    if analyze_png(screenshot)["quantized_rgb_colors"] > 32:
-                        source_ready = True
-                        break
-                except (OSError, ValueError):
-                    incomplete_screenshots.add(
-                        screenshot.relative_to(directory).as_posix()
+                    source_ready = subsurface_startup_packet_ready(
+                        server,
+                        directory,
+                        expected_xpra_wid,
                     )
-                    continue
+                except (LabFailure, OSError, ValueError, json.JSONDecodeError):
+                    source_ready = False
+            else:
+                window_prefix = f"screen-updates/{expected_xpra_wid}/"
+                screenshots = tuple(
+                    relative
+                    for relative in container_artifact_files(
+                        server, "screen-updates", "screenshot.png"
+                    )
+                    if relative.startswith(window_prefix)
+                )
+                screenshots_to_pull = tuple(
+                    relative
+                    for relative in screenshots
+                    if not (directory / relative).is_file()
+                    or relative in incomplete_screenshots
+                )
+                if screenshots_to_pull:
+                    pull_container_artifacts(server, directory, screenshots_to_pull)
+                source_ready = False
+                incomplete_screenshots.clear()
+                for screenshot in directory.glob(
+                    f"screen-updates/{expected_xpra_wid}/*/screenshot.png"
+                ):
+                    try:
+                        if analyze_png(screenshot)["quantized_rgb_colors"] > 32:
+                            source_ready = True
+                            break
+                    except (OSError, ValueError):
+                        incomplete_screenshots.add(
+                            screenshot.relative_to(directory).as_posix()
+                        )
+                        continue
             painted = (
                 nonempty_commit
                 and source_ready
@@ -7614,7 +8760,12 @@ def wait_for_frame_boundary(
                 updates["initial_pixel_format"] = saved_window_initial_pixel_format(
                     directory, expected_xpra_wid
                 )
-            except (LabFailure, OSError, ValueError, json.JSONDecodeError):
+                updates = synchronize_packet_sequence_projection(
+                    server, directory, expected_xpra_wid, sequence_authority, primary=updates,
+                )
+                sequence_snapshot_error = ""
+            except (LabFailure, OSError, ValueError, json.JSONDecodeError) as error:
+                sequence_snapshot_error = str(error)[:500]
                 incomplete_update_info.add(
                     f"screen-updates/{expected_xpra_wid}/window.info"
                 )
@@ -7662,6 +8813,7 @@ def wait_for_frame_boundary(
                 and "do_present_fbo(" in after_draw
             )
             if presented:
+                retain_packet_sequence_observation(directory, "readiness", updates)
                 outcome = "success"
                 return True
             if failed:
@@ -7681,7 +8833,12 @@ def wait_for_frame_boundary(
         if encoding != "h264" or h264_client_policy in H264_ACCEPTANCE_POLICIES
         else f"H264 {h264_client_policy}"
     )
-    wait_for(f"{profile} frame outcome", reached)
+    try:
+        wait_for(f"{profile} frame outcome", reached)
+    except LabFailure as error:
+        if sequence_snapshot_error:
+            raise LabFailure(f"{error}; packet sequence snapshot: {sequence_snapshot_error}") from error
+        raise
     return outcome
 
 
@@ -8130,6 +9287,7 @@ def exercise_zed_h264_stability(
     geometry: dict[str, int],
     directory: Path,
     interaction: dict[str, Any],
+    *, sequence_authority: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Alternate the real Zed theme controls and prove sustained H.264."""
 
@@ -8154,7 +9312,8 @@ def exercise_zed_h264_stability(
     # Let the initial dark-theme transition and its lossless refresh finish before
     # recording the exact owned production interval.
     time.sleep(2.0)
-    baseline_updates = synchronize_saved_updates(server, directory, xpra_wid)
+    baseline_updates = synchronize_packet_sequence_projection(server, directory, xpra_wid, sequence_authority)
+    retain_packet_sequence_observation(directory, "zed-baseline", baseline_updates)
     baseline_sequences = [
         _exact_int(packet.get("sequence"), positive=True)
         for packet in baseline_updates["updates"]
@@ -8227,7 +9386,7 @@ def exercise_zed_h264_stability(
             announce=False,
         )
         dark = convert_xwd(directory, dark_stem)
-        updates = synchronize_saved_updates(server, directory, xpra_wid)
+        updates = synchronize_packet_sequence_projection(server, directory, xpra_wid, sequence_authority)
         sequences = [
             _exact_int(packet.get("sequence"), positive=True)
             for packet in updates["updates"]
@@ -8258,6 +9417,7 @@ def exercise_zed_h264_stability(
             final_updates = updates
             final_metrics = metrics
             final_checks = checks
+            retain_packet_sequence_observation(directory, "zed-stimulus", updates)
             break
     if final_updates is None or final_metrics is None or final_checks is None:
         raise LabFailure("Zed theme toggles did not produce sustained dominant H.264")
@@ -10214,6 +11374,5741 @@ def load_empty_damage_fixture_events(path: Path) -> list[dict[str, Any]]:
     return events
 
 
+def subsurface_client_rgb_artifact(parent_role: str, phase: str) -> str:
+    """Return the fixed client-window capture name for one compositing phase."""
+    if (
+        parent_role not in SUBSURFACE_PARENT_ROLES
+        or phase not in (*SUBSURFACE_PHASES, SUBSURFACE_CONTINUOUS_FINAL_PHASE)
+    ):
+        raise LabFailure("invalid subsurface client capture identity")
+    return f"subsurface-client-{parent_role}-{phase}.rgb.png"
+
+
+def parse_subsurface_fixture_jsonl_text(
+    data: str,
+    label: str,
+) -> list[dict[str, Any]]:
+    """Parse one bounded, duplicate-key-safe subsurface fixture stream."""
+    encoded = data.encode("utf-8")
+    if not encoded or len(encoded) > 256 * 1024 or "\0" in data:
+        raise LabFailure(f"subsurface fixture event stream has an invalid size: {label}")
+    events: list[dict[str, Any]] = []
+    for line in data.splitlines():
+        try:
+            event = json.loads(
+                line,
+                object_pairs_hook=_json_object_without_duplicates,
+            )
+        except json.JSONDecodeError as error:
+            raise LabFailure(
+                f"subsurface fixture event stream is not valid JSON: {label}"
+            ) from error
+        if type(event) is not dict:
+            raise LabFailure(f"subsurface fixture event is not an object: {label}")
+        events.append(event)
+    if not events or len(events) > SUBSURFACE_CONTINUOUS_MAX_GENERATIONS + 15:
+        raise LabFailure(f"subsurface fixture event count is invalid: {label}")
+    return events
+
+
+def read_container_subsurface_events(
+    container: str,
+    relative: str = "subsurface-fixture.stdout",
+) -> list[dict[str, Any]]:
+    """Read only the bounded live fixture authority while its process is active."""
+    relative = _artifact_relative(relative)
+    if container_artifact_size(container, relative) > 256 * 1024:
+        raise LabFailure("subsurface fixture event stream is too large")
+    result = podman_exec(
+        container,
+        ["cat", f"/artifacts/{relative}"],
+        announce=False,
+    )
+    return parse_subsurface_fixture_jsonl_text(result.stdout, relative)
+
+
+def load_subsurface_fixture_events(path: Path) -> list[dict[str, Any]]:
+    """Load the collected subsurface fixture authority."""
+    ensure_private_regular_file(path)
+    try:
+        data = path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError) as error:
+        raise LabFailure("subsurface fixture event stream is unavailable") from error
+    return parse_subsurface_fixture_jsonl_text(data, path.name)
+
+
+def validate_subsurface_pointer_timing(
+    value: Any,
+    fixture_event_monotonic_ns: int,
+) -> dict[str, int]:
+    """Validate the retained end-to-end deadline around the real pointer event."""
+    expected_keys = {
+        "completed_monotonic_ns",
+        "deadline_ns",
+        "elapsed_ns",
+        "fixture_event_monotonic_ns",
+        "schema",
+        "started_monotonic_ns",
+    }
+    if type(value) is not dict or set(value) != expected_keys:
+        raise LabFailure("subsurface pointer timing fields are invalid")
+    started = _exact_int(value.get("started_monotonic_ns"), positive=True)
+    fixture = _exact_int(value.get("fixture_event_monotonic_ns"), positive=True)
+    completed = _exact_int(value.get("completed_monotonic_ns"), positive=True)
+    elapsed = _exact_int(value.get("elapsed_ns"))
+    deadline = _exact_int(value.get("deadline_ns"), positive=True)
+    if (
+        value.get("schema") != 1
+        or started is None
+        or fixture is None
+        or completed is None
+        or elapsed is None
+        or deadline != SUBSURFACE_INPUT_DEADLINE_NS
+        or fixture != fixture_event_monotonic_ns
+        or not started <= fixture <= completed
+        or elapsed != completed - started
+        or not 0 <= elapsed <= deadline
+    ):
+        raise LabFailure("subsurface pointer timing authority is invalid")
+    return {
+        "completed_monotonic_ns": completed,
+        "deadline_ns": deadline,
+        "elapsed_ns": elapsed,
+        "fixture_event_monotonic_ns": fixture,
+        "schema": 1,
+        "started_monotonic_ns": started,
+    }
+
+
+def load_subsurface_pointer_timing(
+    path: Path,
+    fixture_event_monotonic_ns: int,
+) -> dict[str, int]:
+    """Load the private bounded pointer deadline authority."""
+    ensure_private_regular_file(path)
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise LabFailure("subsurface pointer timing artifact is unavailable") from error
+    if not raw or len(raw) > 4096 or b"\0" in raw:
+        raise LabFailure("subsurface pointer timing artifact has an invalid size")
+    try:
+        value = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_json_object_without_duplicates,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise LabFailure("subsurface pointer timing artifact is invalid JSON") from error
+    return validate_subsurface_pointer_timing(value, fixture_event_monotonic_ns)
+
+
+def _subsurface_exact_pair(
+    value: Any,
+    *,
+    dimensions: bool,
+) -> list[int] | None:
+    if (
+        type(value) is not list
+        or len(value) != 2
+        or any(
+            _exact_int(item) is None
+            or (dimensions and item <= 0)
+            or (not dimensions and not -(2**31) <= item < 2**31)
+            for item in value
+        )
+    ):
+        return None
+    return value
+
+
+def validate_subsurface_fixture_events(
+    events: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Validate the fixture's complete buffer, stack, input, and role sequence."""
+    if type(events) is not list or any(type(event) is not dict for event in events):
+        raise LabFailure("subsurface fixture events are not an exact object list")
+    continuous_generation_count = len(events) - 15
+    if not (
+        SUBSURFACE_CONTINUOUS_MIN_GENERATIONS
+        <= continuous_generation_count
+        <= SUBSURFACE_CONTINUOUS_MAX_GENERATIONS
+    ):
+        raise LabFailure("subsurface continuous generation count is invalid")
+    names = (
+        "ready",
+        "lower-state",
+        "lower-state",
+        "lower-moved",
+        "sibling-created",
+        "lower-updated-under-upper",
+        "lower-frame-generation",
+        "lower-frame-generation",
+        "continuous-start",
+        *("continuous-generation" for _ in range(continuous_generation_count)),
+        "continuous-stop",
+        "sibling-click",
+        "lower-destroyed",
+        "upper-detached",
+        "upper-reparented",
+        "exit",
+    )
+    if len(events) != len(names) or tuple(event.get("event") for event in events) != names:
+        raise LabFailure("subsurface fixture events are missing, extra, or reordered")
+    expected_keys = (
+        {
+            "event",
+            "lower_attach_count",
+            "lower_buffer_dimensions",
+            "lower_buffer_id",
+            "lower_buffer_scale",
+            "lower_commit_count",
+            "lower_dimensions",
+            "lower_offset",
+            "lower_state_id",
+            "lower_surface_id",
+            "monotonic_ns",
+            "parent_dimensions",
+            "parents_alive",
+            "schema",
+            "secondary_parent_dimensions",
+            "sequence",
+        },
+        {
+            "event",
+            "lower_attach_count",
+            "lower_buffer_id",
+            "lower_buffer_scale",
+            "lower_commit_count",
+            "lower_state_id",
+            "lower_surface_id",
+            "monotonic_ns",
+            "schema",
+            "sequence",
+            "update_index",
+            "upper_attach_count",
+            "upper_commit_count",
+        },
+        {
+            "event",
+            "lower_attach_count",
+            "lower_buffer_id",
+            "lower_buffer_scale",
+            "lower_commit_count",
+            "lower_state_id",
+            "lower_surface_id",
+            "monotonic_ns",
+            "schema",
+            "sequence",
+            "update_index",
+            "upper_attach_count",
+            "upper_commit_count",
+        },
+        {
+            "event",
+            "from_offset",
+            "lower_attach_count",
+            "lower_buffer_scale",
+            "lower_commit_count",
+            "lower_surface_id",
+            "monotonic_ns",
+            "schema",
+            "sequence",
+            "to_offset",
+        },
+        {
+            "event",
+            "lower_offset",
+            "monotonic_ns",
+            "overlap",
+            "schema",
+            "sequence",
+            "stacking",
+            "upper_attach_count",
+            "upper_buffer_id",
+            "upper_buffer_transform",
+            "upper_commit_count",
+            "upper_dimensions",
+            "upper_offset",
+            "upper_precommitted_before_role",
+            "upper_surface_id",
+        },
+        {
+            "event",
+            "lower_attach_count",
+            "lower_buffer_id",
+            "lower_buffer_scale",
+            "lower_commit_count",
+            "lower_state_id",
+            "lower_surface_id",
+            "monotonic_ns",
+            "schema",
+            "sequence",
+            "update_index",
+            "upper_attach_count",
+            "upper_commit_count",
+        },
+        *(
+            {
+                "event",
+                "frame_callback_data",
+                "frame_callback_id",
+                "frame_done_count",
+                "generation_id",
+                "lower_attach_count",
+                "lower_buffer_id",
+                "lower_buffer_scale",
+                "lower_commit_count",
+                "lower_state_id",
+                "lower_surface_id",
+                "monotonic_ns",
+                "schema",
+                "sequence",
+                "update_index",
+                "upper_attach_count",
+                "upper_commit_count",
+            }
+            for _phase in SUBSURFACE_FRAME_PHASES
+        ),
+        {
+            "continuous_buffer_ids",
+            "continuous_generation_count",
+            "event",
+            "frame_callback_pending",
+            "frame_callback_ready",
+            "frame_done_count",
+            "lower_attach_count",
+            "lower_buffer_id",
+            "lower_commit_count",
+            "lower_state_id",
+            "lower_surface_id",
+            "lower_update_count",
+            "monotonic_ns",
+            "producer_active",
+            "schema",
+            "sequence",
+            "upper_attach_count",
+            "upper_commit_count",
+        },
+        *(
+            {
+                "continuous_generation_id",
+                "event",
+                "frame_callback_data",
+                "frame_callback_id",
+                "frame_done_count",
+                "lower_attach_count",
+                "lower_buffer_id",
+                "lower_buffer_scale",
+                "lower_commit_count",
+                "lower_state_id",
+                "lower_surface_id",
+                "lower_update_count",
+                "monotonic_ns",
+                "producer_active",
+                "schema",
+                "sequence",
+                "upper_attach_count",
+                "upper_commit_count",
+            }
+            for _ in range(continuous_generation_count)
+        ),
+        {
+            "continuous_buffer_ids",
+            "continuous_generation_count",
+            "event",
+            "frame_done_count",
+            "lower_attach_count",
+            "lower_buffer_id",
+            "lower_commit_count",
+            "lower_state_id",
+            "lower_surface_id",
+            "lower_update_count",
+            "monotonic_ns",
+            "pending_callback_cancelled",
+            "producer_active",
+            "schema",
+            "sequence",
+            "terminal_callback_completed",
+            "terminal_callback_data",
+            "terminal_callback_id",
+            "upper_attach_count",
+            "upper_commit_count",
+        },
+        {
+            "event",
+            "monotonic_ns",
+            "parent_coordinates",
+            "schema",
+            "sequence",
+            "surface_coordinates",
+            "target",
+        },
+        {
+            "event",
+            "lower_update_count",
+            "monotonic_ns",
+            "parents_alive",
+            "schema",
+            "sequence",
+            "upper_alive",
+        },
+        {
+            "event",
+            "lower_destroyed",
+            "monotonic_ns",
+            "old_parent",
+            "parents_alive",
+            "schema",
+            "sequence",
+            "upper_attach_count",
+            "upper_buffer_id",
+            "upper_buffer_transform",
+            "upper_commit_count",
+            "upper_precommitted_before_role",
+            "upper_surface_id",
+        },
+        {
+            "event",
+            "monotonic_ns",
+            "new_offset",
+            "new_parent",
+            "parents_alive",
+            "schema",
+            "sequence",
+            "upper_attach_count",
+            "upper_buffer_id",
+            "upper_buffer_transform",
+            "upper_commit_count",
+            "upper_precommitted_before_role",
+            "upper_reattach_parent_committed",
+            "upper_reattach_without_child_commit",
+            "upper_surface_id",
+        },
+        {
+            "click_count",
+            "event",
+            "lower_destroyed",
+            "lower_update_count",
+            "monotonic_ns",
+            "parents_alive",
+            "schema",
+            "sequence",
+            "upper_reparented",
+        },
+    )
+    if any(set(event) != keys for event, keys in zip(events, expected_keys, strict=True)):
+        raise LabFailure("subsurface fixture event fields are invalid")
+    scalar_integer_fields = {
+        "lower_buffer_scale",
+        "monotonic_ns",
+        "parents_alive",
+        "schema",
+        "sequence",
+    }
+    integer_suffixes = ("_count", "_data", "_id", "_index")
+    if any(
+        _exact_int(value) is None
+        for event in events
+        for key, value in event.items()
+        if key in scalar_integer_fields or key.endswith(integer_suffixes)
+    ):
+        raise LabFailure("subsurface fixture integer fields are invalid")
+    if any(event.get("schema") != SUBSURFACE_FIXTURE_SCHEMA for event in events):
+        raise LabFailure("subsurface fixture event schema is invalid")
+    sequences = tuple(_exact_int(event.get("sequence")) for event in events)
+    timestamps = tuple(
+        _exact_int(event.get("monotonic_ns"), positive=True) for event in events
+    )
+    if sequences != tuple(range(len(events))):
+        raise LabFailure("subsurface fixture event sequence is invalid")
+    if (
+        any(value is None for value in timestamps)
+        or tuple(sorted(timestamps)) != timestamps
+        or len(set(timestamps)) != len(timestamps)
+    ):
+        raise LabFailure("subsurface fixture timestamps are not strictly ordered")
+
+    ready = events[0]
+    if (
+        _subsurface_exact_pair(ready.get("parent_dimensions"), dimensions=True)
+        != list(SUBSURFACE_PARENT_DIMENSIONS["primary"])
+        or _subsurface_exact_pair(
+            ready.get("secondary_parent_dimensions"), dimensions=True
+        )
+        != list(SUBSURFACE_PARENT_DIMENSIONS["secondary"])
+        or _subsurface_exact_pair(ready.get("lower_dimensions"), dimensions=True)
+        != list(SUBSURFACE_LOWER_DIMENSIONS)
+        or _subsurface_exact_pair(
+            ready.get("lower_buffer_dimensions"), dimensions=True
+        )
+        != list(SUBSURFACE_LOWER_BUFFER_DIMENSIONS)
+        or _subsurface_exact_pair(ready.get("lower_offset"), dimensions=False)
+        != list(SUBSURFACE_INITIAL_OFFSET)
+        or ready.get("lower_buffer_scale") != SUBSURFACE_LOWER_BUFFER_SCALE
+        or ready.get("parents_alive") != 2
+        or ready.get("lower_state_id") != 1
+        or ready.get("lower_attach_count") != 1
+        or ready.get("lower_commit_count") != 1
+    ):
+        raise LabFailure("subsurface fixture initial state is invalid")
+    lower_surface_id = _exact_int(ready.get("lower_surface_id"), positive=True)
+    lower_buffer_id = _exact_int(ready.get("lower_buffer_id"), positive=True)
+    if lower_surface_id is None or lower_buffer_id is None or lower_surface_id == lower_buffer_id:
+        raise LabFailure("subsurface fixture lower proxy identities are invalid")
+
+    lower_buffer_ids = [lower_buffer_id]
+    for event, state, update_index, attach_count, commit_count in (
+        (events[1], 2, 1, 2, 2),
+        (events[2], 1, 2, 3, 3),
+        (events[5], 2, 3, 4, 4),
+    ):
+        buffer_id = _exact_int(event.get("lower_buffer_id"), positive=True)
+        if (
+            event.get("lower_surface_id") != lower_surface_id
+            or buffer_id is None
+            or buffer_id in lower_buffer_ids
+            or event.get("lower_buffer_scale") != SUBSURFACE_LOWER_BUFFER_SCALE
+            or event.get("lower_state_id") != state
+            or event.get("update_index") != update_index
+            or event.get("lower_attach_count") != attach_count
+            or event.get("lower_commit_count") != commit_count
+        ):
+            raise LabFailure("subsurface fixture lower update state is invalid")
+        lower_buffer_ids.append(buffer_id)
+    if (
+        events[1].get("upper_attach_count") != 0
+        or events[1].get("upper_commit_count") != 0
+        or events[2].get("upper_attach_count") != 0
+        or events[2].get("upper_commit_count") != 0
+        or events[5].get("upper_attach_count") != 1
+        or events[5].get("upper_commit_count") != 1
+    ):
+        raise LabFailure("subsurface fixture sibling update counters are invalid")
+
+    frame_generations = events[6:8]
+    for generation, (event, state, update_index, attach_count, commit_count) in enumerate(
+        zip(
+            frame_generations,
+            (3, 4),
+            (4, 5),
+            (5, 6),
+            (5, 6),
+            strict=True,
+        ),
+        start=1,
+    ):
+        buffer_id = _exact_int(event.get("lower_buffer_id"), positive=True)
+        if (
+            event.get("lower_surface_id") != lower_surface_id
+            or buffer_id is None
+            or buffer_id in lower_buffer_ids
+            or event.get("lower_buffer_scale") != SUBSURFACE_LOWER_BUFFER_SCALE
+            or event.get("lower_state_id") != state
+            or event.get("update_index") != update_index
+            or event.get("lower_attach_count") != attach_count
+            or event.get("lower_commit_count") != commit_count
+            or event.get("frame_done_count") != generation
+            or event.get("generation_id") != generation
+            or _exact_int(event.get("frame_callback_id"), positive=True) is None
+            or _exact_int(event.get("frame_callback_data")) is None
+            or event["frame_callback_data"] < 0
+            or event.get("upper_attach_count") != 1
+            or event.get("upper_commit_count") != 1
+        ):
+            raise LabFailure("subsurface child frame generation is invalid")
+        lower_buffer_ids.append(buffer_id)
+
+    continuous_start = events[8]
+    continuous_generations = events[9 : 9 + continuous_generation_count]
+    _validate_subsurface_continuous_cadence(continuous_generations)
+    continuous_stop = events[9 + continuous_generation_count]
+    start_buffer_ids = continuous_start.get("continuous_buffer_ids")
+    stop_buffer_ids = continuous_stop.get("continuous_buffer_ids")
+    start_callback_pending = continuous_start.get("frame_callback_pending")
+    start_callback_ready = continuous_start.get("frame_callback_ready")
+    start_frame_done = continuous_start.get("frame_done_count")
+    if (
+        type(start_buffer_ids) is not list
+        or len(start_buffer_ids) != 2
+        or any(_exact_int(value, positive=True) is None for value in start_buffer_ids)
+        or start_buffer_ids[0] in lower_buffer_ids
+        or start_buffer_ids[0] == lower_surface_id
+        or start_buffer_ids[1] != frame_generations[1]["lower_buffer_id"]
+        or continuous_start.get("continuous_generation_count") != 0
+        or start_callback_pending is start_callback_ready
+        or type(start_callback_pending) is not bool
+        or type(start_callback_ready) is not bool
+        or start_frame_done != 2 + int(start_callback_ready)
+        or continuous_start.get("lower_attach_count") != 6
+        or continuous_start.get("lower_buffer_id") != start_buffer_ids[1]
+        or continuous_start.get("lower_commit_count") != 6
+        or continuous_start.get("lower_state_id") != 4
+        or continuous_start.get("lower_surface_id") != lower_surface_id
+        or continuous_start.get("lower_update_count") != 5
+        or continuous_start.get("producer_active") is not True
+        or continuous_start.get("upper_attach_count") != 1
+        or continuous_start.get("upper_commit_count") != 1
+    ):
+        raise LabFailure("subsurface continuous start state is invalid")
+    continuous_buffer_ids = start_buffer_ids
+    lower_buffer_ids.append(continuous_buffer_ids[0])
+    for generation, event in enumerate(continuous_generations, start=1):
+        expected_buffer_id = continuous_buffer_ids[(generation - 1) % 2]
+        expected_state = 3 if generation % 2 else 4
+        callback_id = _exact_int(event.get("frame_callback_id"), positive=True)
+        callback_data = _exact_int(event.get("frame_callback_data"))
+        if (
+            event.get("continuous_generation_id") != generation
+            or callback_id is None
+            or callback_data is None
+            or callback_data < 0
+            or event.get("frame_done_count") != 2 + generation
+            or event.get("lower_attach_count") != 6 + generation
+            or event.get("lower_buffer_id") != expected_buffer_id
+            or event.get("lower_buffer_scale") != SUBSURFACE_LOWER_BUFFER_SCALE
+            or event.get("lower_commit_count") != 6 + generation
+            or event.get("lower_state_id") != expected_state
+            or event.get("lower_surface_id") != lower_surface_id
+            or event.get("lower_update_count") != 5 + generation
+            or event.get("producer_active") is not True
+            or event.get("upper_attach_count") != 1
+            or event.get("upper_commit_count") != 1
+        ):
+            raise LabFailure("subsurface continuous generation is invalid")
+    terminal_completed = continuous_stop.get("terminal_callback_completed")
+    pending_cancelled = continuous_stop.get("pending_callback_cancelled")
+    terminal_callback_id = _exact_int(continuous_stop.get("terminal_callback_id"))
+    terminal_callback_data = _exact_int(continuous_stop.get("terminal_callback_data"))
+    final_buffer_id = continuous_buffer_ids[(continuous_generation_count - 1) % 2]
+    final_state = 3 if continuous_generation_count % 2 else 4
+    if (
+        stop_buffer_ids != continuous_buffer_ids
+        or type(stop_buffer_ids) is not list
+        or any(_exact_int(value, positive=True) is None for value in stop_buffer_ids)
+        or continuous_stop.get("continuous_generation_count")
+        != continuous_generation_count
+        or type(terminal_completed) is not bool
+        or type(pending_cancelled) is not bool
+        or terminal_completed is pending_cancelled
+        or terminal_callback_id is None
+        or terminal_callback_data is None
+        or (
+            terminal_completed
+            and (
+                terminal_callback_id <= 0
+                or terminal_callback_data < 0
+                or continuous_stop.get("frame_done_count")
+                != 3 + continuous_generation_count
+            )
+        )
+        or (
+            pending_cancelled
+            and (
+                terminal_callback_id <= 0
+                or terminal_callback_data != 0
+                or continuous_stop.get("frame_done_count")
+                != 2 + continuous_generation_count
+            )
+        )
+        or continuous_stop.get("lower_attach_count")
+        != 6 + continuous_generation_count
+        or continuous_stop.get("lower_buffer_id") != final_buffer_id
+        or continuous_stop.get("lower_commit_count")
+        != 6 + continuous_generation_count
+        or continuous_stop.get("lower_state_id") != final_state
+        or continuous_stop.get("lower_surface_id") != lower_surface_id
+        or continuous_stop.get("lower_update_count")
+        != 5 + continuous_generation_count
+        or continuous_stop.get("producer_active") is not False
+        or continuous_stop.get("upper_attach_count") != 1
+        or continuous_stop.get("upper_commit_count") != 1
+    ):
+        raise LabFailure("subsurface continuous stop state is invalid")
+
+    moved = events[3]
+    if (
+        moved.get("lower_surface_id") != lower_surface_id
+        or moved.get("lower_attach_count") != 3
+        or moved.get("lower_buffer_scale") != SUBSURFACE_LOWER_BUFFER_SCALE
+        or moved.get("lower_commit_count") != 3
+        or _subsurface_exact_pair(moved.get("from_offset"), dimensions=False)
+        != list(SUBSURFACE_INITIAL_OFFSET)
+        or _subsurface_exact_pair(moved.get("to_offset"), dimensions=False)
+        != list(SUBSURFACE_MOVED_OFFSET)
+    ):
+        raise LabFailure("subsurface fixture move did not preserve the child buffer")
+
+    stacked = events[4]
+    if (
+        _subsurface_exact_pair(stacked.get("lower_offset"), dimensions=False)
+        != list(SUBSURFACE_MOVED_OFFSET)
+        or _subsurface_exact_pair(stacked.get("upper_dimensions"), dimensions=True)
+        != list(SUBSURFACE_UPPER_DIMENSIONS)
+        or _subsurface_exact_pair(stacked.get("upper_offset"), dimensions=False)
+        != list(SUBSURFACE_UPPER_OFFSET)
+        or stacked.get("overlap") != list(SUBSURFACE_OVERLAP_GEOMETRY)
+        or stacked.get("stacking") != ["lower", "upper"]
+        or stacked.get("upper_attach_count") != 1
+        or stacked.get("upper_buffer_transform")
+        != SUBSURFACE_UPPER_BUFFER_TRANSFORM
+        or stacked.get("upper_commit_count") != 1
+        or stacked.get("upper_precommitted_before_role") is not True
+    ):
+        raise LabFailure("subsurface fixture sibling stack is invalid")
+    upper_surface_id = _exact_int(stacked.get("upper_surface_id"), positive=True)
+    upper_buffer_id = _exact_int(stacked.get("upper_buffer_id"), positive=True)
+    if (
+        upper_surface_id is None
+        or upper_buffer_id is None
+        or upper_surface_id in lower_buffer_ids
+        or upper_buffer_id in lower_buffer_ids
+        or len(
+            {
+                lower_surface_id,
+                *lower_buffer_ids,
+                upper_surface_id,
+                upper_buffer_id,
+            }
+        )
+        != 3 + len(lower_buffer_ids)
+    ):
+        raise LabFailure("subsurface fixture sibling proxy identities are invalid")
+
+    click_index = 10 + continuous_generation_count
+    click = events[click_index]
+    surface_coordinates = click.get("surface_coordinates")
+    if (
+        click.get("target") != "upper"
+        or click.get("parent_coordinates")
+        != list(SUBSURFACE_POINTER_PARENT_COORDINATES)
+        or type(surface_coordinates) is not list
+        or len(surface_coordinates) != 2
+        or any(type(value) is not float for value in surface_coordinates)
+        or abs(surface_coordinates[0] - SUBSURFACE_POINTER_SURFACE_COORDINATES[0])
+        > 2.0
+        or abs(surface_coordinates[1] - SUBSURFACE_POINTER_SURFACE_COORDINATES[1])
+        > 2.0
+    ):
+        raise LabFailure("subsurface fixture upper-sibling input is invalid")
+    if (
+        events[click_index + 1].get("lower_update_count")
+        != 5 + continuous_generation_count
+        or events[click_index + 1].get("parents_alive") != 2
+        or events[click_index + 1].get("upper_alive") is not True
+    ):
+        raise LabFailure("subsurface fixture lower destruction is invalid")
+
+    detached = events[click_index + 2]
+    reparented = events[click_index + 3]
+    stable_upper = {
+        "upper_attach_count": 1,
+        "upper_buffer_id": upper_buffer_id,
+        "upper_surface_id": upper_surface_id,
+    }
+    if (
+        any(detached.get(key) != value for key, value in stable_upper.items())
+        or detached.get("upper_commit_count") != 1
+        or detached.get("upper_buffer_transform")
+        != SUBSURFACE_UPPER_BUFFER_TRANSFORM
+        or detached.get("upper_precommitted_before_role") is not True
+        or detached.get("lower_destroyed") is not True
+        or detached.get("old_parent") != "primary"
+        or detached.get("parents_alive") != 2
+        or any(reparented.get(key) != value for key, value in stable_upper.items())
+        or reparented.get("upper_commit_count") != 1
+        or reparented.get("upper_buffer_transform")
+        != SUBSURFACE_UPPER_BUFFER_TRANSFORM
+        or reparented.get("upper_precommitted_before_role") is not True
+        or reparented.get("upper_reattach_parent_committed") is not True
+        or reparented.get("upper_reattach_without_child_commit") is not True
+        or reparented.get("new_parent") != "secondary"
+        or reparented.get("new_offset") != list(SUBSURFACE_REPARENT_OFFSET)
+        or reparented.get("parents_alive") != 2
+    ):
+        raise LabFailure("subsurface fixture reparent state is invalid")
+    final = events[click_index + 4]
+    if (
+        final.get("click_count") != 1
+        or final.get("lower_destroyed") is not True
+        or final.get("lower_update_count") != 5 + continuous_generation_count
+        or final.get("parents_alive") != 2
+        or final.get("upper_reparented") is not True
+    ):
+        raise LabFailure("subsurface fixture exit event is invalid")
+    return {
+        "ready": ready,
+        "changed": events[1],
+        "restored": events[2],
+        "moved": moved,
+        "stacked": stacked,
+        "lower-updated": events[5],
+        "lower-frame-one": frame_generations[0],
+        "lower-frame-two": frame_generations[1],
+        "continuous-start": continuous_start,
+        "continuous-generations": continuous_generations,
+        "continuous-stop": continuous_stop,
+        "sibling-click": click,
+        "lower-destroyed": events[click_index + 1],
+        "upper-detached": detached,
+        "reparented": reparented,
+        "exit": final,
+    }
+
+
+def _subsurface_info_lines(path: Path) -> dict[str, str]:
+    ensure_private_regular_file(path)
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise LabFailure(f"subsurface server info is unavailable: {path}") from error
+    if not raw or len(raw) > 4 * 1024 * 1024 or b"\0" in raw:
+        raise LabFailure(f"subsurface server info has an invalid size: {path}")
+    try:
+        lines = raw.decode("utf-8", errors="strict").splitlines()
+    except UnicodeDecodeError as error:
+        raise LabFailure(f"subsurface server info is not UTF-8: {path}") from error
+    values: dict[str, str] = {}
+    for line in lines:
+        key, separator, value = line.partition("=")
+        if not separator or not key:
+            raise LabFailure(f"subsurface server info line is invalid: {path}")
+        if key in values:
+            raise LabFailure(f"subsurface server info repeats key {key!r}")
+        values[key] = value
+    return values
+
+
+def parse_subsurface_server_info(
+    path: Path,
+    parent_wids: dict[str, int],
+) -> dict[str, Any]:
+    """Extract exact connection and cross-parent internal-child state."""
+    if (
+        type(parent_wids) is not dict
+        or set(parent_wids) != set(SUBSURFACE_PARENT_ROLES)
+        or any(_exact_int(wid, positive=True) is None for wid in parent_wids.values())
+        or len(set(parent_wids.values())) != 2
+    ):
+        raise LabFailure("subsurface server info parent identities are invalid")
+    values = _subsurface_info_lines(path)
+    connection_indexes = {
+        int(match.group(1))
+        for key in values
+        if (
+            match := re.fullmatch(
+                r"client\.([0-9]+)\.window\.damage\.next-packet-sequence",
+                key,
+            )
+        )
+    }
+    if len(connection_indexes) != 1:
+        raise LabFailure("subsurface server info has an ambiguous client connection")
+    connection_index = next(iter(connection_indexes))
+    connection_prefix = f"client.{connection_index}.window"
+
+    def exact_int(key: str, *, positive: bool = False) -> int:
+        raw = values.get(key)
+        if raw is None or re.fullmatch(r"-?[0-9]+", raw) is None:
+            raise LabFailure(f"subsurface server info field is unavailable: {key}")
+        value = int(raw)
+        if (positive and value <= 0) or (not positive and value < 0):
+            raise LabFailure(f"subsurface server info field is invalid: {key}")
+        return value
+
+    discovered: dict[int, int] = {}
+    child_root = (
+        rf"{re.escape(connection_prefix)}\.windows\.([1-9][0-9]*)\."
+        r"subsurfaces\.([1-9][0-9]*)\."
+    )
+    for key in values:
+        match = re.fullmatch(child_root + r".+", key)
+        if match is None:
+            continue
+        parent_wid = int(match.group(1))
+        child_wid = int(match.group(2))
+        if parent_wid not in parent_wids.values():
+            raise LabFailure("subsurface server info contains an unknown child parent")
+        previous = discovered.setdefault(child_wid, parent_wid)
+        if previous != parent_wid:
+            raise LabFailure("subsurface server info repeats a child under two parents")
+
+    children: dict[int, dict[str, Any]] = {}
+    for child_wid, parent_wid in sorted(discovered.items()):
+        prefix = (
+            f"{connection_prefix}.windows.{parent_wid}."
+            f"subsurfaces.{child_wid}"
+        )
+        raw_offset = values.get(f"{prefix}.offset")
+        if raw_offset is None:
+            raise LabFailure("subsurface server info child has no offset")
+        try:
+            offset = ast.literal_eval(raw_offset)
+        except (SyntaxError, ValueError) as error:
+            raise LabFailure("subsurface server info offset is invalid") from error
+        if (
+            type(offset) not in (tuple, list)
+            or len(offset) != 2
+            or any(
+                _exact_int(item) is None or not -(2**31) <= item < 2**31
+                for item in offset
+            )
+        ):
+            raise LabFailure("subsurface server info offset is invalid")
+        info_prefix = f"{prefix}.info"
+        children[child_wid] = {
+            "ack_pending": exact_int(f"{info_prefix}.damage.ack-pending"),
+            "encoding_pending": exact_int(
+                f"{info_prefix}.damage.encoding-pending"
+            ),
+            "offset": list(offset),
+            "packets_sent": exact_int(f"{info_prefix}.damage.packets_sent"),
+            "parent_wid": parent_wid,
+        }
+    return {
+        "ack_owners": exact_int(f"{connection_prefix}.damage.ack-owners"),
+        "subsurface_pending": exact_int(f"{connection_prefix}.damage.subsurface-pending"),
+        "subsurface_inflight": exact_int(f"{connection_prefix}.damage.subsurface-inflight"),
+        "active_pixel_sources": exact_int(
+            f"{connection_prefix}.damage.active-pixel-sources"
+        ),
+        "children": children,
+        "parents": {
+            role: {
+                name: exact_int(f"{connection_prefix}.windows.{wid}.damage.{field}")
+                for name, field in (
+                    ("ack_pending", "ack-pending"), ("encoding_pending", "encoding-pending"),
+                    ("packets_sent", "packets_sent"),
+                )
+            }
+            for role, wid in parent_wids.items()
+        },
+        "client_index": connection_index,
+        "next_packet_sequence": exact_int(
+            f"{connection_prefix}.damage.next-packet-sequence",
+            positive=True,
+        ),
+    }
+
+
+def _subsurface_parent_queues_drained(info: dict[str, Any], counts: dict[str, int] | None = None) -> bool:
+    parents = info.get("parents")
+    return bool(
+        isinstance(parents, dict) and set(parents) == set(SUBSURFACE_PARENT_ROLES)
+        and all(
+            isinstance(value, dict) and set(value) == {"ack_pending", "encoding_pending", "packets_sent"}
+            and _exact_int(value.get("ack_pending")) == 0
+            and _exact_int(value.get("encoding_pending")) == 0
+            and _exact_int(value.get("packets_sent")) is not None and value["packets_sent"] >= 0
+            and (counts is None or value["packets_sent"] == counts[role])
+            for role, value in parents.items()
+        )
+    )
+
+
+SUBSURFACE_PUBLISH_RE = re.compile(
+    r"subsurface draw packet sequence (?P<sequence>[0-9]+) "
+    r"from source window (?P<source>0x[0-9a-fA-F]+) "
+    r"published as wire window (?P<wire>0x[0-9a-fA-F]+) "
+    r"using (?P<encoding>[a-z0-9-]+)"
+)
+SUBSURFACE_ACK_RE = re.compile(
+    r"draw acknowledgement sequence (?P<sequence>[0-9]+) "
+    r"for wire window (?P<wire>0x[0-9a-fA-F]+) "
+    r"routed to subsurface window (?P<source>0x[0-9a-fA-F]+)"
+)
+SUBSURFACE_POINTER_TARGET_RE = re.compile(
+    r"Wayland pointer target root=(?P<root>0x[0-9a-f]+) "
+    r"surface=(?P<surface>0x[0-9a-f]+) "
+    r"local=(?P<x>-?[0-9]+\.[0-9]{3}),(?P<y>-?[0-9]+\.[0-9]{3})"
+    r"(?![0-9.])"
+)
+
+
+def parse_subsurface_stream_logs(
+    directory: Path,
+    parent_wids: dict[str, int],
+    child_wids: dict[str, int],
+) -> dict[str, Any]:
+    """Parse exact source/wire/ACK routes for every child source lifetime."""
+    role_ids = _subsurface_role_ids(parent_wids, child_wids)
+    server_path = directory / "server.stderr"
+    client_paths = (directory / "client.stdout", directory / "client.stderr")
+    try:
+        server_log = server_path.read_text(encoding="utf-8", errors="replace")
+        client_log = "".join(
+            path.read_text(encoding="utf-8", errors="replace")
+            for path in client_paths
+        )
+    except OSError as error:
+        raise LabFailure("subsurface packet logs are unavailable") from error
+    publications = [
+        {
+            "encoding": match.group("encoding"),
+            "sequence": int(match.group("sequence")),
+            "source_wid": int(match.group("source"), 16),
+            "wire_wid": int(match.group("wire"), 16),
+        }
+        for match in SUBSURFACE_PUBLISH_RE.finditer(server_log)
+    ]
+    acknowledgements = [
+        {
+            "sequence": int(match.group("sequence")),
+            "source_wid": int(match.group("source"), 16),
+            "wire_wid": int(match.group("wire"), 16),
+        }
+        for match in SUBSURFACE_ACK_RE.finditer(server_log)
+    ]
+    ordered_matches = sorted(
+        (
+            *(
+                (match.start(), "publish", int(match.group("sequence")))
+                for match in SUBSURFACE_PUBLISH_RE.finditer(server_log)
+            ),
+            *(
+                (match.start(), "ack", int(match.group("sequence")))
+                for match in SUBSURFACE_ACK_RE.finditer(server_log)
+            ),
+        )
+    )
+    client_draws = [
+        {
+            "encoding": match.group("encoding"),
+            "height": int(match.group("height")),
+            "sequence": int(match.group("sequence")),
+            "width": int(match.group("width")),
+            "window_id": int(match.group("window_id")),
+            "x": int(match.group("x")),
+            "y": int(match.group("y")),
+        }
+        for match in H264_PROCESS_DRAW_RE.finditer(client_log)
+    ]
+    primary = role_ids["primary"]
+    client_button_matches = list(
+        re.finditer(
+            rf"_button_action\(1,[^\n]*?, (?P<state>True|False)\) "
+            rf"wid=0x{primary:x}(?= /)",
+            client_log,
+        )
+    )
+    client_button_states = [
+        match.group("state") == "True" for match in client_button_matches
+    ]
+    server_click_matches = list(
+        re.finditer(
+            r"\bclick\(1, (?P<state>True|False),[^\n]*\)",
+            server_log,
+        )
+    )
+    server_click_states = [
+        match.group("state") == "True" for match in server_click_matches
+    ]
+    pointer_targets = [
+        {
+            "offset": match.start(),
+            "root_wid": int(match.group("root"), 0),
+            "surface_wid": int(match.group("surface"), 0),
+            "surface_x": float(match.group("x")),
+            "surface_y": float(match.group("y")),
+        }
+        for match in SUBSURFACE_POINTER_TARGET_RE.finditer(server_log)
+    ]
+    first_click_offset = (
+        server_click_matches[0].start() if server_click_matches else len(server_log)
+    )
+    preceding_targets = [
+        target for target in pointer_targets if target["offset"] < first_click_offset
+    ]
+    click_target = preceding_targets[-1] if preceding_targets else None
+    expected_surface = child_wids["upper"]
+    expected_surface_x, expected_surface_y = SUBSURFACE_POINTER_SURFACE_COORDINATES
+    surface_coordinates_exact = bool(
+        click_target is not None
+        and abs(click_target["surface_x"] - expected_surface_x) <= 0.001
+        and abs(click_target["surface_y"] - expected_surface_y) <= 0.001
+    )
+    root_coordinates_exact = bool(
+        surface_coordinates_exact
+        and abs(
+            SUBSURFACE_UPPER_OFFSET[0]
+            + click_target["surface_x"]
+            - SUBSURFACE_POINTER_PARENT_COORDINATES[0]
+        )
+        <= 0.001
+        and abs(
+            SUBSURFACE_UPPER_OFFSET[1]
+            + click_target["surface_y"]
+            - SUBSURFACE_POINTER_PARENT_COORDINATES[1]
+        )
+        <= 0.001
+    )
+    leaf_surface_exact = bool(
+        click_target is not None
+        and click_target["surface_wid"] == expected_surface
+    )
+    client_ordered = client_button_states == [True, False]
+    server_ordered = bool(
+        server_click_states == [True, False]
+        and click_target is not None
+        and click_target["offset"]
+        < server_click_matches[0].start()
+        < server_click_matches[1].start()
+    )
+    return {
+        "acknowledgements": acknowledgements,
+        "client_draws": client_draws,
+        "eos_window_ids": [
+            int(value)
+            for value in re.findall(r"sending eos for wid ([1-9][0-9]*)", server_log)
+        ],
+        "input": {
+            "client_ordered": client_ordered,
+            "client_press": client_button_states == [True, False],
+            "client_release": client_button_states == [True, False],
+            "server_leaf_coordinates": surface_coordinates_exact,
+            "server_leaf_surface": leaf_surface_exact,
+            "server_ordered": server_ordered,
+            "server_press": server_click_states == [True, False],
+            "server_release": server_click_states == [True, False],
+            "server_root_coordinates": root_coordinates_exact,
+            "server_root_wire": bool(
+                click_target is not None and click_target["root_wid"] == primary
+            ),
+        },
+        "publications": publications,
+        "route_order": [
+            {"event": event, "sequence": sequence}
+            for _offset, event, sequence in ordered_matches
+        ],
+    }
+
+
+def _subsurface_role_ids(
+    parent_wids: Any,
+    child_wids: Any,
+) -> dict[str, int]:
+    if (
+        type(parent_wids) is not dict
+        or set(parent_wids) != set(SUBSURFACE_PARENT_ROLES)
+        or type(child_wids) is not dict
+        or set(child_wids) != set(SUBSURFACE_CHILD_ROLES)
+    ):
+        raise LabFailure("subsurface role identities are incomplete")
+    role_ids = {**parent_wids, **child_wids}
+    stable_surface_ids = {
+        *parent_wids.values(),
+        child_wids["lower"],
+        child_wids["upper"],
+    }
+    if (
+        any(_exact_int(value, positive=True) is None for value in role_ids.values())
+        or child_wids["reparented-upper"] != child_wids["upper"]
+        or len(stable_surface_ids) != 4
+    ):
+        raise LabFailure("subsurface role identities are invalid")
+    return role_ids
+
+
+def _subsurface_role_wires(
+    parent_wids: dict[str, int],
+    child_wids: dict[str, int],
+) -> dict[str, int]:
+    _subsurface_role_ids(parent_wids, child_wids)
+    wires = {
+        "primary": parent_wids["primary"],
+        "secondary": parent_wids["secondary"],
+    }
+    for layout in SUBSURFACE_PHASE_CHILD_LAYOUTS.values():
+        for role, parent, _offset in layout:
+            wire_wid = parent_wids[parent]
+            if role in wires and wires[role] != wire_wid:
+                raise LabFailure(f"subsurface {role} wire parent is ambiguous")
+            wires[role] = wire_wid
+    if set(wires) != set(SUBSURFACE_PARENT_ROLES + SUBSURFACE_CHILD_ROLES):
+        raise LabFailure("subsurface wire roles are incomplete")
+    return wires
+
+
+def _subsurface_expected_children(
+    phase: str,
+    parent_wids: dict[str, int],
+    child_wids: dict[str, int],
+) -> dict[int, tuple[int, list[int]]]:
+    """Resolve the canonical phase layout to persistent internal source IDs."""
+    try:
+        layout = SUBSURFACE_PHASE_CHILD_LAYOUTS[phase]
+    except KeyError as error:
+        raise LabFailure(f"invalid subsurface phase layout: {phase}") from error
+    resolved: dict[int, tuple[int, list[int]]] = {}
+    for role, parent, offset in layout:
+        source_wid = child_wids.get(role)
+        parent_wid = parent_wids.get(parent)
+        if (
+            _exact_int(source_wid, positive=True) is None
+            or _exact_int(parent_wid, positive=True) is None
+            or source_wid in resolved
+        ):
+            raise LabFailure(f"subsurface {phase} layout identities are invalid")
+        resolved[source_wid] = (parent_wid, list(offset))
+    return resolved
+
+
+def _subsurface_source_metadata(
+    value: Any,
+    *,
+    roles: tuple[str, ...],
+    role_ids: dict[str, int],
+    label: str,
+) -> dict[str, dict[str, Any]]:
+    if type(value) is not dict or set(value) != set(roles):
+        raise LabFailure(f"subsurface {label} source metadata is incomplete")
+    validated: dict[str, dict[str, Any]] = {}
+    for role in roles:
+        item = value.get(role)
+        if type(item) is not dict or set(item) != {
+            "packet_info",
+            "packet_info_sha256",
+            "packet_payload",
+            "payload_bytes",
+            "payload_sha256",
+            "sequences",
+        }:
+            raise LabFailure(f"subsurface {label} {role} metadata is invalid")
+        sequences = item.get("sequences")
+        if (
+            type(sequences) is not list
+            or len(sequences) != 1
+            or _exact_int(sequences[0], positive=True) is None
+        ):
+            raise LabFailure(f"subsurface {label} {role} sequence is invalid")
+        packet_info = item.get("packet_info")
+        packet_info_sha256 = item.get("packet_info_sha256")
+        packet_payload = item.get("packet_payload")
+        payload_bytes = _exact_int(item.get("payload_bytes"), positive=True)
+        payload_sha256 = item.get("payload_sha256")
+        source_wid = role_ids[role]
+        if (
+            not isinstance(packet_info, str)
+            or re.fullmatch(
+                rf"screen-updates/{source_wid}/(?:0|[1-9][0-9]*)/"
+                r"(?:0|[1-9][0-9]*)\.info",
+                packet_info,
+            )
+            is None
+            or not isinstance(packet_payload, str)
+            or not isinstance(packet_info_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", packet_info_sha256) is None
+            or not isinstance(payload_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", payload_sha256) is None
+            or payload_bytes is None
+        ):
+            raise LabFailure(f"subsurface {label} {role} packet binding is invalid")
+        info_path = PurePosixPath(packet_info)
+        payload_path = PurePosixPath(packet_payload)
+        allowed_encodings = (
+            ("rgb24", "rgb32")
+            if label == "parent-baseline" and role == "secondary"
+            else ("rgb32",)
+        )
+        if (
+            payload_path.parent != info_path.parent
+            or payload_path.stem != info_path.stem
+            or payload_path.suffix.removeprefix(".") not in allowed_encodings
+            or payload_path.is_absolute()
+            or payload_path.as_posix() != packet_payload
+            or len(payload_path.parts) != 4
+        ):
+            raise LabFailure(f"subsurface {label} {role} packet binding is invalid")
+        validated[role] = {
+            "packet_info": packet_info,
+            "packet_info_sha256": packet_info_sha256,
+            "packet_payload": packet_payload,
+            "payload_bytes": payload_bytes,
+            "payload_sha256": payload_sha256,
+            "sequences": list(sequences),
+        }
+    return validated
+
+
+def _subsurface_phase_metadata(
+    phases: Any,
+    parent_sources: Any,
+    parent_wids: dict[str, int],
+    child_wids: dict[str, int],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    role_ids = _subsurface_role_ids(parent_wids, child_wids)
+    parents = _subsurface_source_metadata(
+        parent_sources,
+        roles=SUBSURFACE_PARENT_ROLES,
+        role_ids=role_ids,
+        label="parent-baseline",
+    )
+    if type(phases) is not dict or set(phases) != set(SUBSURFACE_PHASES):
+        raise LabFailure("subsurface phase metadata is incomplete or reordered")
+    validated: dict[str, dict[str, Any]] = {}
+    for phase in SUBSURFACE_PHASES:
+        value = phases.get(phase)
+        if type(value) is not dict or set(value) != {"streams"}:
+            raise LabFailure(f"subsurface {phase} phase metadata is invalid")
+        streams = value.get("streams")
+        roles = SUBSURFACE_PHASE_STREAM_ROLES[phase]
+        if (
+            type(streams) is not list
+            or len(streams) != len(roles)
+            or tuple(
+                stream.get("role") if type(stream) is dict else None
+                for stream in streams
+            )
+            != roles
+        ):
+            raise LabFailure(f"subsurface {phase} stream order is invalid")
+        phase_values: dict[str, dict[str, Any]] = {}
+        for stream in streams:
+            if set(stream) != {
+                "packet_info",
+                "packet_info_sha256",
+                "packet_payload",
+                "payload_bytes",
+                "payload_sha256",
+                "role",
+                "sequences",
+            }:
+                raise LabFailure(f"subsurface {phase} stream fields are invalid")
+            role = stream["role"]
+            phase_values.update(
+                _subsurface_source_metadata(
+                    {
+                        role: {
+                            "packet_info": stream["packet_info"],
+                            "packet_info_sha256": stream["packet_info_sha256"],
+                            "packet_payload": stream["packet_payload"],
+                            "payload_bytes": stream["payload_bytes"],
+                            "payload_sha256": stream["payload_sha256"],
+                            "sequences": stream["sequences"],
+                        }
+                    },
+                    roles=(role,),
+                    role_ids=role_ids,
+                    label=phase,
+                )
+            )
+        validated[phase] = {"streams": phase_values}
+    return parents, validated
+
+
+def _subsurface_updates_for_stream(
+    updates: Any,
+    stream: dict[str, Any],
+) -> list[dict[str, Any]]:
+    packets = updates.get("updates") if isinstance(updates, dict) else None
+    if not isinstance(packets, list):
+        return []
+    expected = stream["sequences"]
+    selected = [
+        packet
+        for packet in packets
+        if isinstance(packet, dict)
+        and packet.get("sequence") in expected
+        and packet.get("relative_info") == stream["packet_info"]
+        and packet.get("info_sha256") == stream["packet_info_sha256"]
+        and _subsurface_saved_payload_relative(packet) == stream["packet_payload"]
+        and packet.get("payload_bytes") == stream["payload_bytes"]
+        and packet.get("payload_sha256") == stream["payload_sha256"]
+    ]
+    return selected if [packet.get("sequence") for packet in selected] == expected else []
+
+
+def _subsurface_saved_payload_relative(packet: dict[str, Any]) -> str | None:
+    relative_info = packet.get("relative_info")
+    if not isinstance(relative_info, str):
+        return None
+    path = PurePosixPath(relative_info)
+    if path.is_absolute() or path.as_posix() != relative_info or len(path.parts) != 4:
+        return None
+    root, window_id, group, info_name = path.parts
+    match = re.fullmatch(r"(0|[1-9][0-9]*)\.info", info_name)
+    encoding = packet.get("encoding")
+    payload_name = packet.get("file")
+    if (
+        root != "screen-updates"
+        or re.fullmatch(r"[1-9][0-9]*", window_id) is None
+        or re.fullmatch(r"0|[1-9][0-9]*", group) is None
+        or match is None
+        or encoding not in {"rgb24", "rgb32"}
+        or payload_name != f"{match.group(1)}.{encoding}"
+    ):
+        return None
+    return (path.parent / payload_name).as_posix()
+
+
+def _subsurface_packet_binding(
+    directory: Path,
+    packet: dict[str, Any],
+) -> dict[str, Any]:
+    relative_info = packet.get("relative_info")
+    relative_payload = _subsurface_saved_payload_relative(packet)
+    payload_bytes = _exact_int(packet.get("payload_bytes"), positive=True)
+    payload_sha256 = packet.get("payload_sha256")
+    sequence = _exact_int(packet.get("sequence"), positive=True)
+    if (
+        not isinstance(relative_info, str)
+        or relative_payload is None
+        or payload_bytes is None
+        or not isinstance(payload_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", payload_sha256) is None
+        or sequence is None
+    ):
+        raise LabFailure("subsurface saved packet binding is invalid")
+    info_path = directory / relative_info
+    ensure_private_regular_file(info_path)
+    info_sha256 = sha256_file(info_path)
+    return {
+        "packet_info": relative_info,
+        "packet_info_sha256": info_sha256,
+        "packet_payload": relative_payload,
+        "payload_bytes": payload_bytes,
+        "payload_sha256": payload_sha256,
+        "sequences": [sequence],
+    }
+
+
+def _subsurface_focus_patterns(wid: int) -> tuple[str, ...]:
+    return (rf"_focus\({wid}, [^\n]+\) current focus=[0-9]+",)
+
+
+def _subsurface_startup_barrier_metadata(value: Any, parent_wids: dict[str, int]) -> dict[str, Any]:
+    if (
+        type(value) is not dict or set(value) != {"schema", "activation_order", "parents"}
+        or _exact_int(value.get("schema")) != 1
+        or value.get("activation_order") not in (["primary", "secondary"], ["secondary", "primary"])
+    ):
+        raise LabFailure("subsurface startup map barriers are invalid")
+    parents = value.get("parents")
+    if type(parents) is not list or len(parents) != 2:
+        raise LabFailure("subsurface startup map barriers are incomplete")
+    bounds = None
+    client_xids = set()
+    for role, record in zip(("secondary", "primary"), parents, strict=True):
+        if type(record) is not dict or set(record) != {
+            "role", "wire_wid", "client_xid", "server_log_start", "server_log_end",
+        }:
+            raise LabFailure("subsurface startup map barrier fields are invalid")
+        start, end = record.get("server_log_start"), record.get("server_log_end")
+        xid = record.get("client_xid")
+        if (
+            record.get("role") != role
+            or _exact_int(record.get("wire_wid"), positive=True) != parent_wids[role]
+            or not isinstance(xid, str) or re.fullmatch(r"(?:0x[0-9a-fA-F]+|[1-9][0-9]*)", xid) is None
+            or int(xid, 16 if xid.startswith("0x") else 10) <= 0
+            or int(xid, 16 if xid.startswith("0x") else 10) in client_xids
+            or _exact_int(start) is None or start < 0
+            or _exact_int(end, positive=True) is None or end <= start
+            or end - start > FRAME_LOG_TOTAL_BYTES
+            or (bounds is not None and (start, end) != bounds)
+        ):
+            raise LabFailure("subsurface startup map barrier identity or bounds are invalid")
+        client_xids.add(int(xid, 16 if xid.startswith("0x") else 10))
+        bounds = (start, end)
+    return value
+
+
+def _load_subsurface_startup_barriers(directory: Path, parent_wids: dict[str, int]) -> dict[str, Any]:
+    path = directory / SUBSURFACE_STARTUP_BARRIERS_ARTIFACT
+    ensure_private_regular_file(path)
+    payload = path.read_bytes()
+    if len(payload) > 16 * 1024:
+        raise LabFailure("subsurface startup map barrier artifact is oversized")
+    value = _subsurface_startup_barrier_metadata(json.loads(payload), parent_wids)
+    log_path = directory / "server.stderr"
+    ensure_private_regular_file(log_path)
+    with log_path.open("rb") as stream:
+        for record in value["parents"]:
+            stream.seek(record["server_log_start"])
+            length = record["server_log_end"] - record["server_log_start"]
+            interval = stream.read(length)
+            if len(interval) != length:
+                raise LabFailure("subsurface startup map barrier log is truncated")
+            text = interval.decode("utf-8", errors="strict")
+            if not all(re.search(pattern, text) for pattern in _subsurface_focus_patterns(record["wire_wid"])):
+                raise LabFailure("subsurface startup has no fresh server focus/map barrier")
+    return value
+
+
+def _establish_subsurface_startup_barriers(
+    server: str, server_pid: int, client: str, client_pid: int, directory: Path,
+    parent_wids: dict[str, int], windows: dict[str, str],
+) -> None:
+    # GTK queues focus only after its map callback. Both use the same Xpra
+    # connection and server UI queue, so a later focus handler is a map barrier.
+    if set(windows) != set(SUBSURFACE_PARENT_ROLES) or any(
+        not isinstance(xid, str) or re.fullmatch(r"(?:0x[0-9a-fA-F]+|[1-9][0-9]*)", xid) is None
+        for xid in windows.values()
+    ) or len({int(xid, 16 if xid.startswith("0x") else 10) for xid in windows.values()}) != 2:
+        raise LabFailure("subsurface startup requires the two owned parent XIDs")
+    if any(int(xid, 16 if xid.startswith("0x") else 10) <= 0 for xid in windows.values()):
+        raise LabFailure("subsurface startup requires positive owned parent XIDs")
+
+    def endpoints_alive() -> None:
+        if not container_process_exists(server, server_pid) or not container_process_exists(client, client_pid):
+            raise LabFailure("Xpra endpoint exited before the subsurface map barrier")
+
+    def activate(role: str) -> None:
+        podman_exec(client, [
+            "env", f"DISPLAY={CLIENT_DISPLAY}", "xdotool", "windowactivate", "--sync", windows[role],
+        ])
+
+    # Open the fresh interval before sampling the current server focus. A
+    # pending client focus packet may then legitimately satisfy a map barrier.
+    # Do not issue an unawaited priming activation: GTK coalesces focus idles.
+    offset = container_artifact_size(server, "server.stderr")
+
+    anchor = ""
+
+    def current_parent() -> bool:
+        nonlocal anchor
+        endpoints_alive()
+        for role, wid in parent_wids.items():
+            pattern = _subsurface_focus_patterns(wid)[0] + r"(?![\s\S]*_focus\([0-9]+,)"
+            if container_artifact_suffix_matches(server, "server.stderr", 0, (pattern,)):
+                anchor = role
+                return True
+        return False
+
+    wait_for("subsurface confirmed initial parent focus", current_parent)
+    first = "secondary" if anchor == "primary" else "primary"
+    activation_order = [first, anchor]
+    for role in activation_order:
+        activate(role)
+
+        def focused(role: str = role) -> bool:
+            endpoints_alive()
+            return container_artifact_suffix_matches(
+                server, "server.stderr", offset, _subsurface_focus_patterns(parent_wids[role]),
+            )
+
+        wait_for(f"subsurface {role} server focus after map", focused)
+
+    end = container_artifact_size(server, "server.stderr")
+    records = [
+        {
+            "role": role, "wire_wid": parent_wids[role], "client_xid": windows[role],
+            "server_log_start": offset, "server_log_end": end,
+        }
+        for role in ("secondary", "primary")
+    ]
+    value = _subsurface_startup_barrier_metadata({
+        "schema": 1, "activation_order": activation_order, "parents": records,
+    }, parent_wids)
+    replace_private_json(directory / SUBSURFACE_STARTUP_BARRIERS_ARTIFACT, value)
+
+
+def _subsurface_secondary_startup_damage(payload: bytes, wid: int, captures: int) -> dict[str, Any]:
+    """Prove the ordinary root's two requests have left delayed batching."""
+    if not 0 < len(payload) <= FRAME_LOG_TOTAL_BYTES or captures not in (1, 2):
+        raise LabFailure("subsurface startup damage bounds are invalid")
+    width, height = SUBSURFACE_PARENT_DIMENSIONS["secondary"]
+    requests = list(re.finditer(rb"do_damage[^\n]+ wid=" + f"{wid:#x}".encode() + rb",[^\n]+", payload))
+    expected_request = re.compile((
+        rf"do_damage\(0, 0, {width}, {height}, \{{\}}\)\s+wid={wid:#x}, "
+        r"(?:scheduling batching expiry for sequence\s+[0-9]+ in\s+[0-9]+ ms"
+        r"|using existing [0-9]+ delayed regions created [0-9]+ms ago)"
+    ).encode())
+    # Compile a byte pattern, keeping offsets in the same units as retained logs.
+    captured = list(re.finditer(
+        (rf"process_damage_region: wid={wid:#x}, sequence=(?P<sequence>[0-9]+), "
+         rf"adding pixel data to encode queue \(\s*{width}x{height}\s+- rgb(?:24|32)\)").encode(),
+        payload,
+    ))
+    if (
+        len(requests) != 2 or any(expected_request.fullmatch(match[0]) is None for match in requests)
+        or len(captured) != captures or captured[-1].start() <= requests[-1].start()
+        or len({int(match["sequence"]) for match in captured}) != captures
+        or captured[0].start() <= requests[0].start()
+        or (captures == 2 and captured[0].start() >= requests[1].start())
+    ):
+        raise LabFailure("subsurface secondary initial/map damage has not completely left batching")
+    return {
+        "server_log_end": len(payload),
+        "requests": [match.start() for match in requests],
+        "captures": [{"offset": match.start(), "sequence": int(match["sequence"])} for match in captured],
+    }
+
+
+def _subsurface_startup_damage_metadata(value: Any, captures: int) -> bool:
+    if type(value) is not dict or set(value) != {"server_log_end", "requests", "captures"}:
+        return False
+    end, requests, recorded = value["server_log_end"], value["requests"], value["captures"]
+    if (
+        _exact_int(end, positive=True) is None or end > FRAME_LOG_TOTAL_BYTES
+        or type(requests) is not list or len(requests) != 2
+        or any(_exact_int(offset) is None or not 0 <= offset < end for offset in requests)
+        or requests[0] >= requests[1]
+        or type(recorded) is not list or len(recorded) != captures
+    ):
+        return False
+    previous_offset = previous_sequence = -1
+    for record in recorded:
+        if type(record) is not dict or set(record) != {"offset", "sequence"}:
+            return False
+        offset, sequence = record["offset"], record["sequence"]
+        if (
+            _exact_int(offset) is None or not previous_offset < offset < end
+            or _exact_int(sequence, positive=True) is None or sequence <= previous_sequence
+        ):
+            return False
+        previous_offset, previous_sequence = offset, sequence
+    return bool(
+        previous_offset > requests[-1] and recorded[0]["offset"] > requests[0]
+        and (captures == 1 or recorded[0]["offset"] < requests[1])
+    )
+
+
+def _load_subsurface_startup_damage(directory: Path, wid: int, captures: int) -> dict[str, Any]:
+    path = directory / SUBSURFACE_STARTUP_DAMAGE_ARTIFACT
+    ensure_private_regular_file(path)
+    metadata_bytes = path.read_bytes()
+    if len(metadata_bytes) > 16 * 1024:
+        raise LabFailure("subsurface startup damage log boundary is oversized")
+    metadata = json.loads(metadata_bytes)
+    if (
+        type(metadata) is not dict or set(metadata) != {"schema", "server_log_end"}
+        or _exact_int(metadata.get("schema")) != 1
+        or _exact_int(metadata.get("server_log_end"), positive=True) is None
+        or metadata["server_log_end"] > FRAME_LOG_TOTAL_BYTES
+    ):
+        raise LabFailure("subsurface startup damage log boundary is invalid")
+    log_path = directory / "server.stderr"
+    ensure_private_regular_file(log_path)
+    with log_path.open("rb") as stream:
+        payload = stream.read(metadata["server_log_end"])
+    if len(payload) != metadata["server_log_end"]:
+        raise LabFailure("subsurface startup damage log is truncated")
+    return _subsurface_secondary_startup_damage(payload, wid, captures)
+
+
+def _subsurface_startup_snapshot(
+    updates_by_role: dict[str, dict[str, Any]],
+    role_ids: dict[str, int],
+    *,
+    before_sequence: int | None = None,
+) -> dict[str, Any]:
+    """Bind all initial-window/map refreshes, including coalesced captures.
+
+    Each mapped root has exactly two possible startup damage producers:
+    send_initial_windows and its Wayland map handler. The fixed fixture makes
+    no further buffer commit before the first controlled marker.
+    """
+    roles = ("primary", "lower", "secondary")
+    if set(updates_by_role) != set(roles) or (
+        before_sequence is not None and _exact_int(before_sequence, positive=True) is None
+    ):
+        raise LabFailure("subsurface startup packet bounds are invalid")
+    packets: dict[str, list[dict[str, Any]]] = {}
+    for role in roles:
+        values = updates_by_role[role].get("updates")
+        if not isinstance(values, list) or any(
+            not isinstance(packet, dict)
+            or _exact_int(packet.get("sequence"), positive=True) is None
+            for packet in values
+        ):
+            raise LabFailure("subsurface startup source updates are invalid")
+        packets[role] = sorted(
+            (packet for packet in values
+             if before_sequence is None or packet["sequence"] < before_sequence),
+            key=lambda packet: packet["sequence"],
+        )
+        if len(packets[role]) not in (1, 2):
+            raise LabFailure("subsurface startup exceeds its initial/map capture bound")
+    if len(packets["primary"]) != len(packets["lower"]):
+        raise LabFailure("subsurface startup has an incomplete transaction")
+    sequences = [packet["sequence"] for values in packets.values() for packet in values]
+    if sorted(sequences) != list(range(1, len(sequences) + 1)):
+        raise LabFailure("subsurface startup packet sequence inventory is incomplete")
+
+    def binding(role: str, packet: dict[str, Any]) -> dict[str, Any]:
+        value = {
+            "packet_info": packet.get("relative_info"),
+            "packet_info_sha256": packet.get("info_sha256"),
+            "packet_payload": _subsurface_saved_payload_relative(packet),
+            "payload_bytes": packet.get("payload_bytes"),
+            "payload_sha256": packet.get("payload_sha256"),
+            "sequences": [packet["sequence"]],
+        }
+        return _subsurface_source_metadata(
+            {role: value}, roles=(role,), role_ids=role_ids, label="parent-baseline",
+        )[role]
+
+    transactions = []
+    previous_sequence = previous_transaction = 0
+    epochs = None
+    for parent, child in zip(packets["primary"], packets["lower"], strict=True):
+        parent_options, child_options = parent.get("options"), child.get("options")
+        if not isinstance(parent_options, dict) or not isinstance(child_options, dict):
+            raise LabFailure("subsurface startup transaction options are missing")
+        transaction_id = _exact_int(parent_options.get("subsurface-transaction-id"), positive=True)
+        current_epochs = tuple(
+            _exact_int(parent_options.get(f"subsurface-{name}-epoch"))
+            for name in ("topology", "backing")
+        )
+        if (
+            transaction_id is None or transaction_id <= previous_transaction
+            or any(epoch is None or epoch < 0 for epoch in current_epochs)
+            or (epochs is not None and current_epochs != epochs)
+            or not previous_sequence < parent["sequence"] < child["sequence"]
+        ):
+            raise LabFailure("subsurface startup transaction order or epochs are invalid")
+        for stage, (role, packet, options) in enumerate((
+            ("primary", parent, parent_options), ("lower", child, child_options),
+        )):
+            geometry = (
+                (0, 0, *SUBSURFACE_PARENT_DIMENSIONS["primary"])
+                if role == "primary" else SUBSURFACE_PHASE_GEOMETRIES[("initial", "lower")]
+            )
+            if (
+                packet.get("encoding") != "rgb32"
+                or tuple(packet.get(key) for key in ("x", "y", "w", "h")) != geometry
+                or options.get("subsurface-composite") != SUBSURFACE_COMPOSITE_MODE
+                or _exact_int(options.get("subsurface-transaction-id"), positive=True) != transaction_id
+                or _exact_int(options.get("subsurface-stage-index")) != stage
+                or _exact_int(options.get("subsurface-stage-count")) != 2
+                or _exact_int(options.get("flush")) != 1 - stage
+                or tuple(_exact_int(options.get(f"subsurface-{name}-epoch"))
+                         for name in ("topology", "backing")) != current_epochs
+                or (
+                    options.get("subsurface-reset") != list(SUBSURFACE_TRANSACTION_RESETS["initial"])
+                    if stage == 0 else "subsurface-reset" in options
+                )
+            ):
+                raise LabFailure("subsurface startup transaction stages are invalid")
+        transactions.append({
+            "transaction_id": transaction_id,
+            "topology_epoch": current_epochs[0], "backing_epoch": current_epochs[1],
+            "packets": [{"role": role, **binding(role, packet)}
+                        for role, packet in (("primary", parent), ("lower", child))],
+        })
+        previous_sequence, previous_transaction = child["sequence"], transaction_id
+        epochs = current_epochs
+    secondary = []
+    secondary_epoch = None
+    for packet in packets["secondary"]:
+        options = packet.get("options")
+        if (
+            packet.get("encoding") not in ("rgb24", "rgb32")
+            or tuple(packet.get(key) for key in ("x", "y", "w", "h"))
+            != (0, 0, *SUBSURFACE_PARENT_DIMENSIONS["secondary"])
+            or not isinstance(options, dict)
+            or any(key.startswith("subsurface-") for key in options)
+            or _exact_int(options.get("flush")) != 0
+            or _exact_int(options.get("backing-epoch")) is None
+            or options["backing-epoch"] < 0
+            or (secondary_epoch is not None and options["backing-epoch"] != secondary_epoch)
+        ):
+            raise LabFailure("subsurface secondary startup packet is invalid")
+        secondary.append(binding("secondary", packet))
+        secondary_epoch = options["backing-epoch"]
+    return {
+        "transactions": transactions, "secondary": secondary,
+        "packet_count": len(sequences), "next_packet_sequence": max(sequences) + 1,
+    }
+
+
+def _subsurface_continuous_transaction_snapshot(
+    directory: Path,
+    updates_by_role: dict[str, dict[str, Any]],
+    role_ids: dict[str, int],
+    *,
+    after_sequence: int,
+    before_sequence: int | None = None,
+) -> dict[str, Any]:
+    """Classify the bounded callback-driven interval from raw packet authority."""
+    roles = ("primary", "lower", "upper")
+    observed_roles = (*roles[:1], "secondary", *roles[1:])
+    if (
+        type(updates_by_role) is not dict
+        or set(updates_by_role) != set(observed_roles)
+        or _exact_int(after_sequence, positive=True) is None
+        or (
+            before_sequence is not None
+            and (
+                _exact_int(before_sequence, positive=True) is None
+                or before_sequence <= after_sequence
+            )
+        )
+    ):
+        raise LabFailure("subsurface continuous packet bounds are invalid")
+    packets: list[tuple[str, dict[str, Any]]] = []
+    for role in observed_roles:
+        updates = updates_by_role[role]
+        values = updates.get("updates") if isinstance(updates, dict) else None
+        if not isinstance(values, list):
+            raise LabFailure("subsurface continuous source updates are invalid")
+        for packet in values:
+            sequence = packet.get("sequence") if isinstance(packet, dict) else None
+            if (
+                _exact_int(sequence, positive=True) is not None
+                and sequence > after_sequence
+                and (before_sequence is None or sequence < before_sequence)
+            ):
+                packets.append((role, packet))
+    packets.sort(key=lambda value: value[1]["sequence"])
+    if len({packet["sequence"] for _role, packet in packets}) != len(packets):
+        raise LabFailure("subsurface continuous packet sequences are not unique")
+
+    transactions: dict[int, list[tuple[str, dict[str, Any]]]] = {}
+    order: list[int] = []
+    for role, packet in packets:
+        options = packet.get("options")
+        transaction_id = (
+            _exact_int(options.get("subsurface-transaction-id"), positive=True)
+            if isinstance(options, dict)
+            else None
+        )
+        if transaction_id is None:
+            raise LabFailure("subsurface continuous packet has no transaction identity")
+        if transaction_id not in transactions:
+            transactions[transaction_id] = []
+            order.append(transaction_id)
+        elif order[-1] != transaction_id:
+            raise LabFailure("subsurface continuous transaction packets are interleaved")
+        transactions[transaction_id].append((role, packet))
+    if any(later <= earlier for earlier, later in pairwise(order)):
+        raise LabFailure("subsurface continuous transaction identities are unordered")
+
+    normalized: list[dict[str, Any]] = []
+    inflight: dict[str, Any] | None = None
+    lower_x, lower_y = SUBSURFACE_CONTINUOUS_SOURCE_ORIGINS["lower"]
+    lower_width, lower_height = SUBSURFACE_CONTINUOUS_GEOMETRY[2:]
+    expected_lower_pixels = {
+        state: _subsurface_fixture_image(pattern).crop((
+            lower_x, lower_y, lower_x + lower_width, lower_y + lower_height,
+        )).tobytes()
+        for state, pattern in ((3, "lower-continuous-one"), (4, "lower-four"))
+    }
+    for transaction_index, transaction_id in enumerate(order):
+        values = transactions[transaction_id]
+        stage_count = 3
+        if len(values) > stage_count:
+            raise LabFailure("subsurface continuous transaction has too many stages")
+        stage_indexes: list[int] = []
+        topology_epochs: list[int] = []
+        backing_epochs: list[int] = []
+        packet_records: list[dict[str, Any]] = []
+        lower_state_id = None
+        for expected_index, (role, packet) in enumerate(values):
+            options = packet.get("options")
+            if not isinstance(options, dict):
+                raise LabFailure("subsurface continuous packet options are invalid")
+            stage_index = _exact_int(options.get("subsurface-stage-index"))
+            declared_count = _exact_int(
+                options.get("subsurface-stage-count"),
+                positive=True,
+            )
+            topology_epoch = _exact_int(options.get("subsurface-topology-epoch"))
+            backing_epoch = _exact_int(options.get("subsurface-backing-epoch"))
+            if (
+                role != roles[expected_index]
+                or packet.get("encoding") != "rgb32"
+                or tuple(packet.get(key) for key in ("x", "y", "w", "h"))
+                != SUBSURFACE_CONTINUOUS_GEOMETRY
+                or options.get("subsurface-composite") != SUBSURFACE_COMPOSITE_MODE
+                or options.get("rgb_format") not in SUBSURFACE_COMPOSITE_FORMATS
+                or options.get("subsurface-transaction-id") != transaction_id
+                or stage_index != expected_index
+                or declared_count != stage_count
+                or topology_epoch is None
+                or topology_epoch < 0
+                or backing_epoch is None
+                or backing_epoch < 0
+                or _exact_int(options.get("flush"))
+                != stage_count - expected_index - 1
+                or (
+                    options.get("subsurface-reset")
+                    != list(SUBSURFACE_CONTINUOUS_GEOMETRY)
+                    if expected_index == 0
+                    else "subsurface-reset" in options
+                )
+            ):
+                raise LabFailure("subsurface continuous transaction stage is invalid")
+            image = _subsurface_raw_packet_image(
+                directory,
+                packet,
+                role_ids[role],
+                composite=True,
+            )
+            if role == "lower":
+                matching_states = [
+                    state for state, pixels in expected_lower_pixels.items()
+                    if image.tobytes() == pixels
+                ]
+                if len(matching_states) != 1:
+                    raise LabFailure("subsurface continuous lower pixels have no fixture state")
+                lower_state_id = matching_states[0]
+            stage_indexes.append(stage_index)
+            topology_epochs.append(topology_epoch)
+            backing_epochs.append(backing_epoch)
+            packet_records.append(
+                {
+                    **_subsurface_packet_binding(directory, packet),
+                    "role": role,
+                    "source_wid": role_ids[role],
+                    "stage_index": stage_index,
+                }
+            )
+        if (
+            stage_indexes != list(range(len(values)))
+            or len(set(topology_epochs)) != 1
+            or len(set(backing_epochs)) != 1
+        ):
+            raise LabFailure("subsurface continuous transaction is malformed")
+        record = {
+            "backing_epoch": backing_epochs[0],
+            "lower_state_id": lower_state_id,
+            "packets": packet_records,
+            "topology_epoch": topology_epochs[0],
+            "transaction_id": transaction_id,
+        }
+        if len(values) == stage_count:
+            normalized.append(record)
+        else:
+            if transaction_index != len(order) - 1 or inflight is not None:
+                raise LabFailure("subsurface continuous transactions have an interior gap")
+            inflight = record
+    return {
+        "complete_transactions": normalized,
+        "inflight_transaction": inflight,
+        "packet_count": len(packets),
+    }
+
+
+def _same_typed_json_value(left: Any, right: Any) -> bool:
+    """Compare retained JSON authority without Python's bool/integer aliasing."""
+    if type(left) is not type(right):
+        return False
+    if type(left) is dict:
+        return set(left) == set(right) and all(
+            _same_typed_json_value(left[key], right[key]) for key in left
+        )
+    if type(left) is list:
+        return len(left) == len(right) and all(
+            _same_typed_json_value(first, second)
+            for first, second in zip(left, right, strict=True)
+        )
+    return bool(left == right)
+
+
+def _subsurface_capture_timeline_matches(
+    transactions: list[dict[str, Any]],
+    generations: list[dict[str, Any]],
+    *,
+    final: bool,
+) -> bool:
+    """Captured states form an ordered subsequence; uncaptured commits may coalesce."""
+    states = [record.get("lower_state_id") for record in transactions]
+    generated = [record.get("lower_state_id") for record in generations]
+    if (
+        not states or len(states) > len(generated)
+        or any(type(state) is not int or state not in (3, 4) for state in states)
+    ):
+        return False
+    if final:
+        if states[-1] != generated[-1]:
+            return False
+        states, generated = states[:-1], generated[:-1]
+    cursor = iter(generated)
+    return all(any(candidate == state for candidate in cursor) for state in states)
+
+
+def validate_subsurface_continuous_liveness(
+    value: Any,
+    events: dict[str, Any],
+    drained_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind the active observation and terminal drain to retained packet data."""
+    if type(value) is not dict or set(value) != {
+        "active",
+        "drained",
+        "schema",
+        "stop_requested_monotonic_ns",
+    }:
+        raise LabFailure("subsurface continuous liveness fields are invalid")
+    active = value.get("active")
+    drained = value.get("drained")
+    if type(active) is not dict or set(active) != {
+        "fixture_event_monotonic_ns",
+        "fixture_event_sequence",
+        "fixture_generation_count",
+        "fixture_process_alive",
+        "initial_fixture_generation_count",
+        "observation_started_monotonic_ns",
+        "observed_monotonic_ns",
+        "packet_cut_before_sequence",
+        "producer_active",
+        "snapshot",
+        "stop_marker_absent",
+    }:
+        raise LabFailure("subsurface active liveness fields are invalid")
+    if type(drained) is not dict or set(drained) != {
+        "fixture_event_monotonic_ns",
+        "fixture_event_sequence",
+        "fixture_generation_count",
+        "observed_monotonic_ns",
+        "producer_active",
+        "snapshot",
+    }:
+        raise LabFailure("subsurface drained liveness fields are invalid")
+    generation_count = _exact_int(active.get("fixture_generation_count"), positive=True)
+    initial_count = _exact_int(active.get("initial_fixture_generation_count"))
+    observation_started = _exact_int(active.get("observation_started_monotonic_ns"), positive=True)
+    packet_cut = _exact_int(active.get("packet_cut_before_sequence"), positive=True)
+    stopped_count = _exact_int(drained.get("fixture_generation_count"), positive=True)
+    active_observed = _exact_int(active.get("observed_monotonic_ns"), positive=True)
+    stop_requested = _exact_int(value.get("stop_requested_monotonic_ns"), positive=True)
+    drained_observed = _exact_int(drained.get("observed_monotonic_ns"), positive=True)
+    active_event_sequence = _exact_int(
+        active.get("fixture_event_sequence"),
+        positive=True,
+    )
+    active_event_monotonic = _exact_int(
+        active.get("fixture_event_monotonic_ns"),
+        positive=True,
+    )
+    drained_event_sequence = _exact_int(
+        drained.get("fixture_event_sequence"),
+        positive=True,
+    )
+    drained_event_monotonic = _exact_int(
+        drained.get("fixture_event_monotonic_ns"),
+        positive=True,
+    )
+    generations = events.get("continuous-generations")
+    stop = events.get("continuous-stop")
+    start = events.get("continuous-start")
+    if (
+        _exact_int(value.get("schema")) != 3
+        or generation_count is None
+        or initial_count is None
+        or not 0 <= initial_count < generation_count
+        or observation_started is None
+        or packet_cut is None
+        or stopped_count is None
+        or not SUBSURFACE_CONTINUOUS_MIN_GENERATIONS
+        <= generation_count
+        < SUBSURFACE_CONTINUOUS_MAX_GENERATIONS
+        or not generation_count
+        <= stopped_count
+        <= SUBSURFACE_CONTINUOUS_MAX_GENERATIONS
+        or active_observed is None
+        or stop_requested is None
+        or drained_observed is None
+        or active_event_sequence is None
+        or active_event_monotonic is None
+        or drained_event_sequence is None
+        or drained_event_monotonic is None
+        or not isinstance(generations, list)
+        or len(generations) != stopped_count
+        or not isinstance(start, dict)
+        or not isinstance(stop, dict)
+        or active.get("fixture_process_alive") is not True
+        or active.get("producer_active") is not True
+        or active.get("stop_marker_absent") is not True
+        or drained.get("producer_active") is not False
+    ):
+        raise LabFailure("subsurface continuous liveness state is invalid")
+    active_event = generations[generation_count - 1]
+    initial_event = generations[initial_count - 1] if initial_count else start
+    if (
+        active_event_sequence != active_event.get("sequence")
+        or active_event_monotonic != active_event.get("monotonic_ns")
+        or drained_event_sequence != stop.get("sequence")
+        or drained_event_monotonic != stop.get("monotonic_ns")
+        or stop.get("continuous_generation_count") != stopped_count
+        or not start["monotonic_ns"] <= initial_event["monotonic_ns"]
+        <= observation_started < active_event["monotonic_ns"]
+        or active_observed - start["monotonic_ns"] > SUBSURFACE_CONTINUOUS_ACTIVE_DEADLINE_NS
+        or not start["monotonic_ns"]
+        < active_event["monotonic_ns"]
+        <= active_observed
+        <= stop_requested
+        <= stop["monotonic_ns"]
+        <= drained_observed
+    ):
+        raise LabFailure("subsurface continuous liveness timing is invalid")
+    active_snapshot = active.get("snapshot")
+    if (
+        type(active_snapshot) is not dict
+        or set(active_snapshot)
+        != {"complete_transactions", "inflight_transaction", "packet_count"}
+        or (
+            active_snapshot.get("inflight_transaction") is not None
+            and type(active_snapshot.get("inflight_transaction")) is not dict
+        )
+    ):
+        raise LabFailure("subsurface active transaction snapshot is invalid")
+    if not _same_typed_json_value(drained.get("snapshot"), drained_snapshot):
+        raise LabFailure("subsurface drained transaction snapshot changed")
+    active_complete = active_snapshot.get("complete_transactions")
+    active_packet_count = _exact_int(active_snapshot.get("packet_count"))
+    drained_complete = drained_snapshot.get("complete_transactions")
+    if (
+        not isinstance(active_complete, list)
+        or active_packet_count is None
+        or not isinstance(drained_complete, list)
+        or len(active_complete) < SUBSURFACE_CONTINUOUS_MIN_GENERATIONS
+        or not SUBSURFACE_CONTINUOUS_MIN_GENERATIONS <= len(drained_complete) <= stopped_count
+        or drained_snapshot.get("inflight_transaction") is not None
+        or drained_snapshot.get("packet_count") != len(drained_complete) * 3
+        or not _subsurface_capture_timeline_matches(drained_complete, generations, final=True)
+        or active_packet_count != len(active_complete) * 3
+        + (
+            len(active_snapshot["inflight_transaction"].get("packets", []))
+            if isinstance(active_snapshot.get("inflight_transaction"), dict)
+            else 0
+        )
+    ):
+        raise LabFailure("subsurface continuous transaction accounting is invalid")
+    drained_by_id = {
+        record.get("transaction_id"): record
+        for record in drained_complete
+        if isinstance(record, dict)
+    }
+    if len(drained_by_id) != len(drained_complete):
+        raise LabFailure("subsurface drained transaction identities are invalid")
+    if not _same_typed_json_value(
+        active_complete,
+        drained_complete[: len(active_complete)],
+    ):
+        raise LabFailure("subsurface active transaction prefix was not retained")
+    active_inflight = active_snapshot.get("inflight_transaction")
+    if not isinstance(active_inflight, dict):
+        raise LabFailure("subsurface active packet frontier has no primary tail")
+    if isinstance(active_inflight, dict):
+        packets = active_inflight.get("packets")
+        completed = (
+            drained_complete[len(active_complete)]
+            if len(active_complete) < len(drained_complete)
+            else None
+        )
+        if (
+            not isinstance(completed, dict)
+            or not isinstance(packets, list)
+            or len(packets) != 1
+            or active_inflight.get("transaction_id") != completed.get("transaction_id")
+            or not _same_typed_json_value(
+                {
+                    key: value
+                    for key, value in active_inflight.items()
+                    if key not in {"packets", "lower_state_id"}
+                },
+                {key: value for key, value in completed.items()
+                 if key not in {"packets", "lower_state_id"}},
+            )
+            or active_inflight.get("lower_state_id")
+            != (completed.get("lower_state_id") if len(packets) >= 2 else None)
+            or not _same_typed_json_value(
+                completed.get("packets", [])[: len(packets)],
+                packets,
+            )
+        ):
+            raise LabFailure("subsurface in-flight transaction did not drain")
+    active_packets = [packet for record in [*active_complete, active_inflight]
+                      for packet in record["packets"]]
+    expected_packets = [packet for record in drained_complete for packet in record["packets"]
+                        if packet["sequences"][0] < packet_cut]
+    if (active_inflight["packets"][0]["sequences"][0] + 1 != packet_cut
+            or not _same_typed_json_value(active_packets, expected_packets)):
+        raise LabFailure("subsurface active packet frontier differs from the retained ledger")
+    active_transaction_count = len(active_complete) + int(active_inflight is not None)
+    lower_digests = {
+        packet.get("payload_sha256")
+        for record in active_complete
+        for packet in record.get("packets", [])
+        if packet.get("role") == "lower"
+    }
+    if (
+        active_transaction_count > generation_count
+        or not _subsurface_capture_timeline_matches(
+            active_complete + ([active_inflight] if active_inflight is not None
+                               and active_inflight.get("lower_state_id") is not None else []),
+            generations[:generation_count], final=False,
+        )
+        or len(lower_digests) < 2
+        or any(
+            later <= earlier
+            for earlier, later in pairwise(
+                record["transaction_id"] for record in drained_complete
+            )
+        )
+    ):
+        raise LabFailure("subsurface active continuous proof is insufficient")
+    return value
+
+
+def load_subsurface_continuous_liveness(
+    path: Path,
+    events: dict[str, Any],
+    drained_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    ensure_private_regular_file(path)
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise LabFailure("subsurface continuous liveness artifact is unavailable") from error
+    if not raw or len(raw) > 1024 * 1024 or b"\0" in raw:
+        raise LabFailure("subsurface continuous liveness artifact has an invalid size")
+    try:
+        value = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_json_object_without_duplicates,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise LabFailure("subsurface continuous liveness artifact is invalid JSON") from error
+    return validate_subsurface_continuous_liveness(value, events, drained_snapshot)
+
+
+def _load_subsurface_packet_info(path: Path) -> dict[str, Any]:
+    """Load one bounded packet authority without tolerating duplicate fields."""
+    ensure_private_regular_file(path)
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise LabFailure("subsurface saved packet info is unavailable") from error
+    if not raw or len(raw) > 1024 * 1024 or b"\0" in raw:
+        raise LabFailure("subsurface saved packet info has an invalid size")
+    try:
+        value = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_json_object_without_duplicates,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise LabFailure("subsurface saved packet info is invalid") from error
+    if type(value) is not dict:
+        raise LabFailure("subsurface saved packet info is not an object")
+    return value
+
+
+def _subsurface_saved_updates(directory: Path, source_wid: int) -> dict[str, Any]:
+    """Load packet authorities without admitting asynchronous source screenshots."""
+    updates_directory = directory / "screen-updates"
+    ensure_private_directory(updates_directory)
+    window_directory = updates_directory / str(source_wid)
+    ensure_private_directory(window_directory)
+    packets: list[dict[str, Any]] = []
+    sequences: set[int] = set()
+    for info_path in sorted(window_directory.glob("*/[0-9]*.info")):
+        ensure_private_directory(info_path.parent)
+        info = _load_subsurface_packet_info(info_path)
+        payload_name = info.get("file")
+        sequence = _exact_int(info.get("sequence"), positive=True)
+        if (
+            not isinstance(payload_name, str)
+            or payload_name in {"", ".", ".."}
+            or PurePosixPath(payload_name).name != payload_name
+        ):
+            raise LabFailure("subsurface saved packet payload path is unsafe")
+        if sequence is None or sequence in sequences:
+            raise LabFailure("subsurface saved packet sequence is invalid")
+        payload_path = info_path.parent / payload_name
+        ensure_private_regular_file(payload_path)
+        relative_info = info_path.relative_to(directory).as_posix()
+        packet = {
+            **info,
+            "info_sha256": sha256_file(info_path),
+            "payload_bytes": payload_path.stat().st_size,
+            "payload_sha256": sha256_file(payload_path),
+            "relative_info": relative_info,
+        }
+        if _saved_update_group_location(packet, source_wid) is None:
+            raise LabFailure("subsurface saved packet info path is invalid")
+        sequences.add(sequence)
+        packets.append(packet)
+    packets.sort(key=lambda packet: packet["sequence"])
+    return {
+        "count": len(packets),
+        "encodings": sorted({str(packet.get("encoding")) for packet in packets}),
+        "rgb_formats": sorted(
+            {
+                str(packet.get("options", {}).get("rgb_format"))
+                for packet in packets
+                if isinstance(packet.get("options"), dict)
+                and packet["options"].get("rgb_format")
+            }
+        ),
+        "updates": packets,
+        "window_id": source_wid,
+    }
+
+
+def synchronize_subsurface_saved_updates(
+    container: str,
+    directory: Path,
+    source_wid: int,
+) -> dict[str, Any]:
+    """Pull only immutable WSSO packet metadata and its bound raw payloads."""
+    prefix = f"screen-updates/{source_wid}/"
+    remote_info = tuple(
+        sorted(
+            relative
+            for relative in container_artifact_files(
+                container,
+                "screen-updates",
+                "*.info",
+            )
+            if re.fullmatch(
+                rf"screen-updates/{source_wid}/(?:0|[1-9][0-9]*)/"
+                r"(?:0|[1-9][0-9]*)\.info",
+                relative,
+            )
+        )
+    )
+    if not remote_info:
+        raise LabFailure(f"subsurface saved packets are unavailable: {prefix}")
+    missing_info = tuple(
+        relative for relative in remote_info if not (directory / relative).is_file()
+    )
+    if missing_info:
+        pull_container_artifacts(container, directory, missing_info)
+    missing_payloads: list[str] = []
+    for relative in remote_info:
+        info_path = directory / relative
+        try:
+            info = _load_subsurface_packet_info(info_path)
+        except LabFailure:
+            # save_update publishes the payload before it finishes the JSON
+            # sidecar.  A poll can therefore retain a bounded partial sidecar;
+            # refresh only that known remote path on the next parse attempt.
+            pull_container_artifacts(container, directory, (relative,))
+            info = _load_subsurface_packet_info(info_path)
+        payload_name = info.get("file")
+        if (
+            not isinstance(payload_name, str)
+            or payload_name in {"", ".", ".."}
+            or PurePosixPath(payload_name).name != payload_name
+        ):
+            raise LabFailure("subsurface saved packet payload path is unsafe")
+        payload_relative = (PurePosixPath(relative).parent / payload_name).as_posix()
+        if not (directory / payload_relative).is_file():
+            missing_payloads.append(payload_relative)
+    if missing_payloads:
+        pull_container_artifacts(
+            container,
+            directory,
+            tuple(sorted(set(missing_payloads))),
+        )
+    return _subsurface_saved_updates(directory, source_wid)
+
+
+def container_subsurface_source_wids(container: str) -> set[int]:
+    """Inventory WSSO source directories without reading diagnostic screenshots."""
+    listing = podman_exec(
+        container,
+        [
+            "find",
+            "/artifacts/screen-updates",
+            "-mindepth",
+            "1",
+            "-maxdepth",
+            "1",
+            "-printf",
+            "%f\\0",
+        ],
+        announce=False,
+    )
+    names = tuple(name for name in listing.stdout.split("\0") if name)
+    if not names or len(names) != len(set(names)):
+        raise LabFailure("subsurface saved source inventory is invalid")
+    source_wids: set[int] = set()
+    for name in names:
+        if re.fullmatch(r"[1-9][0-9]*", name) is None:
+            raise LabFailure("subsurface saved source identity is invalid")
+        source_wid = int(name)
+        if source_wid > 2**31 - 1:
+            raise LabFailure("subsurface saved source identity is invalid")
+        source_wids.add(source_wid)
+    return source_wids
+
+
+def _validate_subsurface_source_inventory(
+    directory: Path,
+    source_wids: set[int],
+) -> None:
+    """Require exactly the two roots and two persistent child source trees."""
+    updates_directory = directory / "screen-updates"
+    ensure_private_directory(updates_directory)
+    entries = tuple(updates_directory.iterdir())
+    expected = {str(wid) for wid in source_wids}
+    if {entry.name for entry in entries} != expected:
+        raise LabFailure("subsurface saved source inventory is not exact")
+    for entry in entries:
+        if re.fullmatch(r"[1-9][0-9]*", entry.name) is None:
+            raise LabFailure("subsurface saved source identity is invalid")
+        ensure_private_directory(entry)
+
+
+def _subsurface_raw_packet_image(
+    directory: Path,
+    packet: dict[str, Any],
+    source_wid: int,
+    *,
+    composite: bool,
+) -> Image.Image:
+    """Decode one exact uncompressed RGB packet retained by ``save_update``."""
+    relative_info = packet.get("relative_info")
+    payload_relative = _subsurface_saved_payload_relative(packet)
+    location = _saved_update_group_location(packet, source_wid)
+    options = packet.get("options")
+    geometry = _packet_geometry(packet)
+    encoding = packet.get("encoding")
+    if (
+        not isinstance(relative_info, str)
+        or payload_relative is None
+        or location is None
+        or not isinstance(options, dict)
+        or geometry is None
+        or encoding not in {"rgb24", "rgb32"}
+    ):
+        raise LabFailure("subsurface saved packet metadata is invalid")
+    if "compressed" in packet or "level" in packet or any(
+        algorithm in options for algorithm in ("brotli", "lz4", "zlib", "zstd")
+    ):
+        raise LabFailure("subsurface saved packet payload is compressed")
+    if composite:
+        if (
+            encoding != "rgb32"
+            or options.get("subsurface-composite")
+            != SUBSURFACE_COMPOSITE_MODE
+        ):
+            raise LabFailure("subsurface transaction packet is not raw rgb32")
+    elif any(str(key).startswith("subsurface-") for key in options):
+        raise LabFailure("ordinary subsurface baseline has transaction fields")
+
+    rgb_format = options.get("rgb_format")
+    formats = (
+        SUBSURFACE_COMPOSITE_FORMATS
+        if encoding == "rgb32"
+        else SUBSURFACE_BASELINE_RGB24_FORMATS
+    )
+    bytes_per_pixel = 4 if encoding == "rgb32" else 3
+    stride = _exact_int(packet.get("stride"), positive=True)
+    _x, _y, width, height = geometry
+    if rgb_format not in formats or stride is None or stride < width * bytes_per_pixel:
+        raise LabFailure("subsurface saved packet RGB format or stride is invalid")
+    expected_size = stride * height
+    payload_bytes = _exact_int(packet.get("payload_bytes"), positive=True)
+    payload_sha256 = packet.get("payload_sha256")
+    if (
+        payload_bytes != expected_size
+        or expected_size > 256 * 1024 * 1024
+        or not isinstance(payload_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", payload_sha256) is None
+    ):
+        raise LabFailure("subsurface saved packet payload size is invalid")
+    info_path = directory / relative_info
+    payload_path = directory / payload_relative
+    ensure_private_regular_file(info_path)
+    ensure_private_regular_file(payload_path)
+    try:
+        payload = payload_path.read_bytes()
+    except OSError as error:
+        raise LabFailure("subsurface saved packet authority is unavailable") from error
+    saved_info = _load_subsurface_packet_info(info_path)
+    packet_info = {
+        key: value
+        for key, value in packet.items()
+        if key
+        not in {
+            "info_sha256",
+            "payload_bytes",
+            "payload_sha256",
+            "relative_info",
+        }
+    }
+    if saved_info != packet_info:
+        raise LabFailure("subsurface saved packet info binding changed")
+    if (
+        payload_path.stat().st_size != expected_size
+        or len(payload) != expected_size
+        or hashlib.sha256(payload).hexdigest() != payload_sha256
+    ):
+        raise LabFailure("subsurface saved packet payload binding changed")
+    info_sha256 = packet.get("info_sha256")
+    if info_sha256 is not None and sha256_file(info_path) != info_sha256:
+        raise LabFailure("subsurface saved packet info binding changed")
+
+    channel_indexes = {
+        "BGR": (2, 1, 0, None),
+        "BGRA": (2, 1, 0, 3),
+        "BGRX": (2, 1, 0, None),
+        "RGB": (0, 1, 2, None),
+        "RGBA": (0, 1, 2, 3),
+        "RGBX": (0, 1, 2, None),
+    }
+    red_index, green_index, blue_index, alpha_index = channel_indexes[rgb_format]
+    rgba = bytearray(width * height * 4)
+    for row in range(height):
+        source_row = row * stride
+        target_row = row * width * 4
+        for column in range(width):
+            source = source_row + column * bytes_per_pixel
+            target = target_row + column * 4
+            rgba[target] = payload[source + red_index]
+            rgba[target + 1] = payload[source + green_index]
+            rgba[target + 2] = payload[source + blue_index]
+            rgba[target + 3] = payload[source + alpha_index] if alpha_index is not None else 255
+    return Image.frombytes("RGBA", (width, height), bytes(rgba))
+
+
+def _subsurface_alpha_summary(image: Any) -> dict[str, Any]:
+    rgba = image.convert("RGBA")
+    alpha = rgba.getchannel("A")
+    minimum, maximum = alpha.getextrema()
+    partial_pixels = sum(
+        1 for value in alpha.get_flattened_data() if 0 < value < 255
+    )
+    premultiplied = all(
+        red <= value and green <= value and blue <= value
+        for red, green, blue, value in rgba.get_flattened_data()
+    )
+    return {
+        "maximum": maximum,
+        "minimum": minimum,
+        "partial_pixels": partial_pixels,
+        "pixel_count": alpha.width * alpha.height,
+        "premultiplied": premultiplied,
+    }
+
+
+def _subsurface_source_over(
+    parent: Image.Image,
+    child: Image.Image,
+    offset: tuple[int, int],
+) -> Image.Image:
+    """Apply one premultiplied source-over stage without straight-alpha conversion."""
+    composited = parent.convert("RGBA")
+    source_image = child.convert("RGBA")
+    width, height = composited.size
+    child_width, child_height = source_image.size
+    destination_x, destination_y = offset
+    if (
+        destination_x < 0
+        or destination_y < 0
+        or destination_x + child_width > width
+        or destination_y + child_height > height
+    ):
+        raise LabFailure("subsurface compositing layer exceeds its parent")
+    output = bytearray(composited.tobytes())
+    pixels = source_image.tobytes()
+    for child_y in range(child_height):
+        output_row = ((destination_y + child_y) * width + destination_x) * 4
+        child_row = child_y * child_width * 4
+        for child_x in range(child_width):
+            source = child_row + child_x * 4
+            target = output_row + child_x * 4
+            alpha = pixels[source + 3]
+            inverse = 255 - alpha
+            for channel in range(3):
+                premultiplied = pixels[source + channel]
+                if premultiplied > alpha:
+                    raise LabFailure("subsurface source pixels are not premultiplied")
+                output[target + channel] = min(
+                    255,
+                    premultiplied + (output[target + channel] * inverse + 127) // 255,
+                )
+            output[target + 3] = min(
+                255,
+                alpha + (output[target + 3] * inverse + 127) // 255,
+            )
+    return Image.frombytes("RGBA", (width, height), bytes(output))
+
+
+def _subsurface_replay_transaction(
+    backing: Image.Image,
+    stages: list[tuple[dict[str, Any], Image.Image]],
+    expected_reset: tuple[int, int, int, int],
+) -> Image.Image:
+    if not stages:
+        raise LabFailure("subsurface transaction has no stages")
+    transaction_id: int | None = None
+    stage_count = len(stages)
+    output = backing.convert("RGBA")
+    for index, (packet, image) in enumerate(stages):
+        options = packet.get("options")
+        geometry = _packet_geometry(packet)
+        if not isinstance(options, dict) or geometry is None:
+            raise LabFailure("subsurface transaction stage is invalid")
+        current_id = _exact_int(options.get("subsurface-transaction-id"), positive=True)
+        if (
+            current_id is None
+            or (transaction_id is not None and current_id != transaction_id)
+            or options.get("subsurface-stage-index") != index
+            or options.get("subsurface-stage-count") != stage_count
+        ):
+            raise LabFailure("subsurface transaction stage order is invalid")
+        transaction_id = current_id
+        reset = options.get("subsurface-reset")
+        if index == 0:
+            if reset != list(expected_reset):
+                raise LabFailure("subsurface transaction reset is invalid")
+            reset_x, reset_y, reset_width, reset_height = expected_reset
+            if (
+                reset_x < 0
+                or reset_y < 0
+                or reset_width <= 0
+                or reset_height <= 0
+                or reset_x + reset_width > output.width
+                or reset_y + reset_height > output.height
+            ):
+                raise LabFailure("subsurface transaction reset exceeds its backing")
+            cleared = Image.new("RGBA", (reset_width, reset_height), (0, 0, 0, 0))
+            output.paste(cleared, (reset_x, reset_y))
+        elif reset is not None:
+            raise LabFailure("subsurface transaction repeats its reset")
+        x, y, width, height = geometry
+        if image.size != (width, height):
+            raise LabFailure("subsurface transaction payload dimensions are invalid")
+        output = _subsurface_source_over(output, image, (x, y))
+    return output
+
+
+def _subsurface_fixture_image(pattern: str) -> Image.Image:
+    """Independent logical-pixel oracle for the C fixture, before Xpra capture.
+
+    The fixture stores scale-2 and inverse-transformed pixels in its buffers;
+    this oracle describes their logical surface contents, never packet output.
+    """
+    specifications = {
+        "primary": (SUBSURFACE_PARENT_DIMENSIONS["primary"], 255,
+                    ((24, 5, 3, 72), (42, 2, 7, 88), (76, 3, 5, 112))),
+        "secondary": (SUBSURFACE_PARENT_DIMENSIONS["secondary"], 255,
+                      ((78, 2, 5, 96), (22, 7, 3, 80), (118, 5, 2, 110))),
+        "lower-one": (SUBSURFACE_LOWER_DIMENSIONS, 144,
+                      ((132, 3, 5, 112), (20, 7, 2, 92), (64, 2, 3, 128))),
+        "lower-two": (SUBSURFACE_LOWER_DIMENSIONS, 144,
+                      ((18, 5, 2, 84), (126, 3, 7, 118), (32, 7, 5, 96))),
+        "lower-three": (SUBSURFACE_LOWER_DIMENSIONS, 144,
+                        ((42, 7, 3, 108), (54, 2, 5, 112), (136, 5, 7, 108))),
+        "lower-four": (SUBSURFACE_LOWER_DIMENSIONS, 144,
+                       ((118, 2, 7, 126), (36, 5, 3, 102), (26, 7, 2, 96))),
+        "upper": (SUBSURFACE_UPPER_DIMENSIONS, 176,
+                  ((220, 2, 3, 35), (138, 5, 2, 80), (8, 3, 7, 64))),
+    }
+    if pattern == "lower-continuous-one":
+        output = _subsurface_fixture_image("lower-four")
+        x, y = SUBSURFACE_CONTINUOUS_SOURCE_ORIGINS["lower"]
+        width, height = SUBSURFACE_CONTINUOUS_GEOMETRY[2:]
+        output.paste(
+            _subsurface_fixture_image("lower-three").crop((x, y, x + width, y + height)),
+            (x, y),
+        )
+        return output
+    if pattern not in specifications:
+        raise LabFailure(f"unknown subsurface fixture pixel pattern: {pattern}")
+    dimensions, alpha, channels = specifications[pattern]
+    output = Image.new("RGBA", dimensions)
+    output.putdata([
+        (*tuple(
+            ((base + (x * dx + y * dy) % modulus) * alpha + 127) // 255
+            for base, dx, dy, modulus in channels
+        ), alpha)
+        for y in range(dimensions[1])
+        for x in range(dimensions[0])
+    ])
+    return output
+
+
+def _subsurface_pixel_observations(
+    directory: Path,
+    events: dict[str, dict[str, Any]],
+    parent_sources: dict[str, dict[str, Any]],
+    phases: dict[str, dict[str, Any]],
+    role_ids: dict[str, int],
+    source_updates: dict[str, dict[str, Any]],
+    continuous_snapshot: dict[str, Any],
+    startup_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    def packet_source(
+        role: str,
+        metadata: dict[str, Any],
+        *,
+        composite: bool,
+        pattern: str,
+        source_origin: tuple[int, int] = (0, 0),
+    ) -> tuple[dict[str, Any], Image.Image]:
+        packets = _subsurface_updates_for_stream(
+            source_updates[str(role_ids[role])],
+            metadata,
+        )
+        if len(packets) != 1:
+            raise LabFailure(f"subsurface {role} packet binding is not unique")
+        packet = packets[0]
+        image = _subsurface_raw_packet_image(
+            directory,
+            packet,
+            role_ids[role],
+            composite=composite,
+        )
+        validate_fixture_pixels(image, pattern, source_origin)
+        return packet, image
+
+    fixture_images = {
+        name: _subsurface_fixture_image(name)
+        for name in (
+            "primary", "secondary", "lower-one", "lower-two", "lower-three",
+            "lower-four", "lower-continuous-one", "upper",
+        )
+    }
+
+    def validate_fixture_pixels(
+        image: Image.Image,
+        pattern: str,
+        origin: tuple[int, int],
+    ) -> None:
+        x, y = origin
+        expected = fixture_images[pattern].crop((x, y, x + image.width, y + image.height))
+        if image.tobytes() != expected.tobytes():
+            raise LabFailure(f"subsurface {pattern} packet differs from fixture pixels")
+
+    lower_patterns = {
+        "initial": "lower-one", "changed": "lower-two", "restored": "lower-one",
+        "moved": "lower-one", "stacked": "lower-one", "lower-updated": "lower-two",
+        "lower-frame-one": "lower-three", "lower-frame-two": "lower-four",
+    }
+
+    parent_packets = {
+        role: packet_source(
+            role,
+            parent_sources[role],
+            composite=role == "primary",
+            pattern=role,
+        )
+        for role in SUBSURFACE_PARENT_ROLES
+    }
+    parents = {role: value[1] for role, value in parent_packets.items()}
+    ready = events["ready"]
+    if (
+        list(parents["primary"].size) != ready["parent_dimensions"]
+        or list(parents["secondary"].size)
+        != ready["secondary_parent_dimensions"]
+    ):
+        raise LabFailure("subsurface parent source dimensions are invalid")
+
+    stream_packets: dict[tuple[str, str], dict[str, Any]] = {}
+    streams: dict[tuple[str, str], Image.Image] = {}
+    alpha: dict[str, Any] = {}
+    for phase in SUBSURFACE_PHASES:
+        for role, metadata in phases[phase]["streams"].items():
+            packet, image = packet_source(
+                role, metadata, composite=True,
+                pattern=lower_patterns[phase] if role == "lower"
+                else "upper" if role in SUBSURFACE_CHILD_ROLES else role,
+                source_origin=SUBSURFACE_PHASE_SOURCE_ORIGINS[(phase, role)],
+            )
+            stream_packets[(phase, role)] = packet
+            streams[(phase, role)] = image
+            if role in SUBSURFACE_CHILD_ROLES:
+                alpha[f"{phase}:{role}"] = _subsurface_alpha_summary(image)
+
+    lower_moved = streams[("moved", "lower")]
+    lower_stacked = streams[("stacked", "lower")]
+    upper_stacked = streams[("stacked", "upper")]
+    upper_updated = streams[("lower-updated", "upper")]
+    upper_after_destroy = streams[("lower-destroyed", "upper")]
+    backings = {
+        "primary": Image.new("RGBA", parents["primary"].size, (0, 0, 0, 0)),
+        "secondary": parents["secondary"].copy(),
+    }
+    comparisons: dict[str, dict[str, Any]] = {}
+
+    # Every initial-window/map refresh is independently checked and replayed.
+    # The final pair names the initial capture; it does not replace its history.
+    for record in startup_snapshot["transactions"]:
+        stages = []
+        for item in record["packets"]:
+            role = item["role"]
+            metadata = {key: value for key, value in item.items() if key != "role"}
+            stages.append(packet_source(
+                role, metadata, composite=True,
+                pattern="primary" if role == "primary" else "lower-one",
+            ))
+        backings["primary"] = _subsurface_replay_transaction(
+            backings["primary"], stages, SUBSURFACE_TRANSACTION_RESETS["initial"],
+        )
+    for metadata in startup_snapshot["secondary"]:
+        _packet, backings["secondary"] = packet_source(
+            "secondary", metadata, composite=False, pattern="secondary",
+        )
+
+    def capture_comparison(phase: str) -> None:
+        expected_backings = {
+            role: fixture_images[role].copy() for role in SUBSURFACE_PARENT_ROLES
+        }
+        layout = SUBSURFACE_PHASE_CHILD_LAYOUTS[
+            SUBSURFACE_FRAME_PHASES[-1]
+            if phase == SUBSURFACE_CONTINUOUS_FINAL_PHASE else phase
+        ]
+        for role, parent_role, offset in layout:
+            pattern = "upper"
+            if role == "lower":
+                pattern = (
+                    "lower-continuous-one"
+                    if events["continuous-stop"]["lower_state_id"] == 3
+                    else "lower-four"
+                ) if phase == SUBSURFACE_CONTINUOUS_FINAL_PHASE else lower_patterns[phase]
+            expected_backings[parent_role] = _subsurface_source_over(
+                expected_backings[parent_role], fixture_images[pattern], offset,
+            )
+        phase_comparisons: dict[str, Any] = {}
+        for parent_role in SUBSURFACE_PARENT_ROLES:
+            if backings[parent_role].tobytes() != expected_backings[parent_role].tobytes():
+                raise LabFailure(f"subsurface {phase} replay differs from fixture state")
+            capture = directory / subsurface_client_rgb_artifact(parent_role, phase)
+            ensure_private_regular_file(capture)
+            with Image.open(capture) as observed_image:
+                observed = observed_image.convert("RGB")
+            phase_comparisons[parent_role] = {
+                "comparison": compare_rgb_image_values(backings[parent_role], observed),
+                "observed": analyze_image(observed),
+            }
+        comparisons[phase] = phase_comparisons
+
+    packets_by_role_sequence = {
+        (role, packet.get("sequence")): packet
+        for role in ("primary", "lower", "upper")
+        for packet in source_updates[str(role_ids[role])].get("updates", [])
+        if isinstance(packet, dict)
+    }
+    for phase in SUBSURFACE_PHASES:
+        target = SUBSURFACE_PHASE_TARGET_PARENTS[phase]
+        transaction = (
+            [
+                parent_packets["primary"],
+                (stream_packets[(phase, "lower")], streams[(phase, "lower")]),
+            ]
+            if phase == "initial"
+            else [
+                (stream_packets[(phase, role)], streams[(phase, role)])
+                for role in SUBSURFACE_PHASE_STREAM_ROLES[phase]
+            ]
+        )
+        if phase != "initial":
+            backings[target] = _subsurface_replay_transaction(
+                backings[target],
+                transaction,
+                SUBSURFACE_TRANSACTION_RESETS[phase],
+            )
+        capture_comparison(phase)
+        if phase == SUBSURFACE_FRAME_PHASES[-1]:
+            continuous_transactions = continuous_snapshot.get("complete_transactions")
+            if not isinstance(continuous_transactions, list):
+                raise LabFailure("subsurface continuous pixel transactions are invalid")
+            for record in continuous_transactions:
+                packet_bindings = record.get("packets") if isinstance(record, dict) else None
+                if not isinstance(packet_bindings, list):
+                    raise LabFailure("subsurface continuous pixel stages are invalid")
+                stages: list[tuple[dict[str, Any], Image.Image]] = []
+                for binding in packet_bindings:
+                    role = binding.get("role") if isinstance(binding, dict) else None
+                    sequences = binding.get("sequences") if isinstance(binding, dict) else None
+                    if (
+                        role not in ("primary", "lower", "upper")
+                        or not isinstance(sequences, list)
+                        or len(sequences) != 1
+                    ):
+                        raise LabFailure("subsurface continuous pixel binding is invalid")
+                    packet = packets_by_role_sequence.get((role, sequences[0]))
+                    if not isinstance(packet, dict):
+                        raise LabFailure("subsurface continuous pixel packet is unavailable")
+                    image = _subsurface_raw_packet_image(
+                        directory, packet, role_ids[role], composite=True,
+                    )
+                    validate_fixture_pixels(
+                        image,
+                        ("lower-continuous-one" if record["lower_state_id"] == 3 else "lower-four")
+                        if role == "lower" else role,
+                        SUBSURFACE_CONTINUOUS_SOURCE_ORIGINS[role],
+                    )
+                    stages.append((packet, image))
+                backings["primary"] = _subsurface_replay_transaction(
+                    backings["primary"],
+                    stages,
+                    SUBSURFACE_CONTINUOUS_GEOMETRY,
+                )
+            capture_comparison(SUBSURFACE_CONTINUOUS_FINAL_PHASE)
+
+    def compare_sources(
+        first: tuple[str, str],
+        second: tuple[str, str],
+    ) -> dict[str, Any]:
+        return compare_rgb_image_values(streams[first], streams[second])
+
+    def parent_crop_comparison(phase: str) -> dict[str, Any]:
+        packet = stream_packets[(phase, "primary")]
+        geometry = _packet_geometry(packet)
+        if geometry is None:
+            raise LabFailure(f"subsurface {phase} parent packet geometry is invalid")
+        x, y, width, height = geometry
+        return compare_rgb_image_values(
+            parents["primary"].crop((x, y, x + width, y + height)),
+            streams[(phase, "primary")],
+        )
+
+    parent_stability = {
+        phase: parent_crop_comparison(phase)
+        for phase in ("moved", "lower-destroyed", "upper-detached")
+    }
+    return {
+        "alpha": alpha,
+        "comparisons": comparisons,
+        "generation_changes": [
+            {
+                "comparison": compare_sources(first, second),
+                "from": first[0],
+                "to": second[0],
+            }
+            for first, second in (
+                (("lower-updated", "lower"), ("lower-frame-one", "lower")),
+                (("lower-frame-one", "lower"), ("lower-frame-two", "lower")),
+            )
+        ],
+        "parent_stability": parent_stability,
+        "source_equalities": {
+            "lower_initial_restored": compare_sources(
+                ("initial", "lower"),
+                ("restored", "lower"),
+            ),
+            "lower_restored_moved": compare_sources(
+                ("restored", "lower"),
+                ("moved", "lower"),
+            ),
+            "lower_changed_updated": compare_sources(
+                ("changed", "lower"),
+                ("lower-updated", "lower"),
+            ),
+            "lower_moved_stacked": compare_rgb_image_values(
+                lower_moved.crop(SUBSURFACE_PHASE_SOURCE_CROPS[("stacked", "lower")]),
+                lower_stacked,
+            ),
+            "upper_stacked_updated": compare_rgb_image_values(
+                upper_stacked.crop(
+                    SUBSURFACE_PHASE_SOURCE_CROPS[("lower-updated", "upper")]
+                ),
+                upper_updated,
+            ),
+            **{
+                f"upper_stacked_{phase}": compare_rgb_image_values(
+                    upper_stacked.crop(SUBSURFACE_PHASE_SOURCE_CROPS[(phase, "upper")]),
+                    streams[(phase, "upper")],
+                )
+                for phase in SUBSURFACE_FRAME_PHASES
+            },
+            "upper_stacked_after_destroy": compare_rgb_image_values(
+                upper_stacked.crop(
+                    SUBSURFACE_PHASE_SOURCE_CROPS[("lower-destroyed", "upper")]
+                ),
+                upper_after_destroy,
+            ),
+            "upper_stacked_reparented": compare_sources(
+                ("stacked", "upper"),
+                ("reparented", "reparented-upper"),
+            ),
+            "lower_initial_changed": compare_sources(
+                ("initial", "lower"),
+                ("changed", "lower"),
+            ),
+        },
+    }
+
+
+def subsurface_artifact_observations(
+    directory: Path,
+    *,
+    parent_wids: dict[str, int],
+    child_wids: dict[str, int],
+    fixture_pid: int,
+    parent_sources: Any,
+    phases: Any,
+) -> dict[str, Any]:
+    """Recompute bounded compositing evidence from retained authority files."""
+    role_ids = _subsurface_role_ids(parent_wids, child_wids)
+    validated_parents, validated_phases = _subsurface_phase_metadata(
+        phases,
+        parent_sources,
+        parent_wids,
+        child_wids,
+    )
+    event_path = directory / "subsurface-fixture.stdout"
+    stderr_path = directory / "subsurface-fixture.stderr"
+    pid_path = directory / "subsurface-fixture.pid"
+    exit_path = directory / "subsurface-fixture.exit"
+    for path in (event_path, stderr_path, pid_path, exit_path):
+        ensure_private_regular_file(path)
+    try:
+        pid_payload = pid_path.read_bytes()
+        stderr_payload = stderr_path.read_bytes()
+    except OSError as error:
+        raise LabFailure("subsurface fixture process artifacts are unavailable") from error
+    if re.fullmatch(rb"[1-9][0-9]{0,9}\n", pid_payload) is None:
+        raise LabFailure("subsurface fixture PID artifact is invalid")
+    artifact_pid = int(pid_payload)
+    if artifact_pid > 2**31 - 1 or artifact_pid != fixture_pid:
+        raise LabFailure("subsurface fixture PID artifact does not match the process")
+
+    raw_events = load_subsurface_fixture_events(event_path)
+    validated_events = validate_subsurface_fixture_events(raw_events)
+    pointer_timing = load_subsurface_pointer_timing(
+        directory / SUBSURFACE_POINTER_TIMING_ARTIFACT,
+        validated_events["sibling-click"]["monotonic_ns"],
+    )
+    info: dict[str, dict[str, Any]] = {}
+    inventories: dict[str, dict[str, str]] = {}
+    for phase in SUBSURFACE_PHASES:
+        value = parse_subsurface_server_info(
+            directory / SUBSURFACE_INFO_ARTIFACTS[phase],
+            parent_wids,
+        )
+        value["children"] = {
+            str(wid): child for wid, child in value["children"].items()
+        }
+        info[phase] = value
+        inventories[phase] = {
+            str(wid): title
+            for wid, title in server_xpra_window_inventory(
+                directory / SUBSURFACE_INFO_ARTIFACTS[phase]
+            ).items()
+        }
+    source_wids = set(role_ids.values())
+    _validate_subsurface_source_inventory(directory, source_wids)
+    source_updates = {
+        str(wid): _subsurface_saved_updates(directory, wid)
+        for wid in sorted(source_wids)
+    }
+    startup_snapshot = _subsurface_startup_snapshot(
+        {role: source_updates[str(role_ids[role])] for role in ("primary", "lower", "secondary")},
+        role_ids, before_sequence=info["initial"]["next_packet_sequence"],
+    )
+    startup_barriers = _load_subsurface_startup_barriers(directory, parent_wids)
+    startup_damage = _load_subsurface_startup_damage(
+        directory, parent_wids["secondary"], len(startup_snapshot["secondary"]),
+    )
+    if startup_damage["server_log_end"] < startup_barriers["parents"][0]["server_log_end"]:
+        raise LabFailure("subsurface startup damage predates its map barriers")
+    continuous_after_sequence = max(
+        sequence
+        for metadata in validated_phases[SUBSURFACE_FRAME_PHASES[-1]]["streams"].values()
+        for sequence in metadata["sequences"]
+    )
+    continuous_before_sequence = min(
+        sequence
+        for metadata in validated_phases["lower-destroyed"]["streams"].values()
+        for sequence in metadata["sequences"]
+    )
+    continuous_snapshot = _subsurface_continuous_transaction_snapshot(
+        directory,
+        {
+            role: source_updates[str(role_ids[role])]
+            for role in ("primary", "secondary", "lower", "upper")
+        },
+        role_ids,
+        after_sequence=continuous_after_sequence,
+        before_sequence=continuous_before_sequence,
+    )
+    continuous_liveness = load_subsurface_continuous_liveness(
+        directory / SUBSURFACE_CONTINUOUS_LIVENESS_ARTIFACT,
+        validated_events,
+        continuous_snapshot,
+    )
+    continuous_info = parse_subsurface_server_info(
+        directory / SUBSURFACE_CONTINUOUS_INFO_ARTIFACT,
+        parent_wids,
+    )
+    continuous_info["children"] = {
+        str(wid): child for wid, child in continuous_info["children"].items()
+    }
+    continuous_inventory = {
+        str(wid): title
+        for wid, title in server_xpra_window_inventory(
+            directory / SUBSURFACE_CONTINUOUS_INFO_ARTIFACT
+        ).items()
+    }
+    pixels = _subsurface_pixel_observations(
+        directory,
+        validated_events,
+        validated_parents,
+        validated_phases,
+        role_ids,
+        source_updates,
+        continuous_snapshot,
+        startup_snapshot,
+    )
+    frame_generations = [
+        {
+            "buffer_id": validated_events[phase]["lower_buffer_id"],
+            "fixture_sequence": validated_events[phase]["sequence"],
+            "frame_callback_data": validated_events[phase]["frame_callback_data"],
+            "frame_callback_id": validated_events[phase]["frame_callback_id"],
+            "frame_done_count": validated_events[phase]["frame_done_count"],
+            "generation_id": validated_events[phase]["generation_id"],
+            "packet_info_sha256": validated_phases[phase]["streams"]["lower"][
+                "packet_info_sha256"
+            ],
+            "packet_sequence": validated_phases[phase]["streams"]["lower"][
+                "sequences"
+            ][0],
+            "payload_sha256": validated_phases[phase]["streams"]["lower"][
+                "payload_sha256"
+            ],
+            "source_wid": role_ids["lower"],
+            "wire_wid": role_ids["primary"],
+        }
+        for phase in SUBSURFACE_FRAME_PHASES
+    ]
+    return {
+        "events": raw_events,
+        "startup": startup_snapshot,
+        "startup_barriers": startup_barriers,
+        "startup_damage": startup_damage,
+        "continuous": {
+            "info": continuous_info,
+            "inventory": continuous_inventory,
+            "liveness": continuous_liveness,
+            "transactions": continuous_snapshot,
+        },
+        "frame_generations": frame_generations,
+        "fixture_exit_status": process_exit_status(directory, "subsurface-fixture"),
+        "fixture_pid_artifact": artifact_pid,
+        "fixture_stderr_empty": stderr_payload == b"",
+        "info": info,
+        "inventories": inventories,
+        "pixels": pixels,
+        "pointer_timing": pointer_timing,
+        "source_updates": source_updates,
+        "stream": parse_subsurface_stream_logs(
+            directory,
+            parent_wids,
+            child_wids,
+        ),
+    }
+
+
+def _subsurface_interaction_checks(interaction: Any) -> dict[str, bool]:
+    """Classify the exact multi-surface stream and source-over evidence."""
+    failed = dict.fromkeys(SUBSURFACE_LIVE_CHECK_NAMES, False)
+    if (
+        type(interaction) is not dict
+        or set(interaction)
+        != {
+            "attempted",
+            "checks",
+            "child_wids",
+            "evidence",
+            "fixture_pid",
+            "parent_sources",
+            "parent_wids",
+            "phases",
+        }
+        or interaction.get("attempted") is not True
+    ):
+        return failed
+    try:
+        role_ids = _subsurface_role_ids(
+            interaction["parent_wids"],
+            interaction["child_wids"],
+        )
+        parent_sources, phases = _subsurface_phase_metadata(
+            interaction["phases"],
+            interaction["parent_sources"],
+            interaction["parent_wids"],
+            interaction["child_wids"],
+        )
+        events = validate_subsurface_fixture_events(interaction["evidence"]["events"])
+        pointer_timing = validate_subsurface_pointer_timing(
+            interaction["evidence"]["pointer_timing"],
+            events["sibling-click"]["monotonic_ns"],
+        )
+    except (KeyError, LabFailure, TypeError, ValueError):
+        return failed
+    fixture_pid = _exact_int(interaction.get("fixture_pid"), positive=True)
+    evidence = interaction.get("evidence")
+    if (
+        fixture_pid is None
+        or type(evidence) is not dict
+        or set(evidence)
+        != {
+            "continuous",
+            "events",
+            "frame_generations",
+            "fixture_exit_status",
+            "fixture_pid_artifact",
+            "fixture_stderr_empty",
+            "info",
+            "inventories",
+            "pixels",
+            "pointer_timing",
+            "source_updates",
+            "stream",
+            "startup",
+            "startup_barriers",
+            "startup_damage",
+        }
+    ):
+        return failed
+    info = evidence["info"]
+    continuous = evidence["continuous"]
+    inventories = evidence["inventories"]
+    pixels = evidence["pixels"]
+    frame_generations = evidence["frame_generations"]
+    source_updates = evidence["source_updates"]
+    stream = evidence["stream"]
+    if not all(
+        type(value) is dict
+        for value in (continuous, info, inventories, pixels, source_updates, stream)
+    ):
+        return failed
+    if not isinstance(frame_generations, list):
+        return failed
+    if set(source_updates) != {str(wid) for wid in role_ids.values()}:
+        return failed
+    if set(continuous) != {"info", "inventory", "liveness", "transactions"}:
+        return failed
+
+    parent_wids = interaction["parent_wids"]
+    child_wids = interaction["child_wids"]
+    primary = parent_wids["primary"]
+    _subsurface_startup_barrier_metadata(evidence["startup_barriers"], parent_wids)
+    secondary = parent_wids["secondary"]
+    lower = child_wids["lower"]
+    upper = child_wids["upper"]
+    reparented_upper = child_wids["reparented-upper"]
+    startup = _subsurface_startup_snapshot(
+        {role: source_updates[str(role_ids[role])] for role in ("primary", "lower", "secondary")},
+        role_ids, before_sequence=info["initial"]["next_packet_sequence"],
+    )
+    if (
+        startup != evidence.get("startup")
+        or startup["next_packet_sequence"] != info["initial"]["next_packet_sequence"]
+        or not _subsurface_startup_damage_metadata(evidence.get("startup_damage"), len(startup["secondary"]))
+        or evidence["startup_damage"]["server_log_end"]
+        < evidence["startup_barriers"]["parents"][0]["server_log_end"]
+        or not _subsurface_parent_queues_drained(info["initial"], {
+            "primary": len(startup["transactions"]), "secondary": len(startup["secondary"]),
+        })
+    ):
+        return failed
+    final_startup = startup["transactions"][-1]["packets"]
+    if (
+        parent_sources["primary"] != {key: value for key, value in final_startup[0].items() if key != "role"}
+        or phases["initial"]["streams"]["lower"]
+        != {key: value for key, value in final_startup[1].items() if key != "role"}
+        or parent_sources["secondary"] != startup["secondary"][-1]
+    ):
+        return failed
+    startup_packet_roles = []
+    for binding in (
+        [item for transaction in startup["transactions"] for item in transaction["packets"]]
+        + [{"role": "secondary", **item} for item in startup["secondary"]]
+    ):
+        role = binding["role"]
+        metadata = {key: value for key, value in binding.items() if key != "role"}
+        matched = _subsurface_updates_for_stream(source_updates[str(role_ids[role])], metadata)
+        if len(matched) != 1:
+            return failed
+        startup_packet_roles.append((role, matched[0]))
+    startup_packet_roles.sort(key=lambda value: value[1]["sequence"])
+    named_startup_sequences = {
+        parent_sources["primary"]["sequences"][0],
+        parent_sources["secondary"]["sequences"][0],
+        phases["initial"]["streams"]["lower"]["sequences"][0],
+    }
+    extra_startup_packets = [
+        (role, packet) for role, packet in startup_packet_roles
+        if packet["sequence"] not in named_startup_sequences
+    ]
+    expected_children = {
+        phase: {
+            str(wid): value
+            for wid, value in _subsurface_expected_children(
+                phase,
+                parent_wids,
+                child_wids,
+            ).items()
+        }
+        for phase in SUBSURFACE_PHASES
+    }
+    expected_active_sources = {
+        phase: len(SUBSURFACE_PARENT_ROLES) + len(children)
+        for phase, children in expected_children.items()
+    }
+
+    info_exact = True
+    ack_drained = True
+    for phase in SUBSURFACE_PHASES:
+        snapshot = info.get(phase)
+        expected = expected_children[phase]
+        if not isinstance(snapshot, dict) or set(snapshot.get("children", {})) != set(expected):
+            info_exact = False
+            ack_drained = False
+            continue
+        if snapshot.get("active_pixel_sources") != expected_active_sources[phase]:
+            info_exact = False
+        if any(snapshot.get(key) != 0 for key in (
+            "ack_owners", "subsurface_pending", "subsurface_inflight",
+        )) or not _subsurface_parent_queues_drained(snapshot):
+            ack_drained = False
+        for child_key, (parent_wid, offset) in expected.items():
+            child = snapshot["children"].get(child_key)
+            if (
+                not isinstance(child, dict)
+                or child.get("parent_wid") != parent_wid
+                or child.get("offset") != offset
+            ):
+                info_exact = False
+                ack_drained = False
+                continue
+            if child.get("ack_pending") != 0 or child.get("encoding_pending") != 0:
+                ack_drained = False
+
+    expected_inventory = {
+        str(primary): SUBSURFACE_FIXTURE_TITLE,
+        str(secondary): SUBSURFACE_REPARENT_TARGET_TITLE,
+    }
+    continuous_info = continuous.get("info")
+    continuous_inventory = continuous.get("inventory")
+    continuous_transactions = continuous.get("transactions")
+    try:
+        continuous_liveness = validate_subsurface_continuous_liveness(
+            continuous.get("liveness"),
+            events,
+            continuous_transactions,
+        )
+    except (KeyError, LabFailure, TypeError, ValueError):
+        return failed
+    continuous_expected_children = expected_children[SUBSURFACE_FRAME_PHASES[-1]]
+    continuous_children = (
+        continuous_info.get("children") if isinstance(continuous_info, dict) else None
+    )
+    continuous_info_exact = bool(
+        isinstance(continuous_children, dict)
+        and set(continuous_children) == set(continuous_expected_children)
+        and continuous_info.get("active_pixel_sources")
+        == len(SUBSURFACE_PARENT_ROLES) + len(continuous_expected_children)
+        and continuous_info.get("ack_owners") == 0
+        and continuous_info.get("subsurface_pending") == 0
+        and continuous_info.get("subsurface_inflight") == 0
+        and _subsurface_parent_queues_drained(continuous_info)
+        and continuous_inventory == expected_inventory
+        and all(
+            isinstance(continuous_children.get(child_wid), dict)
+            and continuous_children[child_wid].get("parent_wid") == parent_wid
+            and continuous_children[child_wid].get("offset") == offset
+            and continuous_children[child_wid].get("ack_pending") == 0
+            and continuous_children[child_wid].get("encoding_pending") == 0
+            for child_wid, (parent_wid, offset) in continuous_expected_children.items()
+        )
+    )
+    inventories_exact = bool(
+        set(inventories) == set(SUBSURFACE_PHASES)
+        and all(inventories.get(phase) == expected_inventory for phase in SUBSURFACE_PHASES)
+    )
+
+    phase_packets: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    evidence_sequences: list[int] = []
+    evidence_sequences.extend(packet["sequence"] for _role, packet in extra_startup_packets)
+    for role, metadata in parent_sources.items():
+        packets = _subsurface_updates_for_stream(
+            source_updates[str(role_ids[role])],
+            metadata,
+        )
+        phase_packets[f"parent:{role}"] = {role: packets}
+        evidence_sequences.extend(metadata["sequences"])
+    for phase in SUBSURFACE_PHASES:
+        selected: dict[str, list[dict[str, Any]]] = {}
+        for role, metadata in phases[phase]["streams"].items():
+            selected[role] = _subsurface_updates_for_stream(
+                source_updates[str(role_ids[role])],
+                metadata,
+            )
+            evidence_sequences.extend(metadata["sequences"])
+        phase_packets[phase] = selected
+    continuous_packet_roles: list[tuple[str, dict[str, Any]]] = []
+    for transaction in continuous_transactions["complete_transactions"]:
+        for binding in transaction["packets"]:
+            role = binding["role"]
+            metadata = {
+                key: binding[key]
+                for key in (
+                    "packet_info",
+                    "packet_info_sha256",
+                    "packet_payload",
+                    "payload_bytes",
+                    "payload_sha256",
+                    "sequences",
+                )
+            }
+            selected = _subsurface_updates_for_stream(
+                source_updates[str(role_ids[role])],
+                metadata,
+            )
+            if len(selected) != 1:
+                return failed
+            continuous_packet_roles.append((role, selected[0]))
+            evidence_sequences.extend(metadata["sequences"])
+    expected_continuous_packets = [
+        (transaction, binding)
+        for transaction in continuous_transactions["complete_transactions"]
+        for binding in transaction["packets"]
+    ]
+    continuous_packets_exact = bool(
+        len(continuous_packet_roles) == len(expected_continuous_packets)
+        and all(
+            role == binding["role"]
+            and packet.get("sequence") == binding["sequences"][0]
+            and packet.get("encoding") == "rgb32"
+            and tuple(packet.get(key) for key in ("x", "y", "w", "h"))
+            == SUBSURFACE_CONTINUOUS_GEOMETRY
+            and isinstance(packet.get("options"), dict)
+            and packet["options"].get("subsurface-composite")
+            == SUBSURFACE_COMPOSITE_MODE
+            and packet["options"].get("subsurface-transaction-id")
+            == transaction["transaction_id"]
+            and _exact_int(packet["options"].get("subsurface-stage-index"))
+            == _exact_int(binding["stage_index"])
+            and _exact_int(binding["stage_index"]) is not None
+            and _exact_int(
+                packet["options"].get("subsurface-stage-count"),
+                positive=True,
+            )
+            == 3
+            and _exact_int(packet["options"].get("subsurface-topology-epoch"))
+            == _exact_int(transaction["topology_epoch"])
+            and _exact_int(transaction["topology_epoch"]) is not None
+            and _exact_int(packet["options"].get("subsurface-backing-epoch"))
+            == _exact_int(transaction["backing_epoch"])
+            and _exact_int(transaction["backing_epoch"]) is not None
+            and _exact_int(packet["options"].get("flush"))
+            == 2 - binding["stage_index"]
+            and (
+                packet["options"].get("subsurface-reset")
+                == list(SUBSURFACE_CONTINUOUS_GEOMETRY)
+                if binding["stage_index"] == 0
+                else "subsurface-reset" not in packet["options"]
+            )
+            for (role, packet), (transaction, binding) in zip(
+                continuous_packet_roles,
+                expected_continuous_packets,
+                strict=True,
+            )
+        )
+    )
+
+    role_dimensions = {
+        "primary": SUBSURFACE_PARENT_DIMENSIONS["primary"],
+        "secondary": SUBSURFACE_PARENT_DIMENSIONS["secondary"],
+        "lower": SUBSURFACE_LOWER_DIMENSIONS,
+        "upper": SUBSURFACE_UPPER_DIMENSIONS,
+        "reparented-upper": SUBSURFACE_UPPER_DIMENSIONS,
+    }
+
+    def packet_exact(
+        packet: dict[str, Any],
+        role: str,
+        geometry: tuple[int, int, int, int],
+        *,
+        parent_source: bool,
+    ) -> bool:
+        options = packet.get("options")
+        coding_ok = packet.get("encoding") in {"rgb24", "rgb32"}
+        if not parent_source:
+            coding_ok = bool(
+                packet.get("encoding") == "rgb32"
+                and isinstance(options, dict)
+                and options.get("rgb_format") in SUBSURFACE_CHILD_FORMATS
+            )
+        return bool(
+            coding_ok
+            and _exact_int(packet.get("payload_bytes"), positive=True) is not None
+            and tuple(packet.get(key) for key in ("x", "y", "w", "h"))
+            == geometry
+        )
+
+    parent_packets_exact = all(
+        len(phase_packets[f"parent:{role}"][role]) == 1
+        and packet_exact(
+            phase_packets[f"parent:{role}"][role][0],
+            role,
+            (0, 0, *role_dimensions[role]),
+            parent_source=True,
+        )
+        for role in SUBSURFACE_PARENT_ROLES
+    )
+    phase_packets_exact = True
+    for phase in SUBSURFACE_PHASES:
+        for role in SUBSURFACE_PHASE_STREAM_ROLES[phase]:
+            packets = phase_packets[phase].get(role, [])
+            if (
+                len(packets) != 1
+                or not packet_exact(
+                    packets[0],
+                    role,
+                    SUBSURFACE_PHASE_GEOMETRIES[(phase, role)],
+                    parent_source=role in SUBSURFACE_PARENT_ROLES,
+                )
+            ):
+                phase_packets_exact = False
+
+    transaction_packets: dict[str, list[dict[str, Any]]] = {
+        "initial": [
+            *phase_packets["parent:primary"]["primary"],
+            *phase_packets["initial"]["lower"],
+        ],
+        **{
+            phase: [
+                packet
+                for role in SUBSURFACE_PHASE_STREAM_ROLES[phase]
+                for packet in phase_packets[phase].get(role, [])
+            ]
+            for phase in SUBSURFACE_PHASES
+            if phase != "initial"
+        },
+    }
+    wire_contract_exact = True
+    transaction_contract_exact = True
+    transaction_ids: list[int] = []
+    transaction_ids_by_phase: dict[str, int] = {}
+    for phase in SUBSURFACE_PHASES:
+        packets = transaction_packets[phase]
+        expected_sequences = (
+            [parent_sources["primary"]["sequences"][0]]
+            + phases[phase]["streams"]["lower"]["sequences"]
+            if phase == "initial"
+            else [
+                phases[phase]["streams"][role]["sequences"][0]
+                for role in SUBSURFACE_PHASE_STREAM_ROLES[phase]
+            ]
+        )
+        if [packet.get("sequence") for packet in packets] != expected_sequences:
+            transaction_contract_exact = False
+        stage_count = len(packets)
+        ids: list[int | None] = []
+        stage_indexes: list[int | None] = []
+        stage_counts: list[int | None] = []
+        topology_epochs: list[int | None] = []
+        backing_epochs: list[int | None] = []
+        flushes: list[int | None] = []
+        for index, packet in enumerate(packets):
+            options = packet.get("options")
+            if (
+                packet.get("encoding") != "rgb32"
+                or not isinstance(options, dict)
+                or options.get("rgb_format") not in SUBSURFACE_COMPOSITE_FORMATS
+                or options.get("subsurface-composite")
+                != SUBSURFACE_COMPOSITE_MODE
+            ):
+                wire_contract_exact = False
+                transaction_contract_exact = False
+            if not isinstance(options, dict):
+                transaction_contract_exact = False
+                continue
+            ids.append(
+                _exact_int(options.get("subsurface-transaction-id"), positive=True)
+            )
+            stage_indexes.append(_exact_int(options.get("subsurface-stage-index")))
+            stage_counts.append(
+                _exact_int(options.get("subsurface-stage-count"), positive=True)
+            )
+            topology_epoch = _exact_int(options.get("subsurface-topology-epoch"))
+            backing_epoch = _exact_int(options.get("subsurface-backing-epoch"))
+            topology_epochs.append(
+                topology_epoch
+                if topology_epoch is not None and topology_epoch >= 0
+                else None
+            )
+            backing_epochs.append(
+                backing_epoch
+                if backing_epoch is not None and backing_epoch >= 0
+                else None
+            )
+            flushes.append(_exact_int(options.get("flush")))
+            expected_reset = list(SUBSURFACE_TRANSACTION_RESETS[phase])
+            if index == 0:
+                if options.get("subsurface-reset") != expected_reset:
+                    transaction_contract_exact = False
+            elif "subsurface-reset" in options:
+                transaction_contract_exact = False
+        if (
+            len(ids) != stage_count
+            or len(set(ids)) != 1
+            or ids[0] is None
+            or stage_indexes != list(range(stage_count))
+            or stage_counts != [stage_count] * stage_count
+            or len(set(topology_epochs)) != 1
+            or topology_epochs[0] is None
+            or len(set(backing_epochs)) != 1
+            or backing_epochs[0] is None
+            or flushes != list(range(stage_count - 1, -1, -1))
+        ):
+            transaction_contract_exact = False
+        else:
+            transaction_ids.append(ids[0])
+            transaction_ids_by_phase[phase] = ids[0]
+    if (
+        len(transaction_ids) != len(SUBSURFACE_PHASES)
+        or any(
+            later <= earlier
+            for earlier, later in pairwise(transaction_ids)
+        )
+    ):
+        transaction_contract_exact = False
+    continuous_transaction_ids = [
+        record["transaction_id"]
+        for record in continuous_transactions["complete_transactions"]
+    ]
+    if (
+        not continuous_transaction_ids
+        or transaction_ids_by_phase.get(SUBSURFACE_FRAME_PHASES[-1], 0)
+        >= continuous_transaction_ids[0]
+        or continuous_transaction_ids[-1]
+        >= transaction_ids_by_phase.get("lower-destroyed", 0)
+    ):
+        transaction_contract_exact = False
+    secondary_options = (
+        phase_packets["parent:secondary"]["secondary"][0].get("options")
+        if len(phase_packets["parent:secondary"]["secondary"]) == 1
+        else None
+    )
+    if not isinstance(secondary_options, dict) or any(
+        key in secondary_options
+        for key in (
+            "subsurface-backing-epoch",
+            "subsurface-composite",
+            "subsurface-reset",
+            "subsurface-stage-count",
+            "subsurface-stage-index",
+            "subsurface-topology-epoch",
+            "subsurface-transaction-id",
+        )
+    ):
+        transaction_contract_exact = False
+
+    expected_child_sequences = sorted(
+        [
+            phases[phase]["streams"][role]["sequences"][0]
+            for phase in SUBSURFACE_PHASES
+            for role in SUBSURFACE_PHASE_STREAM_ROLES[phase]
+            if role in SUBSURFACE_CHILD_ROLES
+        ]
+        + [
+            packet["sequence"]
+            for role, packet in continuous_packet_roles
+            if role in ("lower", "upper")
+        ]
+        + [packet["sequence"] for role, packet in extra_startup_packets if role == "lower"]
+    )
+    actual_child_packets = sorted(
+        (
+            packet
+            for child_wid in sorted(set(child_wids.values()))
+            for packet in source_updates[str(child_wid)].get("updates", [])
+            if isinstance(packet, dict)
+        ),
+        key=lambda packet: packet.get("sequence", -1),
+    )
+    actual_child_sequences = [packet.get("sequence") for packet in actual_child_packets]
+    child_transactions_raw_rgb32_only = bool(
+        actual_child_sequences == expected_child_sequences
+        and actual_child_packets
+        and all(
+            packet.get("encoding") == "rgb32"
+            and isinstance(packet.get("options"), dict)
+            and packet["options"].get("rgb_format") in SUBSURFACE_CHILD_FORMATS
+            and _exact_int(packet.get("payload_bytes"), positive=True) is not None
+            for packet in actual_child_packets
+        )
+    )
+
+    wires = _subsurface_role_wires(parent_wids, child_wids)
+    child_packet_roles = sorted(
+        [
+            (phase, role, phase_packets[phase][role][0])
+            for phase in SUBSURFACE_PHASES
+            for role in SUBSURFACE_PHASE_STREAM_ROLES[phase]
+            if role in SUBSURFACE_CHILD_ROLES
+            and len(phase_packets[phase].get(role, [])) == 1
+        ]
+        + [
+            (SUBSURFACE_CONTINUOUS_FINAL_PHASE, role, packet)
+            for role, packet in continuous_packet_roles
+            if role in ("lower", "upper")
+        ]
+        + [("initial", role, packet) for role, packet in extra_startup_packets if role == "lower"],
+        key=lambda value: value[2]["sequence"],
+    )
+    expected_publications = [
+        {
+            "encoding": packet.get("encoding"),
+            "sequence": packet.get("sequence"),
+            "source_wid": role_ids[role],
+            "wire_wid": wires[role],
+        }
+        for _phase, role, packet in child_packet_roles
+    ]
+    expected_acks = [
+        {
+            "sequence": packet.get("sequence"),
+            "source_wid": role_ids[role],
+            "wire_wid": wires[role],
+        }
+        for _phase, role, packet in child_packet_roles
+    ]
+    publications = stream.get("publications")
+    acknowledgements = stream.get("acknowledgements")
+    client_draws = stream.get("client_draws")
+    if not all(
+        isinstance(value, list)
+        and all(isinstance(item, dict) for item in value)
+        for value in (publications, acknowledgements, client_draws)
+    ):
+        return failed
+
+    selected_packets = [
+        phase_packets[f"parent:{role}"][role][0]
+        for role in SUBSURFACE_PARENT_ROLES
+        if len(phase_packets[f"parent:{role}"][role]) == 1
+    ] + [
+        phase_packets[phase][role][0]
+        for phase in SUBSURFACE_PHASES
+        for role in SUBSURFACE_PHASE_STREAM_ROLES[phase]
+        if len(phase_packets[phase].get(role, [])) == 1
+    ] + [packet for _role, packet in continuous_packet_roles]
+    selected_packets.extend(packet for _role, packet in extra_startup_packets)
+    packet_wire_by_sequence = {
+        packet["sequence"]: (
+            wires.get(role, primary)
+        )
+        for phase in SUBSURFACE_PHASES
+        for role in SUBSURFACE_PHASE_STREAM_ROLES[phase]
+        for packet in phase_packets[phase].get(role, [])
+    }
+    for role in SUBSURFACE_PARENT_ROLES:
+        for packet in phase_packets[f"parent:{role}"].get(role, []):
+            packet_wire_by_sequence[packet["sequence"]] = role_ids[role]
+    for _role, packet in continuous_packet_roles:
+        packet_wire_by_sequence[packet["sequence"]] = primary
+    for role, packet in extra_startup_packets:
+        packet_wire_by_sequence[packet["sequence"]] = wires[role]
+    expected_draws = sorted(
+        (
+            {
+                "encoding": packet.get("encoding"),
+                "height": packet.get("h"),
+                "sequence": packet.get("sequence"),
+                "width": packet.get("w"),
+                "window_id": packet_wire_by_sequence.get(packet.get("sequence")),
+                "x": packet.get("x"),
+                "y": packet.get("y"),
+            }
+            for packet in selected_packets
+        ),
+        key=lambda draw: draw["sequence"],
+    )
+    actual_draws = sorted(
+        client_draws,
+        key=lambda draw: draw["sequence"],
+    )
+
+    route_order = stream.get("route_order")
+    route_exact = isinstance(route_order, list)
+    if route_exact:
+        for expected in expected_acks:
+            sequence = expected["sequence"]
+            matching = [
+                index
+                for index, event in enumerate(route_order)
+                if isinstance(event, dict) and event.get("sequence") == sequence
+            ]
+            if (
+                len(matching) != 2
+                or route_order[matching[0]].get("event") != "publish"
+                or route_order[matching[1]].get("event") != "ack"
+            ):
+                route_exact = False
+                break
+        route_exact = bool(
+            route_exact
+            and len(route_order) == 2 * len(expected_acks)
+        )
+
+    phase_sequence_order = [packet["sequence"] for _role, packet in startup_packet_roles]
+    for phase in SUBSURFACE_PHASES:
+        sequence_group = [
+            phases[phase]["streams"][role]["sequences"][0]
+            for role in SUBSURFACE_PHASE_STREAM_ROLES[phase]
+        ]
+        if phase != "initial":
+            phase_sequence_order.extend(sequence_group)
+        if sequence_group != sorted(sequence_group):
+            return failed
+        if phase == SUBSURFACE_FRAME_PHASES[-1]:
+            continuous_sequences = [
+                packet["sequence"] for _role, packet in continuous_packet_roles
+            ]
+            if continuous_sequences != sorted(continuous_sequences):
+                return failed
+            phase_sequence_order.extend(continuous_sequences)
+    global_sequences_exact = bool(
+        evidence_sequences
+        and len(evidence_sequences) == len(set(evidence_sequences))
+        and all(_exact_int(value, positive=True) is not None for value in evidence_sequences)
+        and sorted(evidence_sequences) == sorted(
+            packet.get("sequence")
+            for updates in source_updates.values()
+            for packet in updates.get("updates", [])
+        )
+        and phase_sequence_order == sorted(phase_sequence_order)
+        and info.get("reparented", {}).get("next_packet_sequence", 0)
+        > max(evidence_sequences)
+    )
+
+    def packet_count(phase: str, child_wid: int) -> int | None:
+        snapshot = info.get(phase)
+        child = (
+            snapshot.get("children", {}).get(str(child_wid))
+            if isinstance(snapshot, dict)
+            else None
+        )
+        return child.get("packets_sent") if isinstance(child, dict) else None
+
+    lower_counts = [
+        packet_count(phase, lower)
+        for phase in ("initial", "changed", "restored", "moved")
+    ]
+    lower_stacked = packet_count("stacked", lower)
+    lower_updated_count = packet_count("lower-updated", lower)
+    lower_frame_counts = [packet_count(phase, lower) for phase in SUBSURFACE_FRAME_PHASES]
+    upper_counts = [
+        packet_count(phase, upper)
+        for phase in (
+            "stacked",
+            "lower-updated",
+            *SUBSURFACE_FRAME_PHASES,
+            "lower-destroyed",
+        )
+    ]
+    continuous_generation_count = events["continuous-stop"][
+        "continuous_generation_count"
+    ]
+    continuous_capture_count = len(continuous_transactions["complete_transactions"])
+    continuous_lower = (
+        continuous_children.get(str(lower), {})
+        if isinstance(continuous_children, dict)
+        else {}
+    )
+    continuous_upper = (
+        continuous_children.get(str(upper), {})
+        if isinstance(continuous_children, dict)
+        else {}
+    )
+    initial_count = len(startup["transactions"])
+    packet_counts_exact = bool(
+        lower_counts == [initial_count + offset for offset in range(4)]
+        and lower_stacked == initial_count + 4
+        and lower_updated_count == initial_count + 5
+        and lower_frame_counts == [initial_count + 6, initial_count + 7]
+        and continuous_lower.get("packets_sent")
+        == initial_count + 7 + continuous_capture_count
+        and continuous_upper.get("packets_sent")
+        == 4 + continuous_capture_count
+        and upper_counts
+        == [
+            1,
+            2,
+            3,
+            4,
+            5 + continuous_capture_count,
+        ]
+        and packet_count("reparented", reparented_upper) == 1
+    )
+
+    comparisons = pixels.get("comparisons")
+    source_equalities = pixels.get("source_equalities")
+    generation_changes = pixels.get("generation_changes")
+    parent_stability = pixels.get("parent_stability")
+    alpha = pixels.get("alpha")
+    if not all(
+        isinstance(value, dict)
+        for value in (comparisons, source_equalities, parent_stability, alpha)
+    ):
+        return failed
+    if not isinstance(generation_changes, list):
+        return failed
+
+    def exact_comparison(value: Any) -> bool:
+        return bool(
+            isinstance(value, dict)
+            and value.get("same_size") is True
+            and value.get("exact") is True
+            and value.get("mean_absolute_error") == 0.0
+        )
+
+    def phase_exact(phase: str, *parents: str) -> bool:
+        value = comparisons.get(phase)
+        return bool(
+            isinstance(value, dict)
+            and all(
+                isinstance(value.get(parent), dict)
+                and exact_comparison(value[parent].get("comparison"))
+                for parent in parents
+            )
+        )
+
+    equality_exact = {
+        name: exact_comparison(source_equalities.get(name))
+        for name in (
+            "lower_initial_restored",
+            "lower_restored_moved",
+            "lower_changed_updated",
+            "lower_moved_stacked",
+            "upper_stacked_updated",
+            *(f"upper_stacked_{phase}" for phase in SUBSURFACE_FRAME_PHASES),
+            "upper_stacked_after_destroy",
+            "upper_stacked_reparented",
+        )
+    }
+    lower_changed = source_equalities.get("lower_initial_changed")
+    source_states_exact = bool(
+        all(equality_exact.values())
+        and isinstance(lower_changed, dict)
+        and lower_changed.get("same_size") is True
+        and lower_changed.get("exact") is False
+        and isinstance(lower_changed.get("mean_absolute_error"), float)
+        and lower_changed["mean_absolute_error"] > 1.0
+    )
+    expected_generation_records = [
+        {
+            "buffer_id": events[phase]["lower_buffer_id"],
+            "fixture_sequence": events[phase]["sequence"],
+            "frame_callback_data": events[phase]["frame_callback_data"],
+            "frame_callback_id": events[phase]["frame_callback_id"],
+            "frame_done_count": events[phase]["frame_done_count"],
+            "generation_id": events[phase]["generation_id"],
+            "packet_info_sha256": phases[phase]["streams"]["lower"][
+                "packet_info_sha256"
+            ],
+            "packet_sequence": phases[phase]["streams"]["lower"]["sequences"][0],
+            "payload_sha256": phases[phase]["streams"]["lower"]["payload_sha256"],
+            "source_wid": lower,
+            "wire_wid": primary,
+        }
+        for phase in SUBSURFACE_FRAME_PHASES
+    ]
+    frame_generations_exact = bool(
+        frame_generations == expected_generation_records
+        and [record["generation_id"] for record in frame_generations] == [1, 2]
+        and [record["frame_done_count"] for record in frame_generations] == [1, 2]
+        and len({record["buffer_id"] for record in frame_generations}) == 2
+        and len({record["payload_sha256"] for record in frame_generations}) == 2
+        and len({record["packet_info_sha256"] for record in frame_generations}) == 2
+        and [record["packet_sequence"] for record in frame_generations]
+        == sorted(record["packet_sequence"] for record in frame_generations)
+        and all(
+            isinstance(change, dict)
+            and change.get("from") == source
+            and change.get("to") == target
+            and isinstance(change.get("comparison"), dict)
+            and change["comparison"].get("same_size") is True
+            and change["comparison"].get("exact") is False
+            and isinstance(change["comparison"].get("mean_absolute_error"), float)
+            and change["comparison"]["mean_absolute_error"] > 1.0
+            for change, source, target in zip(
+                generation_changes,
+                ("lower-updated", "lower-frame-one"),
+                SUBSURFACE_FRAME_PHASES,
+                strict=True,
+            )
+        )
+    )
+    alpha_exact = bool(
+        alpha
+        and all(
+            isinstance(value, dict)
+            and _exact_int(value.get("minimum"), positive=True) is not None
+            and value.get("maximum") == value.get("minimum")
+            and 0 < value["minimum"] < 255
+            and value.get("partial_pixels") == value.get("pixel_count")
+            and _exact_int(value.get("pixel_count"), positive=True) is not None
+            and value.get("premultiplied") is True
+            for value in alpha.values()
+        )
+    )
+    parents_stable = bool(
+        set(parent_stability) == {"moved", "lower-destroyed", "upper-detached"}
+        and all(exact_comparison(value) for value in parent_stability.values())
+    )
+
+    input_evidence = stream.get("input")
+    click = events["sibling-click"]
+    lower_destroy_sequence = phases["lower-destroyed"]["streams"]["primary"][
+        "sequences"
+    ][0]
+    upper_detach_sequence = phases["upper-detached"]["streams"]["primary"][
+        "sequences"
+    ][0]
+    upper_phase_sequences = sorted(
+        [
+            phases[phase]["streams"][role]["sequences"][0]
+            for phase, role in (
+                ("stacked", "upper"),
+                ("lower-updated", "upper"),
+                *((phase, "upper") for phase in SUBSURFACE_FRAME_PHASES),
+                ("lower-destroyed", "upper"),
+                ("reparented", "reparented-upper"),
+            )
+        ]
+        + [
+            packet["sequence"]
+            for role, packet in continuous_packet_roles
+            if role == "upper"
+        ]
+    )
+    upper_update_sequences = [
+        packet.get("sequence")
+        for packet in source_updates[str(upper)].get("updates", [])
+        if isinstance(packet, dict)
+    ]
+    rebound_child = info["reparented"]["children"].get(str(upper))
+    eos_ids = stream.get("eos_window_ids")
+    continuous_complete = continuous_transactions["complete_transactions"]
+    active_continuous = continuous_liveness["active"]
+    active_complete = active_continuous["snapshot"]["complete_transactions"]
+    continuous_lower_digests = [
+        packet["payload_sha256"]
+        for transaction in continuous_complete
+        for packet in transaction["packets"]
+        if packet["role"] == "lower"
+    ]
+    continuous_payloads_match_timeline = bool(
+        len(continuous_lower_digests) == continuous_capture_count
+        and len(set(continuous_lower_digests)) == 2
+        and _subsurface_capture_timeline_matches(
+            continuous_complete, events["continuous-generations"], final=True,
+        )
+    )
+    checks = {
+        "fixture_event_stream_exact": True,
+        "two_parent_wire_windows": bool(inventories_exact and primary != secondary),
+        "internal_child_sources_identified": info_exact,
+        "same_lower_updated_repeatedly": bool(packet_counts_exact and source_states_exact),
+        "lower_moved_without_buffer_attach": bool(
+            events["moved"]["lower_attach_count"]
+            == events["restored"]["lower_attach_count"]
+            and events["moved"]["lower_commit_count"]
+            == events["restored"]["lower_commit_count"]
+            and equality_exact["lower_restored_moved"]
+            and phase_packets_exact
+        ),
+        "overlapping_sibling_stack_exact": bool(
+            events["stacked"]["stacking"] == ["lower", "upper"]
+            and events["stacked"]["overlap"]
+            == list(SUBSURFACE_OVERLAP_GEOMETRY)
+            and phase_exact("stacked", "primary", "secondary")
+        ),
+        "child_transactions_raw_rgb32_only": bool(
+            child_transactions_raw_rgb32_only and phase_packets_exact
+        ),
+        "child_packets_target_current_parent": bool(
+            publications == expected_publications
+            and actual_draws == expected_draws
+        ),
+        "global_damage_sequences_unique": global_sequences_exact,
+        "child_ack_owner_exact": bool(
+            acknowledgements == expected_acks and route_exact
+        ),
+        "child_ack_drained": ack_drained,
+        "child_sources_have_transparency": alpha_exact,
+        "premultiplied_source_over_wire_contract": bool(
+            wire_contract_exact and child_transactions_raw_rgb32_only
+        ),
+        "atomic_transaction_contract_exact": bool(
+            transaction_contract_exact
+            and parent_packets_exact
+            and phase_packets_exact
+        ),
+        "initial_alpha_composite_exact": phase_exact(
+            "initial", "primary", "secondary"
+        ),
+        "changed_alpha_composite_exact": phase_exact(
+            "changed", "primary", "secondary"
+        ),
+        "restored_alpha_composite_exact": bool(
+            phase_exact("restored", "primary", "secondary")
+            and source_states_exact
+        ),
+        "moved_alpha_composite_exact": bool(
+            phase_exact("moved", "primary", "secondary")
+            and parents_stable
+        ),
+        "lower_update_preserves_upper": bool(
+            phase_exact("lower-updated", "primary", "secondary")
+            and equality_exact["upper_stacked_updated"]
+            and phases["lower-updated"]["streams"]["lower"]["sequences"][0]
+            < phases["lower-updated"]["streams"]["upper"]["sequences"][0]
+        ),
+        "child_frame_generations_exact": bool(
+            frame_generations_exact
+            and packet_counts_exact
+            and all(
+                phase_exact(phase, "primary", "secondary")
+                and equality_exact[f"upper_stacked_{phase}"]
+                and phases[phase]["streams"]["primary"]["sequences"][0]
+                < phases[phase]["streams"]["lower"]["sequences"][0]
+                < phases[phase]["streams"]["upper"]["sequences"][0]
+                for phase in SUBSURFACE_FRAME_PHASES
+            )
+        ),
+        "continuous_child_active_liveness": bool(
+            len(active_complete) >= SUBSURFACE_CONTINUOUS_MIN_GENERATIONS
+            and active_continuous["fixture_process_alive"] is True
+            and active_continuous["producer_active"] is True
+            and active_continuous["stop_marker_absent"] is True
+            and active_continuous["observed_monotonic_ns"]
+            <= continuous_liveness["stop_requested_monotonic_ns"]
+        ),
+        "continuous_transactions_complete": bool(
+            continuous_info_exact
+            and continuous_packets_exact
+            and SUBSURFACE_CONTINUOUS_MIN_GENERATIONS
+            <= len(continuous_complete) <= continuous_generation_count
+            and continuous_transactions["inflight_transaction"] is None
+            and continuous_transactions["packet_count"]
+            == continuous_capture_count * 3
+            and continuous_payloads_match_timeline
+            and all(
+                [packet["role"] for packet in transaction["packets"]]
+                == ["primary", "lower", "upper"]
+                for transaction in continuous_complete
+            )
+        ),
+        "continuous_callback_accounting_exact": bool(
+            continuous_info_exact
+            and events["continuous-stop"]["lower_attach_count"]
+            == events["continuous-start"]["lower_attach_count"]
+            + continuous_generation_count
+            and events["continuous-stop"]["lower_commit_count"]
+            == events["continuous-start"]["lower_commit_count"]
+            + continuous_generation_count
+            and events["continuous-stop"]["lower_update_count"]
+            == events["continuous-start"]["lower_update_count"]
+            + continuous_generation_count
+            and events["continuous-stop"]["frame_done_count"]
+            == 2
+            + continuous_generation_count
+            + int(events["continuous-stop"]["terminal_callback_completed"])
+            and events["continuous-stop"]["frame_done_count"]
+            + int(events["continuous-stop"]["pending_callback_cancelled"])
+            == 3 + continuous_generation_count
+            and packet_counts_exact
+        ),
+        "continuous_final_composite_exact": bool(
+            phase_exact(
+                SUBSURFACE_CONTINUOUS_FINAL_PHASE,
+                "primary",
+                "secondary",
+            )
+            and continuous_payloads_match_timeline
+        ),
+        "sibling_destroy_restores_parent_and_upper": bool(
+            phase_exact("lower-destroyed", "primary", "secondary")
+            and equality_exact["upper_stacked_after_destroy"]
+            and phases["lower-destroyed"]["streams"]["primary"]["sequences"][0]
+            < phases["lower-destroyed"]["streams"]["upper"]["sequences"][0]
+        ),
+        "upper_detach_restores_primary": bool(
+            phase_exact("upper-detached", "primary", "secondary")
+            and parents_stable
+        ),
+        "reparent_preserves_surface_and_buffer": bool(
+            events["upper-detached"]["upper_surface_id"]
+            == events["reparented"]["upper_surface_id"]
+            and events["upper-detached"]["upper_buffer_id"]
+            == events["reparented"]["upper_buffer_id"]
+            and events["upper-detached"]["upper_attach_count"]
+            == events["reparented"]["upper_attach_count"]
+            == 1
+            and events["reparented"]["upper_commit_count"]
+            == events["upper-detached"]["upper_commit_count"]
+            == 1
+            and events["reparented"]["upper_reattach_parent_committed"] is True
+            and events["reparented"]["upper_reattach_without_child_commit"] is True
+            and upper == reparented_upper
+            and equality_exact["upper_stacked_reparented"]
+        ),
+        "reparent_composite_exact": phase_exact(
+            "reparented", "primary", "secondary"
+        ),
+        "client_pointer_path": bool(
+            isinstance(input_evidence, dict)
+            and input_evidence.get("client_ordered") is True
+            and input_evidence.get("client_press") is True
+            and input_evidence.get("client_release") is True
+        ),
+        "server_pointer_path": bool(
+            isinstance(input_evidence, dict)
+            and input_evidence.get("server_root_wire") is True
+            and input_evidence.get("server_root_coordinates") is True
+            and input_evidence.get("server_leaf_surface") is True
+            and input_evidence.get("server_leaf_coordinates") is True
+            and input_evidence.get("server_ordered") is True
+            and input_evidence.get("server_press") is True
+            and input_evidence.get("server_release") is True
+        ),
+        "fixture_pointer_path": bool(
+            click.get("target") == "upper"
+            and click.get("parent_coordinates")
+            == list(SUBSURFACE_POINTER_PARENT_COORDINATES)
+            and pointer_timing["elapsed_ns"] <= pointer_timing["deadline_ns"]
+        ),
+        "lower_source_removed": bool(
+            str(lower) not in info["lower-destroyed"]["children"]
+            and all(
+                packet.get("sequence", 0) < lower_destroy_sequence
+                for packet in source_updates[str(lower)].get("updates", [])
+                if isinstance(packet, dict)
+            )
+        ),
+        "upper_wid_stable_and_role_rebound": bool(
+            upper == reparented_upper
+            and info["upper-detached"]["children"] == {}
+            and isinstance(rebound_child, dict)
+            and rebound_child.get("parent_wid") == secondary
+            and rebound_child.get("offset") == list(SUBSURFACE_REPARENT_OFFSET)
+            and rebound_child.get("packets_sent") == 1
+            and upper_update_sequences == upper_phase_sequences
+            and max(upper_phase_sequences[:-1]) < upper_detach_sequence
+            and upper_detach_sequence
+            < info["upper-detached"]["next_packet_sequence"]
+            <= upper_phase_sequences[-1]
+            and not any(
+                upper_detach_sequence < sequence < upper_phase_sequences[-1]
+                for sequence in upper_update_sequences
+            )
+            and events["upper-detached"]["monotonic_ns"]
+            < events["reparented"]["monotonic_ns"]
+        ),
+        "no_child_eos": bool(
+            isinstance(eos_ids, list)
+            and not set(child_wids.values()).intersection(eos_ids)
+            and all(
+                packet.get("encoding") != "eos"
+                for role in SUBSURFACE_CHILD_ROLES
+                for packet in source_updates[str(role_ids[role])].get("updates", [])
+                if isinstance(packet, dict)
+            )
+        ),
+        "parents_live_until_exit": bool(
+            inventories_exact
+            and all(event.get("parents_alive") == 2 for event in (
+                events["ready"],
+                events["lower-destroyed"],
+                events["upper-detached"],
+                events["reparented"],
+                events["exit"],
+            ))
+        ),
+        "fixture_clean_exit": bool(
+            evidence.get("fixture_exit_status") == 0
+            and evidence.get("fixture_pid_artifact") == fixture_pid
+            and evidence.get("fixture_stderr_empty") is True
+        ),
+    }
+    return {name: checks[name] for name in SUBSURFACE_LIVE_CHECK_NAMES}
+
+
+def subsurface_interaction_checks(interaction: Any) -> dict[str, bool]:
+    """Fail closed while classifying subsurface ownership and composition."""
+    try:
+        return _subsurface_interaction_checks(interaction)
+    except (AttributeError, KeyError, LabFailure, TypeError, ValueError):
+        return dict.fromkeys(SUBSURFACE_LIVE_CHECK_NAMES, False)
+
+
+def subsurface_artifact_evidence_matches(
+    interaction: Any,
+    directory: Path,
+) -> bool:
+    """Bind reported subsurface evidence to exact retained authorities."""
+    if not isinstance(interaction, dict):
+        return False
+    try:
+        observed = subsurface_artifact_observations(
+            directory,
+            parent_wids=interaction["parent_wids"],
+            child_wids=interaction["child_wids"],
+            fixture_pid=interaction["fixture_pid"],
+            parent_sources=interaction["parent_sources"],
+            phases=interaction["phases"],
+        )
+    except (AttributeError, KeyError, LabFailure, OSError, TypeError, ValueError):
+        return False
+    return observed == interaction.get("evidence")
+
+
+def _publish_subsurface_marker(server: str, marker: str) -> None:
+    if marker not in {
+        SUBSURFACE_UPDATE_MARKER,
+        SUBSURFACE_RESTORE_MARKER,
+        SUBSURFACE_MOVE_MARKER,
+        SUBSURFACE_STACK_MARKER,
+        SUBSURFACE_LOWER_UPDATE_MARKER,
+        *SUBSURFACE_FRAME_GENERATION_MARKERS,
+        SUBSURFACE_CONTINUOUS_START_MARKER,
+        SUBSURFACE_CONTINUOUS_STOP_MARKER,
+        SUBSURFACE_DESTROY_LOWER_MARKER,
+        SUBSURFACE_DETACH_UPPER_MARKER,
+        SUBSURFACE_REPARENT_UPPER_MARKER,
+        SUBSURFACE_EXIT_MARKER,
+    }:
+        raise LabFailure(f"unsupported subsurface fixture marker: {marker}")
+    result = podman_exec(
+        server,
+        [
+            "sh",
+            "-c",
+            'umask 077; test ! -e "$1"; : > "$1"',
+            "subsurface-marker",
+            marker,
+        ],
+        check=False,
+    )
+    if result.returncode:
+        raise LabFailure(f"could not publish subsurface fixture marker: {marker}")
+
+
+def _wait_subsurface_event_prefix(
+    server: str,
+    fixture_pid: int,
+    expected: tuple[str, ...],
+    *,
+    timeout: float = WAIT_SECONDS,
+) -> list[dict[str, Any]]:
+    observed: list[dict[str, Any]] = []
+
+    def reached() -> bool:
+        nonlocal observed
+        if not container_process_exists(server, fixture_pid):
+            raise LabFailure("subsurface fixture exited before completing its event stream")
+        try:
+            records = read_container_subsurface_events(server)
+        except LabFailure:
+            return False
+        if len(records) != len(expected):
+            return False
+        if tuple(record.get("event") for record in records) != expected:
+            raise LabFailure("subsurface fixture event prefix is invalid")
+        previous_timestamp = 0
+        for sequence, record in enumerate(records):
+            timestamp = _exact_int(record.get("monotonic_ns"), positive=True)
+            if (
+                _exact_int(record.get("schema")) != SUBSURFACE_FIXTURE_SCHEMA
+                or _exact_int(record.get("sequence")) != sequence
+                or timestamp is None
+                or timestamp <= previous_timestamp
+            ):
+                raise LabFailure("subsurface fixture event prefix has invalid authority fields")
+            previous_timestamp = timestamp
+        observed = records
+        return True
+
+    wait_for(f"subsurface fixture event {expected[-1]}", reached, timeout=timeout)
+    return observed
+
+
+def _write_subsurface_server_info(
+    server: str,
+    destination: Path,
+) -> bool:
+    result = podman_exec(
+        server,
+        ["xpra", "info", *command_cli_options("server", "info")],
+        check=False,
+        announce=False,
+    )
+    if result.returncode:
+        return False
+    destination.write_text(result.stdout, encoding="utf-8")
+    destination.chmod(0o600)
+    return True
+
+
+def _subsurface_expected_inventory(parent_wids: dict[str, int]) -> dict[int, str]:
+    return {
+        parent_wids["primary"]: SUBSURFACE_FIXTURE_TITLE,
+        parent_wids["secondary"]: SUBSURFACE_REPARENT_TARGET_TITLE,
+    }
+
+
+def _wait_subsurface_info_phase(
+    server: str,
+    server_pid: int,
+    directory: Path,
+    *,
+    phase: str,
+    parent_wids: dict[str, int],
+    expected_children: dict[int, tuple[int, list[int]]],
+    expected_packets_sent: dict[int, int],
+    active_pixel_sources: int,
+    minimum_next_sequence: int,
+) -> dict[str, Any]:
+    if phase not in (*SUBSURFACE_PHASES, SUBSURFACE_CONTINUOUS_FINAL_PHASE):
+        raise LabFailure(f"invalid subsurface info phase: {phase}")
+    destination = directory / (
+        SUBSURFACE_CONTINUOUS_INFO_ARTIFACT
+        if phase == SUBSURFACE_CONTINUOUS_FINAL_PHASE
+        else SUBSURFACE_INFO_ARTIFACTS[phase]
+    )
+    observed: dict[str, Any] = {}
+
+    def reached() -> bool:
+        nonlocal observed
+        if not container_process_exists(server, server_pid):
+            raise LabFailure("Xpra server exited before subsurface state publication")
+        if not _write_subsurface_server_info(server, destination):
+            return False
+        try:
+            value = parse_subsurface_server_info(destination, parent_wids)
+            inventory = server_xpra_window_inventory(destination)
+        except LabFailure:
+            return False
+        if inventory != _subsurface_expected_inventory(parent_wids):
+            return False
+        if (
+            value.get("ack_owners") != 0
+            or value.get("subsurface_pending") != 0
+            or value.get("subsurface_inflight") != 0
+            or not _subsurface_parent_queues_drained(value)
+            or value.get("active_pixel_sources") != active_pixel_sources
+            or value.get("next_packet_sequence", 0) <= minimum_next_sequence
+        ):
+            return False
+        children = value.get("children")
+        if not isinstance(children, dict) or set(children) != set(expected_children):
+            return False
+        for child_wid, (parent_wid, offset) in expected_children.items():
+            child = children.get(child_wid)
+            if (
+                not isinstance(child, dict)
+                or child.get("parent_wid") != parent_wid
+                or child.get("offset") != offset
+                or child.get("ack_pending") != 0
+                or child.get("encoding_pending") != 0
+                or child.get("packets_sent")
+                != expected_packets_sent.get(child_wid)
+            ):
+                return False
+        observed = value
+        return True
+
+    wait_for(f"subsurface {phase} ACK drain and source inventory", reached)
+    return observed
+
+
+def _discover_subsurface_child(
+    server: str,
+    server_pid: int,
+    directory: Path,
+    *,
+    parent_wids: dict[str, int],
+    parent_wid: int,
+    offset: list[int],
+    excluded: set[int],
+    phase: str,
+) -> int:
+    destination = directory / SUBSURFACE_INFO_ARTIFACTS[phase]
+    observed = 0
+
+    def reached() -> bool:
+        nonlocal observed
+        if not container_process_exists(server, server_pid):
+            raise LabFailure("Xpra server exited before child source discovery")
+        if not _write_subsurface_server_info(server, destination):
+            return False
+        try:
+            value = parse_subsurface_server_info(destination, parent_wids)
+        except LabFailure:
+            return False
+        candidates = [
+            wid
+            for wid, child in value.get("children", {}).items()
+            if wid not in excluded
+            and child.get("parent_wid") == parent_wid
+            and child.get("offset") == offset
+        ]
+        if len(candidates) > 1:
+            raise LabFailure("subsurface child source discovery is ambiguous")
+        if not candidates:
+            return False
+        observed = candidates[0]
+        return True
+
+    wait_for(f"subsurface {phase} internal child source", reached)
+    return observed
+
+
+def _subsurface_source_baseline(
+    server: str,
+    directory: Path,
+    source_wid: int,
+) -> tuple[int, set[str]]:
+    try:
+        updates = synchronize_subsurface_saved_updates(server, directory, source_wid)
+    except LabFailure:
+        return 0, set()
+    sequences = [
+        packet.get("sequence")
+        for packet in updates.get("updates", [])
+        if isinstance(packet, dict)
+        and _exact_int(packet.get("sequence"), positive=True) is not None
+    ]
+    return (
+        max(sequences, default=0),
+        {
+            packet["relative_info"]
+            for packet in updates.get("updates", [])
+            if isinstance(packet, dict) and isinstance(packet.get("relative_info"), str)
+        },
+    )
+
+
+def _wait_subsurface_source_stream(
+    server: str,
+    server_pid: int,
+    client: str,
+    client_pid: int,
+    directory: Path,
+    *,
+    role: str,
+    source_wid: int,
+    wire_wid: int,
+    geometry: tuple[int, int, int, int],
+    baseline_sequence: int,
+    previous_packet_info: set[str],
+) -> dict[str, Any]:
+    observed: dict[str, Any] = {}
+
+    def reached() -> bool:
+        nonlocal observed
+        if not container_process_exists(server, server_pid):
+            raise LabFailure("Xpra server exited before the subsurface draw packet")
+        if not container_process_exists(client, client_pid):
+            raise LabFailure("Xpra client exited before the subsurface draw packet")
+        try:
+            updates = synchronize_subsurface_saved_updates(server, directory, source_wid)
+        except (LabFailure, OSError, ValueError, json.JSONDecodeError):
+            return False
+        packets = [
+            packet
+            for packet in updates.get("updates", [])
+            if isinstance(packet, dict)
+            and _exact_int(packet.get("sequence"), positive=True) is not None
+            and packet["sequence"] > baseline_sequence
+            and packet.get("relative_info") not in previous_packet_info
+        ]
+        if len(packets) != 1:
+            return False
+        packet = packets[0]
+        if (
+            packet.get("encoding") != "rgb32"
+            or tuple(packet.get(key) for key in ("x", "y", "w", "h")) != geometry
+        ):
+            return False
+        try:
+            _subsurface_raw_packet_image(
+                directory,
+                packet,
+                source_wid,
+                composite=True,
+            )
+            binding = _subsurface_packet_binding(directory, packet)
+        except LabFailure:
+            return False
+        pattern = (
+            rf"process_draw:[^\n]+ for window\s+{wire_wid},\s+"
+            rf"sequence\s+{packet['sequence']},[^\n]+using\s+"
+            rf"{re.escape(str(packet['encoding']))}\s+encoding"
+        )
+        if not container_artifact_suffix_matches(
+            client,
+            "client.stdout",
+            0,
+            (pattern,),
+        ):
+            return False
+        observed = {
+            "role": role,
+            **binding,
+        }
+        return True
+
+    wait_for(f"subsurface {role} source packet and client draw", reached)
+    return observed
+
+
+def _wait_subsurface_startup(
+    server: str,
+    server_pid: int,
+    client: str,
+    client_pid: int,
+    directory: Path,
+    *,
+    parent_wids: dict[str, int],
+    lower_wid: int,
+) -> dict[str, Any]:
+    observed: dict[str, Any] = {}
+    previous_snapshot: dict[str, Any] | None = None
+    role_ids = {**parent_wids, "lower": lower_wid}
+    info_path = directory / SUBSURFACE_INFO_ARTIFACTS["initial"]
+
+    def reached() -> bool:
+        nonlocal observed, previous_snapshot
+        if not container_process_exists(server, server_pid):
+            raise LabFailure("Xpra server exited before subsurface startup capture")
+        if not container_process_exists(client, client_pid):
+            raise LabFailure("Xpra client exited before subsurface startup capture")
+        try:
+            updates = {
+                role: synchronize_subsurface_saved_updates(server, directory, source_wid)
+                for role, source_wid in role_ids.items()
+            }
+            snapshot = _subsurface_startup_snapshot(updates, role_ids)
+            patterns = []
+            for role, source_updates in updates.items():
+                for packet in source_updates["updates"]:
+                    image = _subsurface_raw_packet_image(
+                        directory, packet, role_ids[role], composite=role != "secondary",
+                    )
+                    expected = _subsurface_fixture_image("lower-one" if role == "lower" else role)
+                    if image.size != expected.size or image.tobytes() != expected.tobytes():
+                        raise LabFailure("subsurface startup packet differs from fixture pixels")
+                    wire_wid = parent_wids["primary"] if role == "lower" else role_ids[role]
+                    patterns.append(
+                        rf"process_draw:[^\n]+ for window\s+{wire_wid},\s+"
+                        rf"sequence\s+{packet['sequence']},[^\n]+using\s+"
+                        rf"{re.escape(str(packet['encoding']))}\s+encoding"
+                    )
+            pull_container_artifacts(server, directory, ("server.stderr",))
+            damage = _subsurface_secondary_startup_damage(
+                (directory / "server.stderr").read_bytes(), parent_wids["secondary"],
+                len(snapshot["secondary"]),
+            )
+            if not _write_subsurface_server_info(server, info_path):
+                return False
+            info = parse_subsurface_server_info(info_path, parent_wids)
+            child = info.get("children", {}).get(lower_wid, {})
+            if (
+                server_xpra_window_inventory(info_path) != _subsurface_expected_inventory(parent_wids)
+                or info.get("next_packet_sequence") != snapshot["next_packet_sequence"]
+                or info.get("active_pixel_sources") != 3
+                or any(info.get(key) != 0 for key in (
+                    "ack_owners", "subsurface_pending", "subsurface_inflight",
+                ))
+                or set(info.get("children", {})) != {lower_wid}
+                or child.get("parent_wid") != parent_wids["primary"]
+                or child.get("offset") != list(SUBSURFACE_INITIAL_OFFSET)
+                or child.get("packets_sent") != len(snapshot["transactions"])
+                or child.get("ack_pending") != 0 or child.get("encoding_pending") != 0
+                or not _subsurface_parent_queues_drained(info, {
+                    "primary": len(snapshot["transactions"]), "secondary": len(snapshot["secondary"]),
+                })
+                or not container_artifact_suffix_matches(client, "client.stdout", 0, tuple(patterns))
+            ):
+                previous_snapshot = None
+                return False
+        except (LabFailure, OSError, ValueError, json.JSONDecodeError):
+            previous_snapshot = None
+            return False
+        stable = previous_snapshot == snapshot
+        previous_snapshot = snapshot
+        if not stable:
+            return False
+        replace_private_json(directory / SUBSURFACE_STARTUP_DAMAGE_ARTIFACT, {
+            "schema": 1, "server_log_end": damage["server_log_end"],
+        })
+        final = snapshot["transactions"][-1]["packets"]
+        observed = {
+            "parent_sources": {
+                "primary": {key: value for key, value in final[0].items() if key != "role"},
+                "secondary": snapshot["secondary"][-1],
+            },
+            "initial_stream": final[1],
+            "snapshot": snapshot,
+        }
+        return True
+
+    wait_for("subsurface complete initial/map packet history and ACK drain", reached)
+    return observed
+
+
+def _capture_subsurface_phase(
+    client: str,
+    directory: Path,
+    *,
+    phase: str,
+    windows: dict[str, str],
+    dimensions: dict[str, list[int]],
+) -> None:
+    for parent_role in SUBSURFACE_PARENT_ROLES:
+        stem = f"subsurface-client-{parent_role}-{phase}"
+        capture_xwd(
+            client,
+            directory,
+            f"{stem}.xwd",
+            window_id=windows[parent_role],
+            announce=False,
+        )
+        capture = convert_xwd(directory, stem)
+        if [
+            capture["image"]["width"],
+            capture["image"]["height"],
+        ] != dimensions[parent_role]:
+            raise LabFailure(
+                f"subsurface {phase} {parent_role} client dimensions are invalid"
+            )
+
+
+def _validate_subsurface_continuous_cadence(generations: list[dict[str, Any]]) -> None:
+    for previous, current in pairwise(generations):
+        before = _exact_int(previous.get("monotonic_ns"), positive=True)
+        after = _exact_int(current.get("monotonic_ns"), positive=True)
+        if (before is None or after is None
+                or after - before < SUBSURFACE_CONTINUOUS_MIN_INTERVAL_NS):
+            raise LabFailure("subsurface continuous producer cadence is invalid")
+
+
+def _subsurface_continuous_event_prefix(
+    records: list[dict[str, Any]],
+    *,
+    stopped: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Validate the strict variable-length fixture prefix around active production."""
+    fixed = (
+        "ready",
+        "lower-state",
+        "lower-state",
+        "lower-moved",
+        "sibling-created",
+        "lower-updated-under-upper",
+        "lower-frame-generation",
+        "lower-frame-generation",
+        "continuous-start",
+    )
+    if len(records) < len(fixed) + (1 if stopped else 0):
+        raise LabFailure("subsurface continuous fixture prefix is incomplete")
+    if tuple(record.get("event") for record in records[: len(fixed)]) != fixed:
+        raise LabFailure("subsurface continuous fixture prefix is invalid")
+    tail = records[len(fixed) :]
+    stop: dict[str, Any] | None = None
+    if stopped:
+        if not tail or tail[-1].get("event") != "continuous-stop":
+            raise LabFailure("subsurface continuous stop event is unavailable")
+        stop = tail[-1]
+        tail = tail[:-1]
+    if (
+        any(record.get("event") != "continuous-generation" for record in tail)
+        or len(tail) > SUBSURFACE_CONTINUOUS_MAX_GENERATIONS
+    ):
+        raise LabFailure("subsurface continuous generation prefix is invalid")
+    previous_timestamp = 0
+    for sequence, record in enumerate(records):
+        timestamp = _exact_int(record.get("monotonic_ns"), positive=True)
+        if (
+            _exact_int(record.get("schema")) != SUBSURFACE_FIXTURE_SCHEMA
+            or _exact_int(record.get("sequence")) != sequence
+            or timestamp is None
+            or timestamp <= previous_timestamp
+        ):
+            raise LabFailure("subsurface continuous prefix authority is invalid")
+        previous_timestamp = timestamp
+    for generation, record in enumerate(tail, start=1):
+        if (
+            _exact_int(record.get("continuous_generation_id"), positive=True)
+            != generation
+            or record.get("producer_active") is not True
+        ):
+            raise LabFailure("subsurface continuous active event is invalid")
+    _validate_subsurface_continuous_cadence(tail)
+    if stopped and (
+        len(tail) < SUBSURFACE_CONTINUOUS_MIN_GENERATIONS
+        or stop is None
+        or stop.get("producer_active") is not False
+        or _exact_int(stop.get("continuous_generation_count")) != len(tail)
+    ):
+        raise LabFailure("subsurface continuous stop accounting is invalid")
+    return tail, stop
+
+
+def _wait_subsurface_continuous_active(
+    server: str,
+    server_pid: int,
+    client: str,
+    client_pid: int,
+    fixture_pid: int,
+    directory: Path,
+    role_ids: dict[str, int],
+    after_sequence: int,
+) -> dict[str, Any]:
+    observed: dict[str, Any] = {}
+    initial_count: int | None = None
+    observation_started: int | None = None
+    attempt_number = 0
+    diagnostic: dict[str, Any] = {}
+
+    def checked_observation_time(start: dict[str, Any]) -> int:
+        now = time.monotonic_ns()
+        if not 0 <= now - start["monotonic_ns"] <= SUBSURFACE_CONTINUOUS_ACTIVE_DEADLINE_NS:
+            raise LabFailure("subsurface continuous active observation deadline expired")
+        return now
+
+    def observe() -> bool:
+        nonlocal observed, initial_count, observation_started
+        diagnostic["stage"] = "process-liveness"
+        if not container_process_exists(server, server_pid):
+            raise LabFailure("Xpra server exited during continuous subsurface production")
+        if not container_process_exists(client, client_pid):
+            raise LabFailure("Xpra client exited during continuous subsurface production")
+        if not container_process_exists(server, fixture_pid):
+            raise LabFailure("subsurface fixture exited during continuous production")
+        diagnostic["stage"] = "initial-source-prefix"
+        try:
+            records = read_container_subsurface_events(server)
+            generations, stop = _subsurface_continuous_event_prefix(
+                records,
+                stopped=False,
+            )
+        except LabFailure as error:
+            diagnostic["reason"] = str(error)[:240]
+            return False
+        started = records[8]
+        now = checked_observation_time(started)
+        diagnostic["initial_generation_count"] = len(generations)
+        if initial_count is None:
+            initial_count = len(generations)
+            observation_started = now
+        if len(generations) >= SUBSURFACE_CONTINUOUS_MAX_GENERATIONS:
+            raise LabFailure(
+                "subsurface continuous producer reached its safety cap "
+                "before active proof"
+            )
+        if (
+            stop is not None
+            or len(generations) < SUBSURFACE_CONTINUOUS_MIN_GENERATIONS
+        ):
+            diagnostic["reason"] = "source has not reached the minimum generation count"
+            return False
+        updates_by_role: dict[str, dict[str, Any]] = {}
+        packet_cut = None
+        try:
+            for role in ("primary", "secondary", "lower", "upper"):
+                diagnostic["stage"] = f"collect-{role}"
+                role_started = time.monotonic_ns()
+                updates_by_role[role] = synchronize_subsurface_saved_updates(
+                    server,
+                    directory,
+                    role_ids[role],
+                )
+                values = updates_by_role[role]["updates"]
+                diagnostic["roles"][role] = {
+                    "elapsed_ns": time.monotonic_ns() - role_started,
+                    "packet_count": len(values),
+                    "maximum_sequence": max((packet["sequence"] for packet in values), default=0),
+                }
+                if role == "primary":
+                    sequences = [packet["sequence"] for packet in updates_by_role[role]["updates"]
+                                 if packet["sequence"] > after_sequence]
+                    if not sequences:
+                        diagnostic["reason"] = "primary has no continuous packet yet"
+                        return False
+                    # Freeze one prefix before pulling the later roles. Their
+                    # newer packets remain final-drain evidence, but cannot
+                    # turn this earlier root inventory into an interior gap.
+                    packet_cut = max(sequences) + 1
+                    diagnostic["packet_cut_before_sequence"] = packet_cut
+            diagnostic["stage"] = "validate-bounded-packet-snapshot"
+            snapshot = _subsurface_continuous_transaction_snapshot(
+                directory,
+                updates_by_role,
+                role_ids,
+                after_sequence=after_sequence,
+                before_sequence=packet_cut,
+            )
+        except (LabFailure, OSError, ValueError, json.JSONDecodeError) as error:
+            diagnostic["reason"] = str(error)[:240]
+            return False
+        complete = snapshot["complete_transactions"]
+        lower_digests = {
+            packet["payload_sha256"]
+            for transaction in complete
+            for packet in transaction["packets"]
+            if packet["role"] == "lower"
+        }
+        transaction_count = len(complete) + int(
+            snapshot["inflight_transaction"] is not None
+        )
+        diagnostic["complete_transactions"] = len(complete)
+        diagnostic["stage"] = "complete-distinct-transactions"
+        if (
+            len(complete) < SUBSURFACE_CONTINUOUS_MIN_GENERATIONS
+            or len(lower_digests) < 2
+        ):
+            diagnostic["reason"] = "fewer than two complete distinct lower states"
+            return False
+        diagnostic["stage"] = "producer-stop-boundary"
+        if (
+            podman_exec(
+                server,
+                ["test", "!", "-e", SUBSURFACE_CONTINUOUS_STOP_MARKER],
+                check=False,
+                announce=False,
+            ).returncode
+            != 0
+            or not container_process_exists(server, fixture_pid)
+        ):
+            diagnostic["reason"] = "stop marker appeared or fixture exited"
+            return False
+        # Packet collection is asynchronous. Re-read producer state after it,
+        # so an earlier active prefix cannot hide arrival at the safety cap.
+        diagnostic["stage"] = "fresh-source-prefix"
+        try:
+            generations, stop = _subsurface_continuous_event_prefix(
+                read_container_subsurface_events(server), stopped=False,
+            )
+        except LabFailure as error:
+            diagnostic["reason"] = str(error)[:240]
+            return False
+        now = checked_observation_time(started)
+        diagnostic["final_generation_count"] = len(generations)
+        if stop is not None or len(generations) >= SUBSURFACE_CONTINUOUS_MAX_GENERATIONS:
+            raise LabFailure("subsurface producer is no longer below its active safety cap")
+        if (len(generations) <= initial_count
+                or generations[-1]["monotonic_ns"] <= observation_started
+                or transaction_count > len(generations)):
+            diagnostic["reason"] = "source did not advance or capture count exceeds fresh source count"
+            return False
+        if not _subsurface_capture_timeline_matches(complete, generations, final=False):
+            diagnostic["reason"] = "captured states are not a source-ordered subsequence"
+            return False
+        event = generations[-1]
+        observed = {
+            "fixture_event_monotonic_ns": event["monotonic_ns"],
+            "fixture_event_sequence": event["sequence"],
+            "fixture_generation_count": len(generations),
+            "fixture_process_alive": True,
+            "initial_fixture_generation_count": initial_count,
+            "observation_started_monotonic_ns": observation_started,
+            "observed_monotonic_ns": now,
+            "packet_cut_before_sequence": packet_cut,
+            "producer_active": True,
+            "snapshot": snapshot,
+            "stop_marker_absent": True,
+        }
+        return True
+
+    def reached() -> bool:
+        nonlocal attempt_number, diagnostic
+        attempt_number += 1
+        if attempt_number > 64:
+            raise LabFailure("subsurface continuous observation attempt bound exceeded")
+        diagnostic = {"attempt": attempt_number, "roles": {},
+                      "started_monotonic_ns": time.monotonic_ns()}
+        try:
+            accepted = observe()
+            diagnostic["accepted"] = accepted
+            return accepted
+        except LabFailure as error:
+            diagnostic["accepted"] = False
+            diagnostic["reason"] = str(error)[:240]
+            raise
+        finally:
+            diagnostic["finished_monotonic_ns"] = time.monotonic_ns()
+            print("SUBSURFACE_CONTINUOUS_OBSERVATION " + json.dumps(diagnostic, sort_keys=True), flush=True)
+
+    wait_for("active callback-driven subsurface transactions", reached,
+             timeout=SUBSURFACE_CONTINUOUS_ACTIVE_DEADLINE_NS / 1_000_000_000)
+    return observed
+
+
+def _wait_subsurface_continuous_stop(
+    server: str,
+    fixture_pid: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    observed: tuple[list[dict[str, Any]], dict[str, Any]] | None = None
+
+    def reached() -> bool:
+        nonlocal observed
+        if not container_process_exists(server, fixture_pid):
+            raise LabFailure("subsurface fixture exited before continuous stop")
+        try:
+            records = read_container_subsurface_events(server)
+            generations, stop = _subsurface_continuous_event_prefix(
+                records,
+                stopped=True,
+            )
+        except LabFailure:
+            return False
+        assert stop is not None
+        observed = generations, stop
+        return True
+
+    wait_for("callback-driven subsurface producer stop", reached)
+    assert observed is not None
+    return observed
+
+
+def _log_subsurface_client_parent_identities(
+    phase: str,
+    observed: dict[str, tuple[str, str] | None],
+    expected: dict[str, tuple[str, str]] | None = None,
+) -> None:
+    record: dict[str, Any] = {"phase": phase}
+    for label, identities in (("observed", observed), ("expected", expected)):
+        if identities is not None:
+            # Bound diagnostics only; identity comparisons use the full values.
+            record[label] = {role: [value[0][:32], value[1][:256]] if value is not None else None
+                             for role, value in identities.items()}
+    print("SUBSURFACE_CLIENT_PARENT_IDENTITIES " + json.dumps(record, sort_keys=True), flush=True)
+
+
+def _require_subsurface_client_parent_identities(
+    client: str,
+    expected: dict[str, tuple[str, str]],
+) -> None:
+    titles = {"primary": SUBSURFACE_FIXTURE_TITLE, "secondary": SUBSURFACE_REPARENT_TARGET_TITLE}
+    observed = {role: find_window(client, (title,)) for role, title in titles.items()}
+    _log_subsurface_client_parent_identities("final", observed, expected)
+    if observed != expected:
+        raise LabFailure("subsurface client mapped XID or WM title changed during the fixture")
+
+
+def exercise_wayland_subsurface(
+    server: str,
+    server_pid: int,
+    client: str,
+    client_pid: int,
+    fixture_pid: int,
+    window_id: str,
+    primary_wid: int,
+    directory: Path,
+) -> dict[str, Any]:
+    """Exercise moves, stacking, alpha, destruction, and protocol reparenting."""
+    prefix = ("ready",)
+    ready = _wait_subsurface_event_prefix(server, fixture_pid, prefix)[0]
+    if (
+        ready.get("parent_dimensions")
+        != list(SUBSURFACE_PARENT_DIMENSIONS["primary"])
+        or ready.get("secondary_parent_dimensions")
+        != list(SUBSURFACE_PARENT_DIMENSIONS["secondary"])
+        or ready.get("lower_dimensions") != list(SUBSURFACE_LOWER_DIMENSIONS)
+        or ready.get("lower_buffer_dimensions")
+        != list(SUBSURFACE_LOWER_BUFFER_DIMENSIONS)
+        or ready.get("lower_buffer_scale") != SUBSURFACE_LOWER_BUFFER_SCALE
+        or ready.get("lower_offset") != list(SUBSURFACE_INITIAL_OFFSET)
+        or window_geometry(client, window_id)["width"]
+        != SUBSURFACE_PARENT_DIMENSIONS["primary"][0]
+        or window_geometry(client, window_id)["height"]
+        != SUBSURFACE_PARENT_DIMENSIONS["primary"][1]
+    ):
+        raise LabFailure("subsurface fixture primary geometry is invalid")
+
+    primary_found = find_window(client, (SUBSURFACE_FIXTURE_TITLE,))
+    if primary_found is None or primary_found[0] != window_id:
+        raise LabFailure("subsurface initial client primary XID does not match discovery")
+    secondary_found: tuple[str, str] | None = None
+
+    def secondary_ready() -> bool:
+        nonlocal secondary_found
+        secondary_found = find_window(client, (SUBSURFACE_REPARENT_TARGET_TITLE,))
+        return secondary_found is not None
+
+    wait_for("forwarded subsurface reparent target", secondary_ready)
+    assert secondary_found is not None
+    secondary_window_id = secondary_found[0]
+    initial_client_windows = {"primary": primary_found, "secondary": secondary_found}
+    _log_subsurface_client_parent_identities("initial", initial_client_windows)
+    secondary_geometry = window_geometry(client, secondary_window_id)
+    if (
+        secondary_geometry["width"] != SUBSURFACE_PARENT_DIMENSIONS["secondary"][0]
+        or secondary_geometry["height"]
+        != SUBSURFACE_PARENT_DIMENSIONS["secondary"][1]
+    ):
+        raise LabFailure("subsurface fixture secondary geometry is invalid")
+
+    discovery_path = directory / SUBSURFACE_INFO_ARTIFACTS["initial"]
+
+    def parents_ready() -> bool:
+        if not _write_subsurface_server_info(server, discovery_path):
+            return False
+        try:
+            inventory = server_xpra_window_inventory(discovery_path)
+        except LabFailure:
+            return False
+        return (
+            inventory.get(primary_wid) == SUBSURFACE_FIXTURE_TITLE
+            and len(inventory) == 2
+            and list(inventory.values()).count(SUBSURFACE_REPARENT_TARGET_TITLE) == 1
+        )
+
+    wait_for("two subsurface parent wire windows", parents_ready)
+    inventory = server_xpra_window_inventory(discovery_path)
+    secondary_matches = [
+        wid
+        for wid, title in inventory.items()
+        if title == SUBSURFACE_REPARENT_TARGET_TITLE
+    ]
+    if len(secondary_matches) != 1:
+        raise LabFailure("subsurface secondary parent wire identity is ambiguous")
+    parent_wids = {
+        "primary": primary_wid,
+        "secondary": secondary_matches[0],
+    }
+    parent_dimensions = {
+        "primary": ready["parent_dimensions"],
+        "secondary": ready["secondary_parent_dimensions"],
+    }
+    windows = {
+        "primary": window_id,
+        "secondary": secondary_window_id,
+    }
+
+    lower_wid = _discover_subsurface_child(
+        server,
+        server_pid,
+        directory,
+        parent_wids=parent_wids,
+        parent_wid=primary_wid,
+        offset=ready["lower_offset"],
+        excluded=set(parent_wids.values()),
+        phase="initial",
+    )
+    child_wids = {
+        "lower": lower_wid,
+        "upper": 0,
+        "reparented-upper": 0,
+    }
+    _establish_subsurface_startup_barriers(
+        server, server_pid, client, client_pid, directory, parent_wids, windows,
+    )
+    startup = _wait_subsurface_startup(
+        server, server_pid, client, client_pid, directory,
+        parent_wids=parent_wids, lower_wid=lower_wid,
+    )
+    parent_sources = startup["parent_sources"]
+    phases: dict[str, dict[str, Any]] = {}
+
+    def capture_and_info(
+        phase: str,
+        streams: list[dict[str, Any]],
+        expected_packets: dict[int, int],
+    ) -> dict[str, Any]:
+        phases[phase] = {"streams": streams}
+        expected_children = _subsurface_expected_children(
+            phase,
+            parent_wids,
+            child_wids,
+        )
+        maximum = max(
+            sequence
+            for stream in streams
+            for sequence in stream["sequences"]
+        )
+        info = _wait_subsurface_info_phase(
+            server,
+            server_pid,
+            directory,
+            phase=phase,
+            parent_wids=parent_wids,
+            expected_children=expected_children,
+            expected_packets_sent=expected_packets,
+            active_pixel_sources=(
+                len(SUBSURFACE_PARENT_ROLES) + len(expected_children)
+            ),
+            minimum_next_sequence=maximum,
+        )
+        _capture_subsurface_phase(
+            client,
+            directory,
+            phase=phase,
+            windows=windows,
+            dimensions=parent_dimensions,
+        )
+        return info
+
+    initial_info = capture_and_info(
+        "initial",
+        [startup["initial_stream"]],
+        {lower_wid: len(startup["snapshot"]["transactions"])},
+    )
+
+    def transition(
+        marker: str,
+        expected_prefix: tuple[str, ...],
+        specs: tuple[tuple[str, int, int, tuple[int, int, int, int]], ...],
+    ) -> list[dict[str, Any]]:
+        baselines = {
+            source_wid: _subsurface_source_baseline(server, directory, source_wid)
+            for _role, source_wid, _wire_wid, _geometry in specs
+        }
+        _publish_subsurface_marker(server, marker)
+        _wait_subsurface_event_prefix(server, fixture_pid, expected_prefix)
+        return [
+            _wait_subsurface_source_stream(
+                server,
+                server_pid,
+                client,
+                client_pid,
+                directory,
+                role=role,
+                source_wid=source_wid,
+                wire_wid=wire_wid,
+                geometry=geometry,
+                baseline_sequence=baselines[source_wid][0],
+                previous_packet_info=baselines[source_wid][1],
+            )
+            for role, source_wid, wire_wid, geometry in specs
+        ]
+
+    prefix += ("lower-state",)
+    streams = transition(
+        SUBSURFACE_UPDATE_MARKER,
+        prefix,
+        (
+            (
+                "primary",
+                primary_wid,
+                primary_wid,
+                SUBSURFACE_PHASE_GEOMETRIES[("changed", "primary")],
+            ),
+            (
+                "lower",
+                lower_wid,
+                primary_wid,
+                SUBSURFACE_PHASE_GEOMETRIES[("changed", "lower")],
+            ),
+        ),
+    )
+    changed_info = capture_and_info(
+        "changed",
+        streams,
+        {
+            lower_wid: initial_info["children"][lower_wid]["packets_sent"] + 1,
+        },
+    )
+
+    prefix += ("lower-state",)
+    streams = transition(
+        SUBSURFACE_RESTORE_MARKER,
+        prefix,
+        (
+            (
+                "primary",
+                primary_wid,
+                primary_wid,
+                SUBSURFACE_PHASE_GEOMETRIES[("restored", "primary")],
+            ),
+            (
+                "lower",
+                lower_wid,
+                primary_wid,
+                SUBSURFACE_PHASE_GEOMETRIES[("restored", "lower")],
+            ),
+        ),
+    )
+    restored_info = capture_and_info(
+        "restored",
+        streams,
+        {
+            lower_wid: changed_info["children"][lower_wid]["packets_sent"] + 1,
+        },
+    )
+
+    prefix += ("lower-moved",)
+    streams = transition(
+        SUBSURFACE_MOVE_MARKER,
+        prefix,
+        (
+            (
+                "primary",
+                primary_wid,
+                primary_wid,
+                SUBSURFACE_PHASE_GEOMETRIES[("moved", "primary")],
+            ),
+            (
+                "lower",
+                lower_wid,
+                primary_wid,
+                SUBSURFACE_PHASE_GEOMETRIES[("moved", "lower")],
+            ),
+        ),
+    )
+    moved_info = capture_and_info(
+        "moved",
+        streams,
+        {
+            lower_wid: restored_info["children"][lower_wid]["packets_sent"] + 1,
+        },
+    )
+
+    stack_baselines = {
+        source_wid: _subsurface_source_baseline(server, directory, source_wid)
+        for source_wid in (primary_wid, lower_wid)
+    }
+    _publish_subsurface_marker(server, SUBSURFACE_STACK_MARKER)
+    prefix += ("sibling-created",)
+    _wait_subsurface_event_prefix(server, fixture_pid, prefix)
+    upper_wid = _discover_subsurface_child(
+        server,
+        server_pid,
+        directory,
+        parent_wids=parent_wids,
+        parent_wid=primary_wid,
+        offset=list(SUBSURFACE_UPPER_OFFSET),
+        excluded={*parent_wids.values(), lower_wid},
+        phase="stacked",
+    )
+    child_wids["upper"] = upper_wid
+    stacked_streams = [
+        _wait_subsurface_source_stream(
+            server,
+            server_pid,
+            client,
+            client_pid,
+            directory,
+            role=role,
+            source_wid=source_wid,
+            wire_wid=primary_wid,
+            geometry=geometry,
+            baseline_sequence=stack_baselines.get(source_wid, (0, set()))[0],
+            previous_packet_info=stack_baselines.get(source_wid, (0, set()))[1],
+        )
+        for role, source_wid, geometry in (
+            (
+                "primary",
+                primary_wid,
+                SUBSURFACE_PHASE_GEOMETRIES[("stacked", "primary")],
+            ),
+            (
+                "lower",
+                lower_wid,
+                SUBSURFACE_PHASE_GEOMETRIES[("stacked", "lower")],
+            ),
+            (
+                "upper",
+                upper_wid,
+                SUBSURFACE_PHASE_GEOMETRIES[("stacked", "upper")],
+            ),
+        )
+    ]
+    stacked_info = capture_and_info(
+        "stacked",
+        stacked_streams,
+        {
+            lower_wid: moved_info["children"][lower_wid]["packets_sent"] + 1,
+            upper_wid: 1,
+        },
+    )
+
+    prefix += ("lower-updated-under-upper",)
+    streams = transition(
+        SUBSURFACE_LOWER_UPDATE_MARKER,
+        prefix,
+        (
+            (
+                "primary",
+                primary_wid,
+                primary_wid,
+                SUBSURFACE_PHASE_GEOMETRIES[("lower-updated", "primary")],
+            ),
+            (
+                "lower",
+                lower_wid,
+                primary_wid,
+                SUBSURFACE_PHASE_GEOMETRIES[("lower-updated", "lower")],
+            ),
+            (
+                "upper",
+                upper_wid,
+                primary_wid,
+                SUBSURFACE_PHASE_GEOMETRIES[("lower-updated", "upper")],
+            ),
+        ),
+    )
+    lower_updated_info = capture_and_info(
+        "lower-updated",
+        streams,
+        {
+            lower_wid: stacked_info["children"][lower_wid]["packets_sent"] + 1,
+            upper_wid: stacked_info["children"][upper_wid]["packets_sent"] + 1,
+        },
+    )
+
+    generation_info = lower_updated_info
+    for phase, marker in zip(
+        SUBSURFACE_FRAME_PHASES,
+        SUBSURFACE_FRAME_GENERATION_MARKERS,
+        strict=True,
+    ):
+        prefix += ("lower-frame-generation",)
+        streams = transition(
+            marker,
+            prefix,
+            tuple(
+                (
+                    role,
+                    {**parent_wids, **child_wids}[role],
+                    primary_wid,
+                    SUBSURFACE_PHASE_GEOMETRIES[(phase, role)],
+                )
+                for role in SUBSURFACE_PHASE_STREAM_ROLES[phase]
+            ),
+        )
+        generation_info = capture_and_info(
+            phase,
+            streams,
+            {
+                lower_wid: generation_info["children"][lower_wid]["packets_sent"]
+                + 1,
+                upper_wid: generation_info["children"][upper_wid]["packets_sent"]
+                + 1,
+            },
+        )
+
+    role_ids = {**parent_wids, **child_wids}
+    continuous_after_sequence = max(
+        sequence
+        for stream in phases[SUBSURFACE_FRAME_PHASES[-1]]["streams"]
+        for sequence in stream["sequences"]
+    )
+    _publish_subsurface_marker(server, SUBSURFACE_CONTINUOUS_START_MARKER)
+    continuous_active = _wait_subsurface_continuous_active(
+        server,
+        server_pid,
+        client,
+        client_pid,
+        fixture_pid,
+        directory,
+        role_ids,
+        continuous_after_sequence,
+    )
+    stop_requested_ns = time.monotonic_ns()
+    _publish_subsurface_marker(server, SUBSURFACE_CONTINUOUS_STOP_MARKER)
+    continuous_generations, continuous_stop = _wait_subsurface_continuous_stop(
+        server,
+        fixture_pid,
+    )
+    prefix += (
+        "continuous-start",
+        *("continuous-generation" for _ in continuous_generations),
+        "continuous-stop",
+    )
+    continuous_snapshot: dict[str, Any] = {}
+
+    def continuous_drained() -> bool:
+        nonlocal continuous_snapshot
+        updates_by_role: dict[str, dict[str, Any]] = {}
+        try:
+            for role in ("primary", "secondary", "lower", "upper"):
+                updates_by_role[role] = synchronize_subsurface_saved_updates(
+                    server,
+                    directory,
+                    role_ids[role],
+                )
+            snapshot = _subsurface_continuous_transaction_snapshot(
+                directory,
+                updates_by_role,
+                role_ids,
+                after_sequence=continuous_after_sequence,
+            )
+        except (LabFailure, OSError, ValueError, json.JSONDecodeError):
+            return False
+        if (
+            not SUBSURFACE_CONTINUOUS_MIN_GENERATIONS
+            <= len(snapshot["complete_transactions"]) <= len(continuous_generations)
+            or snapshot["inflight_transaction"] is not None
+            or snapshot["packet_count"] != len(snapshot["complete_transactions"]) * 3
+            or not _subsurface_capture_timeline_matches(
+                snapshot["complete_transactions"], continuous_generations, final=True,
+            )
+        ):
+            return False
+        info_path = directory / SUBSURFACE_CONTINUOUS_INFO_ARTIFACT
+        if not _write_subsurface_server_info(server, info_path):
+            return False
+        try:
+            info = parse_subsurface_server_info(info_path, parent_wids)
+        except LabFailure:
+            return False
+        if any(info.get(key) != 0 for key in (
+            "ack_owners", "subsurface_pending", "subsurface_inflight",
+        )) or not _subsurface_parent_queues_drained(info):
+            return False
+        for wid in (lower_wid, upper_wid):
+            child = info.get("children", {}).get(wid, {})
+            if (
+                child.get("packets_sent")
+                != generation_info["children"][wid]["packets_sent"]
+                + len(snapshot["complete_transactions"])
+                or child.get("encoding_pending") != 0
+                or child.get("ack_pending") != 0
+            ):
+                return False
+        continuous_snapshot = snapshot
+        return True
+
+    wait_for("complete callback-driven subsurface transaction drain", continuous_drained)
+    continuous_maximum = max(
+        packet["sequences"][0]
+        for transaction in continuous_snapshot["complete_transactions"]
+        for packet in transaction["packets"]
+    )
+    continuous_info = _wait_subsurface_info_phase(
+        server,
+        server_pid,
+        directory,
+        phase=SUBSURFACE_CONTINUOUS_FINAL_PHASE,
+        parent_wids=parent_wids,
+        expected_children=_subsurface_expected_children(
+            SUBSURFACE_FRAME_PHASES[-1],
+            parent_wids,
+            child_wids,
+        ),
+        expected_packets_sent={
+            lower_wid: generation_info["children"][lower_wid]["packets_sent"]
+            + len(continuous_snapshot["complete_transactions"]),
+            upper_wid: generation_info["children"][upper_wid]["packets_sent"]
+            + len(continuous_snapshot["complete_transactions"]),
+        },
+        active_pixel_sources=len(SUBSURFACE_PARENT_ROLES) + 2,
+        minimum_next_sequence=continuous_maximum,
+    )
+    _capture_subsurface_phase(
+        client,
+        directory,
+        phase=SUBSURFACE_CONTINUOUS_FINAL_PHASE,
+        windows=windows,
+        dimensions=parent_dimensions,
+    )
+    drained_observed_ns = time.monotonic_ns()
+    replace_private_json(
+        directory / SUBSURFACE_CONTINUOUS_LIVENESS_ARTIFACT,
+        {
+            "active": continuous_active,
+            "drained": {
+                "fixture_event_monotonic_ns": continuous_stop["monotonic_ns"],
+                "fixture_event_sequence": continuous_stop["sequence"],
+                "fixture_generation_count": len(continuous_generations),
+                "observed_monotonic_ns": drained_observed_ns,
+                "producer_active": False,
+                "snapshot": continuous_snapshot,
+            },
+            "schema": 3,
+            "stop_requested_monotonic_ns": stop_requested_ns,
+        },
+    )
+    generation_info = continuous_info
+
+    click_started_ns = time.monotonic_ns()
+    podman_exec(
+        client,
+        [
+            "env",
+            f"DISPLAY={CLIENT_DISPLAY}",
+            "xdotool",
+            "windowactivate",
+            "--sync",
+            window_id,
+            "mousemove",
+            "--sync",
+            "--window",
+            window_id,
+            str(SUBSURFACE_POINTER_PARENT_COORDINATES[0]),
+            str(SUBSURFACE_POINTER_PARENT_COORDINATES[1]),
+            "click",
+            "1",
+        ],
+        timeout=SUBSURFACE_INPUT_DEADLINE_SECONDS,
+    )
+    remaining_ns = SUBSURFACE_INPUT_DEADLINE_NS - (
+        time.monotonic_ns() - click_started_ns
+    )
+    if remaining_ns <= 0:
+        raise LabFailure("subsurface pointer input exceeded its deadline")
+    wait_for(
+        "subsurface upper sibling pointer release",
+        lambda: (
+            podman_exec(
+                server,
+                ["test", "-f", SUBSURFACE_CLICK_MARKER],
+                check=False,
+                announce=False,
+            ).returncode
+            == 0
+        ),
+        timeout=remaining_ns / 1_000_000_000,
+    )
+    prefix += ("sibling-click",)
+    remaining_ns = SUBSURFACE_INPUT_DEADLINE_NS - (
+        time.monotonic_ns() - click_started_ns
+    )
+    if remaining_ns <= 0:
+        raise LabFailure("subsurface pointer event exceeded its deadline")
+    click = _wait_subsurface_event_prefix(
+        server,
+        fixture_pid,
+        prefix,
+        timeout=remaining_ns / 1_000_000_000,
+    )[-1]
+    click_completed_ns = time.monotonic_ns()
+    replace_private_json(
+        directory / SUBSURFACE_POINTER_TIMING_ARTIFACT,
+        validate_subsurface_pointer_timing(
+            {
+                "completed_monotonic_ns": click_completed_ns,
+                "deadline_ns": SUBSURFACE_INPUT_DEADLINE_NS,
+                "elapsed_ns": click_completed_ns - click_started_ns,
+                "fixture_event_monotonic_ns": click["monotonic_ns"],
+                "schema": 1,
+                "started_monotonic_ns": click_started_ns,
+            },
+            click["monotonic_ns"],
+        ),
+    )
+
+    prefix += ("lower-destroyed",)
+    streams = transition(
+        SUBSURFACE_DESTROY_LOWER_MARKER,
+        prefix,
+        (
+            (
+                "primary",
+                primary_wid,
+                primary_wid,
+                SUBSURFACE_PHASE_GEOMETRIES[("lower-destroyed", "primary")],
+            ),
+            (
+                "upper",
+                upper_wid,
+                primary_wid,
+                SUBSURFACE_PHASE_GEOMETRIES[("lower-destroyed", "upper")],
+            ),
+        ),
+    )
+    capture_and_info(
+        "lower-destroyed",
+        streams,
+        {
+            upper_wid: generation_info["children"][upper_wid]["packets_sent"] + 1,
+        },
+    )
+
+    prefix += ("upper-detached",)
+    streams = transition(
+        SUBSURFACE_DETACH_UPPER_MARKER,
+        prefix,
+        (
+            (
+                "primary",
+                primary_wid,
+                primary_wid,
+                SUBSURFACE_PHASE_GEOMETRIES[("upper-detached", "primary")],
+            ),
+        ),
+    )
+    capture_and_info(
+        "upper-detached",
+        streams,
+        {},
+    )
+
+    secondary_baseline = _subsurface_source_baseline(
+        server,
+        directory,
+        parent_wids["secondary"],
+    )
+    upper_reparent_baseline = _subsurface_source_baseline(
+        server,
+        directory,
+        upper_wid,
+    )
+    _publish_subsurface_marker(server, SUBSURFACE_REPARENT_UPPER_MARKER)
+    prefix += ("upper-reparented",)
+    _wait_subsurface_event_prefix(server, fixture_pid, prefix)
+    reparented_upper_wid = upper_wid
+    child_wids["reparented-upper"] = reparented_upper_wid
+    reparented_streams = [
+        _wait_subsurface_source_stream(
+            server,
+            server_pid,
+            client,
+            client_pid,
+            directory,
+            role=role,
+            source_wid=source_wid,
+            wire_wid=parent_wids["secondary"],
+            geometry=SUBSURFACE_PHASE_GEOMETRIES[("reparented", role)],
+            baseline_sequence=baseline[0],
+            previous_packet_info=baseline[1],
+        )
+        for role, source_wid, baseline in (
+            ("secondary", parent_wids["secondary"], secondary_baseline),
+            ("reparented-upper", reparented_upper_wid, upper_reparent_baseline),
+        )
+    ]
+    capture_and_info(
+        "reparented",
+        reparented_streams,
+        {reparented_upper_wid: 1},
+    )
+
+    _require_subsurface_client_parent_identities(client, initial_client_windows)
+
+    _publish_subsurface_marker(server, SUBSURFACE_EXIT_MARKER)
+    fixture_exit_status = wait_for_process_exit(
+        server,
+        fixture_pid,
+        directory,
+        "subsurface-fixture",
+        timeout=15,
+    )
+    if fixture_exit_status != 0:
+        raise LabFailure("subsurface fixture exited unsuccessfully")
+    return {
+        "attempted": True,
+        "checks": dict.fromkeys(SUBSURFACE_LIVE_CHECK_NAMES, False),
+        "child_wids": child_wids,
+        "evidence": {},
+        "fixture_pid": fixture_pid,
+        "parent_sources": parent_sources,
+        "parent_wids": parent_wids,
+        "phases": phases,
+    }
+
+
+def finalize_wayland_subsurface_evidence(
+    interaction: dict[str, Any],
+    directory: Path,
+) -> dict[str, Any]:
+    """Recompute final compositing evidence after endpoint collection."""
+    finalized = {
+        **interaction,
+        "evidence": subsurface_artifact_observations(
+            directory,
+            parent_wids=interaction["parent_wids"],
+            child_wids=interaction["child_wids"],
+            fixture_pid=interaction["fixture_pid"],
+            parent_sources=interaction["parent_sources"],
+            phases=interaction["phases"],
+        ),
+    }
+    finalized["checks"] = subsurface_interaction_checks(finalized)
+    if not subsurface_artifact_evidence_matches(finalized, directory):
+        raise LabFailure("subsurface retained artifacts do not reproduce their evidence")
+    return finalized
+
+
 def validate_empty_damage_fixture_events(
     events: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
@@ -10497,8 +17392,8 @@ def exercise_empty_damage_fixture(
 
     wait_for("sustained empty-damage frame callbacks", pressure_ready, timeout=5)
     empty_commit_patterns = {
-        "parent": rf"commit wid {parent_wid} mapped=True,[^\n]*rects=\[\]",
-        "child": rf"commit wid {child_wid} mapped=True,[^\n]*rects=\[\]",
+        "parent": mapped_empty_wayland_commit_pattern(parent_wid),
+        "child": mapped_empty_wayland_commit_pattern(child_wid),
     }
     mapped_empty_commits = {
         name: container_artifact_suffix_matches(
@@ -11385,6 +18280,42 @@ def application_boundary_checks(
     }
 
 
+def wayland_capture_checks(
+    log_evidence: dict[str, Any], updates: dict[str, Any],
+) -> dict[str, bool]:
+    wid = _exact_int(updates.get("window_id"), positive=True)
+    canvases = set()
+    for packet in updates.get("updates", ()):
+        if not isinstance(packet, dict) or wid is None:
+            continue
+        options = packet.get("options", {})
+        canvas = options.get("window-size") if isinstance(options, dict) else None
+        if (
+            isinstance(canvas, (list, tuple)) and len(canvas) == 2
+            and all(_exact_int(value, positive=True) is not None for value in canvas)
+            and isinstance(packet.get("relative_info"), str)
+            and packet["relative_info"].startswith(f"screen-updates/{wid}/")
+        ):
+            canvases.add(tuple(canvas))
+    records = log_evidence.get("native_wayland_captures", ())
+    primary_capture = any(
+        isinstance(record, dict)
+        and record.get("window_id") == wid
+        and tuple(record.get("logical_size", ())) in canvases
+        and (
+            record.get("kind") == "normalized-texture"
+            and record.get("pixel_format") in {"RGBX", "BGRX"}
+            or record.get("kind") == "legacy-dmabuf"
+            and record.get("native_fourcc") in {"0x34325258", "0x34324258"}
+        )
+        for record in records
+    )
+    return {
+        "nonempty_commit": log_evidence["nonempty_wayland_commits"] > 0,
+        "primary_native_opaque_capture": primary_capture,
+    }
+
+
 def classify_boundaries(
     *,
     args: argparse.Namespace,
@@ -11408,14 +18339,9 @@ def classify_boundaries(
         log_evidence=log_evidence,
         render_node=args.render_node,
     )
-    wayland_checks = {
+    wayland_checks = wayland_capture_checks(log_evidence, updates) if args.application == "zed" else {
         "nonempty_commit": log_evidence["nonempty_wayland_commits"] > 0,
-        "xrgb8888_dmabuf": "0x34325258" in log_evidence["dmabuf_fourcc"],
-        "rgbx_image": log_evidence["rgbx_images"] > 0,
     }
-    if args.application != "zed":
-        wayland_checks.pop("xrgb8888_dmabuf")
-        wayland_checks.pop("rgbx_image")
     positive_payloads = updates["count"] > 0 and all(
         update["payload_bytes"] > 0 for update in updates["updates"]
     )
@@ -11593,7 +18519,49 @@ def classify_boundaries(
         ),
         "red_blue_order_verified": bool(pixel_evidence.get("red_blue_order_verified")),
     }
-    if args.application == "gtk":
+    if args.application == "subsurface":
+        subsurface_checks = interaction.get("checks", {})
+        composite_names = (
+            "initial_alpha_composite_exact",
+            "changed_alpha_composite_exact",
+            "restored_alpha_composite_exact",
+            "moved_alpha_composite_exact",
+            "overlapping_sibling_stack_exact",
+            "lower_update_preserves_upper",
+            "sibling_destroy_restores_parent_and_upper",
+            "upper_detach_restores_primary",
+            "reparent_composite_exact",
+        )
+        final_checks = {
+            "direct_rgb_nonuniform": direct_xwd["unique_rgb_colors"] > 100,
+            "focused_screen_nonuniform": composited["quantized_rgb_colors"] > 100,
+            "focused_screen_not_background": (
+                composited["background_match_ratio"] < 0.95
+            ),
+            "subsurface_phase_composites_exact": bool(
+                isinstance(subsurface_checks, dict)
+                and all(
+                    subsurface_checks.get(name) is True
+                    for name in composite_names
+                )
+            ),
+            "subsurface_premultiplied_source_over_exact": bool(
+                isinstance(subsurface_checks, dict)
+                and subsurface_checks.get("child_sources_have_transparency") is True
+                and subsurface_checks.get(
+                    "premultiplied_source_over_wire_contract"
+                )
+                is True
+                and subsurface_checks.get(
+                    "atomic_transaction_contract_exact"
+                )
+                is True
+            ),
+            "window_central_alpha_opaque": (
+                direct_image["central_opaque_ratio"] >= 0.99
+            ),
+        }
+    elif args.application == "gtk":
         final_checks.update(
             image_alpha_content_checks(direct_image, prefix="window")
         )
@@ -11650,6 +18618,16 @@ def classify_boundaries(
         interaction_checks = {
             name: check_schema_exact and clipboard_checks.get(name) is True
             for name in CLIPBOARD_LIVE_CHECK_NAMES
+        }
+    elif args.application == "subsurface":
+        subsurface_checks = interaction.get("checks", {})
+        check_schema_exact = bool(
+            isinstance(subsurface_checks, dict)
+            and set(subsurface_checks) == set(SUBSURFACE_LIVE_CHECK_NAMES)
+        )
+        interaction_checks = {
+            name: check_schema_exact and subsurface_checks.get(name) is True
+            for name in SUBSURFACE_LIVE_CHECK_NAMES
         }
     else:
         interaction_checks = {"not_required_for_vulkan_control": True}
@@ -12209,6 +19187,19 @@ def run_scenario(
             check=False,
         )
         xpra_wid = server_xpra_window_id(directory / "server-info.txt", title_patterns)
+        sequence_authority = None
+        if args.encoding == "h264":
+            sequence_window_ids = (xpra_wid,)
+            if args.application in MULTIWINDOW_HARDWARE_APPLICATIONS:
+                sequence_window_ids += (server_xpra_window_id(
+                    directory / "server-info.txt", (INTERACTION_READY_TITLE,),
+                ),)
+            sequence_authority = packet_sequence_authority(
+                directory / "server-info.txt", run_id=run_id,
+                selected_case_slugs=args.selected_case_slugs,
+                selection_sha256=args.selected_selection_sha256,
+                expected_window_ids=sequence_window_ids,
+            )
         frame_outcome = wait_for_frame_boundary(
             server,
             server_pid,
@@ -12219,6 +19210,7 @@ def run_scenario(
             args.h264_client_policy,
             application=args.application,
             expected_xpra_wid=xpra_wid,
+            sequence_authority=sequence_authority,
         )
         geometry = window_geometry(client, window_id)
         write_command_output(
@@ -12405,6 +19397,7 @@ def run_scenario(
                     geometry,
                     directory,
                     interaction,
+                    sequence_authority=sequence_authority,
                 )
             elif args.lifecycle == "application-exit":
                 interaction["empty_damage_fixture"] = exercise_empty_damage_fixture(
@@ -12424,6 +19417,7 @@ def run_scenario(
                     server,
                     directory,
                     xpra_wid,
+                    sequence_authority=sequence_authority,
                 )
 
         interaction_window: tuple[str, str] | None = None
@@ -12468,6 +19462,7 @@ def run_scenario(
                 directory,
                 xpra_wid,
                 hardware_h264_interval,
+                sequence_authority=sequence_authority,
             )
             podman_exec(
                 client,
@@ -12528,6 +19523,17 @@ def run_scenario(
                 scenario.clipboard_policy,
                 directory,
             )
+        elif args.application == "subsurface":
+            interaction = exercise_wayland_subsurface(
+                server,
+                server_pid,
+                client,
+                client_pid,
+                application_pid,
+                window_id,
+                xpra_wid,
+                directory,
+            )
 
         lifecycle: dict[str, Any] = {"mode": args.lifecycle}
         if application_identity is not None:
@@ -12575,6 +19581,11 @@ def run_scenario(
                         "Escape",
                     ],
                 )
+            elif (
+                args.application == "subsurface"
+                and process_exit_status(directory, "subsurface-fixture") != 0
+            ):
+                raise LabFailure("subsurface fixture exit status changed")
             wait_for(
                 "Xpra server exit after application termination",
                 lambda: not container_process_exists(server, server_pid),
@@ -12765,7 +19776,27 @@ def run_scenario(
         if args.application == "clipboard":
             stop_x11_clipboard_owner(client)
         workloads_exited = True
-        pull_all_container_artifacts(server, directory, "server")
+        if args.application == "subsurface":
+            source_wids = {
+                *interaction["parent_wids"].values(),
+                *interaction["child_wids"].values(),
+            }
+            if container_subsurface_source_wids(server) != source_wids:
+                raise LabFailure("subsurface saved source inventory is not exact")
+            pull_all_container_artifacts(
+                server,
+                directory,
+                "server",
+                include_screen_updates=False,
+            )
+            for source_wid in sorted(source_wids):
+                synchronize_subsurface_saved_updates(
+                    server,
+                    directory,
+                    source_wid,
+                )
+        else:
+            pull_all_container_artifacts(server, directory, "server")
         collected_containers.add(server)
         pull_all_container_artifacts(client, directory, "client")
         collected_containers.add(client)
@@ -12785,14 +19816,40 @@ def run_scenario(
                 directory,
                 scenario.clipboard_policy,
             )
+        elif args.application == "subsurface":
+            interaction = finalize_wayland_subsurface_evidence(
+                interaction,
+                directory,
+            )
         if args.application == "opengl":
             application_activity["opengl"] = load_opengl_evidence(
                 directory / "opengl.stdout"
             )
-        updates = parse_saved_updates(directory, xpra_wid)
-        updates["initial_pixel_format"] = saved_window_initial_pixel_format(
-            directory, xpra_wid
-        )
+        final_sequence_windows = None
+        if sequence_authority is not None and sequence_authority["namespace"] == "connection-v1":
+            observed_windows = {
+                int(path.name) for path in (directory / "screen-updates").iterdir()
+                if path.is_dir() and re.fullmatch(r"[1-9][0-9]*", path.name)
+            }
+            if observed_windows != set(sequence_authority["window_ids"]):
+                raise LabFailure("final packet history contains an undeclared source window")
+            sequence_windows = {}
+            for wid in sequence_authority["window_ids"]:
+                window_updates = parse_saved_updates(directory, wid)
+                window_updates["initial_pixel_format"] = saved_window_initial_pixel_format(directory, wid)
+                sequence_windows[wid] = window_updates
+            final_sequence_windows = bind_packet_sequence_ledger(sequence_windows, sequence_authority)
+            validate_packet_sequence_observations(directory, final_sequence_windows)
+        if final_sequence_windows is not None:
+            updates = final_sequence_windows[xpra_wid]
+        elif args.application == "subsurface":
+            updates = _subsurface_saved_updates(directory, xpra_wid)
+        else:
+            updates = parse_saved_updates(directory, xpra_wid)
+            updates["initial_pixel_format"] = saved_window_initial_pixel_format(
+                directory,
+                xpra_wid,
+            )
         if args.application == "zed" and args.encoding == "h264":
             stimulus = interaction.get("h264_stimulus")
             if not isinstance(stimulus, dict):
@@ -12816,7 +19873,11 @@ def run_scenario(
                 "window_size": stimulus.get("window_size"),
             }
         interaction_updates = (
-            parse_saved_updates(directory, interaction_xpra_wid)
+            (
+                final_sequence_windows[interaction_xpra_wid]
+                if final_sequence_windows is not None
+                else parse_saved_updates(directory, interaction_xpra_wid)
+            )
             if interaction_xpra_wid is not None
             else None
         )
@@ -12896,7 +19957,10 @@ def run_scenario(
             focused_rgb_path = directory / "window-focused-source-viewport.rgb.png"
         pixel_evidence, source_image = pixel_pipeline_evidence(
             directory,
-            updates["screenshots"],
+            pixel_pipeline_source_screenshots(
+                args.application,
+                updates.get("screenshots", []),
+            ),
             direct_rgb_path,
             focused_rgb_path,
             pixel_error_limit(args.application, args.encoding),
@@ -13022,6 +20086,8 @@ def run_scenario(
                 "title": window_title,
             },
         }
+        if sequence_authority is not None:
+            report["packet_sequence_authority"] = sequence_authority
         if interaction_window is not None:
             report["interaction_window"] = {
                 "id": interaction_window[0],
@@ -13246,10 +20312,22 @@ def main() -> int:
             alpha_scenarios=args.alpha_scenarios,
             network_profile_name=args.network_profile,
         )
-        validate_profile_selection(
-            application=args.application,
-            selection=args.selection,
-        )
+        if (
+            args.application == "clipboard"
+            and args.selection != CLIPBOARD_CASE_SELECTION
+        ):
+            raise ProfileError(
+                "clipboard live acceptance requires selection "
+                f"{CLIPBOARD_CASE_SELECTION}"
+            )
+        if (
+            args.application == "subsurface"
+            and args.selection != SUBSURFACE_CASE_SELECTION
+        ):
+            raise ProfileError(
+                "subsurface live acceptance requires selection "
+                f"{SUBSURFACE_CASE_SELECTION}"
+            )
     except ProfileError as error:
         raise LabFailure(str(error)) from error
     if args.selection is None:
@@ -13335,6 +20413,14 @@ def main() -> int:
         keyboard_scenario_sha256 = bound.keyboard_scenario_sha256
         if args.selection != (None if server_selection.name == "master" else server_selection.name):
             raise LabFailure("bound live selection does not match the invocation")
+        validate_live_profile_selection(
+            application=args.application,
+            lifecycle=args.lifecycle,
+            encoding=args.encoding,
+            h264_client_policy=args.h264_client_policy,
+            alpha_scenarios=args.alpha_scenarios,
+            selection=server_selection,
+        )
         validate_endpoint_contexts(
             args.application,
             server_context,
@@ -13342,6 +20428,14 @@ def main() -> int:
         )
     else:
         server_selection = resolve_patch_selection(args.selection, args.source_variant)
+        validate_live_profile_selection(
+            application=args.application,
+            lifecycle=args.lifecycle,
+            encoding=args.encoding,
+            h264_client_policy=args.h264_client_policy,
+            alpha_scenarios=args.alpha_scenarios,
+            selection=server_selection,
+        )
         client_selection = client_selection_for_application(
             args.application,
             server_selection,
@@ -13365,7 +20459,7 @@ def main() -> int:
         )
         client_context = (
             server_context
-            if args.application == "clipboard"
+            if args.application in {"clipboard", "subsurface"}
             else prepare_build_context(state_root, snapshot, client_selection)
         )
         validate_endpoint_contexts(
@@ -13402,6 +20496,7 @@ def main() -> int:
     if not isinstance(input_provenance, dict) or input_provenance.get("schema") != 2:
         raise LabFailure("frozen live input manifest has an unsupported schema")
     args.selected_case_slugs = server_selection.case_slugs
+    args.selected_selection_sha256 = server_selection.digest
     commit = snapshot.commit
     server_context_digest = server_context.digest
     client_context_digest = client_context.digest
@@ -13537,7 +20632,9 @@ def main() -> int:
             "selection": {
                 "case_slugs": server_selection.case_slugs,
                 "digest": server_selection.digest,
+                "kind": server_selection.kind,
                 "name": server_selection.name,
+                "required_gates": server_selection.required_gates,
                 "resolution": server_context.resolution,
                 "selector_digests": dict(server_selection.selector_digests),
                 "selectors": server_selection.selectors,

@@ -303,6 +303,68 @@ class DebianArchiveTests(unittest.TestCase):
             self.assertEqual(validated["schema"], 2)
             self.assertEqual(validated["packages"][0]["package"], "xpra-codecs")
 
+    def test_independently_requires_the_packaged_jph_pair(self) -> None:
+        entries = codec_data_entries()
+        for part in ("decoder", "encoder"):
+            name = f"./usr/lib/python3/dist-packages/xpra/codecs/jph/{part}.{TEST_ABI}.so"
+            entries[name] = b"native fixture"
+        common = (
+            "xpra-common_6.6-r42479-1_amd64.deb",
+            "xpra-common",
+            common_data_entries(),
+            "python3",
+        )
+
+        def codecs(files: dict[str, bytes]) -> tuple[str, str, dict[str, bytes], str]:
+            return (
+                "xpra-codecs_6.6-r42479-1_amd64.deb", "xpra-codecs", files, TEST_DEPENDS,
+            )
+
+        for part in ("decoder", "encoder"):
+            target = f"./usr/lib/python3/dist-packages/xpra/codecs/jph/{part}.{TEST_ABI}.so"
+            remaining = {name: value for name, value in entries.items() if name != target}
+            python_only = target.split(f".{TEST_ABI}")[0] + ".py"
+            alternate = target.replace(TEST_ABI, "cpython-313-x86_64-linux-gnu")
+            cases = (
+                ("missing", (codecs(remaining), common), "missing or ambiguous"),
+                (
+                    "python-only",
+                    (codecs({**remaining, python_only: b"pass\n"}), common),
+                    "missing or ambiguous",
+                ),
+                (
+                    "wrong owner",
+                    (
+                        codecs(remaining), common,
+                        (
+                            "xpra-codecs-extras_6.6-r42479-1_amd64.deb",
+                            "xpra-codecs-extras", {target: entries[target]}, "xpra-codecs",
+                        ),
+                    ),
+                    "belongs to xpra-codecs-extras",
+                ),
+                (
+                    "different ABI",
+                    (codecs({**remaining, alternate: entries[target]}), common),
+                    "different Python ABIs",
+                ),
+                (
+                    "ambiguous ABI",
+                    (codecs({**entries, alternate: entries[target]}), common),
+                    "missing or ambiguous",
+                ),
+            )
+            for label, fixtures, message in cases:
+                with (
+                    self.subTest(module=part, label=label),
+                    tempfile.TemporaryDirectory() as raw,
+                ):
+                    root = Path(raw)
+                    args = build_args(root)
+                    archive = write_package_set_tar(root, args, fixtures)
+                    with self.assertRaisesRegex(job.JobError, message):
+                        job.validate_package_tar(archive, args)
+
     def test_rejects_incomplete_or_inconsistent_package_sets(self) -> None:
         valid = codec_data_entries()
         encoder = next(name for name in valid if "/encoder." in name)

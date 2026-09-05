@@ -1,8 +1,16 @@
 # Bootstrap Fork Maintenance
 
+This runbook prepares source and runtime prerequisites. Schedule subsequent
+development checks and final acceptance with [`validation.md`](validation.md);
+preparing an image does not require immediately running a full matrix or every
+live/package gate.
+
 ## Host prerequisites
 
-Provide Git, GNU Make, Python 3.11 or newer, Ruff, and Podman. Physical profiles
+Provide Git, GNU Make, Python 3.11 or newer, Ruff, Podman, and a C11 compiler
+available as `cc`. The offline live-infrastructure tests compile the fixture's
+real pixel/scheduling helpers using standard C headers; do not silently skip
+that boundary or install missing host packages automatically. Physical profiles
 additionally need access to the selected `/dev/dri/renderD*` node and, for the
 Zed scenario, a readable application directory. No host service manager is a
 runner prerequisite. The lifecycle creates no systemd unit and never invokes
@@ -187,6 +195,10 @@ on the new clean source in all three matrix modes before applying it. Follow
 [`test-quarantine.md`](test-quarantine.md); a module which becomes green in an
 assigned gate must leave that gate in the same reviewed cycle. Remove the
 module and its patch path only when no gate still assigns it.
+
+That clean reassessment does not block independent production-case development.
+Retain its current results across unrelated production-only edits; the complete
+new-base acceptance set is required after adaptation and candidate freeze.
 
 ## Runtime root
 

@@ -33,9 +33,9 @@ Before planning deletion:
 5. review failures through their first failed boundary;
 6. complete all clean quarantine reassessment gates for a rebase cycle;
 7. run the exact per-job cleanup target for every collected job;
-8. finish the required validation ladder, or document the proven non-semantic
-   unchanged-base exception, and run the offline automation checks. A rebase
-   cycle never qualifies for that exception.
+8. finish final acceptance under [`validation.md`](validation.md), or document
+   the proven non-semantic unchanged-base exception, and run the offline
+   automation checks. A rebase cycle never qualifies for that exception.
 
 The per-job cleanup commands are:
 

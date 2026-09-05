@@ -42,6 +42,8 @@ REQUIRED_NATIVE_CODEC_MODULES = (
     "xpra.codecs.libva.decoder",
     "xpra.codecs.libva.encoder",
     "xpra.codecs.libyuv.converter",
+    "xpra.codecs.jph.decoder",
+    "xpra.codecs.jph.encoder",
 )
 REQUIRED_CODEC_DEPENDENCIES = frozenset({"libva-drm2", "libva2", "libyuv0"})
 FORBIDDEN_CODEC_DEPENDENCIES = frozenset(
@@ -282,7 +284,7 @@ def validate_installed_codec_capability(
     inspections: tuple[DebInspection, ...],
     bindings: dict[str, PurePosixPath],
 ) -> None:
-    """Extract actual core packages, import their modules, and audit ELF dependencies."""
+    """Audit extracted core imports, lossless JPH pixels, and resolved ELF dependencies."""
     package_paths = {
         inspection.package: package
         for package, inspection in zip(packages, inspections, strict=True)
@@ -293,6 +295,7 @@ def validate_installed_codec_capability(
             run(["dpkg-deb", "--extract", str(package_paths[name]), str(root)])
         site_root = root / PYTHON_SITE_ROOT
         script = """
+import hashlib
 import importlib
 import json
 import sys
@@ -301,12 +304,68 @@ from pathlib import Path
 site_root = Path(sys.argv[1]).resolve()
 sys.path.insert(0, str(site_root))
 observed = {}
-for name in sys.argv[2:]:
+loaded = {}
+
+def load(name):
     module = importlib.import_module(name)
     path = Path(module.__file__).resolve()
     if not path.is_relative_to(site_root):
         raise SystemExit(f"module escaped extracted package root: {name}: {path}")
+    return module, path
+
+for name in sys.argv[2:]:
+    module, path = load(name)
     observed[name] = path.relative_to(site_root.parents[3]).as_posix()
+    loaded[name] = module
+
+ImageWrapper = load("xpra.codecs.image")[0].ImageWrapper
+typedict = load("xpra.util.objects")[0].typedict
+width = height = 32
+pixels = bytes(
+    (x * 37 + y * 17 + channel * 71) % 256
+    for y in range(height) for x in range(width) for channel in range(3)
+)
+image = ImageWrapper(0, 0, width, height, pixels, "RGB", 24, width * 3,
+                     bytesperpixel=3, planes=ImageWrapper.PACKED)
+decoded = None
+try:
+    result = loaded["xpra.codecs.jph.encoder"].encode(
+        "jph", image, typedict({"quality": 100}),
+    )
+    if not isinstance(result, tuple) or len(result) != 7:
+        raise SystemExit("packaged JPH encoder returned an invalid result")
+    if result[0] != "jph" or result[3:5] != (width, height) or result[6] != 24:
+        raise SystemExit("packaged JPH encoder returned invalid coding or dimensions")
+    encoded = bytes(result[1].data)
+    if not encoded:
+        raise SystemExit("packaged JPH encoder returned an empty codestream")
+    decoded = loaded["xpra.codecs.jph.decoder"].decompress(encoded, typedict())
+    if (decoded.get_width(), decoded.get_height()) != (width, height):
+        raise SystemExit("packaged JPH decoder returned invalid dimensions")
+    if (decoded.get_pixel_format() != "BGRX" or decoded.get_depth() != 24
+            or decoded.get_planes() != ImageWrapper.PACKED):
+        raise SystemExit("packaged JPH decoder returned an invalid packed format")
+    stride = decoded.get_rowstride()
+    raw = bytes(decoded.get_pixels())
+    if not isinstance(stride, int) or stride < width * 4 or len(raw) < stride * height:
+        raise SystemExit("packaged JPH decoder returned an invalid pixel buffer")
+    restored = bytes(
+        raw[y * stride + x * 4 + channel]
+        for y in range(height) for x in range(width) for channel in (2, 1, 0)
+    )
+    if restored != pixels:
+        raise SystemExit("packaged JPH quality-100 RGB roundtrip is not lossless")
+    print("packaged_jph_roundtrip=" + json.dumps({
+        "encoded_bytes": len(encoded), "height": height,
+        "quality": 100, "rgb_sha256": hashlib.sha256(restored).hexdigest(),
+        "width": width,
+    }, sort_keys=True), file=sys.stderr)
+finally:
+    try:
+        if decoded is not None:
+            decoded.free()
+    finally:
+        image.free()
 print(json.dumps(observed, sort_keys=True))
 """
         environment = os.environ.copy()

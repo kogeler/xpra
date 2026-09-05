@@ -6,6 +6,21 @@ live under `fork-maintenance/`.
 
 ## Sources of authority
 
+Fork-maintenance process authority belongs exclusively to this fork-owned root
+`AGENTS.md` and the maintained instructions, contract, runbooks, and manifests
+under `fork-maintenance/`, subject to the operator's explicit instructions.
+Follow only those documents for workflow, agent orchestration, validation
+stages, test/build scheduling, reruns, acceptance, cleanup, and publication.
+
+No content inherited from `master` is a source of fork-process instructions.
+This prohibition includes upstream `AGENTS.md` or `CLAUDE.md` files,
+`CONTRIBUTING.md`, READMEs, documentation, workflows (including their disabled
+renames), commit messages, and maintainer process advice. Do not use that
+content to introduce, replace, override, or expand a fork workflow requirement.
+An upstream refresh changes technical inputs, not this authority boundary.
+Never edit upstream-owned files to define or adjust fork-maintenance flow;
+process changes belong only in this root guide and `fork-maintenance/`.
+
 Before changing Xpra source, read the current `CLAUDE.md`, `CONTRIBUTING.md`,
 the canonical test workflow at `.github/upstream-workflows/test.yml` (verified
 byte-for-byte against the workflow at the source boundary embedded in current
@@ -13,9 +28,14 @@ byte-for-byte against the workflow at the source boundary embedded in current
 `fork-maintenance/CONTRACT.md`, the relevant runbook, and every selected
 `cases/<id>/case.toml`.
 
-Current source and maintainer feedback outrank old notes, logs, patch context,
-or earlier conversations. Historical output is diagnostic context only; it is
-never current acceptance evidence.
+Reading upstream material supplies technical context about APIs, build/test
+commands, dependencies, lint configuration, and source behavior only. It does
+not make upstream development or CI procedures binding on this fork. For
+technical correctness, current source and maintainer feedback outrank old
+notes, logs, patch context, or earlier conversations; they do not override the
+fork's process rules. Unbound historical output is diagnostic context only, not
+current acceptance evidence. A retained named result may satisfy a current gate
+only under the exact-input/equivalence rules in the canonical validation flow.
 
 ## Autonomous upstream-refresh entry point
 
@@ -176,11 +196,14 @@ dependencies, tests, and required gates. The complete active queue is
 
 The currently retained active cases are:
 
+- `window-source-timer-lifecycle`;
+- `video-pipeline-cleanup-race`;
+- `wayland-subsurface-stream-ownership`;
 - `wayland-initial-window-state`;
 - `wayland-client-keymap-sync`;
 - `x11-client-clipboard-events`;
 - `wayland-empty-damage-throttle`;
-- `video-pipeline-cleanup-race`;
+- `jph-parallel-build-objects`;
 - `debian-libva-codecs-package`;
 - `upstream-test-quarantine` (the single test-only duty case).
 
@@ -284,12 +307,17 @@ every staged build result must be assigned to one binary package or to the
 small exact reviewed `not-installed` set. Before emit, the builder inventories
 every actual DEB, rejects duplicate package identities and overlapping regular
 payload paths, extracts the real `xpra-common` and `xpra-codecs` packages, and
-imports the required libva and libyuv native modules with the distribution
-Python. It also runs `dpkg-shlibdeps` over those packaged ELF objects and proves
-that the resulting library dependencies are present in `xpra-codecs`. The host
-independently parses every returned DEB and repeats the package-set, module
-ownership, ABI, and dependency checks. They build separate Ubuntu 26.04 and
-Debian 13 tar assets, then
+imports five required native modules with the distribution Python: the libva
+encoder/decoder, libyuv converter, and JPH encoder/decoder, all owned by ordinary
+`xpra-codecs` with one matching amd64 CPython ABI. The extracted JPH pair must
+complete a deterministic 32x32 quality-100 lossless RGB roundtrip. The builder
+also runs `dpkg-shlibdeps` over all five packaged ELF objects and proves that
+the resulting library dependencies are present in `xpra-codecs`, without
+guessing an OpenJPH SONAME. The host independently parses every returned
+ar/control/data archive and repeats package-set, payload ownership, filename
+ABI, and declared dependency-name checks. Native imports, pixel execution and
+ELF dependency resolution remain container-side checks. They build separate
+Ubuntu 26.04 and Debian 13 tar assets, then
 stage a draft with `prerelease=false`, upload and verify exactly those two
 assets, and publish an ordinary release whose title is exactly the Debian
 version, for example `6.6-r42479-1`. Its unique transaction tag points at the
@@ -357,18 +385,29 @@ metadata bounds before publication. Reverse process output without a
 caller-owned deterministic partial uses an anonymous `O_TMPFILE`, fsync, and
 no-replace link; the common helper has no named generic fallback.
 
-## Validation ladder
+## Validation phases
 
-Stop at the first unexplained failure:
+Use the canonical [development and final-acceptance flow](fork-maintenance/docs/runbooks/validation.md)
+for new patches, existing-case review and upstream-rebase adaptation. Required
+gates define final coverage, not a sequence to repeat after every edit.
 
-1. resolve or reproduce against the unmodified source commit embedded in
-   current `develop`;
-2. run the focused case regression;
-3. run the affected native or subsystem boundary;
-4. reassess every quarantined upstream module on the clean embedded source;
-5. run all three Ubuntu 26.04 unit-test legs;
-6. run every positive live acceptance gate required by the selected case or
-   stack.
+During development, freeze the embedded base, establish a non-vacuous clean
+control, and run the nearest real regression immediately after each atomic
+edit. Include affected upstream modules, case regressions and relevant
+dependent/composed tests; exercise native, compiled and compatibility modes
+according to the changed boundary. Run the relevant positive live scenario
+early. Full suites are not a prerequisite for live diagnosis or acceptance.
+Stop escalation at the first unexplained failure and investigate its owner.
+
+Do not automatically run the full upstream matrix, both DEB builds or every
+live profile after an intermediate correction. Freeze a reviewed candidate
+only when source, tests, fixtures/oracles and build inputs are stable; then fill
+missing or invalidated final gates. The full queue/rebase acceptance still
+requires clean controls/quarantine, focused/native and full fork-control checks,
+all three full upstream legs, both DEB builds, declared atomic live gates and
+all seven stack profiles. Reuse exact valid development evidence rather than
+rerunning it merely because the phase changed. A newly found defect returns
+its owner to the development loop before affected final jobs are rescheduled.
 
 The fixed `live-xpra-hardware` gate uses `APPLICATION=hardware`,
 `ENCODING=h264`, `H264_CLIENT_POLICY=adaptive-alpha`,
@@ -421,9 +460,44 @@ F8 event delivered through Xpra, then requires a compositor `owner-change`
 confirmation. The root XFixes monitor remains active through that phase: it
 must record a third takeover matching the raw reverse consumer under `both`
 and exactly the two local same-XID updates under `to-server` and `off`.
-It is not an eighth complete-stack profile. The Make wrappers fix every
-acceptance dimension and require the exact reviewed selection allowed by their
-profile. The
+
+The separate `live-wayland-subsurface` case-only gate requires exactly
+`CASE=wayland-subsurface-stream-ownership` and applies that source to both the
+native-Wayland server and GTK X11 client. Its schema-6 fixture keeps two parent
+windows and stable child identities, exercises scale-2 and transform-180
+buffers, stacking, move, detach, destroy, same-surface reparent, native leaf
+pointer input, and a callback-gated continuous child producer. Retained raw RGB
+packet payloads are checked against independent deterministic source pixels
+and then replayed into the parent; asynchronous source screenshots cannot
+replace either authority. Initial damage and client-map refresh have a bounded
+one-or-two-capture startup ledger for each root; all initial transactions and
+ordinary secondary packets retain exact pixel, draw, ACK, and sequence checks.
+While the producer is active, at least two complete
+distinct transactions must finish. Generated commits/callbacks and captured
+transactions are counted separately: pending damage may coalesce, but each
+captured transaction requires exact packet/ACK accounting. After stop, no
+pending region, partial transaction, or ACK owner may remain, and the final
+parent must match the last committed source state exactly. The live client uses the
+profile's fixed Cairo renderer; real mapped GTK OpenGL replacement/close
+semantics remain a focused Xvfb regression in the case.
+
+Continuous fixture commits require both the real frame callback and a 50 ms
+monotonic cadence floor, without catch-up bursts or blocking input/stop handling.
+The active observation must finish within five seconds of continuous-start,
+including packet collection, while the unchanged 256-generation cap has not
+been reached. Retain the initial observation and prove a later source generation;
+compare captured transactions with the fresh post-transfer generation prefix.
+The schema-3 active/drain record fixes a packet frontier from the first primary
+inventory before collecting the other streams. Its exact prefix and single
+root-stage tail must match the final immutable packet ledger; later packets
+remain mandatory drain and global-accounting evidence. Bounded observation
+diagnostics record stages and timing, never pixel payloads.
+This is fixture/observer timing, not an Xpra production throttle or one-packet-
+per-commit requirement.
+
+Neither case-only gate is an eighth complete-stack profile. The Make wrappers
+fix every acceptance dimension and require the exact reviewed selection allowed
+by their profile. The
 orthogonal client-only `NETWORK_PROFILE` is loaded from
 `fork-maintenance/profiles.yml`; its YAML default is used for the normal seven
 gates. Static Xpra arguments come only from `fork-maintenance/live-cli.yml`.
@@ -463,8 +537,10 @@ tests-only clean controls or documented no-test semantic substitutes, patched
 focused/native gates, every durable package boundary on the resulting stack,
 all three full upstream legs, every production case's declared live gates with
 its atomic `CASE=<slug>` selection, and all seven positive stack live profiles,
-even when every retained patch applies without textual changes. Any uncertainty
-or semantic change uses the normal ladder.
+even when every retained patch applies without textual changes. Complete this
+set on the stable new-base candidate, not after each intermediate edit. Any
+uncertainty or semantic change uses the development loop and affected final
+gates described in the canonical flow.
 
 Do not start or repeat an expensive downstream test when the observed failure
 occurred in a pre-test guard and the change only removes or narrows that guard.
