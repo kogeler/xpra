@@ -4970,7 +4970,6 @@ def validate_live_status(
         or provenance.get("path") != str(result_directory / "inputs")
         or provenance.get("harness_sha256") != status["harness_sha256"]
         or not GIT_SHA_RE.fullmatch(str(provenance.get("source_commit", "")))
-        or provenance.get("client_selection") != "master"
         or not isinstance(harness, dict)
         or not harness
         or any(
@@ -4995,6 +4994,26 @@ def validate_live_status(
         )
     ):
         fail(f"collected live input provenance is inconsistent: {name}")
+    # These two case-only profiles deliberately apply the same source at both
+    # endpoints. Keep their exact bindings, rather than admitting any patched
+    # client or assuming the ordinary clean-client profile for every result.
+    if provenance["client_selection"] != "master" and (
+        provenance["client_selection"] not in (
+            "cases/x11-client-clipboard-events",
+            "cases/wayland-subsurface-stream-ownership",
+        )
+        or provenance["client_selection"] != provenance["server_selection"]
+        or any(
+            provenance[f"client_{field}"] != provenance[f"server_{field}"]
+            for field in (
+                "selection_sha256",
+                "selection_resolution_sha256",
+                "context_sha256",
+                "context_archive_sha256",
+            )
+        )
+    ):
+        fail(f"collected live endpoint provenance is inconsistent: {name}")
     zed_archive = provenance.get("zed_archive_sha256")
     zed_binary = provenance.get("zed_binary_sha256")
     if (zed_archive is None) != (zed_binary is None) or (

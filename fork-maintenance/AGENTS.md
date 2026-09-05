@@ -238,7 +238,11 @@ not added to the seven-profile stack set. Its native-Wayland reverse source is
 armed by a private command, claims only inside a real F8 callback delivered
 through Xpra, and must receive a compositor owner-change confirmation. The
 same root XFixes monitor covers both forward updates and that reverse boundary,
-with three owner events for `both` and exactly two for `to-server` and `off`.
+with three production owner events for `both` and exactly two for `to-server`
+and `off`. It remains active through controlled Xpra client exit and an X11
+queue drain; only an exact shutdown-only zero-owner event may be classified
+separately. Retained compositor source intervals and cross-stream fixture
+chronology must be reparsed at collection, and a late nonzero takeover fails.
 Their fixed Make wrappers require the
 exact nonempty reviewed selection allowed by each profile. `profiles.yml` alone
 supplies the selectable client network/quality overlay and its default;

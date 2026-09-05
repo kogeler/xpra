@@ -26,9 +26,9 @@ PROJECT_ROOT = MAINTENANCE_ROOT.parent
 TOOLS_ROOT = MAINTENANCE_ROOT / "tools"
 sys.path.insert(0, str(TOOLS_ROOT))
 
-import background_job
-import container_payload
-import podman_policy
+import background_job  # noqa: E402 - needs the tools-path bootstrap above
+import container_payload  # noqa: E402 - needs the tools-path bootstrap above
+import podman_policy  # noqa: E402 - needs the tools-path bootstrap above
 
 STATE_ROOT = PROJECT_ROOT / ".artifacts" / "fork-maintenance" / "upstream-tests"
 LOG_ROOT = STATE_ROOT / "logs"

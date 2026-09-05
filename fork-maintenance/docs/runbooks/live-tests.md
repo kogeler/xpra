@@ -170,7 +170,7 @@ acceptance dimensions are fixed;
 `live-x11-clipboard` and `live-wayland-subsurface` are additional case-only
 positive gates and do not change this seven-profile stack set.
 
-## Native-Wayland client keymap synchronization
+## Client keymap synchronization with a native-Wayland server
 
 Run the keyboard case independently; do not substitute `live-rgb`, whose Zed
 scenario intentionally exercises the unrelated empty-damage case:
@@ -194,8 +194,10 @@ generic manifest-declared ownership. The migration must update the runner,
 provenance checks, immutable inventories, and mutation tests before the
 stack-selected keyboard gate can remain valid without that case.
 
-The clean maintained client uses `setxkbmap` on its actual X11 display. The
-bound scenario first uses model `pc104` with four ordered groups
+The clean maintained client uses `setxkbmap` on its actual X11 display. This
+live gate exercises legacy client keymap transport; negotiated exact-wire
+transport and native-Wayland client discovery remain focused/native coverage.
+The bound scenario first uses model `pc104` with four ordered groups
 (`us,fr,ru,ara`), then replaces it with model `pc105` and `ge,am,us,fr`
 without reconnecting. Across both maximum-sized maps, one physical key
 exercises Latin, Cyrillic, Arabic, Georgian, and Armenian Unicode text. For
@@ -278,10 +280,33 @@ For the reverse phase, the private command only arms the Wayland owner. The
 runner sends F8 through the forwarded Xpra window, the fixture claims inside
 that key callback with a current Wayland input serial, and a compositor-driven
 `owner-change` record confirms the claim. Keep the root XFixes monitor running
-until after the raw reverse conversion: require a third owner transition and
-the same new owner XID in `both`, but exactly the two original same-XID forward
-transitions and the original raw owner in `to-server` and `off`. Do not replace
-these event authorities with a fixed settle delay.
+through the raw reverse conversion and until the Xpra client has exited, then
+drain a real X-server round trip before publishing the terminal record. Require
+the third production owner transition and the same new owner XID in `both`,
+followed only by its zero-owner release/destroy after the fixture closes.
+`to-server` and `off` retain exactly the two original same-XID forward
+transitions and the original raw owner through client termination. A delayed
+forbidden takeover after the first reverse read fails the gate.
+
+Before every allowed forward paste, the runner observes the compositor's new
+non-NULL selection event without sending input or running a diagnostic command
+through Xpra. The retained `clipboard-transitions.json` binds four contiguous
+server-log intervals, their observation times, and the final client-exit
+observation. Collection reparses the existing safe compositor logs: each
+forward phase has exactly one source publication (`off` has none), and the
+reverse phase has exactly one non-NULL source after its real F8 event. Adjacent
+source identities must differ; later pointer reuse remains valid. This proves
+each restored marker belongs to a fresh publication. Clipboard payload logging
+remains disabled.
+
+The fixture records the input callback before calling the ownership API. Its
+confirmation callback is bound to that request, deduplicated, and cancelled at
+close. Collection compares cross-peer monotonic event times, including every
+local update, paste request/result, reverse conversion, and monitor closure.
+GTK confirmation and the reverse XFixes event are independent deliveries of
+the same compositor transition; both must follow the owned input and precede
+the raw reverse read. Their relative process scheduling is not authority.
+Do not replace these event and terminal-process boundaries with a settle delay.
 
 The fixture accepts only fixed, non-sensitive marker identifiers. Retained
 runtime evidence contains event sequence, advertised targets, owner XIDs and

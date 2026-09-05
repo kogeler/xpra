@@ -15,7 +15,7 @@ import gi
 
 gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gdk, GLib, Gtk
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402 - select GI versions before importing
 
 TITLE = "Xpra Wayland Keyboard Fixture"
 MAX_TEXT_BYTES = 4096
