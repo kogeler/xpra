@@ -1,12 +1,12 @@
 diff --git a/tests/unittests/unit/client/keyboard_helper_test.py b/tests/unittests/unit/client/keyboard_helper_test.py
-index d12582803dfa92cd60ed875a2971b25bb5c2608b..52e29b3b448c34e734fc2666d6231c325ca3c8ce 100755
+index d12582803dfa92cd60ed875a2971b25bb5c2608b..260c317c1d11e4368f0c997397ac397c9906592c 100755
 --- a/tests/unittests/unit/client/keyboard_helper_test.py
 +++ b/tests/unittests/unit/client/keyboard_helper_test.py
 @@ -5,9 +5,11 @@
  # later version. See the file COPYING for details.
  
  import unittest
-+from unittest.mock import patch
++from unittest.mock import Mock, patch
  
  from xpra.common import noop
 -from xpra.util.objects import AdHocStruct
@@ -15,7 +15,7 @@ index d12582803dfa92cd60ed875a2971b25bb5c2608b..52e29b3b448c34e734fc2666d6231c32
  from xpra.client.gui.keyboard_helper import KeyboardHelper
  from unit.process_test_util import DisplayContext
  
-@@ -37,9 +39,478 @@ class KeyboardHelperTest(unittest.TestCase):
+@@ -37,9 +39,515 @@ class KeyboardHelperTest(unittest.TestCase):
          kh.query_xkbmap()
          p = kh.get_keymap_properties()
          assert p, "no keymap properties returned"
@@ -491,6 +491,43 @@ index d12582803dfa92cd60ed875a2971b25bb5c2608b..52e29b3b448c34e734fc2666d6231c32
 +            "query",
 +            ("modifier-map", {"ISO_Level3_Shift": "mod5"}),
 +        ])
++
++    def test_gtk_cleanup_retires_pending_keymap_change(self):
++        from xpra.client.gtk3.keyboard_helper import GTKKeyboardHelper
++
++        keymap = Mock()
++        keymap.connect.return_value = 23
++        backend = Mock()
++        backend.get_keyboard_repeat.return_value = None
++        callbacks = []
++
++        def schedule(delay, callback):
++            self.assertEqual(delay, 500)
++            callbacks.append(callback)
++            return 17
++
++        with (
++                patch.object(KeyboardHelper, "make_keyboard", return_value=backend),
++                patch.object(GTKKeyboardHelper, "update", return_value=True) as update,
++                patch("xpra.client.gtk3.keyboard_helper.get_default_keymap", return_value=keymap),
++                patch("xpra.client.gtk3.keyboard_helper.GLib.timeout_add", side_effect=schedule),
++                patch("xpra.client.gtk3.keyboard_helper.GLib.source_remove") as remove,
++        ):
++            helper = GTKKeyboardHelper(noop)
++            helper.keymap_changed()
++            helper.keymap_changed()
++            self.assertEqual(len(callbacks), 1)
++            helper.cleanup()
++            update.reset_mock()
++            keymap.connect.reset_mock()
++
++            # A callback already dispatched by GLib must also be harmless.
++            callbacks[0]()
++            keymap.connect.assert_not_called()
++            update.assert_not_called()
++            remove.assert_called_once_with(17)
++            helper.cleanup()
++            remove.assert_called_once_with(17)
 +
      def test_parse_shortcuts(self):
          shortcuts = [
@@ -1165,10 +1202,10 @@ index 0000000000000000000000000000000000000000..c4874fee084f4d077323ee34422764ed
 +    main()
 diff --git a/tests/unittests/unit/wayland/keyboard_test.py b/tests/unittests/unit/wayland/keyboard_test.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..c2c3f8c77e137d82dd5070e51666d402a10d10e8
+index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef4257706279e9b829
 --- /dev/null
 +++ b/tests/unittests/unit/wayland/keyboard_test.py
-@@ -0,0 +1,2789 @@
+@@ -0,0 +1,2934 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 kogeler
@@ -1183,11 +1220,8 @@ index 0000000000000000000000000000000000000000..c2c3f8c77e137d82dd5070e51666d402
 +from xpra.net.common import BACKWARDS_COMPATIBLE, Packet
 +from xpra.util.objects import typedict
 +from xpra.wayland.server.keyboard_config import KeyboardConfig
-+from xpra.wayland.server.subsystem.keyboard import (
-+    MAX_TRACKED_KEYS,
-+    MAX_TRACKED_KEYS_PER_SOURCE,
-+    WaylandKeyboardManager,
-+)
++from xpra.wayland.server.subsystem import keyboard as keyboard_module
++from xpra.wayland.server.subsystem.keyboard import WaylandKeyboardManager
 +from xpra.wayland.server.subsystem.pointer import WaylandPointerManager
 +
 +Q = ord("q")
@@ -1360,6 +1394,18 @@ index 0000000000000000000000000000000000000000..c2c3f8c77e137d82dd5070e51666d402
 +    def get_keycode_capacity():
 +        return 32
 +
++    def get_keycode_for_keysym(self, keysym):
++        # The clean server's existing interface flattens the keymap and takes
++        # the first symbol match.  Keep this boundary callable for the clean
++        # control; its wrong group-one collision must fail an output assertion.
++        for layout in self.layouts:
++            if keycode := self.SYMBOLS.get(layout, {}).get(keysym):
++                return keycode
++        return -1
++
++    def get_keycode_for_keyname(self, name):
++        return self.KEYNAMES.get(name, -1)
++
 +    def set_repeat_rate(self, delay, interval):
 +        self.repeat_calls.append((delay, interval))
 +
@@ -1476,6 +1522,50 @@ index 0000000000000000000000000000000000000000..c2c3f8c77e137d82dd5070e51666d402
 +        server.sources.append(source)
 +    manager.add_new_client(source, typedict())
 +    return source
++
++
++class WaylandKeyboardWireBoundaryTest(unittest.TestCase):
++    """Existing public APIs provide behavioral controls on the clean source."""
++
++    def test_client_map_installs_after_acceptance_and_resolves_group_collision(self):
++        server = FakeServer()
++        server.compositor.keyboard_device.layouts = ("us",)
++        manager = WaylandKeyboardManager(server)
++        manager.setup()
++        source = FakeSource("owner", 1, None)
++        server.sources.append(source)
++        caps = typedict({
++            "keyboard": True,
++            "keymap": {"layout": "us,fr", "variant": ",", "layout_groups": True},
++        })
++
++        manager.parse_hello_ui_keyboard(source, caps)
++        self.assertEqual(manager.device.layouts, ("us",))
++        manager.add_new_client(source, caps)
++        self.assertEqual(manager.device.layouts, ("us", "fr"))
++        self.assertEqual(manager.get_keycode(source, 24, "a", True, [], A, "a", 1), (24, 1))
++
++    def test_readonly_keyboard_event_does_not_change_native_modifiers(self):
++        server = FakeServer()
++        server.compositor.keyboard_device.layouts = ("us",)
++        manager = WaylandKeyboardManager(server)
++        manager.setup()
++        source = FakeSource("readonly", 1, None, readonly=True)
++        server.sources.append(source)
++        proto = object()
++        server.protocol_sources[proto] = source
++        caps = typedict({"keyboard": True, "keymap": {"layout": "us"}})
++        manager.parse_hello_ui_keyboard(source, caps)
++        manager.add_new_client(source, caps)
++        before = manager.device.modifiers
++
++        manager.do_process_keyboard_event(proto, 0, "Shift_L", True, {
++            "modifiers": ("shift",), "keyval": SHIFT_L, "string": "",
++            "keycode": 50, "group": 0,
++        })
++
++        self.assertEqual(manager.device.modifiers, before)
++        self.assertFalse(manager.device.keys_down)
 +
 +
 +class WaylandKeyboardTranslationTest(unittest.TestCase):
@@ -1604,6 +1694,62 @@ index 0000000000000000000000000000000000000000..c2c3f8c77e137d82dd5070e51666d402
 +        self.assertEqual(source.keyboard_config.current_modifiers, ("mod5",))
 +        self.assertEqual(manager.device.modifiers, ("mod5",))
 +
++    def test_repeat_retains_inferred_level_without_pinning_packet_modifiers(self):
++        for layouts, keystr, inferred in (
++                (("fr", "us"), "Q", "shift"),
++                (("us", "de"), "@", "mod5")):
++            with self.subTest(layouts=layouts, keystr=keystr):
++                manager, server = manager_fixture()
++                source = FakeSource("owner", 1, config(manager, layouts))
++                accept(manager, server, source)
++                proto = WaylandKeyboardPacketTest.bind(manager, server, source)
++                event = {
++                    "modifiers": ("control",), "keyval": Q, "string": keystr,
++                    "keycode": 24, "group": 1,
++                }
++                manager.do_process_keyboard_event(proto, 0, "q", True, event)
++                self.assertEqual(manager.device.keys_down, {24})
++                self.assertEqual(manager.device.group, 1)
++                self.assertEqual(set(manager.device.modifiers), {inferred, "control"})
++                resolve_count = len(manager.device.resolve_calls)
++                for modifiers in ((), ("mod1",), ()):
++                    # Repeat keeps the physical key and inferred level, while
++                    # newly released/pressed real modifiers still take effect.
++                    event["modifiers"] = modifiers
++                    manager.do_process_keyboard_event(proto, 0, "q", True, event)
++                    self.assertEqual(set(manager.device.modifiers), {inferred, *modifiers})
++                    self.assertEqual(set(source.keyboard_config.current_modifiers), {inferred, *modifiers})
++                    self.assertEqual(source.keyboard_config.pressed_translation, {24: (24, 1)})
++                self.assertEqual(len(manager.device.resolve_calls), resolve_count)
++                self.assertEqual(manager.device.press_calls, [(24, True)])
++                self.assertEqual(set(manager._key_repeat_timers), {(source, 24)})
++
++                manager.do_process_keyboard_event(proto, 0, "q", False, event)
++                self.assertEqual(manager.device.modifiers, ())
++                self.assertFalse(manager.device.keys_down)
++                self.assertFalse(manager._key_repeat_timers)
++                self.assertFalse(source.keyboard_config.pressed_modifier_overrides)
++
++    def test_rejected_inference_does_not_poison_reused_key_identity(self):
++        manager, server = manager_fixture()
++        source = FakeSource("owner", 1, config(manager, ("us",)))
++        accept(manager, server, source)
++        proto = WaylandKeyboardPacketTest.bind(manager, server, source)
++        manager.device.get_keycode_capacity = lambda: 1
++        a_event = {"modifiers": (), "keyval": A, "string": "a", "keycode": 38, "group": 0}
++        q_event = {"modifiers": (), "keyval": Q, "string": "Q", "keycode": 24, "group": 0}
++        manager.do_process_keyboard_event(proto, 0, "a", True, a_event)
++        manager.do_process_keyboard_event(proto, 0, "q", True, q_event)
++        self.assertEqual(manager.device.keys_down, {38})
++
++        manager.do_process_keyboard_event(proto, 0, "a", False, a_event)
++        q_event["string"] = "q"
++        for _ in range(2):
++            manager.do_process_keyboard_event(proto, 0, "q", True, q_event)
++            self.assertEqual(manager.device.modifiers, ())
++            self.assertEqual(manager.device.keys_down, {24})
++        manager.do_process_keyboard_event(proto, 0, "q", False, q_event)
++
 +
 +class CompiledXKBKeymapTest(unittest.TestCase):
 +
@@ -1652,6 +1798,8 @@ index 0000000000000000000000000000000000000000..c2c3f8c77e137d82dd5070e51666d402
 +        self.assertGreater(us.resolve_keycode("KP_1", 0, ("mod2",)), 0)
 +        self.assertGreater(us.resolve_keycode("dead_acute", 0), 0)
 +        self.assertEqual(de.resolve_keycode("at", 0, ("mod5",)), 24)
++        self.assertEqual(de.resolve_keycode("at", 0, ("control", "mod5")), 24)
++        self.assertNotEqual(de.resolve_keycode("at", 0, ("shift", "mod5")), 24)
 +
 +    def test_event_unicode_candidate_priority_precedes_level_trials(self):
 +        for layout, keystr, inferred_modifier in (
@@ -1667,6 +1815,34 @@ index 0000000000000000000000000000000000000000..c2c3f8c77e137d82dd5070e51666d402
 +                    (24, 1),
 +                )
 +                self.assertEqual(modifiers, [inferred_modifier])
++
++    def test_repeat_keeps_inferred_level_under_real_xkb_state(self):
++        for layouts, keystr, keysym, sync in (
++                (("fr", "us"), "Q", "Q", True),
++                (("us", "de"), "@", "at", True),
++                (("fr", "us"), "Q", "Q", False),
++                (("us", "de"), "@", "at", False)):
++            with self.subTest(layouts=layouts, keystr=keystr, sync=sync):
++                candidate = self.compile(",".join(layouts), ",")
++                self.addCleanup(candidate.cleanup)
++                manager, server = manager_fixture()
++                source = FakeSource("owner", 1, config(manager, layouts))
++                source.keyboard_config.sync = sync
++                accept(manager, server, source)
++                manager.device.resolve_keycode = candidate.resolve_event_keycode
++                proto = WaylandKeyboardPacketTest.bind(manager, server, source)
++                event = {
++                    "modifiers": (), "keyval": Q, "string": keystr,
++                    "keycode": 24, "group": 1,
++                }
++                for _ in range(3):
++                    manager.do_process_keyboard_event(proto, 0, "q", True, event)
++                    self.assertEqual(candidate.resolve_keycode(
++                        keysym, manager.device.group, manager.device.modifiers,
++                    ), 24)
++                manager.do_process_keyboard_event(proto, 0, "q", False, event)
++                self.assertFalse(manager.device.keys_down)
++                self.assertEqual(manager.device.modifiers, ())
 +
 +    def test_event_keyname_precedes_printable_keypad_string(self):
 +        from xpra.wayland.server.keyboard import WaylandKeyboard
@@ -2010,6 +2186,7 @@ index 0000000000000000000000000000000000000000..c2c3f8c77e137d82dd5070e51666d402
 +        })
 +
 +    def test_wire_key_tracking_is_bounded_and_capacity_is_reusable(self):
++        MAX_TRACKED_KEYS_PER_SOURCE = keyboard_module.MAX_TRACKED_KEYS_PER_SOURCE
 +        manager, server = manager_fixture()
 +        source = FakeSource("owner", 1, config(manager, ("us",)))
 +        accept(manager, server, source)
@@ -2039,6 +2216,8 @@ index 0000000000000000000000000000000000000000..c2c3f8c77e137d82dd5070e51666d402
 +        self.assertFalse(manager._tracked_key_tokens())
 +
 +    def test_wire_key_tracking_has_a_shared_multi_source_bound(self):
++        MAX_TRACKED_KEYS = keyboard_module.MAX_TRACKED_KEYS
++        MAX_TRACKED_KEYS_PER_SOURCE = keyboard_module.MAX_TRACKED_KEYS_PER_SOURCE
 +        manager, server = manager_fixture()
 +        source_count = MAX_TRACKED_KEYS // MAX_TRACKED_KEYS_PER_SOURCE
 +        sources = [
@@ -2531,9 +2710,12 @@ index 0000000000000000000000000000000000000000..c2c3f8c77e137d82dd5070e51666d402
 +        accept(manager, server, holder)
 +
 +        holder_proto = WaylandKeyboardPacketTest.bind(manager, server, holder)
-+        manager.do_process_keyboard_event(holder_proto, 0, "Shift_L", True, {
-+            "modifiers": (), "keyval": SHIFT_L, "string": "",
-+            "keycode": 50, "group": 0,
++        # Control does not change AD01's XKB level.  Shift+Level3 would
++        # produce Greek_OMEGA on the real German map, making '@' impossible
++        # while the resolver correctly preserves the held Shift key.
++        manager.do_process_keyboard_event(holder_proto, 0, "Control_L", True, {
++            "modifiers": (), "keyval": CONTROL_L, "string": "",
++            "keycode": 37, "group": 0,
 +        })
 +        other_proto = WaylandKeyboardPacketTest.bind(manager, server, other)
 +        manager.do_process_keyboard_event(other_proto, 0, "at", True, {
@@ -2541,7 +2723,7 @@ index 0000000000000000000000000000000000000000..c2c3f8c77e137d82dd5070e51666d402
 +            "keycode": 24, "group": 0,
 +        })
 +        self.assertEqual(manager.device.group, 1)
-+        self.assertEqual(manager.device.modifiers, ("shift", "mod5"))
++        self.assertEqual(manager.device.modifiers, ("control", "mod5"))
 +        self.assertIs(manager._keyboard_state_source, other)
 +
 +        server.sources = [owner, other]
@@ -4073,10 +4255,51 @@ index e047159aaf7649f342161a02c27840115be82ebd..bf08eb933893b433a7174bca8a63f059
      unittest.main()
  
 diff --git a/xpra/client/gtk3/keyboard_helper.py b/xpra/client/gtk3/keyboard_helper.py
-index 7d8fe13370113f6a9080d9291fa0e59aa2c9a5b2..cbab2347beafa81c95d10cf3c24c42c1693ae8ed 100644
+index 7d8fe13370113f6a9080d9291fa0e59aa2c9a5b2..c01a59c7bc1e0f50a8631c951fe55f187ffa042e 100644
 --- a/xpra/client/gtk3/keyboard_helper.py
 +++ b/xpra/client/gtk3/keyboard_helper.py
-@@ -78,6 +78,11 @@ class GTKKeyboardHelper(KeyboardHelper):
+@@ -26,6 +26,8 @@ class GTKKeyboardHelper(KeyboardHelper):
+         # used for delaying the sending of keymap changes
+         # (as we may be getting dozens of such events at a time)
+         self._keymap_changing = False
++        self._keymap_change_timer = 0
++        self._keymap_closed = False
+         self._keymap_change_handler_id = 0
+         self._keymap = get_default_keymap()
+         self.update()
+@@ -52,9 +54,11 @@ class GTKKeyboardHelper(KeyboardHelper):
+ 
+     def keymap_changed(self, *args) -> None:
+         log("keymap_changed%s", args)
++        if self._keymap_closed:
++            return
+         if self._keymap_change_handler_id:
+             self._keymap.disconnect(self._keymap_change_handler_id)
+-            self._keymap_change_handler_id = None
++            self._keymap_change_handler_id = 0
+         self._keymap = get_default_keymap()
+         if self._keymap_changing:
+             # timer is already due
+@@ -62,8 +66,12 @@ class GTKKeyboardHelper(KeyboardHelper):
+         self._keymap_changing = True
+ 
+         def do_keys_changed() -> None:
++            if self._keymap_closed:
++                return
++            self._keymap_change_timer = 0
+             # re-register the change handler:
+-            self._keymap_change_handler_id = self._keymap.connect("keys-changed", self.keymap_changed)
++            if self._keymap:
++                self._keymap_change_handler_id = self._keymap.connect("keys-changed", self.keymap_changed)
+             self._keymap_changing = False
+             if self.locked:
+                 # automatic changes not allowed!
+@@ -74,10 +82,15 @@ class GTKKeyboardHelper(KeyboardHelper):
+                 log.info(" sending updated mappings to the server")
+                 self.send_config()
+ 
+-        GLib.timeout_add(500, do_keys_changed)
++        self._keymap_change_timer = GLib.timeout_add(500, do_keys_changed)
  
      def update(self) -> bool:
          old_hash = self.hash
@@ -4088,6 +4311,36 @@ index 7d8fe13370113f6a9080d9291fa0e59aa2c9a5b2..cbab2347beafa81c95d10cf3c24c42c1
          super().update()
          if is_X11():
              with log.trap_error("Error querying modifier map"):
+@@ -89,13 +102,26 @@ class GTKKeyboardHelper(KeyboardHelper):
+         return get_gtk_keymap()
+ 
+     def cleanup(self) -> None:
+-        super().cleanup()
++        # Retire callback ownership before resetting negotiated state.  A
++        # dispatched callback may still run after source_remove and must never
++        # query the backend or reconnect the keymap's signal after teardown.
++        self._keymap_closed = True
++        self._keymap_changing = False
++        if timer := self._keymap_change_timer:
++            self._keymap_change_timer = 0
++            try:
++                GLib.source_remove(timer)
++            except Exception as e:
++                log.warn("failed to remove keymap change timer: %s", e)
+         if self._keymap_change_handler_id:
++            handler_id = self._keymap_change_handler_id
++            self._keymap_change_handler_id = 0
+             try:
+-                self._keymap.disconnect(self._keymap_change_handler_id)
+-                self._keymap_change_handler_id = 0
++                self._keymap.disconnect(handler_id)
+             except Exception as e:
+                 log.warn("failed to disconnect keymap change handler: %s", e)
++        self._keymap = None
++        super().cleanup()
+ 
+ 
+ def main() -> None:
 diff --git a/xpra/client/gui/keyboard_helper.py b/xpra/client/gui/keyboard_helper.py
 index 7558a42e4f1cdfe19dccb2e75f78e7f200b96971..574cd22e2ed1f40964c043d71f793c8b68bae0d9 100644
 --- a/xpra/client/gui/keyboard_helper.py
@@ -5401,10 +5654,10 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
  
          wlr_seat_keyboard_notify_enter(self.seat, surface,
 diff --git a/xpra/wayland/server/keyboard_config.py b/xpra/wayland/server/keyboard_config.py
-index cd5d749551734acb6c95d3fce7613b8a6e1e34a2..02c508ec461569b71bec92841b9fc44cdebdfb3d 100644
+index cd5d749551734acb6c95d3fce7613b8a6e1e34a2..63497f1843162a4bdb19234f5a1e46ae8996596a 100644
 --- a/xpra/wayland/server/keyboard_config.py
 +++ b/xpra/wayland/server/keyboard_config.py
-@@ -3,12 +3,731 @@
+@@ -3,12 +3,750 @@
  # Xpra is released under the terms of the GNU GPL v2, or, at your option, any
  # later version. See the file COPYING for details.
  
@@ -5897,6 +6150,7 @@ index cd5d749551734acb6c95d3fce7613b8a6e1e34a2..02c508ec461569b71bec92841b9fc44c
 +        self.rejected_hash = ""
 +        self.valid = props is None
 +        self.modifier_meanings: dict[str, str] = {}
++        self.pressed_modifier_overrides: dict[Any, tuple[tuple[str, ...], tuple[str, ...]]] = {}
 +        self.settled_translation: set[Any] = set()
 +        self.representation = "legacy"
 +        self.repeat_delay = 500
@@ -6090,9 +6344,18 @@ index cd5d749551734acb6c95d3fce7613b8a6e1e34a2..02c508ec461569b71bec92841b9fc44c
 +            return -1, 0
 +        if identity in self.pressed_translation:
 +            translation = self.pressed_translation[identity]
-+            if not pressed:
-+                del self.pressed_translation[identity]
++            if pressed:
++                # The pinned physical key still needs the level inferred on
++                # press.  Repeats from lightweight clients can omit Shift or
++                # Level3 just like the original event.  Preserve only the
++                # inference delta, allowing real packet modifiers to change.
++                added, removed = self.pressed_modifier_overrides.get(identity, ((), ()))
++                modifiers[:] = [modifier for modifier in modifiers if modifier not in removed]
++                modifiers.extend(modifier for modifier in added if modifier not in modifiers)
++            else:
++                self.discard_pressed_translation(identity)
 +            return translation
++        original_modifiers = tuple(modifiers)
 +        keycode, server_group = self.do_get_keycode(
 +            client_keycode, keyname, pressed, modifiers, keyval, keystr, group,
 +        )
@@ -6102,6 +6365,10 @@ index cd5d749551734acb6c95d3fce7613b8a6e1e34a2..02c508ec461569b71bec92841b9fc44c
 +            )
 +        if pressed and keycode > 0:
 +            self.pressed_translation[identity] = keycode, server_group
++            added = tuple(modifier for modifier in modifiers if modifier not in original_modifiers)
++            removed = tuple(modifier for modifier in original_modifiers if modifier not in modifiers)
++            if added or removed:
++                self.pressed_modifier_overrides[identity] = added, removed
 +        return keycode, server_group
 +
 +    @staticmethod
@@ -6115,13 +6382,18 @@ index cd5d749551734acb6c95d3fce7613b8a6e1e34a2..02c508ec461569b71bec92841b9fc44c
 +    def discard_key_release(self, client_keycode: int, keyname: str, keyval: int) -> None:
 +        """Consume a release suppressed by readonly/recording policy."""
 +        identity = self.key_identity(client_keycode, keyname, keyval)
-+        self.pressed_translation.pop(identity, None)
++        self.discard_pressed_translation(identity)
 +        self.settled_translation.discard(identity)
++
++    def discard_pressed_translation(self, identity) -> None:
++        self.pressed_translation.pop(identity, None)
++        self.pressed_modifier_overrides.pop(identity, None)
 +
 +    def settle_pressed_translations(self) -> None:
 +        """Ignore repeats and the eventual releases for keys settled by a map change."""
 +        self.settled_translation.update(self.pressed_translation)
 +        self.pressed_translation.clear()
++        self.pressed_modifier_overrides.clear()
 +
 +    def do_get_keycode(self, _client_keycode: int, keyname: str, _pressed: bool,
 +                       modifiers: list[str], keyval: int, keystr: str, group: int) -> tuple[int, int]:
@@ -6140,7 +6412,7 @@ index cd5d749551734acb6c95d3fce7613b8a6e1e34a2..02c508ec461569b71bec92841b9fc44c
 +    def compute_modifier_keynames(self) -> None:
 +        return None
 diff --git a/xpra/wayland/server/subsystem/keyboard.py b/xpra/wayland/server/subsystem/keyboard.py
-index e5cbcbeff24992b599c174df96291484ab9a198b..8d036a3f57c0fc75f51ebfb14c0ae49c0d372a22 100644
+index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966ec9ae718c 100644
 --- a/xpra/wayland/server/subsystem/keyboard.py
 +++ b/xpra/wayland/server/subsystem/keyboard.py
 @@ -4,46 +4,1054 @@
@@ -7129,7 +7401,7 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..8d036a3f57c0fc75f51ebfb14c0ae49c
 +                # disappear from a subsequent focus-enter state.  A second wire
 +                # identity for an already-held server keycode remains valid.
 +                if config:
-+                    config.pressed_translation.pop(key_identity, None)
++                    config.discard_pressed_translation(key_identity)
 +                log("ignoring key press beyond the wlroots held-keycode capacity")
 +                return None
 +        holders = self._key_holders.setdefault(keycode, set())

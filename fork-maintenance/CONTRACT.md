@@ -1121,6 +1121,40 @@ exactly the original two same-XID transitions for `to-server` and `off`.
 A fixed sleep, an unconfirmed owner call, or a monitor stopped before reverse
 is not valid policy evidence.
 
+The clipboard monitor also covers the controlled Xpra client shutdown and
+drains its queued X11 events after that client has exited. Any permitted
+shutdown-only zero-owner notification is separate from the exact production
+takeovers; a late nonzero takeover must never be dismissed as cleanup. Forward
+and reverse source transitions are bound to retained compositor log intervals,
+and cross-stream ordering is recomputed from the raw fixture records during
+collection. Independent streams with individually ordered timestamps do not
+establish that their events happened in the required causal order.
+
+Native clipboard transfer ownership extends through completion of the actual
+pipe I/O. Nonblocking output must preserve short writes and remain cancellable
+under source replacement, policy revocation, reset, timeout and cleanup. Native reads have a
+deadline and enforce the existing origin/packet bounds without changing
+explicit send-truncation policy. Setup failure and post-cleanup calls must not
+leave a pipe or GLib source alive. Selection adapters borrow their caller's FD
+and transfer only a duplicate to the wlroots source which owns its closure.
+Native callback handoff must not close an already transferred descriptor again
+on an exception; queued output owns a stable byte-oriented buffer. Real-pipe
+regressions cover backpressure, final bytes before EOF, descriptor reuse,
+retirement and both ordinary and primary selections.
+
+Server clipboard admission belongs to the current peer, not only the peer
+which queued a GLib callback. Deferred work revalidates its connection, helper,
+generation, enablement and readonly policy when dispatched. Replacement drains
+the previous peer before publishing another, and a non-owner's status packet
+cannot change the owner's policy. Revocation also retires already started
+requests and native I/O: rejecting only queued packets is insufficient after
+disable/re-enable. Runtime direction controls preserve startup's server-relative
+send/receive meaning and do not discard the still-allowed direction or its
+current source on permission expansion. A no-op owner or policy notification
+does not revoke otherwise valid work. Status and data use one ordered UI
+admission path: native teardown cannot run on the network thread, and an enable
+notification cannot invalidate fresh packets already queued behind it.
+
 Clipboard fixture source contains only fixed public non-sensitive markers.
 Runtime evidence names marker IDs and records bounded event order, targets,
 owner XIDs, timestamps, lengths, SHA-256 digests, policy outcomes, and equality
@@ -1566,6 +1600,13 @@ transactions are also blockers until their explicit recovery target succeeds.
 Retained valid lock files are not cleanup targets. Plan and execution take the
 retained upstream-test lifecycle, upstream image-cache, live lifecycle, DEB
 terminal, workspace lifecycle, and case-update locks in that fixed order.
+The live result schema permits a patched client only for the existing
+clipboard and subsurface case-only selections, with exactly the same case,
+selection/resolution digests and build-context/archive digests at both ends.
+All other live profiles retain the clean-client boundary. Cycle cleanup
+validates those endpoint bindings as well as the current status and removal
+transaction; it must not reject valid case-only results by assuming every
+client is `master`, or admit arbitrary patched-client selections.
 Before its first deletion,
 execution publishes `cycle-cleanups/<CYCLE>.remove.json`, binding the exact plan
 and confirmation digest plus each directory target's device, inode, and

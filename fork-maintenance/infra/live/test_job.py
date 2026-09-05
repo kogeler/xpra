@@ -18,6 +18,7 @@ from collections.abc import Callable
 from contextlib import contextmanager, redirect_stdout
 from io import BytesIO, StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
 
 LIVE_DIRECTORY = Path(__file__).resolve().parent
@@ -127,6 +128,7 @@ def clipboard_interaction(policy: str) -> dict[str, object]:
         },
         "owner": {"records": []},
         "policy": policy,
+        "transitions": {},
         "wayland": {"records": []},
         "xfixes": {"records": []},
     }
@@ -550,18 +552,24 @@ class LiveJobTest(unittest.TestCase):
                 ),
                 clipboard_event(
                     8,
+                    "owner-input",
+                    command_id=4,
+                    keyval=65477,
+                ),
+                clipboard_event(
+                    9,
                     "owner-set",
                     command_id=4,
                     **summary("three"),
                 ),
                 clipboard_event(
-                    9,
+                    10,
                     "owner-confirmed",
                     command_id=4,
                     **summary("three"),
                 ),
-                clipboard_event(10, "escape-received"),
-                clipboard_event(11, "closed", pid=fixture_pid),
+                clipboard_event(11, "escape-received"),
+                clipboard_event(12, "closed", pid=fixture_pid),
             )
         )
         reverse_marker = "three" if policy == "both" else "one"
@@ -569,6 +577,7 @@ class LiveJobTest(unittest.TestCase):
         notification_pairs = [(601, owner_xid), (701, owner_xid)]
         if policy == "both":
             notification_pairs.append((801, reverse_owner_xid))
+            notification_pairs.append((801, 0))
         notification_values = [
             {
                 "owner_xid": notification_owner,
@@ -585,6 +594,7 @@ class LiveJobTest(unittest.TestCase):
             clipboard_event(
                 0,
                 "monitor-ready",
+                pid=monitor_pid,
                 event_base=87,
                 owner_before_xid=owner_xid,
                 root_xid=root_xid,
@@ -601,14 +611,24 @@ class LiveJobTest(unittest.TestCase):
             clipboard_event(
                 len(notification_values) + 1,
                 "monitor-result",
+                pid=monitor_pid,
                 event_count=len(notification_values),
                 events=notification_values,
                 overflow=False,
-                owner_after_xid=reverse_owner_xid,
+                owner_after_xid=0 if policy == "both" else owner_xid,
                 stop_requested=True,
+                stop_requested_ns=1_046_000_000,
+                drained_ns=1_046_500_000,
                 subscribed_window_xids=[root_xid],
             ),
         ]
+        owner_times = (1, 12, 22, 50, 51)
+        wayland_times = (3, 6, 7, 16, 17, 26, 27, 30, 31, 32, 33, 40, 41)
+        monitor_times = (10, 13, 23, 34, 42, 47) if policy == "both" else (10, 13, 23, 47)
+        for records, times in ((owner_records, owner_times), (wayland_records, wayland_times),
+                               (xfixes_records, monitor_times)):
+            for record, value in zip(records, times, strict=True):
+                record["monotonic_ns"] = 1_000_000_000 + value * 1_000_000
         stdout_records = {
             "clipboard-consumer-initial.stdout": [
                 clipboard_conversion("one", owner_xid)
@@ -626,6 +646,32 @@ class LiveJobTest(unittest.TestCase):
             "clipboard-monitor.stdout": xfixes_records,
             "clipboard-owner.stdout": owner_records,
         }
+        for name, value in (("initial", 2), ("updated", 15), ("repeat", 25), ("reverse", 35)):
+            stdout_records[f"clipboard-consumer-{name}.stdout"][0]["monotonic_ns"] = (
+                1_000_000_000 + value * 1_000_000
+            )
+        phase_records = []
+        log_parts = []
+        end = 0
+        for index, (name, value) in enumerate(zip(("initial", "updated", "repeat", "reverse"),
+                                                 (5, 14, 24, 36), strict=True)):
+            text = f"phase {name}\n"
+            if name == "reverse":
+                text += "keyboard event: wid=1, keyname='F8', True, typedict({})\n"
+            if forward or name == "reverse":
+                text += f"emit('selection', {100 + index}) callbacks=()\n"
+            payload = text.encode("utf-8")
+            phase_records.append({"name": name, "log_range": [end, end + len(payload)],
+                                  "observed_ns": 1_000_000_000 + value * 1_000_000})
+            end += len(payload)
+            log_parts.append(payload)
+        (root / "server.stderr").write_bytes(b"".join(log_parts))
+        (root / "server.stderr").chmod(0o600)
+        (root / "client.exit").write_text("0\n", encoding="ascii")
+        (root / "client.exit").chmod(0o600)
+        live_run.replace_private_json(root / live_run.CLIPBOARD_TRANSITIONS_ARTIFACT, {
+            "schema": 1, "phases": phase_records, "client_exit_observed_ns": 1_044_000_000,
+        })
         for name, records in stdout_records.items():
             path = root / name
             path.write_text(clipboard_jsonl(records), encoding="utf-8")
@@ -2470,7 +2516,7 @@ class LiveJobTest(unittest.TestCase):
                 record = self.record(run)
                 if kind == "main":
                     path = job.record_path(run)
-                    loader = lambda run=run: job.load_record(
+                    loader = lambda run=run: job.load_record(  # noqa: E731 - captures this subtest's run
                         run, require_current=False
                     )
                 else:
@@ -2493,7 +2539,7 @@ class LiveJobTest(unittest.TestCase):
                     record.pop("result_report")
                     record["schema"] = 2
                     path = job.freeze_record_path(run)
-                    loader = lambda run=run: job.load_freeze_record(run)
+                    loader = lambda run=run: job.load_freeze_record(run)  # noqa: E731 - captures this subtest's run
                 record["process"]["runtime_log"] = str(self.root / "outside.log")
                 self.write_private_json(path, record)
                 with self.assertRaisesRegex(job.JobError, "runtime log is outside"):
@@ -2953,6 +2999,67 @@ class LiveJobTest(unittest.TestCase):
                     live_run.clipboard_artifact_evidence_matches(interaction, root)
                 )
 
+    def test_clipboard_source_and_cross_peer_authorities_reject_mutations(self) -> None:
+        def source_change(root: Path, old: str, new: str) -> None:
+            path = root / "server.stderr"
+            path.write_text(path.read_text().replace(old, new), encoding="utf-8")
+
+        def event_change(root: Path, name: str, index: int, key: str, value: object) -> None:
+            path = root / name
+            records = live_run.read_clipboard_records(path)
+            records[index][key] = value
+            path.write_text(clipboard_jsonl(records), encoding="utf-8")
+
+        mutations = {
+            "null-native-source": lambda root: source_change(root, "selection', 103", "selection', 000"),
+            "stale-restored-source": lambda root: source_change(root, "selection', 102", "selection', 101"),
+            "missing-forward-source": lambda root: source_change(root, "emit('selection', 101)", "xmit('selection', 101)"),
+            "unobserved-forward-source": lambda root: source_change(root, "emit('selection', 101)", "emit('selection', xxx)"),
+            "reverse-before-native-confirmation": lambda root: event_change(
+                root, "clipboard-consumer-reverse.stdout", 0, "monotonic_ns", 1_029_000_000),
+            "monitor-stopped-before-fixture-closed": lambda root: event_change(
+                root, "clipboard-monitor.stdout", -1, "stop_requested_ns", 1_039_000_000),
+            "synthetic-xfixes-event": lambda root: event_change(
+                root, "clipboard-monitor.stdout", 1, "send_event", True),
+            "foreign-xfixes-window": lambda root: event_change(
+                root, "clipboard-monitor.stdout", 1, "window_xid", 999),
+            "foreign-monitor-pid": lambda root: (root / "clipboard-monitor.pid").write_text("999\n"),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(mutation=name):
+                root = self.root / name
+                self.make_clipboard_fixture_artifacts(root, "both")
+                mutate(root)
+                try:
+                    changed = live_run._clipboard_evidence_from_artifacts(root, "both")
+                except live_run.LabFailure:
+                    continue
+                self.assertFalse(all(changed["checks"].values()), changed["checks"])
+                self.assertFalse(live_run.clipboard_artifact_evidence_matches(changed, root))
+
+    def test_clipboard_monitor_rejects_takeover_after_reverse_conversion(self) -> None:
+        for policy in live_run.CLIPBOARD_POLICIES:
+            with self.subTest(policy=policy):
+                root = self.root / f"late-{policy}"
+                self.make_clipboard_fixture_artifacts(root, policy)
+                path = root / "clipboard-monitor.stdout"
+                records = live_run.read_clipboard_records(path)
+                late = {**records[1], "monotonic_ns": 1_038_000_000, "owner_xid": 999,
+                        "selection_timestamp": 850, "timestamp": 850}
+                records.insert(4 if policy == "both" else 3, late)
+                for index, record in enumerate(records):
+                    record["sequence"] = index
+                records[-1]["event_count"] += 1
+                records[-1]["events"] = [
+                    {key: value for key, value in record.items()
+                     if key not in {"event", "monotonic_ns", "schema", "sequence"}}
+                    for record in records[1:-1]
+                ]
+                path.write_text(clipboard_jsonl(records), encoding="utf-8")
+                changed = live_run._clipboard_evidence_from_artifacts(root, policy)
+                self.assertFalse(changed["checks"]["reverse_policy"])
+                self.assertFalse(live_run.clipboard_artifact_evidence_matches(changed, root))
+
     def test_clipboard_artifact_helpers_bind_pids_and_exact_artifact_set(
         self,
     ) -> None:
@@ -3052,7 +3159,7 @@ class LiveJobTest(unittest.TestCase):
                 root = self.root / f"clipboard-confirmation-{policy}"
                 interaction = self.make_clipboard_fixture_artifacts(root, policy)
                 changed = copy.deepcopy(interaction)
-                changed["wayland"]["records"][9]["event"] = "owner-unconfirmed"
+                changed["wayland"]["records"][10]["event"] = "owner-unconfirmed"
                 checks = live_run.clipboard_interaction_checks(changed, root)
                 self.assertFalse(checks["reverse_policy"])
                 self.assertFalse(checks["event_sequence_exact"])
@@ -7914,10 +8021,157 @@ class LiveTransportProfileTest(unittest.TestCase):
         self.assertNotIn("entry.grab_focus()", source)
         self.assertIn("event.keyval == Gdk.KEY_F8", source)
         self.assertIn('clipboard.connect("owner-change", clipboard_owner_changed)', source)
-        self.assertIn("GLib.idle_add(publish_owner_confirmation)", source)
+        self.assertIn("publish_owner_confirmation, state[\"confirming_owner\"]", source)
         self.assertIn('"owner-armed"', source)
         self.assertIn('"owner-set"', source)
         self.assertIn('"owner-confirmed"', source)
+
+    def test_clipboard_fixture_confirmation_owns_one_pending_callback(self) -> None:
+        """Execute the fixture callbacks: arming alone cannot confirm ownership."""
+        gdk = Mock(SELECTION_CLIPBOARD=1, KEY_F8=65477, KEY_Escape=65307)
+        gdk.Display.get_default.return_value.get_name.return_value = "wayland-0"
+        gtk = Mock(STYLE_PROVIDER_PRIORITY_APPLICATION=1)
+        glib = Mock(SOURCE_REMOVE=False, SOURCE_CONTINUE=True)
+        window_signals: dict[str, Callable] = {}
+        clipboard_signals: dict[str, Callable] = {}
+        gtk.Window.return_value.connect.side_effect = window_signals.__setitem__
+        clipboard = gtk.Clipboard.get.return_value
+        clipboard.connect.side_effect = clipboard_signals.__setitem__
+        pending: list[tuple[Callable, tuple]] = []
+
+        def idle(callback: Callable, *args: object) -> int:
+            pending.append((callback, args))
+            return len(pending)
+
+        glib.idle_add.side_effect = idle
+        fake_modules = {
+            "gi": Mock(),
+            "gi.repository": SimpleNamespace(Gdk=gdk, GLib=glib, Gtk=gtk),
+        }
+        specification = importlib.util.spec_from_file_location(
+            "clipboard_fixture_callbacks", LIVE_DIRECTORY / "wayland_clipboard_fixture.py"
+        )
+        assert specification is not None and specification.loader is not None
+        fixture = importlib.util.module_from_spec(specification)
+        with patch.dict(sys.modules, fake_modules):
+            specification.loader.exec_module(fixture)
+
+        def exercise() -> None:
+            poll = glib.timeout_add.call_args.args[1]
+            changed = clipboard_signals["owner-change"]
+            pressed = window_signals["key-press-event"]
+            changed(clipboard, SimpleNamespace(selection=1))
+            self.assertEqual(len(pending), 1)  # readiness only
+            poll()
+            clipboard.set_text.assert_not_called()
+            self.assertFalse(pressed(None, SimpleNamespace(keyval=1)))
+
+            def backend_notification(*_args: object) -> None:
+                changed(clipboard, SimpleNamespace(selection=2))
+                self.assertEqual(len(pending), 1)
+                changed(clipboard, SimpleNamespace(selection=1))
+                changed(clipboard, SimpleNamespace(selection=1))
+
+            clipboard.set_text.side_effect = backend_notification
+            self.assertTrue(pressed(None, SimpleNamespace(keyval=65477)))
+            self.assertEqual(len(pending), 2)
+            callback, args = pending[-1]
+            callback(*args)
+            changed(clipboard, SimpleNamespace(selection=1))
+            self.assertEqual(len(pending), 2)
+            clipboard.set_text.side_effect = lambda *_args: changed(
+                clipboard, SimpleNamespace(selection=1)
+            )
+            poll()
+            pressed(None, SimpleNamespace(keyval=65477))
+            callback, args = pending[-1]
+            window_signals["delete-event"](None, None)
+            glib.source_remove.assert_called_once_with(3)
+            callback(*args)  # already queued callback must be harmless after close
+            changed(clipboard, SimpleNamespace(selection=1))
+
+        gtk.main.side_effect = exercise
+        output = StringIO()
+        with (
+            patch.object(fixture, "take_command", side_effect=[("own", "three")] * 2),
+            patch.object(fixture.signal, "signal"),
+            redirect_stdout(output),
+            tempfile.TemporaryDirectory() as temporary,
+        ):
+            self.assertEqual(fixture.run(Path(temporary) / "command"), 0)
+        records = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(
+            [record["event"] for record in records],
+            ["owner-armed", "owner-input", "owner-set", "owner-confirmed",
+             "owner-armed", "owner-input", "owner-set", "closed"],
+        )
+
+    def test_clipboard_monitor_drains_late_events_after_stop(self) -> None:
+        specification = importlib.util.spec_from_file_location(
+            "clipboard_monitor_callbacks", LIVE_DIRECTORY / "x11_clipboard_fixture.py"
+        )
+        assert specification is not None and specification.loader is not None
+        fixture = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(fixture)
+        clock_ns = 1_000_000_000
+        queue: list[int] = []
+        sync_sent = False
+        stop_requested = False
+        x11 = Mock(root=501, display=1)
+        x11.atom.return_value = 51
+        x11.owner.return_value = 401
+
+        def sleep(_duration: float) -> None:
+            nonlocal clock_ns
+            clock_ns += 10_000_000
+
+        def sync(*_args: object) -> None:
+            nonlocal sync_sent
+            if not sync_sent and stop_requested:
+                sync_sent = True
+                queue.extend((601, 401))
+
+        def stop(_path: Path) -> bool:
+            nonlocal stop_requested
+            stop_requested = True
+            return True
+
+        def event(_display: object, pointer: object) -> None:
+            value = pointer._obj.xfixes
+            value.type = 87
+            value.window = 501
+            value.owner = queue.pop(0)
+            value.selection = 51
+            value.selection_timestamp = clock_ns // 1_000_000
+
+        def query(_display: object, event_base: object, _error_base: object) -> bool:
+            event_base._obj.value = 87
+            return True
+
+        x11.fixes.XFixesQueryExtension.side_effect = query
+        x11.lib.XPending.side_effect = lambda _display: len(queue)
+        x11.lib.XNextEvent.side_effect = event
+        x11.lib.XSync.side_effect = sync
+        output = StringIO()
+        with (
+            patch.object(fixture, "X11", return_value=x11),
+            patch.object(fixture, "take_monitor_stop", side_effect=stop),
+            patch.object(fixture, "time", SimpleNamespace(
+                monotonic=lambda: clock_ns / 1_000_000_000,
+                monotonic_ns=lambda: clock_ns,
+                sleep=sleep,
+            )),
+            redirect_stdout(output),
+            tempfile.TemporaryDirectory() as temporary,
+        ):
+            self.assertEqual(fixture.run_monitor(
+                event_window=None, root=True,
+                stop_file=Path(temporary) / "stop", timeout=1,
+            ), 0)
+        records = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([record["owner_xid"] for record in records[1:3]], [601, 401])
+        self.assertEqual(records[-1]["event_count"], 2)
+        self.assertGreaterEqual(records[-1]["drained_ns"], records[-1]["stop_requested_ns"])
 
     def test_tracked_live_configuration_parser_fails_closed_generically(self) -> None:
         for source in (

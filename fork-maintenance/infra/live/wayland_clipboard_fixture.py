@@ -21,7 +21,7 @@ import gi
 
 gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gdk, GLib, Gtk
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402 - select GI versions before importing
 
 TITLE: Final = "Xpra Wayland Clipboard Fixture"
 MAX_COMMAND_BYTES: Final = 128
@@ -129,7 +129,7 @@ entry {
         "closed": False,
         "command_id": 0,
         "confirming_owner": None,
-        "owner_confirmation_pending": False,
+        "owner_confirmation_idle": 0,
         "pending_owner": None,
         "request_id": 0,
     }
@@ -138,6 +138,11 @@ entry {
         if state["closed"]:
             return
         state["closed"] = True
+        if state["owner_confirmation_idle"]:
+            GLib.source_remove(state["owner_confirmation_idle"])
+            state["owner_confirmation_idle"] = 0
+        state["confirming_owner"] = None
+        state["pending_owner"] = None
         emitter.emit("closed", pid=os.getpid())
         Gtk.main_quit()
 
@@ -198,11 +203,10 @@ entry {
             raise AssertionError(operation)
         return GLib.SOURCE_CONTINUE
 
-    def publish_owner_confirmation() -> bool:
-        state["owner_confirmation_pending"] = False
-        request = state["confirming_owner"]
-        if request is None:
+    def publish_owner_confirmation(request: tuple[int, str]) -> bool:
+        if state["closed"] or state["confirming_owner"] != request:
             return GLib.SOURCE_REMOVE
+        state["owner_confirmation_idle"] = 0
         state["confirming_owner"] = None
         command_id, marker_id = request
         emitter.emit(
@@ -216,16 +220,17 @@ entry {
         _clipboard: Gtk.Clipboard,
         event: Gdk.EventOwnerChange,
     ) -> None:
-        if event.selection != Gdk.SELECTION_CLIPBOARD:
+        if state["closed"] or event.selection != Gdk.SELECTION_CLIPBOARD:
             return
         if (
             state["confirming_owner"] is not None
-            and not state["owner_confirmation_pending"]
+            and not state["owner_confirmation_idle"]
         ):
-            state["owner_confirmation_pending"] = True
             # Keep the public record order deterministic even if a backend
             # happens to emit owner-change synchronously from set_text().
-            GLib.idle_add(publish_owner_confirmation)
+            state["owner_confirmation_idle"] = GLib.idle_add(
+                publish_owner_confirmation, state["confirming_owner"]
+            )
 
     def key_pressed(_window: Gtk.Window, event: Gdk.EventKey) -> bool:
         if event.keyval == Gdk.KEY_F8 and state["pending_owner"] is not None:
@@ -233,6 +238,7 @@ entry {
             state["pending_owner"] = None
             state["confirming_owner"] = request
             command_id, marker_id = request
+            emitter.emit("owner-input", command_id=command_id, keyval=int(event.keyval))
             clipboard.set_text(marker_text(marker_id), -1)
             display.flush()
             emitter.emit(
