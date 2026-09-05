@@ -1,0 +1,22 @@
+schema = 1
+slug = "jph-parallel-build-objects"
+kind = "production"
+title = "Keep JPH parallel build objects independently owned"
+commit_subject = "Compile JPH helpers within independently owned extension objects"
+patch_sha256 = "6df16eda893113ae1f262b059b68bf30648f8f7fa2456f60a9d805b357ad3932"
+dependencies = []
+paths = [
+  "setup.py",
+  "tests/unittests/unit/codecs/jph_build_test.py",
+  "xpra/codecs/jph/decoder.pyx",
+  "xpra/codecs/jph/encoder.pyx",
+]
+
+[tests]
+list = [
+  "unit.codecs.jph_build_test",
+  "unit.codecs.lossless_roundtrip_test",
+]
+
+[evidence]
+required_gates = []

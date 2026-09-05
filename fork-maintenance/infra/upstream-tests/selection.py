@@ -34,6 +34,7 @@ SUPPORTED_GATES = frozenset(
         "live-rgb",
         "live-x11-clipboard",
         "live-wayland-keyboard",
+        "live-wayland-subsurface",
         "live-wayland-h264-hardware",
         "live-wayland-opengl-h264-hardware",
     }
@@ -476,6 +477,16 @@ def iter_gates(selection: Selection) -> Iterator[str]:
             yield test
 
 
+def iter_required_gates(selection: Selection) -> Iterator[str]:
+    """Yield only gates declared by case evidence, never tests.list entries."""
+    seen: set[str] = set()
+    for case in selection.cases:
+        for gate in case.required_gates:
+            if gate not in seen:
+                seen.add(gate)
+                yield gate
+
+
 def iter_quarantined_tests(selection: Selection, gate: str | None = None) -> Iterator[str]:
     if gate is not None and gate not in QUARANTINE_GATES:
         fail(f"invalid quarantine gate: {gate}")
@@ -825,6 +836,7 @@ def main() -> int:
             "unit-tests",
             "quarantined-tests",
             "gates",
+            "required-gates",
             "digest",
             "resolve",
             "resolution-patches",
@@ -873,6 +885,9 @@ def main() -> int:
                 print(test)
         elif args.action == "gates":
             for gate in iter_gates(selection):
+                print(gate)
+        elif args.action == "required-gates":
+            for gate in iter_required_gates(selection):
                 print(gate)
         elif args.action == "digest":
             print(selection_digest(selection, lab_root))

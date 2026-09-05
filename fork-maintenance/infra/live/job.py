@@ -32,7 +32,6 @@ from profiles import (
     NETWORK_PROFILES,
     ProfileError,
     validate_profile,
-    validate_profile_selection,
 )
 
 INFRA_ROOT = Path(__file__).resolve().parent
@@ -70,10 +69,12 @@ HARNESS_INPUTS = (
     INFRA_ROOT / "start_hardware_fixture.sh",
     INFRA_ROOT / "start_wayland_clipboard_fixture.sh",
     INFRA_ROOT / "start_wayland_keyboard_fixture.sh",
+    INFRA_ROOT / "start_wayland_subsurface_fixture.sh",
     INFRA_ROOT / "start_zed.sh",
     INFRA_ROOT / "wayland_keyboard_fixture.py",
     INFRA_ROOT / "wayland_clipboard_fixture.py",
     INFRA_ROOT / "x11_clipboard_fixture.py",
+    INFRA_ROOT / "subsurface_fixture.c",
     INFRA_ROOT / "xkb_xtest_driver.c",
     INFRA_ROOT / "xwd_to_png.py",
     SELECTION_TOOL,
@@ -754,10 +755,13 @@ def validate_input_provenance(
         raise JobError("live-job input provenance has the wrong harness digest")
     if provenance.get("server_selection") != (selection or "master"):
         raise JobError("live-job input provenance has the wrong server selection")
-    expected_client_selection = selection if application == "clipboard" else "master"
+    shared_selection_applications = {"clipboard", "subsurface"}
+    expected_client_selection = (
+        selection if application in shared_selection_applications else "master"
+    )
     if provenance.get("client_selection") != expected_client_selection:
         raise JobError("live-job input provenance has the wrong client selection")
-    if application == "clipboard" and any(
+    if application in shared_selection_applications and any(
         provenance.get(client_key) != provenance.get(server_key)
         for client_key, server_key in (
             ("client_context_archive_sha256", "server_context_archive_sha256"),
@@ -770,8 +774,8 @@ def validate_input_provenance(
         )
     ):
         raise JobError(
-            "live-job clipboard provenance does not bind the same selected source "
-            "to both endpoints"
+            f"live-job {application} provenance does not bind the same selected "
+            "source to both endpoints"
         )
     inputs_path = provenance.get("path")
     if inputs_path != str(RESULT_ROOT / run / "inputs"):
@@ -1467,11 +1471,19 @@ def _start_locked(args: argparse.Namespace, run: str) -> int:
             alpha_scenarios=args.alpha_scenarios,
             network_profile_name=args.network_profile,
         )
-        validate_profile_selection(
-            application=args.application,
-            selection=args.selection,
-        )
     except ProfileError as error:
+        raise JobError(str(error)) from error
+    try:
+        selected = runner.resolve_patch_selection(args.selection, None)
+        runner.validate_live_profile_selection(
+            application=args.application,
+            lifecycle=args.lifecycle,
+            encoding=args.encoding,
+            h264_client_policy=args.h264_client_policy,
+            alpha_scenarios=args.alpha_scenarios,
+            selection=selected,
+        )
+    except runner.LabFailure as error:
         raise JobError(str(error)) from error
     if not RUNNER.is_file() or RUNNER.is_symlink():
         raise JobError(f"live runner is unavailable: {RUNNER}")
@@ -1588,11 +1600,22 @@ def _start_locked(args: argparse.Namespace, run: str) -> int:
             container_payload.rename_no_replace(staging, final_result)
         except (FileExistsError, container_payload.PayloadError, OSError) as error:
             raise JobError(f"live result publication raced: {final_result}") from error
-        runner.load_bound_inputs(
-            final_result / "inputs",
-            expected_manifest_sha256=input_provenance["input_manifest_sha256"],
-            expected_tree_sha256=input_provenance["input_tree_sha256"],
-        )
+        try:
+            bound = runner.load_bound_inputs(
+                final_result / "inputs",
+                expected_manifest_sha256=input_provenance["input_manifest_sha256"],
+                expected_tree_sha256=input_provenance["input_tree_sha256"],
+            )
+            runner.validate_live_profile_selection(
+                application=args.application,
+                lifecycle=args.lifecycle,
+                encoding=args.encoding,
+                h264_client_policy=args.h264_client_policy,
+                alpha_scenarios=args.alpha_scenarios,
+                selection=bound.server_context.selection,
+            )
+        except runner.LabFailure as error:
+            raise JobError(str(error)) from error
         frozen_harness = final_result / "inputs" / "harness"
         frozen_runner = frozen_harness / "infra" / "live" / "run.py"
         frozen_supervisor = frozen_harness / "infra" / "live" / "job.py"
@@ -2089,6 +2112,54 @@ def clipboard_fixture_artifact_evidence_matches(
     )
 
 
+def subsurface_fixture_artifact_evidence_matches(
+    embedded: dict[str, Any],
+    scenario_root: Path,
+    runner: Any,
+) -> bool:
+    """Recompute the case-only subsurface route from its authority artifacts."""
+    interaction = embedded.get("interaction")
+    classification = embedded.get("classification")
+    boundaries = (
+        classification.get("boundaries")
+        if isinstance(classification, dict)
+        else None
+    )
+    classified_checks = (
+        boundaries.get("interaction") if isinstance(boundaries, dict) else None
+    )
+    if not isinstance(interaction, dict):
+        return False
+    checks = interaction.get("checks")
+    if (
+        not isinstance(checks, dict)
+        or set(checks) != set(runner.SUBSURFACE_LIVE_CHECK_NAMES)
+        or not all(type(value) is bool for value in checks.values())
+    ):
+        return False
+    try:
+        recomputed = runner.subsurface_interaction_checks(interaction)
+        artifacts_match = runner.subsurface_artifact_evidence_matches(
+            interaction,
+            scenario_root,
+        )
+    except (
+        AttributeError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        runner.LabFailure,
+    ):
+        return False
+    return bool(
+        artifacts_match
+        and recomputed == checks
+        and classified_checks == checks
+        and all(checks.values())
+    )
+
+
 def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
     runner = live_runner_module()
     root = report.parent
@@ -2118,6 +2189,8 @@ def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
         )
         if tuple(names) != expected_names:
             return False
+    if payload.get("application") == "subsurface" and names != ["default-alpha"]:
+        return False
     expected_top_level = {"inputs", "report.json", *names}
     if {path.name for path in root.iterdir()} != expected_top_level:
         return False
@@ -2145,8 +2218,19 @@ def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
         if recorded != embedded or scenario_digests[name] != sha256_file(scenario_report):
             return False
         if (
-            embedded.get("result") != "passed"
+            embedded.get("application") != payload.get("application")
+            or embedded.get("encoding") != payload.get("encoding")
+            or embedded.get("h264_client_policy")
+            != payload.get("h264_client_policy")
+            or embedded.get("result") != "passed"
             or embedded.get("artifact_collection_passed") is not True
+            or (
+                payload.get("application") == "subsurface"
+                and (
+                    not isinstance(embedded.get("client"), dict)
+                    or embedded["client"].get("alpha_disabled") is not False
+                )
+            )
             or not isinstance(embedded.get("cleanup"), dict)
             or embedded["cleanup"].get("passed") is not True
         ):
@@ -2207,6 +2291,15 @@ def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
             scenario_root,
             runner,
             clipboard_policies[scenario_index],
+        ):
+            return False
+        if (
+            payload.get("application") == "subsurface"
+            and not subsurface_fixture_artifact_evidence_matches(
+                embedded,
+                scenario_root,
+                runner,
+            )
         ):
             return False
         if keyboard_scenario is not None:

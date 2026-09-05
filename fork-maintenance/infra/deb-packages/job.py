@@ -107,6 +107,8 @@ REQUIRED_NATIVE_CODEC_MODULES = (
     "xpra.codecs.libva.decoder",
     "xpra.codecs.libva.encoder",
     "xpra.codecs.libyuv.converter",
+    "xpra.codecs.jph.decoder",
+    "xpra.codecs.jph.encoder",
 )
 REQUIRED_CODEC_DEPENDENCIES = frozenset({"libva-drm2", "libva2", "libyuv0"})
 FORBIDDEN_CODEC_DEPENDENCIES = frozenset(

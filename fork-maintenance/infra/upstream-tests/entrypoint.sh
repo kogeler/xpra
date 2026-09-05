@@ -321,6 +321,29 @@ check_focused_native_modules() {
     xpra_dir=$(installed_xpra_dir)
     test -n "$xpra_dir"
     cd "$WORK/tests/unittests"
+    # setup.py cythonize_more includes xpra.net; this installed module binds
+    # both the actual compiled mode and the process-wide compatibility policy.
+    PYTHONPATH=".:${xpra_dir%/xpra}" python3 - \
+        "$xpra_dir" "$CYTHONIZE_MORE" "$XPRA_BACKWARDS_COMPATIBLE" <<'FOCUSED_MODE_PY'
+import sys
+from importlib.machinery import EXTENSION_SUFFIXES
+from pathlib import Path
+
+from xpra.net import common
+
+installed = Path(sys.argv[1]).resolve(strict=True)
+module = Path(common.__file__).resolve(strict=True)
+if not module.is_relative_to(installed):
+    raise SystemExit("focused runtime module is outside the installed Xpra tree")
+compiled = any(str(module).endswith(suffix) for suffix in EXTENSION_SUFFIXES)
+if compiled != (sys.argv[2] == "with"):
+    raise SystemExit("focused runtime compiled mode does not match the named target")
+if common.BACKWARDS_COMPATIBLE is not (sys.argv[3] == "1"):
+    raise SystemExit("focused runtime compatibility does not match the named target")
+print(f"focused_runtime_module={module}")
+print(f"focused_runtime_compiled={int(compiled)}")
+print(f"focused_runtime_backwards_compatible={int(common.BACKWARDS_COMPATIBLE)}")
+FOCUSED_MODE_PY
     if ! gates_output=$(selected_gate_names); then
         return 2
     fi
@@ -365,8 +388,15 @@ PY
 }
 
 run_focused() {
-    local extra_args gates_output selected_output test_path
+    local target=$1 cythonize compat extra_args gates_output selected_output test_path applied_tree
     local -a selected_paths selected_tests
+    case "$target" in
+        focused) cythonize=without; compat=1 ;;
+        focused-cython) cythonize=with; compat=1 ;;
+        focused-no-compat) cythonize=without; compat=0 ;;
+        *) printf 'invalid focused mode: %s\n' "$target" >&2; return 2 ;;
+    esac
+    local -x CYTHONIZE_MORE="$cythonize" XPRA_BACKWARDS_COMPATIBLE="$compat"
     case "$PATCH_MODE" in
         patched|tests-only) ;;
         *)
@@ -381,6 +411,10 @@ run_focused() {
     mapfile -t selected_tests <<<"$selected_output"
     for test_path in "${selected_tests[@]}"; do
         test_path=${test_path//./\/}.py
+        [[ "$test_path" == *test.py ]] || {
+            printf 'selected unit module is not an executable test: %s\n' "$test_path" >&2
+            return 2
+        }
         test -f "$WORK/tests/unittests/$test_path" || {
             printf 'selected unit test is missing after patching: %s\n' "$test_path" >&2
             return 2
@@ -397,6 +431,18 @@ run_focused() {
     if grep -Fx wayland <<<"$gates_output" >/dev/null; then
         extra_args+=' --with-keyboard --with-wayland_server --with-clipboard --with-dmabuf'
     fi
+    if ! applied_tree=$(git -C "$WORK" write-tree); then
+        printf '%s\n' 'cannot determine focused applied source tree' >&2
+        return 2
+    fi
+    [[ "$applied_tree" =~ ^[0-9a-f]{40}$ ]] || {
+        printf '%s\n' 'invalid focused applied source tree' >&2
+        return 2
+    }
+    printf 'focused_mode=%s\nfocused_cythonize_more=%s\nfocused_backwards_compatible=%s\n' \
+        "$target" "$cythonize" "$compat"
+    printf 'focused_applied_tree=%s\n' "$applied_tree"
+    printf 'focused_unit_test=%s\n' "${selected_tests[@]}"
     cd "$WORK"
     CFLAGS='-O0 -g0' \
     CXXFLAGS='-O0 -g0' \
@@ -620,8 +666,8 @@ case "${1:-help}" in
         git -C "$WORK" diff --cached --name-status
         git -C "$WORK" ls-files --others --exclude-standard
         ;;
-    focused)
-        run_focused
+    focused|focused-cython|focused-no-compat)
+        run_focused "$1"
         ;;
     wayland)
         run_wayland

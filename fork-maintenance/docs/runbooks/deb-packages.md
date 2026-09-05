@@ -1,5 +1,14 @@
 # Build And Publish Downstream DEB Packages
 
+Schedule local builds under [`validation.md`](validation.md). Development uses
+the nearest build/package regression first; a real DEB build may run early when
+the disputed boundary is the actual packaged result. Do not build both
+distributions after every source or harness edit. Full queue/rebase final
+acceptance still requires both real distribution builds on the frozen
+candidate, filling missing or invalidated evidence only. Cached images are not
+accepted packages, and unchanged tags do not prove unchanged resolved build
+dependencies. The hosted publication transaction below remains separate.
+
 ## Source boundary
 
 The package automation is branch-agnostic. It uses the checked-out `HEAD`
@@ -122,23 +131,42 @@ inspects the control and data archives of every generated DEB and requires:
 - one unique control `Package` identity for every archive;
 - no regular payload path owned by two packages;
 - one ABI-compatible native module each for `xpra.codecs.libva.encoder`,
-  `xpra.codecs.libva.decoder`, and `xpra.codecs.libyuv.converter`;
-- all three modules in ordinary `xpra-codecs`, never an AMD, NVIDIA, or extras
+  `xpra.codecs.libva.decoder`, `xpra.codecs.libyuv.converter`,
+  `xpra.codecs.jph.encoder`, and `xpra.codecs.jph.decoder`, all with the same
+  amd64 CPython ABI;
+- all five modules in ordinary `xpra-codecs`, never an AMD, NVIDIA, or extras
   package;
 - final `xpra-codecs` dependencies that include `libva-drm2`, `libva2`, and
   `libyuv0`, with no dependency on a vendor-specific Xpra codec package.
 
 It then extracts the actual `xpra-common` and `xpra-codecs` DEBs into a private
-root and imports all three modules with the distribution's `/usr/bin/python3`.
-The loaded paths must be the files inventoried from those DEBs. Finally,
-`dpkg-shlibdeps` runs on the packaged ELF objects and every resolved library
-dependency must occur in the final control `Depends` field.
+root and imports all five modules with the distribution's `/usr/bin/python3`.
+The loaded paths must be the files inventoried from those DEBs; source-tree or
+host imports cannot substitute. The actual extracted JPH pair encodes
+deterministic nonuniform 32x32 RGB24 pixels at quality 100 and must return a
+nonempty codestream. Decoding must produce the exact dimensions and packed
+BGRX24 format with a valid rowstride. Comparing every RGB channel against the
+input ignores X bytes and row padding, not differences in color; JPH does not
+promise alpha preservation. Source and decoded images are released through
+nested `finally` blocks even if validation fails. The retained
+`packaged_jph_roundtrip` log records dimensions, quality, codestream length and
+the matching RGB digest, not arbitrary screen contents. Unit codec doubles
+test rejection and cleanup paths but cannot satisfy this native package gate.
+
+`dpkg-shlibdeps` then runs on all five packaged ELF objects and every resolved
+library dependency must occur in final control `Depends`. The actual resolver
+supplies OpenJPH's distribution-specific dependency; do not guess a SONAME or
+copy one distribution's package version to the other. These five core modules
+are mandatory for the supported Ubuntu 26.04 and Debian 13 complete-stack
+builds, without a conditional case-slug bypass.
 
 After the package tar crosses stdout, the host independently parses every
 Debian ar/control/data archive and repeats the complete package inventory,
-payload ownership, module ABI, and dependency checks. It does not trust either
+payload ownership, filename ABI, and declared dependency-name checks. It does not trust either
 the source `.files` manifests or the builder-generated `manifest.json` as proof
-of installed capability.
+of installed capability. The host does not execute native modules or parse ELF
+dynamic sections: actual imports, lossless RGB execution and ELF dependency
+resolution remain the builder container's checks on extracted package bytes.
 
 ## Versioning
 
@@ -154,9 +182,9 @@ The build also installs the two dependency shims supplied by upstream under
 `packaging/debian/` before resolving `Build-Depends`, matching upstream's
 `build.sh` sequence on amd64. It deliberately invokes
 `dpkg-buildpackage -us -uc -b`, so the binary package build is unsigned.
-`SHA256SUMS` records the exact package bytes within the release tar but is not a
-Debian package signature; the Xpra repository key used during dependency
-installation does not sign these downstream packages.
+`SHA256SUMS` records the exact package bytes within the release tar; it does not
+sign the unsigned DEBs. Dependency installation uses only the configured
+distribution archives and introduces no Xpra repository or signing key.
 
 ## Local lifecycle
 
