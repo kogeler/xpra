@@ -21,6 +21,9 @@ Xpra repository root:
 │   └── sources/
 ├── jobs/
 ├── live-results/
+├── retained/
+│   ├── current/
+│   └── checkpoints/
 ├── source-archives/
 ├── upstream-tests/
 │   ├── image-builds/
@@ -33,12 +36,114 @@ Xpra repository root:
 └── workspace-fingerprints/
 ```
 
-The exact set may grow as runners add owned state, but durable run output never
-moves into the tracked `fork-maintenance/` directory. Transient interpreter or
+The exact set may grow only with a corresponding reviewed change to
+`fork-maintenance/artifacts.toml` and its runtime-protection tests. Durable run
+output never moves into the tracked `fork-maintenance/` directory. Transient interpreter or
 tool caches may exist only at another explicitly ignored local path; the root
 `clean` Make target removes the automation's `__pycache__` entries. The root
 `.gitignore` ignores all of `.artifacts/`; the `artifact-boundary` Make target
 verifies that rule and checks that known runtime/result roots are not tracked.
+
+## Deterministic whole-directory housekeeping
+
+Use this explicit discard operation when local output is no longer needed for
+the current acceptance/reuse cycle. It is independent of the cycle-specific
+finalization flow below, and can remove obsolete report formats and unmanaged
+diagnostic scratch without interpreting them as current acceptance evidence.
+It does not run Xpra tests, rebuild images, stop jobs, or delete Podman objects.
+
+Coordinate whole-root disposal with every agent/operator writing artifacts.
+Lifecycle locks protect registered jobs, not an agent editing an unmanaged
+probe or a newly created workspace whose tree still equals the queue. Do not
+run global disposal as a background janitor during concurrent development.
+An unexpected diff or new artifact is not permission to discard another
+writer's work: keep the reviewed plan, let a changed confirmation fail, and
+finish the cleanup handoff without repeatedly deleting new output. Plan/check
+remain non-destructive. Resume disposal only at a coordinated review boundary.
+
+The permanent allowlist is [`artifacts.toml`](../../artifacts.toml). Its entries
+are storage classes, never current run/cycle names or dates. It keeps shared
+caches, virtual environments, lifecycle/recovery authorities and deliberate
+operator records under `retained/`. Structural parents remain; other safe
+children are disposable. The same policy applies to yesterday's log and a
+newly generated log. No age threshold, newest-success heuristic or agent-made
+list decides retention.
+
+Keep the current concise handoff at `retained/current/handoff.md`. Put a sealed
+preservation archive under `retained/checkpoints/<checkpoint>/` only when
+explicitly needed. Do not save every run or bulk-move old scratch into
+`retained/`. To migrate an existing unmanaged top-level record without editing
+its bytes or overwriting another item:
+
+```bash
+make -C fork-maintenance artifacts-save \
+  ITEM=existing-handoff.md AS=current/handoff.md
+make -C fork-maintenance artifacts-save \
+  ITEM=sealed-checkpoint AS=checkpoints/sealed-checkpoint
+```
+
+Managed result/runtime roots and their descendants cannot be moved by this
+target: their recorded absolute provenance must stay intact. `retained/` is
+not a way to relabel a copied report as current acceptance. For new work, write
+the durable operator handoff there directly; probes and ordinary job output
+remain disposable. Delete/update obsolete deliberate records only through a
+separately reviewed exact operation, not by changing the permanent allowlist.
+
+Review and execute the exact plan:
+
+```bash
+make -C fork-maintenance artifacts-clean-plan
+make -C fork-maintenance artifacts-clean CONFIRM=<artifacts_clean_confirm>
+make -C fork-maintenance artifacts-check
+```
+
+`artifacts-clean` without `CONFIRM` is also plan-only. The plan prints exact
+relative targets, content/mode fingerprints, total apparent file bytes,
+protected paths and blocked unsafe paths with reasons. It binds the exact policy bytes as well as the
+targets. A changed target, new disposable file, policy change or newly owned
+result invalidates the old confirmation. Filesystem allocation, compression and
+shared extents can make actual freed disk space differ from apparent bytes.
+
+Both planning and removal hold the same six lifecycle locks as `cycle-clean`.
+An existing runtime record protects its exact job family even when the owner
+is old, exited or not collectable by today's schema. Read-only Podman inspection
+also protects owned containers/networks without a local owner. Remaining job
+state is finished through `test-*`, `test-image-*`, `live-*` or `deb-*`; the
+housekeeping command neither signals processes nor unlinks their authority.
+Runtime/recovery authorities and the six locks remain protected even if an
+accidental policy edit omits their keep entry. Unknown runtime layouts fail
+closed. Recovery state is retained, and pending
+case/workspace recovery protects the workspace boundary. A workspace is
+disposable only if the existing finalized-workspace check proves its candidate
+is represented by the current queue. All other workspaces are reported and
+preserved. Unsafe files/trees are reported as blocked, not followed,
+force-deleted or silently considered retained. A blocked path makes the
+command return nonzero even when no other disposable target remains.
+
+Confirmed removal reuses the cycle transaction engine under the reserved
+identity `artifacts-<policy-sha256>`. Directory staging is no-replace and binds
+the original device/inode; the durable rmtree phase permits a retry after
+partial recursive deletion. On interruption, run the same command with the
+same policy and `CONFIRM`. Do not delete the marker/staging by hand and do not
+use `cycle-clean` to resume this different policy. A pending cycle cleanup
+must instead finish through its original cycle interface first.
+
+After success, `artifacts-check` must report `disposable_targets=0` and an empty
+`blocked` list; an immediate
+repeat clean is a no-op. Protected runtime/workspaces remain listed separately,
+not disguised as deleted garbage. Do not claim the folder is entirely empty or
+that every job is removed merely from this result. Caches, operator records and
+recovery infrastructure are the intended clean state.
+
+Deleting a named result ends its reuse window in [`validation.md`](validation.md).
+Update the retained handoff to distinguish historical conclusions from still
+available raw evidence. Do not rerun Xpra merely because logs were deleted;
+if a later task needs unavailable evidence, it must produce a new named result.
+The narrow implementation gate is `make -C fork-maintenance artifact-tests`;
+run the full offline `check` on a stable cleanup-tooling candidate, not Xpra
+full suites or package/live builds.
+
+## Producer ownership boundaries
 
 The durable and transient subtrees have these exact ownership boundaries:
 

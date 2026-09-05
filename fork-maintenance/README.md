@@ -374,6 +374,23 @@ publishes a bound `.<CYCLE>.<index>.rmtree.json` phase for each directory, so an
 interrupted partial deletion resumes by exact device/inode rather than requiring
 the original tree hash.
 
+For all old output and unmanaged scratch, use the permanent storage policy
+instead of maintaining a list of cycle names:
+
+```bash
+make -C fork-maintenance artifacts-clean-plan
+make -C fork-maintenance artifacts-clean CONFIRM=<artifacts_clean_confirm>
+make -C fork-maintenance artifacts-check
+```
+
+[`artifacts.toml`](artifacts.toml) keeps shared caches, deliberate `retained/`
+operator records and lifecycle/recovery authorities. Runtime-bound results and
+unfinished workspaces are protected; other safe output is disposable regardless
+of age or report schema. No Podman objects are removed. A repeat on unchanged
+state reports zero disposable targets. Review the
+[artifact runbook](docs/runbooks/artifacts.md#deterministic-whole-directory-housekeeping)
+before discarding evidence: a deleted named result cannot be reused later.
+
 ## DEB packages
 
 Use these real builds early when diagnosing their actual package boundary, or
