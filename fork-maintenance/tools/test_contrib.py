@@ -4557,6 +4557,100 @@ class CycleCleanupTest(unittest.TestCase):
         self.assertFalse(log.exists())
         self.assertFalse(result.exists())
 
+    def bind_live_endpoint_provenance(
+        self, status_path: Path, changes: dict[str, str]
+    ) -> None:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        status["input_provenance"].update(changes)
+        status_path.write_text(json.dumps(status) + "\n", encoding="utf-8")
+        marker = self.live_jobs / f"{status['run']}.remove.json"
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        payload["record"]["input_provenance"] = status["input_provenance"]
+        marker.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        self.refresh_live_remove_transaction(status["run"])
+
+    def test_digest_confirmed_cleanup_accepts_shared_case_endpoints(self) -> None:
+        for index, case in enumerate(
+            ("x11-client-clipboard-events", "wayland-subsurface-stream-ownership")
+        ):
+            with self.subTest(case=case):
+                cycle = f"shared-endpoints-{index}"
+                name = f"{cycle}-live-01"
+                status, log, result = self.collected_live_result(name)
+                provenance = json.loads(status.read_text(encoding="utf-8"))[
+                    "input_provenance"
+                ]
+                changes = {
+                    "client_selection": f"cases/{case}",
+                    "server_selection": f"cases/{case}",
+                }
+                for field in (
+                    "selection_sha256",
+                    "selection_resolution_sha256",
+                    "context_sha256",
+                    "context_archive_sha256",
+                ):
+                    changes[f"client_{field}"] = provenance[f"server_{field}"]
+                self.bind_live_endpoint_provenance(status, changes)
+
+                plan = contrib.build_cleanup_plan(
+                    self.repo, cycle, inspect_runtime=False
+                )
+                marker = self.live_jobs / f"{name}.remove.json"
+                expected = {status, log, marker, result}
+                self.assertEqual({target.path for target in plan.targets}, expected)
+                self.assertEqual(
+                    contrib.remove_cleanup_plan(self.repo, plan, plan.digest), 4
+                )
+                self.assertTrue(all(not path.exists() for path in expected))
+
+    def test_cleanup_rejects_unbound_shared_case_endpoints(self) -> None:
+        clipboard = "cases/x11-client-clipboard-events"
+        subsurface = "cases/wayland-subsurface-stream-ownership"
+        mismatches = [
+            (clipboard, "master", None),
+            (clipboard, "stacks/develop", None),
+            (clipboard, subsurface, None),
+            ("cases/unreviewed-case", "cases/unreviewed-case", None),
+            ("cases/unreviewed-case", clipboard, None),
+            ("stacks/develop", "stacks/develop", None),
+        ]
+        for selection in (clipboard, subsurface):
+            for field in (
+                "selection_sha256",
+                "selection_resolution_sha256",
+                "context_sha256",
+                "context_archive_sha256",
+            ):
+                mismatches.append((selection, selection, field))
+        for index, (client, server, mismatch) in enumerate(mismatches):
+            with self.subTest(client=client, server=server, mismatch=mismatch):
+                cycle = f"unbound-endpoints-{index}"
+                name = f"{cycle}-live-01"
+                status, log, result = self.collected_live_result(name)
+                provenance = json.loads(status.read_text(encoding="utf-8"))[
+                    "input_provenance"
+                ]
+                changes = {"client_selection": client, "server_selection": server}
+                for field in (
+                    "selection_sha256",
+                    "selection_resolution_sha256",
+                    "context_sha256",
+                    "context_archive_sha256",
+                ):
+                    changes[f"client_{field}"] = provenance[f"server_{field}"]
+                if mismatch:
+                    changes[f"client_{mismatch}"] = "0" * 64
+                # Rebind the removal record and status hash as well: an
+                # unrelated transaction mismatch must not mask this boundary.
+                self.bind_live_endpoint_provenance(status, changes)
+                with self.assertRaisesRegex(
+                    contrib.ContribError, "input provenance|endpoint"
+                ):
+                    contrib.build_cleanup_plan(self.repo, cycle, inspect_runtime=False)
+                marker = self.live_jobs / f"{name}.remove.json"
+                self.assertTrue(all(path.exists() for path in (status, log, marker, result)))
+
     def test_cleanup_accepts_live_keyboard_scenario_provenance(self) -> None:
         status_path, _log, result = self.collected_live_result("audit-live-01")
         scenario = result / "inputs" / "keyboard-scenario.json"

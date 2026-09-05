@@ -146,6 +146,13 @@ multiple pre-handshake changes coalesce, a delayed client always completes its
 reservation, and a no-delay client retains the established no-initial-packet
 compatibility behavior without racing exact-RMLVO negotiation.
 
+GTK's coalescing timeout is owned by the helper for its whole lifetime. Cleanup
+retires that timeout before resetting negotiated state, disconnects the keymap
+signal and drops its keymap reference. An already dispatched callback must
+observe the closed helper and return before reconnecting, querying the backend
+or rebuilding configuration. Otherwise a keymap change immediately before
+disconnect can keep a cleaned helper alive and resume its callbacks afterward.
+
 The normalizer also recognizes the established `xkbmap_*` aliases. Packet
 envelopes remain strict: nested and flat payloads must be dictionaries, their
 `force` value must be a real boolean, and hello and structured-keymap modifier
@@ -402,7 +409,15 @@ A translation is pinned on press and consumed on release. Positive client
 keycodes are the usual identity; clients which send zero for every key fall
 back to `(client_keycode, keyname-or-keyval)`. Repeats reuse the original
 server keycode/group instead of resolving through the current group or a newly
-installed map. When policy or replacement forcibly settles a press, a bounded
+installed map. They also retain the press-time modifier additions/removals
+inferred by the native resolver. A lightweight client's repeated `Q` or `@`
+event can omit Shift or Level3 on every packet; keeping only its physical
+translation would reset the native level on the second press. Only that
+inference delta is retained, so the current packet still controls real
+Control/Alt/other modifier changes and shared physical holders remain
+authoritative. Release, forced settlement and a rejected native-capacity press
+retire the inference with its translation; it must not leak into a reused wire
+identity. When policy or replacement forcibly settles a press, a bounded
 tombstone ignores later repeats and consumes the eventual release so it cannot
 release an unrelated key in the new state.
 
@@ -603,6 +618,14 @@ layer with real compiled-XKB checks. Fake lookup tables prove policy and state
 transitions but cannot prove installed layout data, xkbcommon level selection,
 ABI declarations, or native cleanup. Conversely, compiling a keymap only proves
 symbol availability, not shared-client behavior. Preserve both layers.
+`WaylandKeyboardWireBoundaryTest` invokes the existing setup, hello parsing,
+connection acceptance and input APIs on both clean and patched source. Its
+clean controls fail on an unchanged startup map after acceptance and on a
+readonly event mutating native modifiers. Patch-only constants are loaded only
+inside the tests which need them, so their absence cannot prevent these
+behavioral controls from running. Missing new parser/native APIs in other
+tests remain explicit failures; they are not themselves non-vacuous controls
+and must never be converted into successful skips.
 `unit.wayland.linkage_test` may skip when native modules were not built; the
 declared `wayland` gate must build all Wayland extensions and make its isolated
 keyboard import non-skipping.
@@ -657,6 +680,7 @@ It does not:
 The focused parser and helper tests bind nested/flat equivalence, negotiated
 single-packet exact delivery, unnegotiated legacy/backend packet behavior,
 pre-handshake change coalescing with keyboard-data delay enabled and disabled,
+pending GTK keymap timeout cleanup including an already dispatched callback,
 replaceable detected options versus immutable command-line overrides, legacy
 and versioned precedence, explicit empties, every hash field, positional
 variants, one through four groups, bounded rejection, modifier-cache
@@ -672,6 +696,9 @@ collision, Caps/Num Lock, AltGr, dead keys, keypad symbol priority, Unicode
 `keystr` priority, unavailable data, logged option rejection, and rules-driven
 model behavior. The native gate then compiles and independently imports the
 Cython extension so a Python mock cannot hide a declaration or linkage error.
+The repeat regression also connects manager input handling to a real compiled
+XKB candidate and verifies the repeated physical key still produces `Q` or `@`
+with inferred modifiers, under both synchronized and unsynchronized input.
 
 The dedicated positive live scenario is
 `tests/live-wayland-keyboard.json`. Before attachment, the runner seeds the

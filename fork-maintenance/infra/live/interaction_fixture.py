@@ -12,7 +12,7 @@ import gi
 
 gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gdk, GLib, Gtk
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402 - select GI versions before importing
 
 READY_TITLE = "Xpra Hardware Interaction Ready"
 CLICKED_TITLE = "Xpra Hardware Interaction Clicked"
