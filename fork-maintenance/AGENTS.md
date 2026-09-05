@@ -41,6 +41,8 @@ the fork-owned contract and runbooks alone decide when and how our checks run.
 - `tools/container_payload.py`: common validated Podman tar transport;
 - `tools/podman_policy.py`: common bounded user-namespace policy;
 - `tools/contrib.py`: branch, sync, patch-queue, and manifest safety gates;
+- `artifacts.toml` and `tools/artifacts.py`: permanent artifact storage classes
+  and digest-confirmed whole-root housekeeping;
 - `docs/runbooks/`: operator workflows;
 - `CONTRACT.md`: machine and process invariants.
 
@@ -368,6 +370,21 @@ device, inode, and fingerprint. Directory targets are atomically staged at
 recursive deletion has changed that staged tree. An interruption is resumed
 only with the same cycle and confirmation digest. Cleanup is branch-agnostic
 and does not require or mutate a named remote or ref.
+
+Whole-root `artifacts-clean` is the separate explicit discard flow described
+in [the artifact runbook](docs/runbooks/artifacts.md). `artifacts.toml` is its
+permanent structural allowlist; never populate it with current run/cycle names,
+dates, success statuses, or age heuristics. It keeps shared caches, `retained/`
+operator records, lifecycle/recovery state, runtime-bound results and unfinished
+workspaces. Remaining safe output is disposable regardless of historical report
+schema. The command reuses the six locks and resumable removal engine but does
+not perform job lifecycle transitions or result acceptance. Preserve a current
+handoff in `retained/current/` and intentional sealed archives in
+`retained/checkpoints/`; do not automatically preserve every generated log.
+Cleanup ends reuse of deleted named evidence. Run `artifacts-clean-plan`,
+confirm its exact digest with `artifacts-clean`, then require `artifacts-check`
+to report no disposable leftovers. Report every protected exception explicitly;
+never silently discard an unexported candidate to obtain an empty directory.
 
 Keep direct Xpra behavior separate from SSH or parent-product orchestration.
 The live runner owns direct-TCP detach, abrupt transport loss, RGB, adaptive

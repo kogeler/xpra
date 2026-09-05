@@ -4115,8 +4115,8 @@ def parse_status_file(path: Path) -> dict[str, str]:
     return values
 
 
-def secure_tree_fingerprint(path: Path) -> str:
-    require_owned_directory(path, "cycle cleanup directory")
+def secure_tree_fingerprint(path: Path, *, private: bool = True) -> str:
+    require_owned_directory(path, "cycle cleanup directory", private=private)
     entries: list[dict[str, Any]] = []
     for candidate in sorted(path.rglob("*")):
         relative = candidate.relative_to(path).as_posix()
@@ -4173,6 +4173,35 @@ def secure_tree_fingerprint(path: Path) -> str:
         else:
             fail(f"cycle cleanup tree contains a special file: {candidate}")
     return sha256_bytes(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode())
+
+
+def artifact_fingerprint(path: Path) -> str:
+    """Discard identity, not result acceptance; the ancestor must be private.
+
+    Old probes need not have a runner's 0600/0700 modes. Bind their actual mode
+    and content without relaxing any existing collected-result validation.
+    """
+    info = path.lstat()
+    mode = stat.S_IMODE(info.st_mode)
+    if info.st_uid != os.getuid() or mode & 0o002:
+        fail(f"artifact is not safely owned: {path}")
+    if stat.S_ISDIR(info.st_mode):
+        content = secure_tree_fingerprint(path, private=False)
+    elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+        content = sha256_file(path)
+    else:
+        fail(f"artifact is not a real directory or singly-linked file: {path}")
+    return sha256_bytes(f"{mode}:{content}".encode())
+
+
+CLEANUP_DIRECTORY_KINDS = {"live-result-tree", "workspace", "artifact-tree"}
+
+
+def require_cycle_plan(plan: CleanupPlan) -> None:
+    if plan.cycle.startswith("artifacts-") or any(
+        target.kind.startswith("artifact-") for target in plan.targets
+    ):
+        fail("this is a structural artifacts cleanup; use artifacts-clean")
 
 
 def run_with_index(source: Path, index: Path, *arguments: str) -> str:
@@ -6259,6 +6288,8 @@ def cleanup_plan_from_payload(repo: Path, payload: object) -> CleanupPlan:
     targets: list[CleanupTarget] = []
     seen: set[Path] = set()
     allowed_kinds = {
+        "artifact-file",
+        "artifact-tree",
         "deb-result",
         "live-result",
         "live-result-tree",
@@ -6301,29 +6332,33 @@ def cleanup_plan_from_payload(repo: Path, payload: object) -> CleanupPlan:
 def validate_cleanup_directory_state(
     path: Path,
     state: CleanupDirectoryState,
+    *,
+    artifact: bool = False,
 ) -> None:
-    require_owned_directory(path, "cycle cleanup directory staging")
+    require_owned_directory(path, "cycle cleanup directory staging", private=not artifact)
     details = path.lstat()
-    if stat.S_IMODE(details.st_mode) != 0o700:
+    if not artifact and stat.S_IMODE(details.st_mode) != 0o700:
         fail(f"cycle cleanup directory mode is not exactly 0700: {path}")
     if (
         details.st_dev != state.device
         or details.st_ino != state.inode
-        or secure_tree_fingerprint(path) != state.fingerprint
+        or (artifact_fingerprint(path) if artifact else secure_tree_fingerprint(path))
+        != state.fingerprint
     ):
         fail(f"cycle cleanup directory changed after transaction publication: {path}")
 
 
 def cleanup_directory_state(index: int, target: CleanupTarget) -> CleanupDirectoryState:
-    require_owned_directory(target.path, "cycle cleanup directory target")
+    artifact = target.kind == "artifact-tree"
+    require_owned_directory(target.path, "cycle cleanup directory target", private=not artifact)
     details = target.path.lstat()
-    if stat.S_IMODE(details.st_mode) != 0o700:
+    if not artifact and stat.S_IMODE(details.st_mode) != 0o700:
         fail(f"cycle cleanup directory mode is not exactly 0700: {target.path}")
     return CleanupDirectoryState(
         index,
         details.st_dev,
         details.st_ino,
-        secure_tree_fingerprint(target.path),
+        artifact_fingerprint(target.path) if artifact else secure_tree_fingerprint(target.path),
     )
 
 
@@ -6445,7 +6480,7 @@ def load_pending_cleanup_transaction(repo: Path) -> CleanupTransaction | None:
     expected_indices = tuple(
         index
         for index, target in enumerate(plan.targets)
-        if target.kind in {"live-result-tree", "workspace"}
+        if target.kind in CLEANUP_DIRECTORY_KINDS
     )
     if not isinstance(raw_directories, list) or len(raw_directories) != len(
         expected_indices
@@ -6486,19 +6521,19 @@ def load_pending_cleanup_transaction(repo: Path) -> CleanupTransaction | None:
     staging = {
         transaction_root / f".{plan.cycle}.{index}.remove"
         for index, target in enumerate(plan.targets)
-        if target.kind in {"live-result-tree", "workspace"}
+        if target.kind in CLEANUP_DIRECTORY_KINDS
     }
     phases = {
         cleanup_directory_phase_path(marker, plan.cycle, index)
         for index, target in enumerate(plan.targets)
-        if target.kind in {"live-result-tree", "workspace"}
+        if target.kind in CLEANUP_DIRECTORY_KINDS
     }
     unexpected = set(entries).difference({marker}, staging, phases)
     if unexpected:
         fail(f"cycle cleanup transaction root has unexpected state: {sorted(unexpected)}")
     transaction = CleanupTransaction(plan, marker, tuple(directories))
     for index, target in enumerate(plan.targets):
-        if target.kind not in {"live-result-tree", "workspace"}:
+        if target.kind not in CLEANUP_DIRECTORY_KINDS:
             continue
         partial = transaction_root / f".{plan.cycle}.{index}.remove"
         phase = cleanup_directory_phase_path(marker, plan.cycle, index)
@@ -6512,18 +6547,24 @@ def load_pending_cleanup_transaction(repo: Path) -> CleanupTransaction | None:
         if target.path.exists() or target.path.is_symlink():
             fail(f"cycle cleanup has both target and removal staging: {target.path}")
         if phase_present:
-            require_private_directory(partial, "cycle cleanup directory staging")
+            require_owned_directory(
+                partial, "cycle cleanup directory staging", private=target.kind != "artifact-tree"
+            )
             details = partial.lstat()
             state = by_index[index]
             if details.st_dev != state.device or details.st_ino != state.inode:
                 fail(f"cycle cleanup directory identity changed: {partial}")
         else:
-            validate_cleanup_directory_state(partial, by_index[index])
+            validate_cleanup_directory_state(
+                partial, by_index[index], artifact=target.kind == "artifact-tree"
+            )
     for index, target in enumerate(plan.targets):
-        if target.kind not in {"live-result-tree", "workspace"}:
+        if target.kind not in CLEANUP_DIRECTORY_KINDS:
             continue
         if target.path.exists() or target.path.is_symlink():
-            validate_cleanup_directory_state(target.path, by_index[index])
+            validate_cleanup_directory_state(
+                target.path, by_index[index], artifact=target.kind == "artifact-tree"
+            )
     return transaction
 
 
@@ -6535,7 +6576,7 @@ def publish_cleanup_transaction(repo: Path, plan: CleanupPlan) -> Path:
     directories = tuple(
         cleanup_directory_state(index, target)
         for index, target in enumerate(plan.targets)
-        if target.kind in {"live-result-tree", "workspace"}
+        if target.kind in CLEANUP_DIRECTORY_KINDS
     )
     publish_private_json(
         marker,
@@ -7003,11 +7044,13 @@ def build_cleanup_plan(
 ) -> CleanupPlan:
     """Build or resume one plan while excluding every lifecycle publication."""
     require_cycle_name(cycle)
+    require_cycle_plan(CleanupPlan(cycle, (), ""))
     validate_cleanup_host(repo)
     with cleanup_lifecycle_locks(repo):
         pending = load_pending_cleanup_transaction(repo)
         if pending is not None:
             plan = pending.plan
+            require_cycle_plan(plan)
             if plan.cycle != cycle:
                 fail(
                     f"cycle cleanup for {plan.cycle!r} must be completed before "
@@ -7053,6 +7096,8 @@ def validate_cleanup_target(repo: Path, root: Path, target: CleanupTarget) -> No
         fingerprint = _finalized_workspace_fingerprint_locked(repo, target.path.name)
     elif target.kind == "live-result-tree":
         fingerprint = secure_tree_fingerprint(target.path)
+    elif target.kind in {"artifact-file", "artifact-tree"}:
+        fingerprint = artifact_fingerprint(target.path)
     else:
         require_cleanup_file(target.path, "cycle cleanup target")
         fingerprint = sha256_file(target.path)
@@ -7085,6 +7130,7 @@ def finish_cleanup_staged_directory(
     staging: Path,
 ) -> None:
     """Start or resume one directory rmtree behind its durable phase marker."""
+    artifact = transaction.plan.targets[state.index].kind == "artifact-tree"
     phase = cleanup_directory_phase_path(
         transaction.marker,
         transaction.plan.cycle,
@@ -7093,11 +7139,11 @@ def finish_cleanup_staged_directory(
     if phase.exists() or phase.is_symlink():
         validate_cleanup_directory_phase(transaction, state)
     else:
-        validate_cleanup_directory_state(staging, state)
+        validate_cleanup_directory_state(staging, state, artifact=artifact)
         publish_cleanup_directory_phase(transaction, state)
-        validate_cleanup_directory_state(staging, state)
+        validate_cleanup_directory_state(staging, state, artifact=artifact)
     if staging.exists() or staging.is_symlink():
-        require_private_directory(staging, "cycle cleanup directory staging")
+        require_owned_directory(staging, "cycle cleanup directory staging", private=not artifact)
         details = staging.lstat()
         if details.st_dev != state.device or details.st_ino != state.inode:
             fail(f"cycle cleanup directory identity changed: {staging}")
@@ -7140,11 +7186,11 @@ def finish_cleanup_transaction(repo: Path, transaction: CleanupTransaction) -> i
         if not target.path.exists() and not target.path.is_symlink():
             continue
         validate_cleanup_target(repo, root, target)
-        if target.kind in {"live-result-tree", "workspace"}:
+        if target.kind in CLEANUP_DIRECTORY_KINDS:
             state = directory_states.get(index)
             if state is None:
                 fail(f"cycle cleanup has no exact directory state: {target.path}")
-            validate_cleanup_directory_state(target.path, state)
+            validate_cleanup_directory_state(target.path, state, artifact=target.kind == "artifact-tree")
             if staging.exists() or staging.is_symlink():
                 fail(f"cycle cleanup directory staging already exists: {staging}")
             try:
@@ -7155,7 +7201,7 @@ def finish_cleanup_transaction(repo: Path, transaction: CleanupTransaction) -> i
                 fail(f"cannot stage cycle cleanup directory {target.path}: {error}")
             fsync_directory(target.path.parent)
             fsync_directory(staging.parent)
-            validate_cleanup_directory_state(staging, state)
+            validate_cleanup_directory_state(staging, state, artifact=target.kind == "artifact-tree")
             finish_cleanup_staged_directory(transaction, state, staging)
         else:
             target.path.unlink()
@@ -7183,6 +7229,7 @@ def remove_cleanup_plan(
     inspect_runtime: bool = False,
 ) -> int:
     """Durably complete one reviewed plan under every subsystem lifecycle lock."""
+    require_cycle_plan(plan)
     validate_cleanup_host(repo)
     if (
         confirmation != plan.digest

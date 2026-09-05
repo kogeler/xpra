@@ -102,7 +102,8 @@ invalidation, installed-module and real-run behavior are implemented and tested.
 Freeze only after reviewing production source, tests, composed queue, native
 and compiled risks, relevant live fixtures/oracles, and package/build changes.
 An unresolved runtime oracle or known source defect means development continues.
-Create an ignored cycle ledger below `.artifacts/fork-maintenance/`, not a
+Create the current ignored cycle ledger below
+`.artifacts/fork-maintenance/retained/current/`, not a
 tracked research archive. For each requirement record:
 
 - case/stack selection, patch mode, embedded source and applied candidate;

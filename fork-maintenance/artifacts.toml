@@ -1,0 +1,45 @@
+# Permanent storage classes, not a list of cycles, dates, or successful runs.
+schema = 1
+
+# Shared caches, explicit operator records, and lifecycle/recovery authorities.
+# These are retained recursively. Adding a new runtime root requires updating
+# this policy and its ownership tests before the producer is enabled.
+keep = [
+  "retained",
+  "build-contexts",
+  "source-archives",
+  "tooling-venv",
+  "venvs",
+  "case-staging",
+  "case-updates",
+  "workspace-fingerprints",
+  "cycle-cleanups",
+  "upstream-tests/sources",
+  "upstream-tests/runs",
+  "upstream-tests/image-builds",
+  "upstream-tests/.foreground-payload",
+  "upstream-tests/.foreground-payload.owner.json",
+  "upstream-tests/.foreground-payload.lock",
+  "upstream-tests/logs/.lifecycle.lock",
+  "upstream-tests/workspaces/.lifecycle.lock",
+  "jobs/live/.lifecycle.lock",
+  "deb-packages/sources",
+  "deb-packages/selections",
+  "deb-packages/runs",
+  "deb-packages/locks",
+  "deb-packages/releases",
+]
+
+# Structural parents stay, but their children are disposable unless kept above
+# or protected by a runtime owner / unfinished isolated workspace.
+containers = [
+  "jobs",
+  "jobs/live",
+  "live-results",
+  "upstream-tests",
+  "upstream-tests/logs",
+  "upstream-tests/workspaces",
+  "deb-packages",
+  "deb-packages/results",
+  "deb-packages/outputs",
+]

@@ -8,6 +8,12 @@ that cycle identity. It removes disposable results and generated workspaces
 below `.artifacts/fork-maintenance/` without touching Xpra source, case files,
 the host index, branches, or reusable caches.
 
+For whole-directory housekeeping across old cycles and unmanaged scratch, use
+the separate permanent-policy [`artifacts-clean` flow](artifacts.md#deterministic-whole-directory-housekeeping).
+Do not keep adding historical cycle names to a deletion/retention list or weaken
+the result validators here to accept obsolete evidence. The structural flow
+discards unused output; this flow verifies and finalizes one completed cycle.
+
 Choose one lowercase cycle prefix before starting work and put it at the start
 of every `RUN`, `IMAGE_RUN`, and `WORKSPACE`, followed by a dash:
 
