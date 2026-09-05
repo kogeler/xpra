@@ -24,6 +24,8 @@ IMAGE_RUN ?=
 WORKSPACE ?=
 CYCLE ?=
 CONFIRM ?=
+ITEM ?=
+AS ?=
 TARGET ?= focused
 PATCH_MODE ?= patched
 IMAGE_TAG_SUFFIX ?=
@@ -53,6 +55,9 @@ export XPRA_FORK_NETWORK_PROFILE := $(NETWORK_PROFILE)
 export XPRA_FORK_RENDER_NODE := $(RENDER_NODE)
 export XPRA_FORK_ZED_DIRECTORY := $(ZED_DIRECTORY)
 export XPRA_FORK_SELECTOR := $(SELECTOR)
+export XPRA_ARTIFACT_CONFIRM := $(CONFIRM)
+export XPRA_ARTIFACT_ITEM := $(ITEM)
+export XPRA_ARTIFACT_AS := $(AS)
 
 AUTOMATION_PYTHON := $(shell find tools infra cases -type f -name '*.py' -print 2>/dev/null | sort)
 AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_wayland_clipboard_fixture.sh \
@@ -69,6 +74,7 @@ AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_waylan
 	workspace-name-check workspace-create workspace-status workspace-diff workspace-stage \
 	workspace-update workspace-remove workspace-recover \
 	cycle-name-check cycle-clean-plan cycle-clean \
+	artifacts-clean-plan artifacts-clean artifacts-check artifacts-save artifact-tests \
 	run-name-check image-run-name-check test-target-check live-options-check \
 	deb-policy-check \
 	test-image test-image-start test-image-status test-image-logs test-image-wait \
@@ -111,6 +117,12 @@ help:
 		'make -C fork-maintenance cycle-clean-plan CYCLE=cycle-name' \
 		'make -C fork-maintenance cycle-clean CYCLE=cycle-name CONFIRM=printed-sha256' \
 		'    Review, then remove exact finalized cycle results and workspaces' \
+		'make -C fork-maintenance artifacts-clean-plan' \
+		'make -C fork-maintenance artifacts-clean CONFIRM=printed-sha256' \
+		'make -C fork-maintenance artifacts-check' \
+		'    Apply permanent artifacts.toml storage policy; preserve runtime and unfinished work' \
+		'make -C fork-maintenance artifacts-save ITEM=top-level-record AS=notes/record' \
+		'    Move an explicit operator record into the retained namespace without overwriting' \
 		'make -C fork-maintenance develop-check' \
 		'    Verify clean linear develop, embedded source boundary, queue, and ignore boundary' \
 		'make -C fork-maintenance ci-layout-check' \
@@ -165,6 +177,7 @@ check: artifact-boundary ci-layout-check
 	done
 	@$(CONTRIB) case-list >/dev/null
 	@$(PYTHON) tools/test_contrib.py
+	@$(PYTHON) tools/test_artifacts.py
 	@$(PYTHON) tools/test_background_job.py
 	@PYTHONPATH="$(AUTOMATION_ROOT)/tools" $(PYTHON) tools/test_container_payload.py
 	@PYTHONPATH="$(AUTOMATION_ROOT)/tools" $(PYTHON) tools/test_podman_policy.py
@@ -180,6 +193,22 @@ lint:
 
 contributor-tests:
 	@$(PYTHON) tools/test_contrib.py
+
+artifact-tests:
+	@$(PYTHON) tools/test_artifacts.py
+	@$(PYTHON) tools/test_contrib.py CycleCleanupTest
+
+artifacts-clean-plan:
+	@$(PYTHON) tools/artifacts.py plan
+
+artifacts-clean:
+	@$(PYTHON) tools/artifacts.py clean
+
+artifacts-check:
+	@$(PYTHON) tools/artifacts.py check
+
+artifacts-save:
+	@$(PYTHON) tools/artifacts.py save
 
 artifact-boundary:
 	@$(CONTRIB) doctor >/dev/null

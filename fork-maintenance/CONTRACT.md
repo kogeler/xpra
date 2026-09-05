@@ -1590,8 +1590,9 @@ lifecycle shortcuts: GitHub Actions provides their timeout, cancellation state,
 and complete console log, while tracked Python verifies each image build and
 Make owns each disposable `podman run --rm` invocation.
 
-Collected results and finalized workspaces are removed only by the
-digest-confirmed cycle cleanup flow. It never stops active work and rejects
+Collected results and finalized workspaces may be removed by the
+digest-confirmed cycle cleanup flow below, or by the explicit permanent-policy
+discard flow described after it. Cycle cleanup never stops active work and rejects
 remaining owner/partial records, unsafe retained lock files, owned processes,
 Podman containers or networks, incomplete evidence, changed fingerprints, and
 unfinished workspace candidates. Case-creation and workspace
@@ -1651,13 +1652,68 @@ Package source bundles, immutable selection snapshots, and input-keyed,
 label-verified builder images are reusable state; each package result remains
 bound to the actual immutable image ID it executed.
 
+### Permanent-policy artifact disposal
+
+`artifacts.toml` is the sole structural allowlist for whole-root filesystem
+housekeeping. Its exact `keep` paths retain shared cache, operator-record and
+runtime/recovery namespaces recursively; `containers` retain structural parents
+while classifying their children. There are no run/cycle pins, age thresholds,
+newest-result rules or success-based keep decisions. Unknown top-level scratch
+and obsolete result formats are disposable, not upgraded to acceptance evidence.
+Any producer introducing a new runtime/storage root must extend the policy and
+its ownership tests before use. New unmanaged diagnostic output is disposable
+by default. `retained/current/` holds the current operator handoff;
+`retained/checkpoints/` holds explicitly requested sealed preservation archives.
+Do not turn `retained/` into an automatic archive of every run.
+
+`artifacts-clean-plan` freezes the policy SHA-256 and exact target fingerprints.
+`artifacts-clean` without `CONFIRM` only prints a plan. With the matching digest,
+it takes the same six lifecycle locks and uses the existing schema-2 removal
+transaction with an `artifacts-<policy-sha256>` identity. Dedicated
+`artifact-file` / `artifact-tree` target kinds bind the actual file/tree content
+and mode under the private artifact ancestor; they do not relax cycle-result
+validation. There is no blanket removal of the artifact root. The common
+no-replace staging, directory device/inode binding and durable rmtree phase
+provide exact retry after interruption. Resume with the same policy bytes and
+confirmation; the cycle-specific API refuses structural artifact plans.
+
+Runtime owner/prelaunch/completion state protects its exact result family even
+when its schema is old or its process/container has exited. Read-only Podman
+inspection additionally protects owned containers and networks whose local
+owner is missing. No process is signaled and no engine object is deleted.
+Unknown runtime layout fails closed. Job removal remains the corresponding
+public lifecycle's responsibility. Runtime/recovery authorities and the six
+lifecycle locks are unconditional protections, even if a future policy edit
+accidentally omits their recursive keep entry. Case/workspace recovery protects workspaces
+until its exact recovery completes. Only the existing finalized-workspace check
+can declare a workspace disposable; an unexported or unresolvable workspace is
+retained with its reason, never exported or discarded implicitly. Unsafe paths
+are reported separately as blocked, rather than traversed, deleted or silently
+added to retention. They make the command return nonzero.
+
+The command discards completed filesystem evidence; it need not validate that
+obsolete evidence against today's acceptance schema. This authorization does
+not imply acceptance, erase an unexplained failure, or make an abbreviated
+handoff substitute for deleted raw evidence. Finish the intended review first:
+deletion ends the result's exact-input reuse window. A repeat plan on unchanged
+state must contain zero disposable targets. `artifacts-check` reports remaining
+protected state separately. Podman images/volumes and hosted release staging
+are outside this disposal scope.
+
+`artifacts-save ITEM=<unmanaged-top-level-item> AS=<retained-relative-path>`
+performs a no-replace move into `retained/` under the lifecycle locks. It refuses
+managed roots and descendants, traversal, symlinked parents and pending cleanup;
+it cannot relocate named results and thereby invalidate their absolute
+provenance. The saved item is not modified or reclassified as acceptance.
+
 ## Authority boundary
 
 The automation may verify/fetch refs read-only, fast-forward local `master`,
 perform an explicitly invoked local `develop` rebase, create and remove exact
 owned isolated workspaces, recover exact marker-backed case/workspace staging
 and removal or case-update transactions, remove a digest-confirmed finalized
-artifact cycle, update case files from a verified workspace, apply or remove
+artifact cycle or apply the permanent structural artifact-disposal policy,
+update case files from a verified workspace, apply or remove
 patches in a clean non-master host worktree, run tests, and print status.
 
 No target creates a new content commit automatically. Invocation of the
