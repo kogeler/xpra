@@ -533,12 +533,325 @@ index 438eb8f24733594d85e9546e11eb7dd324e32356..d355048be5a63efd28084acd15efcb61
      def test_modern_packet_omits_empty_targets(self):
          helper, proxy, packets = self.make_helper(False)
          with patch.object(core, "get_hex_uuid", return_value="origin-2"):
+diff --git a/tests/unittests/unit/server/subsystem/clipboard_test.py b/tests/unittests/unit/server/subsystem/clipboard_test.py
+index f0cfe5338c4d4f98fa38ac4966a29dab8a11c8ab..c715956cf2b35899101aae658f87136b0c98c17e 100755
+--- a/tests/unittests/unit/server/subsystem/clipboard_test.py
++++ b/tests/unittests/unit/server/subsystem/clipboard_test.py
+@@ -5,6 +5,9 @@
+ # later version. See the file COPYING for details.
+ 
+ import unittest
++from threading import Thread, get_ident
++from types import SimpleNamespace
++from unittest.mock import Mock, patch
+ 
+ from xpra.util.objects import AdHocStruct
+ from xpra.os_util import POSIX, OSX
+@@ -12,6 +15,298 @@ from unit.server.subsystem.servermixintest_util import ServerMixinTest
+ from unit.process_test_util import DisplayContext
+ 
+ 
++class ClipboardOwnerTest(unittest.TestCase):
++
++    @staticmethod
++    def make_manager():
++        from xpra.server.subsystem.clipboard import ClipboardManager
++
++        def source(name):
++            return SimpleNamespace(
++                uuid=name, protocol=Mock(is_closed=lambda: False), clipboard_enabled=True, clipboard_record=False,
++                clipboard_greedy=(), clipboard_want_targets=(), clipboard_selections=("CLIPBOARD",),
++                clipboard_preferred_targets=(),
++            )
++
++        first, second = source("first"), source("second")
++        sources = {first.protocol: first, second.protocol: second}
++        server = SimpleNamespace(
++            readonly=False, get_server_source=sources.get,
++            get_sources_by_type=lambda *_args: (), setting_changed=Mock(),
++        )
++        manager = ClipboardManager(server)
++        manager.enabled = True
++        manager.direction = "both"
++        manager.client = first
++        manager.helper = Mock()
++        scheduled = []
++        manager.idle_add = lambda callback, *args: scheduled.append((callback, args))
++        return manager, first, second, sources, scheduled
++
++    def drain_callbacks(self, scheduled):
++        while scheduled:
++            callback, args = scheduled.pop(0)
++            self.assertIsNone(callback(*args), "clipboard callbacks must be one-shot")
++
++    def dispatch_from_thread(self, manager, protocol, packets):
++        from xpra.net.dispatch import PacketDispatcher
++
++        class Dispatcher(PacketDispatcher):
++            def call_packet_handler(self, main, handler, proto, packet):
++                # Match the server's scheduler boundary while retaining the
++                # real subsystem lookup, aliases and authenticated dispatch.
++                if main:
++                    manager.idle_add(handler, proto, packet)
++                else:
++                    handler(proto, packet)
++
++        dispatcher = Dispatcher()
++        vars(dispatcher).update(vars(manager.server))
++        dispatcher.subsystems[manager.PREFIX] = manager
++        manager.server = dispatcher
++        manager.init_packet_handlers()
++        thread_ids = []
++        errors = []
++
++        def receive():
++            thread_ids.append(get_ident())
++            try:
++                for packet in packets:
++                    dispatcher.dispatch_packet(protocol, packet, authenticated=True)
++            except Exception as error:
++                errors.append(error)
++
++        receiver = Thread(target=receive, name="clipboard-test-parser", daemon=True)
++        receiver.start()
++        receiver.join(5)
++        self.assertFalse(receiver.is_alive(), "clipboard packet ingress did not finish")
++        self.assertEqual(errors, [])
++        self.assertEqual(len(thread_ids), 1)
++        self.assertNotEqual(thread_ids[0], get_ident())
++
++    def test_status_from_another_peer_cannot_change_owner_policy(self):
++        from xpra.net.common import Packet
++
++        manager, first, second, _sources, scheduled = self.make_manager()
++        try:
++            manager._process_packet(second.protocol, Packet("clipboard-status", False))
++            self.drain_callbacks(scheduled)
++            self.assertTrue(first.clipboard_enabled)
++            first.clipboard_enabled = False
++            manager._process_packet(second.protocol, Packet("clipboard-status", True))
++            self.drain_callbacks(scheduled)
++            self.assertFalse(first.clipboard_enabled)
++            manager.helper.enable_selections.assert_not_called()
++            manager._process_packet(first.protocol, Packet("clipboard-status", True))
++            self.assertFalse(first.clipboard_enabled)
++            self.drain_callbacks(scheduled)
++            self.assertTrue(first.clipboard_enabled)
++            manager._process_packet(first.protocol, Packet("clipboard-status", False))
++            self.assertTrue(first.clipboard_enabled)
++            self.drain_callbacks(scheduled)
++            self.assertFalse(first.clipboard_enabled)
++            manager.helper.enable_selections.assert_called_once_with()
++        finally:
++            manager.cleanup()
++
++    def test_dispatched_policy_cycle_preserves_ui_thread_and_packet_order(self):
++        from xpra.net.common import BACKWARDS_COMPATIBLE, Packet
++
++        status_names = ["clipboard-status"]
++        if BACKWARDS_COMPATIBLE:
++            status_names.append("set-clipboard-enabled")
++        for status_name in status_names:
++            for initially_enabled in (True, False):
++                with self.subTest(status=status_name, initially_enabled=initially_enabled):
++                    manager, first, _second, _sources, scheduled = self.make_manager()
++                    first.clipboard_enabled = initially_enabled
++                    helper = manager.helper
++                    calls = []
++                    ui_thread = get_ident()
++
++                    def record(name, *args):
++                        calls.append((name, args, first.clipboard_enabled, get_ident()))
++
++                    helper.enable_selections.side_effect = lambda *args: record("enable", *args)
++                    helper.client_reset.side_effect = lambda: record("reset")
++                    helper.process_clipboard_packet.side_effect = lambda packet: record("packet", packet)
++                    enabled = Packet("clipboard-enable-selections", ("CLIPBOARD",))
++                    fresh = Packet("clipboard-data", "CLIPBOARD", {"origin": "fresh-after-enable"})
++                    packets = (
++                        Packet(status_name, False),
++                        Packet("clipboard-data", "CLIPBOARD", {"origin": "while-disabled"}),
++                        Packet(status_name, True), enabled, fresh,
++                    )
++                    try:
++                        self.dispatch_from_thread(manager, first.protocol, packets)
++                        self.assertEqual(len(scheduled), len(packets))
++                        self.assertEqual(first.clipboard_enabled, initially_enabled)
++                        self.assertEqual(helper.mock_calls, [], "packet parser touched the native helper")
++                        self.assertEqual(calls, [])
++                        self.drain_callbacks(scheduled)
++                        expected = [("enable", (), False, ui_thread)]
++                        if initially_enabled:
++                            expected.append(("reset", (), False, ui_thread))
++                        expected.extend((
++                            ("packet", (enabled,), True, ui_thread),
++                            ("packet", (fresh,), True, ui_thread),
++                        ))
++                        self.assertEqual(calls, expected)
++                        self.assertTrue(first.clipboard_enabled)
++                    finally:
++                        manager.cleanup()
++
++    def test_dispatched_status_cannot_cross_peer_handoff(self):
++        from xpra.net.common import Packet
++
++        for return_to_first in (False, True):
++            with self.subTest(return_to_first=return_to_first):
++                manager, first, second, _sources, scheduled = self.make_manager()
++                helper = manager.helper
++                try:
++                    self.dispatch_from_thread(manager, first.protocol, (Packet("clipboard-status", False),))
++                    self.assertEqual(len(scheduled), 1)
++                    self.assertTrue(first.clipboard_enabled)
++                    helper.client_reset.assert_not_called()
++                    manager.set_clipboard_source(second)
++                    if return_to_first:
++                        manager.set_clipboard_source(first)
++                    helper.reset_mock()
++                    self.drain_callbacks(scheduled)
++                    self.assertTrue(first.clipboard_enabled)
++                    self.assertTrue(second.clipboard_enabled)
++                    self.assertEqual(helper.mock_calls, [], "stale status affected a replacement peer lifetime")
++                finally:
++                    manager.cleanup()
++
++    def test_current_owner_packet_survives_repeated_same_owner_notification(self):
++        from xpra.net.common import Packet
++
++        manager, first, _second, _sources, scheduled = self.make_manager()
++        packet = Packet("clipboard-data", "CLIPBOARD", {})
++        helper = manager.helper
++        try:
++            manager._process_packet(first.protocol, packet)
++            self.assertEqual(len(scheduled), 1)
++            helper.process_clipboard_packet.assert_not_called()
++            manager.set_clipboard_source(first)
++            helper.client_reset.assert_not_called()
++            callback, args = scheduled.pop()
++            callback(*args)
++            helper.process_clipboard_packet.assert_called_once_with(packet)
++        finally:
++            manager.cleanup()
++
++    def test_deferred_packet_cannot_cross_owner_or_policy_lifetime(self):
++        from xpra.net.common import Packet
++
++        boundaries = (
++            "reset", "disconnect", "replace", "return", "disable-enable",
++            "direction-cycle", "helper", "protocol", "readonly", "peer-readonly",
++        )
++        for boundary in boundaries:
++            with self.subTest(boundary=boundary):
++                manager, first, second, sources, scheduled = self.make_manager()
++                helper = manager.helper
++                try:
++                    manager._process_packet(first.protocol, Packet("clipboard-data", "CLIPBOARD", {}))
++                    self.assertEqual(len(scheduled), 1)
++                    if boundary == "reset":
++                        manager.reset_clipboard()
++                    elif boundary == "disconnect":
++                        manager.cleanup_protocol(first.protocol)
++                    elif boundary in ("replace", "return"):
++                        manager.set_clipboard_source(second)
++                        if boundary == "return":
++                            manager.set_clipboard_source(first)
++                    elif boundary == "disable-enable":
++                        manager.set_clipboard_enabled_status(first, False)
++                        manager.set_clipboard_enabled_status(first, True)
++                    elif boundary == "direction-cycle":
++                        manager.control_command_clipboard_direction("disabled")
++                        manager.control_command_clipboard_direction("both")
++                    elif boundary == "helper":
++                        manager.helper = Mock()
++                    elif boundary == "protocol":
++                        sources.pop(first.protocol)
++                    elif boundary == "peer-readonly":
++                        first.effective_readonly = lambda: True
++                    else:
++                        manager.server.readonly = True
++                    callback, args = scheduled.pop()
++                    callback(*args)
++                    helper.process_clipboard_packet.assert_not_called()
++                finally:
++                    manager.cleanup()
++
++    def test_policy_changes_drain_requests_but_repeated_settings_preserve_them(self):
++        manager, first, _second, _sources, _scheduled = self.make_manager()
++        helper = manager.helper
++        try:
++            manager.set_clipboard_enabled_status(first, True)
++            manager.control_command_clipboard_direction("both")
++            helper.client_reset.assert_not_called()
++            manager.set_clipboard_enabled_status(first, False)
++            helper.client_reset.assert_called_once_with()
++            manager.set_clipboard_enabled_status(first, False)
++            manager.set_clipboard_enabled_status(first, True)
++            helper.client_reset.assert_called_once_with()
++            manager.control_command_clipboard_direction("to-client")
++            helper.set_direction.assert_called_with(True, False)
++            helper.client_reset.assert_called_once_with()
++            manager.control_command_clipboard_direction("to-client")
++            manager.control_command_clipboard_direction("both")
++            helper.set_direction.assert_called_with(True, True)
++            helper.client_reset.assert_called_once_with()
++        finally:
++            manager.cleanup()
++
++    def test_peer_replacement_drains_before_new_peer_publication(self):
++        manager, first, second, _sources, _scheduled = self.make_manager()
++        helper = manager.helper
++        owners_during_reset = []
++        helper.client_reset.side_effect = lambda: owners_during_reset.append(manager.client)
++        try:
++            manager.set_clipboard_source(second)
++            self.assertIs(manager.client, second)
++            self.assertEqual(owners_during_reset, [None])
++            helper.send_tokens.assert_called_once_with(second.clipboard_selections)
++            manager.set_clipboard_source(second)
++            self.assertEqual(owners_during_reset, [None])
++            manager.set_clipboard_source(None)
++            self.assertIsNone(manager.client)
++            self.assertEqual(owners_during_reset, [None, None])
++            self.assertTrue(first.clipboard_enabled)
++            helper.enable_selections.assert_called_with()
++        finally:
++            manager.cleanup()
++
++    def test_runtime_direction_uses_server_send_receive_orientation(self):
++        from xpra.server.subsystem.clipboard import ClipboardManager
++
++        manager, _first, _second, _sources, _scheduled = self.make_manager()
++        directions = {
++            "to-server": (False, True),
++            "to-client": (True, False),
++            "both": (True, True),
++            "disabled": (False, False),
++        }
++        try:
++            for direction, expected in directions.items():
++                with self.subTest(direction=direction):
++                    factory = Mock()
++                    manager.direction = direction
++                    with patch.object(ClipboardManager, "get_clipboard_class", return_value=factory):
++                        manager.init_clipboard()
++                    startup = factory.call_args.kwargs
++                    self.assertEqual((startup["can-send"], startup["can-receive"]), expected)
++                    manager.control_command_clipboard_direction(direction)
++                    manager.helper.set_direction.assert_called_with(*expected)
++                    manager.server.setting_changed.assert_called_with("clipboard-direction", direction)
++        finally:
++            manager.cleanup()
++
++
+ class ClipboardMixinTest(ServerMixinTest):
+ 
+     # ClipboardManager subscribes to these ServerBase lifecycle signals.
 diff --git a/tests/unittests/unit/wayland/clipboard_test.py b/tests/unittests/unit/wayland/clipboard_test.py
 new file mode 100755
-index 0000000000000000000000000000000000000000..ed73bf208b5a2e569b9e2dd73c143d663ecc0fb7
+index 0000000000000000000000000000000000000000..753734b9f1ead4b0268a2a93edadbf0536ca1d16
 --- /dev/null
 +++ b/tests/unittests/unit/wayland/clipboard_test.py
-@@ -0,0 +1,298 @@
+@@ -0,0 +1,825 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 kogeler
@@ -546,8 +859,12 @@ index 0000000000000000000000000000000000000000..ed73bf208b5a2e569b9e2dd73c143d66
 +# later version. See the file COPYING for details.
 +
 +import os
++import fcntl
++import ctypes
 +import unittest
 +from time import monotonic, sleep
++from types import SimpleNamespace
++from unittest.mock import patch
 +
 +from xpra.os_util import gi_import
 +
@@ -559,7 +876,7 @@ index 0000000000000000000000000000000000000000..ed73bf208b5a2e569b9e2dd73c143d66
 +    context = gi_import("GLib").MainContext.default()
 +    deadline = monotonic() + timeout
 +    while monotonic() < deadline:
-+        while context.pending():
++        while context.pending() and monotonic() < deadline:
 +            context.iteration(False)
 +        if predicate():
 +            return True
@@ -636,6 +953,23 @@ index 0000000000000000000000000000000000000000..ed73bf208b5a2e569b9e2dd73c143d66
 +        return WaylandSelectionSource if selection == "CLIPBOARD" else WaylandPrimarySource
 +
 +    @staticmethod
++    def make_manager(helper):
++        from xpra.server.subsystem.clipboard import ClipboardManager
++
++        owner = SimpleNamespace(uuid="clipboard-owner", protocol=object(), clipboard_enabled=True)
++        server = SimpleNamespace(
++            readonly=False, get_server_source=lambda protocol: owner if protocol is owner.protocol else None,
++            get_sources_by_type=lambda *_args: (), setting_changed=lambda *_args: None,
++        )
++        manager = ClipboardManager(server)
++        manager.enabled = True
++        manager.direction = "both"
++        manager.client = owner
++        manager.helper = helper
++        manager.idle_add = lambda callback, *args: callback(*args)
++        return manager, owner
++
++    @staticmethod
 +    def owner_changed(proxy, selection: str, source_ptr: int) -> None:
 +        if selection == "CLIPBOARD":
 +            proxy.selection_changed(source_ptr)
@@ -648,6 +982,379 @@ index 0000000000000000000000000000000000000000..ed73bf208b5a2e569b9e2dd73c143d66
 +            return os.read(fd, 65536)
 +        except BlockingIOError:
 +            return None
++
++    @staticmethod
++    def large_pipe_payload(fd: int) -> bytes:
++        capacity = fcntl.fcntl(fd, fcntl.F_GETPIPE_SZ)
++        return bytes(range(256)) * (3 * capacity // 256 + 1)
++
++    def test_native_consumer_backpressure_preserves_complete_payload(self):
++        GLib = gi_import("GLib")
++        for selection in ("CLIPBOARD", "PRIMARY"):
++            for cached in (False, True):
++                with self.subTest(selection=selection, cached=cached):
++                    helper, _compositor, packets = self.make_helper()
++                    proxy = helper._get_proxy(selection)
++                    rfd, wfd = os.pipe()
++                    os.set_blocking(rfd, False)
++                    # A nonblocking consumer FD makes the old single-write
++                    # implementation fail with truncation, without hanging
++                    # the tests-only clean control in its blocking write.
++                    os.set_blocking(wfd, False)
++                    payload = self.large_pipe_payload(wfd)
++                    received = bytearray()
++                    eof = []
++                    dispatched = []
++
++                    def drain():
++                        chunk = self.read_now(rfd)
++                        if chunk == b"":
++                            eof.append(True)
++                        elif chunk:
++                            received.extend(chunk)
++                        return bool(eof)
++
++                    try:
++                        target_data = {TARGET: (TARGET, 8, payload)} if cached else {}
++                        proxy.got_token((TARGET,), target_data)
++                        proxy.remote_source.send(TARGET, wfd)
++                        requests = [packet for packet in packets if packet[0] == "clipboard-request"]
++                        if cached:
++                            self.assertEqual(requests, [])
++                        else:
++                            self.assertEqual(len(requests), 1)
++                            helper._clipboard_got_contents(requests[0][1], TARGET, 8, payload)
++                        # The consumer deliberately stays idle while another
++                        # main-loop callback proves the compositor can run.
++                        GLib.idle_add(lambda: dispatched.append(True))
++                        self.assertTrue(spin_until(lambda: bool(dispatched)))
++                        self.assertTrue(spin_until(drain), "native transfer did not reach EOF")
++                        self.assertEqual(bytes(received), payload)
++                        self.assertEqual(proxy.pending_writes, {})
++                        self.assertEqual(proxy.pending_write_sources, {})
++                    finally:
++                        helper.cleanup()
++                        os.close(rfd)
++
++    def test_native_output_owns_byte_snapshot_of_buffer_views(self):
++        for selection in ("CLIPBOARD", "PRIMARY"):
++            for view_kind in ("typed", "strided", "mutable"):
++                with self.subTest(selection=selection, view=view_kind):
++                    helper, _compositor, _packets = self.make_helper()
++                    proxy = helper._get_proxy(selection)
++                    rfd, wfd = os.pipe()
++                    os.set_blocking(rfd, False)
++                    os.set_blocking(wfd, False)
++                    storage = bytearray(self.large_pipe_payload(wfd))
++                    data = memoryview(storage)
++                    if view_kind == "typed":
++                        data = data.cast("I")
++                    elif view_kind == "strided":
++                        data = data[::2]
++                    expected = bytes(data)
++                    received = bytearray()
++
++                    def drain():
++                        chunk = self.read_now(rfd)
++                        if chunk:
++                            received.extend(chunk)
++                        return chunk == b""
++
++                    try:
++                        proxy.got_token((TARGET,), {TARGET: (TARGET, 8, data)})
++                        proxy.remote_source.send(TARGET, wfd)
++                        # The caller may reuse its mutable storage as soon as
++                        # send returns; queued output must retain its bytes.
++                        storage[:] = bytes(len(storage))
++                        self.assertTrue(spin_until(drain), "buffer-view output did not reach EOF")
++                        self.assertEqual(bytes(received), expected)
++                        self.assertEqual(proxy.pending_writes, {})
++                        self.assertEqual(proxy.pending_write_sources, {})
++                    finally:
++                        helper.cleanup()
++                        os.close(rfd)
++
++    def test_native_send_exception_cannot_close_reused_descriptor(self):
++        from xpra.wayland.server import clipboard as clipboard_module
++
++        GLib = gi_import("GLib")
++        # Resolve wlroots through the actual extension's linked dependencies.
++        # PyDLL keeps the GIL while its real C callback re-enters Python.
++        native = ctypes.PyDLL(clipboard_module.__file__)
++        for selection in ("CLIPBOARD", "PRIMARY"):
++            symbol = (
++                "wlr_data_source_send" if selection == "CLIPBOARD" else "wlr_primary_selection_source_send"
++            )
++            native_send = getattr(native, symbol)
++            native_send.argtypes = (ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int)
++            native_send.restype = None
++            for boundary in ("nonblocking", "watch", "timer"):
++                with self.subTest(selection=selection, boundary=boundary):
++                    helper, _compositor, _packets = self.make_helper()
++                    proxy = helper._get_proxy(selection)
++                    rfd, wfd = os.pipe()
++                    witness_rfd, witness_wfd = os.pipe()
++                    os.set_blocking(rfd, False)
++                    os.set_blocking(wfd, False)
++                    payload = self.large_pipe_payload(wfd)
++                    replacement_fds = []
++                    finish = proxy.finish_pending_write
++
++                    def retire_and_reuse(write_key):
++                        finish(write_key)
++                        replacement_fds.append(os.dup(witness_rfd))
++
++                    owner, method = {
++                        "nonblocking": (os, "set_blocking"),
++                        "watch": (GLib, "io_add_watch"),
++                        "timer": (GLib, "timeout_add"),
++                    }[boundary]
++                    try:
++                        os.write(witness_wfd, b"independent descriptor")
++                        proxy.got_token((TARGET,), {TARGET: (TARGET, 8, payload)})
++                        with (
++                            patch.object(proxy, "finish_pending_write", side_effect=retire_and_reuse),
++                            patch.object(owner, method, side_effect=RuntimeError("injected output setup failure")),
++                            patch.object(clipboard_module, "log") as mocked_log,
++                        ):
++                            native_send(proxy.remote_source.ptr(), TARGET.encode(), wfd)
++                        mocked_log.error.assert_called_once()
++                        self.assertEqual(replacement_fds, [wfd], "control did not reuse the retired descriptor")
++                        os.fstat(wfd)
++                        self.assertEqual(os.read(wfd, 64), b"independent descriptor")
++                        self.assertEqual(proxy.pending_writes, {})
++                        self.assertEqual(proxy.pending_write_sources, {})
++                    finally:
++                        helper.cleanup()
++                        for fd in {rfd, wfd, witness_rfd, witness_wfd, *replacement_fds}:
++                            try:
++                                os.close(fd)
++                            except OSError:
++                                pass
++
++    def test_native_consumer_pending_output_closes_on_lifetime_end(self):
++        GLib = gi_import("GLib")
++        context = GLib.MainContext.default()
++        for selection in ("CLIPBOARD", "PRIMARY"):
++            for ending in ("source", "reset", "cleanup", "timeout", "receive-disable", "selection-disable"):
++                with self.subTest(selection=selection, ending=ending):
++                    helper, _compositor, _packets = self.make_helper()
++                    proxy = helper._get_proxy(selection)
++                    rfd, wfd = os.pipe()
++                    os.set_blocking(rfd, False)
++                    os.set_blocking(wfd, False)
++                    payload = self.large_pipe_payload(wfd)
++                    eof = []
++
++                    def drain():
++                        if self.read_now(rfd) == b"":
++                            eof.append(True)
++                        return bool(eof)
++
++                    try:
++                        from xpra.wayland.server import clipboard as clipboard_module
++
++                        proxy.got_token((TARGET,), {TARGET: (TARGET, 8, payload)})
++                        with patch.object(clipboard_module, "REMOTE_TIMEOUT", 10 if ending == "timeout" else 2500):
++                            proxy.remote_source.send(TARGET, wfd)
++                        # Waiting for the remote reply and writing that reply
++                        # into a full pipe are both source-owned lifetimes.
++                        self.assertTrue(proxy.pending_writes)
++                        sources = tuple(
++                            source_id for ids in proxy.pending_write_sources.values() for source_id in ids
++                        )
++                        self.assertEqual(len(sources), 2)
++                        if ending == "source":
++                            proxy.remote_source.destroy()
++                        elif ending == "reset":
++                            helper.client_reset()
++                        elif ending == "cleanup":
++                            helper.cleanup()
++                        elif ending == "receive-disable":
++                            helper.set_direction(True, False)
++                            helper.set_direction(True, True)
++                        elif ending == "selection-disable":
++                            helper.enable_selections()
++                            helper.enable_selections(("CLIPBOARD", "PRIMARY"))
++                        else:
++                            self.assertTrue(spin_until(lambda: not proxy.pending_writes))
++                        self.assertTrue(spin_until(drain), "retired transfer left its pipe open")
++                        self.assertEqual(proxy.pending_writes, {})
++                        self.assertEqual(proxy.pending_write_sources, {})
++                        self.assertTrue(all(context.find_source_by_id(source_id) is None for source_id in sources))
++                    finally:
++                        helper.cleanup()
++                        os.close(rfd)
++
++    def test_direction_change_preserves_the_still_allowed_transfer(self):
++        from xpra.net.common import Packet
++
++        for selection in ("CLIPBOARD", "PRIMARY"):
++            with self.subTest(selection=selection, allowed="receive"):
++                helper, _compositor, packets = self.make_helper()
++                proxy = helper._get_proxy(selection)
++                proxy.selection_api = FakeSelectionAPI()
++                rfd, wfd = os.pipe()
++                os.set_blocking(rfd, False)
++                try:
++                    proxy.got_token((TARGET,))
++                    source = proxy.remote_source
++                    proxy.local_source_ptr = source.ptr()
++                    source.send(TARGET, wfd)
++                    request = packets[-1][1]
++                    helper.set_direction(False, True)
++                    helper.set_direction(True, True)
++                    self.assertIs(proxy.remote_source, source)
++                    self.assertEqual(proxy.selection_api.clear_calls, 0)
++                    self.assertIn(request, helper._clipboard_outstanding_requests)
++                    self.assertIsNone(self.read_now(rfd))
++                    helper.process_clipboard_packet(Packet(
++                        "clipboard-contents", request, selection, TARGET, 8, "bytes", b"allowed-receive",
++                    ))
++                    self.assertEqual(self.read_now(rfd), b"allowed-receive")
++                    self.assertEqual(self.read_now(rfd), b"")
++                finally:
++                    helper.cleanup()
++                    os.close(rfd)
++            with self.subTest(selection=selection, allowed="send"):
++                helper, _compositor, _packets = self.make_helper()
++                proxy = helper._get_proxy(selection)
++                api = FakeSelectionAPI()
++                proxy.selection_api = api
++                proxy.local_source_ptr = 0x1234
++                results = []
++                try:
++                    proxy.get_contents(TARGET, lambda *result: results.append(result))
++                    self.assertTrue(proxy.pending_reads)
++                    helper.set_direction(True, False)
++                    helper.set_direction(True, True)
++                    self.assertTrue(proxy.pending_reads)
++                    self.assertEqual(results, [])
++                    os.write(api.write_fds[0], b"allowed-send")
++                    os.close(api.write_fds.pop())
++                    self.assertTrue(spin_until(lambda: bool(results)))
++                    self.assertEqual(results, [(TARGET, 8, b"allowed-send")])
++                    self.assertEqual(proxy.pending_reads, {})
++                finally:
++                    helper.cleanup()
++                    for fd in api.write_fds:
++                        os.close(fd)
++
++    def test_policy_cycle_cancels_remote_request_without_clearing_new_native_owner(self):
++        from xpra.net.common import Packet
++
++        for selection in ("CLIPBOARD", "PRIMARY"):
++            for boundary in ("status", "direction", "selection"):
++                for native_owner in (False, True):
++                    with self.subTest(selection=selection, boundary=boundary, native_owner=native_owner):
++                        helper, _compositor, packets = self.make_helper()
++                        manager, owner = self.make_manager(helper)
++                        proxy = helper._get_proxy(selection)
++                        api = FakeSelectionAPI()
++                        proxy.selection_api = api
++                        rfd1 = rfd2 = -1
++                        try:
++                            proxy.got_token((TARGET,))
++                            source = proxy.remote_source
++                            proxy.local_source_ptr = 0x1234 if native_owner else source.ptr()
++                            rfd1, wfd1 = os.pipe()
++                            os.set_blocking(rfd1, False)
++                            source.send(TARGET, wfd1)
++                            request1 = packets[-1][1]
++                            self.assertIn(request1, helper._clipboard_outstanding_requests)
++                            manager.set_clipboard_enabled_status(owner, True)
++                            manager.control_command_clipboard_direction("both")
++                            helper.enable_selections(("CLIPBOARD", "PRIMARY"))
++                            self.assertIs(proxy.remote_source, source)
++                            self.assertIsNone(self.read_now(rfd1), "no-op policy change retired a live request")
++                            if boundary == "status":
++                                manager.set_clipboard_enabled_status(owner, False)
++                                manager.set_clipboard_enabled_status(owner, True)
++                            elif boundary == "direction":
++                                manager.control_command_clipboard_direction("to-client")
++                                manager.control_command_clipboard_direction("both")
++                            else:
++                                manager._process_packet(owner.protocol, Packet("clipboard-enable-selections", ()))
++                            manager._process_packet(
++                                owner.protocol, Packet("clipboard-enable-selections", ("CLIPBOARD", "PRIMARY")),
++                            )
++                            self.assertEqual(self.read_now(rfd1), b"", "policy loss left an old request FD open")
++                            self.assertEqual(api.clear_calls, 0 if native_owner else 1)
++                            if boundary != "selection":
++                                self.assertNotIn(request1, helper._clipboard_outstanding_requests)
++                            proxy.got_token((TARGET,))
++                            rfd2, wfd2 = os.pipe()
++                            os.set_blocking(rfd2, False)
++                            proxy.remote_source.send(TARGET, wfd2)
++                            request2 = packets[-1][1]
++                            self.assertNotEqual(request1, request2)
++                            manager._process_packet(owner.protocol, Packet(
++                                "clipboard-contents", request1, selection, TARGET, 8, "bytes", b"stale-policy",
++                            ))
++                            self.assertIsNone(self.read_now(rfd2), "stale response completed a fresh consumer")
++                            manager._process_packet(owner.protocol, Packet(
++                                "clipboard-contents", request2, selection, TARGET, 8, "bytes", b"fresh-policy",
++                            ))
++                            self.assertEqual(self.read_now(rfd2), b"fresh-policy")
++                            self.assertEqual(self.read_now(rfd2), b"")
++                            self.assertEqual(helper._clipboard_outstanding_requests, {})
++                        finally:
++                            manager.cleanup()
++                            for fd in (rfd1, rfd2):
++                                if fd >= 0:
++                                    os.close(fd)
++
++    def test_policy_loss_cancels_native_reads_and_forbids_eager_data_until_restored(self):
++        for selection in ("CLIPBOARD", "PRIMARY"):
++            for boundary in ("status", "direction", "selection"):
++                with self.subTest(selection=selection, boundary=boundary):
++                    helper, _compositor, packets = self.make_helper()
++                    manager, owner = self.make_manager(helper)
++                    proxy = helper._get_proxy(selection)
++                    api = FakeSelectionAPI(EAGER_TARGETS)
++                    proxy.selection_api = api
++                    proxy._greedy_client = True
++                    results = []
++                    try:
++                        self.owner_changed(proxy, selection, 0x1234)
++                        self.assertEqual(len(api.write_fds), 1)
++                        if boundary == "status":
++                            manager.set_clipboard_enabled_status(owner, False)
++                        elif boundary == "direction":
++                            manager.control_command_clipboard_direction("to-server")
++                        else:
++                            helper.enable_selections()
++                        self.assertEqual(proxy.pending_reads, {})
++                        self.assertEqual(proxy.pending_read_timers, {})
++                        with self.assertRaises(BrokenPipeError):
++                            os.write(api.write_fds[0], b"stale-policy")
++                        self.owner_changed(proxy, selection, 0x2345)
++                        self.assertEqual(len(api.write_fds), 1, "revoked policy admitted another eager read")
++                        proxy.get_contents(EAGER_TARGETS[0], lambda *result: results.append(result))
++                        self.assertEqual(results, [("", 0, b"")])
++                        self.assertEqual(packets, [], "revoked policy emitted local clipboard data")
++                        manager.set_clipboard_enabled_status(owner, True)
++                        manager.control_command_clipboard_direction("both")
++                        helper.enable_selections(("CLIPBOARD", "PRIMARY"))
++                        self.owner_changed(proxy, selection, 0x3456)
++                        self.assertEqual(len(api.write_fds), 2)
++                        os.write(api.write_fds[1], b"fresh-policy")
++                        os.close(api.write_fds.pop())
++                        self.assertTrue(spin_until(lambda: len(api.write_fds) == 2))
++                        os.close(api.write_fds.pop())
++                        self.assertTrue(spin_until(lambda: bool(packets)))
++                        self.assertEqual(len(packets), 1)
++                        packet = packets[0]
++                        if packet[0] == "clipboard-data":
++                            data = packet[2]["data"][EAGER_TARGETS[0]][3]
++                        else:
++                            self.assertEqual(packet[0], "clipboard-token")
++                            data = packet[7]
++                        self.assertEqual(bytes(data), b"fresh-policy")
++                    finally:
++                        manager.cleanup()
++                        for fd in api.write_fds:
++                            os.close(fd)
 +
 +    def test_remote_replacement_keeps_request_results_generation_bound(self):
 +        for selection in ("CLIPBOARD", "PRIMARY"):
@@ -695,6 +1402,139 @@ index 0000000000000000000000000000000000000000..ed73bf208b5a2e569b9e2dd73c143d66
 +                                os.close(fd)
 +                            except OSError:
 +                                pass
++
++    def test_native_read_timeout_and_size_limits_complete_once(self):
++        from xpra.wayland.server import clipboard as clipboard_module
++
++        for selection in ("CLIPBOARD", "PRIMARY"):
++            for boundary in ("timeout", "origin-size", "packet-size", "eof"):
++                with self.subTest(selection=selection, boundary=boundary):
++                    helper, _compositor, _packets = self.make_helper()
++                    proxy = helper._get_proxy(selection)
++                    api = FakeSelectionAPI()
++                    proxy.selection_api = api
++                    proxy.local_source_ptr = 0x1234
++                    helper.max_clipboard_packet_size = 32
++                    target = clipboard_module.ORIGIN_MIME_TYPE if boundary == "origin-size" else TARGET
++                    results = []
++                    payload = b"x" * (clipboard_module.MAX_ORIGIN_SIZE + 1)
++                    try:
++                        with patch.object(clipboard_module, "REMOTE_TIMEOUT", 10 if boundary == "timeout" else 60_000):
++                            proxy.get_contents(target, lambda *result: results.append(result))
++                        self.assertEqual(len(api.write_fds), 1)
++                        fd = api.write_fds[0]
++                        if boundary == "eof":
++                            payload = b"final bytes queued before HUP"
++                            os.write(fd, payload)
++                            os.close(api.write_fds.pop())
++                        elif boundary != "timeout":
++                            os.write(fd, payload)
++                            # Keep the native writer open: oversize must be
++                            # rejected without waiting for its EOF.
++                        self.assertTrue(spin_until(lambda: bool(results)))
++                        expected = (target, 8, payload) if boundary == "eof" else ("", 0, b"")
++                        self.assertEqual(results, [expected])
++                        self.assertEqual(proxy.pending_reads, {})
++                        self.assertEqual(proxy.pending_read_timers, {})
++                        spin_until(lambda: len(results) > 1, 0.02)
++                        self.assertEqual(results, [expected])
++                    finally:
++                        helper.cleanup()
++                        for fd in api.write_fds:
++                            os.close(fd)
++
++    def test_native_read_preserves_explicit_send_truncation(self):
++        from xpra.net.common import Packet
++
++        helper, _compositor, packets = self.make_helper()
++        proxy = helper._get_proxy("CLIPBOARD")
++        api = FakeSelectionAPI()
++        proxy.selection_api = api
++        proxy.local_source_ptr = 0x1234
++        helper.max_clipboard_packet_size = 32
++        helper.set_limits(16, None)
++        payload = bytes(range(64))
++        try:
++            helper.process_clipboard_packet(Packet("clipboard-request", 7, "CLIPBOARD", TARGET))
++            os.write(api.write_fds[0], payload)
++            os.close(api.write_fds.pop())
++            self.assertTrue(spin_until(lambda: bool(packets)))
++            self.assertEqual(packets, [
++                ("clipboard-contents", 7, "CLIPBOARD", TARGET, 8, "bytes", payload[:16], 48),
++            ])
++        finally:
++            helper.cleanup()
++            for fd in api.write_fds:
++                os.close(fd)
++
++    def test_native_read_setup_failure_retires_both_pipe_ends(self):
++        GLib = gi_import("GLib")
++        for boundary in ("nonblocking", "watch", "timer", "send"):
++            with self.subTest(boundary=boundary):
++                helper, _compositor, _packets = self.make_helper()
++                proxy = helper._get_proxy("CLIPBOARD")
++                api = FakeSelectionAPI()
++                proxy.selection_api = api
++                proxy.local_source_ptr = 0x1234
++                results = []
++                pipes = []
++                real_pipe = os.pipe
++
++                def capture_pipe():
++                    pair = real_pipe()
++                    pipes.extend(pair)
++                    return pair
++
++                owner, method = {
++                    "nonblocking": (os, "set_blocking"),
++                    "watch": (GLib, "io_add_watch"),
++                    "timer": (GLib, "timeout_add"),
++                    "send": (api, "send_source"),
++                }[boundary]
++                try:
++                    with (
++                        patch.object(os, "pipe", new=capture_pipe),
++                        patch.object(owner, method, side_effect=RuntimeError("injected read setup failure")),
++                        self.assertRaisesRegex(RuntimeError, "injected read setup"),
++                    ):
++                        proxy.get_contents(TARGET, lambda *result: results.append(result))
++                    self.assertEqual(results, [("", 0, b"")])
++                    self.assertEqual(proxy.pending_reads, {})
++                    self.assertEqual(proxy.pending_read_timers, {})
++                    self.assertEqual(len(pipes), 2)
++                    for fd in pipes:
++                        with self.assertRaises(OSError):
++                            os.fstat(fd)
++                finally:
++                    helper.cleanup()
++
++    def test_closed_proxy_cannot_start_native_read(self):
++        helper, _compositor, _packets = self.make_helper()
++        proxy = helper._get_proxy("CLIPBOARD")
++        proxy.local_source_ptr = 0x1234
++        results = []
++        helper.cleanup()
++        with patch.object(os, "pipe", side_effect=AssertionError("post-cleanup pipe")):
++            proxy.get_contents(TARGET, lambda *result: results.append(result))
++        self.assertEqual(results, [("", 0, b"")])
++
++    def test_selection_adapter_borrows_request_fd_without_display(self):
++        from xpra.wayland.server.clipboard import WaylandSelection, WaylandPrimarySelection
++
++        for adapter_class in (WaylandSelection, WaylandPrimarySelection):
++            with self.subTest(adapter=adapter_class):
++                rfd, wfd = os.pipe()
++                try:
++                    adapter_class(0, 0).send_source(0, TARGET, wfd)
++                    # The read caller remains the only closer of this FD;
++                    # wlroots may own only an adapter-created duplicate.
++                    os.fstat(wfd)
++                finally:
++                    os.close(rfd)
++                    try:
++                        os.close(wfd)
++                    except OSError:
++                        pass
 +
 +    def test_local_replacement_cancels_stale_read_generation(self):
 +        for selection in ("CLIPBOARD", "PRIMARY"):
@@ -1052,8 +1892,180 @@ index 799b8ae44bfd1240d75f5f8319b7f7d092634140..976e9571fe9ee1ff3a920a46a1c2eb80
 -                self._clipboard_got_contents(request_id)
 +            self._drain_clipboard_requests()
 +        super().client_reset()
+diff --git a/xpra/server/subsystem/clipboard.py b/xpra/server/subsystem/clipboard.py
+index 2b355ca5de64886b76e19f45c30f95fe2d7b2fdd..1d7e3a2b69acdd1bfca511bcd56034f16494f159 100644
+--- a/xpra/server/subsystem/clipboard.py
++++ b/xpra/server/subsystem/clipboard.py
+@@ -26,7 +26,7 @@ class ClipboardManager(StubSubsystem):
+     """
+     Mixin for servers that handle clipboard synchronization.
+     """
+-    __slots__ = ("client", "direction", "enabled", "filter_file", "helper", "selections")
++    __slots__ = ("client", "direction", "enabled", "filter_file", "helper", "selections", "_clipboard_generation")
+     PREFIX = "clipboard"
+     toggle_features = ("clipboard",)
+ 
+@@ -37,6 +37,7 @@ class ClipboardManager(StubSubsystem):
+         self.filter_file = None
+         self.helper = None
+         self.client = None
++        self._clipboard_generation = 0
+         self.selections: Sequence[str] = ()
+ 
+     def init(self, opts) -> None:
+@@ -61,12 +62,15 @@ class ClipboardManager(StubSubsystem):
+         ac("clipboard-limits", "restrict clipboard transfers size", min_args=2, max_args=2, validation=[int, int])
+ 
+     def reset_clipboard(self, *args) -> None:
++        self._clipboard_generation += 1
+         ch = self.helper
+         log("reset_clipboard%s helper=%s", args, ch)
+         if ch:
+             ch.client_reset()
+ 
+     def cleanup(self) -> None:
++        self._clipboard_generation += 1
++        self.client = None
+         if ch := self.helper:
+             self.helper = None
+             ch.cleanup()
+@@ -75,7 +79,7 @@ class ClipboardManager(StubSubsystem):
+         ch = self.helper
+         if ch and self.client and self.client.protocol == protocol:
+             self.client = None
+-            ch.client_reset()
++            self.reset_clipboard()
+ 
+     def parse_hello(self, ss, caps: typedict) -> str | ConnectionMessage:
+         if self.enabled:
+@@ -187,12 +191,19 @@ class ClipboardManager(StubSubsystem):
+         return True
+ 
+     def set_clipboard_source(self, ss) -> None:
+-        if not self.can_source_own_clipboard(ss):
++        if ss is not None and not self.can_source_own_clipboard(ss):
+             return
+-        if self.client == ss:
++        if self.client is ss:
+             return
+-        self.client = ss
++        previous = self.client
++        self.client = None
++        self._clipboard_generation += 1
+         ch = self.helper
++        # Empty-complete the old peer's work while neither peer can receive
++        # its callbacks, before enabling and announcing the replacement.
++        if previous is not None and ch:
++            ch.client_reset()
++        self.client = ss
+         log("client %s is the clipboard peer, helper=%s", ss, ch)
+         if not ch:
+             return
+@@ -219,22 +230,36 @@ class ClipboardManager(StubSubsystem):
+             return
+         self.may_record("server", *packet)
+         packet_type = packet.get_type()
+-        if packet_type == "clipboard-status" or (BACKWARDS_COMPATIBLE and packet_type == "set-clipboard-enabled"):
+-            self._process_status(proto, packet)
+-            return
+         if self.client != ss:
+             log("the clipboard packet %r does not come from the clipboard owner!", packet_type)
+             log(" owner is %s, request from %s", self.client, ss)
+             return
+-        if not ss.clipboard_enabled:
+-            # this can happen when we disable clipboard in the middle of transfers
+-            # (especially when there is a clipboard loop)
+-            log.warn("Warning: unexpected clipboard packet")
+-            log.warn(" clipboard is disabled for %r", ss.uuid)
+-            return
+         ch = self.helper
+         assert ch, "received a clipboard packet but clipboard sharing is disabled"
+-        self.idle_add(ch.process_clipboard_packet, packet)
++        generation = self._clipboard_generation
++
++        def process_current_packet() -> None:
++            if (
++                not self.enabled
++                or generation != self._clipboard_generation
++                or self.helper is not ch
++                or self.client is not ss
++                or self.get_server_source(proto) is not ss
++                or self.is_readonly(proto)
++            ):
++                return
++            # Status shares the same ordered UI admission as data. Native
++            # policy teardown must never run on the packet parser thread.
++            if packet_type == "clipboard-status" or (BACKWARDS_COMPATIBLE and packet_type == "set-clipboard-enabled"):
++                self._process_status(proto, packet)
++                return
++            if not ss.clipboard_enabled:
++                log.warn("Warning: unexpected clipboard packet")
++                log.warn(" clipboard is disabled for %r", ss.uuid)
++                return
++            ch.process_clipboard_packet(packet)
++
++        self.idle_add(process_current_packet)
+ 
+     def _process_status(self, proto, packet: Packet) -> None:
+         assert self.enabled
+@@ -242,9 +267,9 @@ class ClipboardManager(StubSubsystem):
+             return
+         clipboard_enabled = packet.get_bool(1)
+         if ss := self.get_server_source(proto):
+-            self.set_clipboard_enabled_status(ss, clipboard_enabled)
++            self.set_clipboard_enabled_status(ss, clipboard_enabled, _ordered=True)
+ 
+-    def set_clipboard_enabled_status(self, ss, clipboard_enabled: bool) -> None:
++    def set_clipboard_enabled_status(self, ss, clipboard_enabled: bool, *, _ordered: bool = False) -> None:
+         ch = self.helper
+         if not ch:
+             log.warn("Warning: client try to toggle clipboard-enabled status,")
+@@ -253,16 +278,24 @@ class ClipboardManager(StubSubsystem):
+         cc = self.client
+         if not cc:
+             return
+-        cc.clipboard_enabled = clipboard_enabled
+-        log("toggled clipboard to %s for %s", clipboard_enabled, ss.protocol)
+-        if cc != ss or ss is None:
++        if cc is not ss:
+             log("received a request to change the clipboard status,")
+             log(" but it does not come from the clipboard owner! Ignoring it.")
+-            log(" from %s", cc)
++            log(" from %s", ss)
+             log(" owner is %s", self.client)
+             return
++        changed = cc.clipboard_enabled != clipboard_enabled
++        # Ordered packet callbacks already serialize the policy boundary.
++        # Advancing their epoch here would discard fresh packets queued behind
++        # an enable notification before the UI thread has drained that queue.
++        if changed and not _ordered:
++            self._clipboard_generation += 1
++        cc.clipboard_enabled = clipboard_enabled
++        log("toggled clipboard to %s for %s", clipboard_enabled, ss.protocol)
+         if not clipboard_enabled:
+             ch.enable_selections()
++            if changed:
++                ch.client_reset()
+ 
+     def clipboard_progress(self, local_requests: int, _remote_requests: int) -> None:
+         assert self.enabled
+@@ -306,9 +339,12 @@ class ClipboardManager(StubSubsystem):
+         DIRECTIONS = ("to-server", "to-client", "both", "disabled")
+         if direction not in DIRECTIONS:
+             raise ValueError(f"invalid direction {direction!r}, must be one of " + csv(DIRECTIONS))
++        changed = self.direction != direction
+         self.direction = direction
+-        can_send = direction in ("to-server", "both")
+-        can_receive = direction in ("to-client", "both")
++        if changed:
++            self._clipboard_generation += 1
++        can_send = direction in ("to-client", "both")
++        can_receive = direction in ("to-server", "both")
+         ch.set_direction(can_send, can_receive)
+         msg = f"clipboard direction set to {direction!r}"
+         log(msg)
 diff --git a/xpra/wayland/server/clipboard.pyx b/xpra/wayland/server/clipboard.pyx
-index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76c918afed 100644
+index c8a541223621f3466d0f2aed0de68d34eb077ffa..2287ae95c655b268aa3110f062181c1d9480cc01 100644
 --- a/xpra/wayland/server/clipboard.pyx
 +++ b/xpra/wayland/server/clipboard.pyx
 @@ -9,7 +9,6 @@
@@ -1064,7 +2076,18 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
  
  from libc.stdint cimport uintptr_t, uint32_t
  from libc.stdlib cimport calloc, free, malloc
-@@ -26,7 +25,7 @@ from xpra.log import Logger
+@@ -17,8 +16,9 @@ from libc.string cimport memcpy
+ from cpython.ref cimport Py_INCREF, Py_DECREF
+ 
+ from xpra.clipboard.common import ClipboardCallback
++from xpra.clipboard.core import MAX_CLIPBOARD_PACKET_SIZE
+ from xpra.clipboard.proxy import ClipboardProxyCore
+-from xpra.clipboard.timeout import ClipboardTimeoutHelper
++from xpra.clipboard.timeout import ClipboardTimeoutHelper, REMOTE_TIMEOUT
+ from xpra.os_util import gi_import
+ from xpra.util.gobject import n_arg_signal, one_arg_signal
+ from xpra.util.str_fn import Ellipsizer, bytestostr
+@@ -26,7 +26,7 @@ from xpra.log import Logger
  
  from xpra.wayland.server.wlroots cimport (
      wl_array_add,
@@ -1073,7 +2096,67 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
      wl_array,
      wlr_data_source, wlr_data_source_impl,
      wlr_data_source_init, wlr_data_source_destroy, wlr_data_source_send,
-@@ -190,7 +189,7 @@ cdef class WaylandSelectionSource:
+@@ -92,18 +92,24 @@ cdef tuple source_mime_types(wl_array *mime_types):
+ 
+ 
+ cdef void data_source_send(wlr_data_source *source, const char *mime_type, int fd) noexcept:
++    cdef bint transferred = False
+     try:
+         owner = DATA_SOURCE_OWNERS.get(<uintptr_t> source) if source != NULL else None
+         if owner is None:
+-            os.close(fd)
+             return
+-        owner.send(mime_type.decode("utf8", "replace") if mime_type != NULL else "", fd)
++        target = mime_type.decode("utf8", "replace") if mime_type != NULL else ""
++        # The wrapper/proxy owns all completion and error paths after this
++        # handoff.  Its cleanup may already close and reuse the descriptor.
++        transferred = True
++        owner.send(target, fd)
+     except Exception:
+         log.error("Error sending selection contents", exc_info=True)
+-        try:
+-            os.close(fd)
+-        except OSError:
+-            pass
++    finally:
++        if not transferred:
++            try:
++                os.close(fd)
++            except OSError:
++                pass
+ 
+ 
+ cdef void data_source_destroy(wlr_data_source *source) noexcept:
+@@ -117,18 +123,22 @@ cdef void data_source_destroy(wlr_data_source *source) noexcept:
+ 
+ 
+ cdef void primary_source_send(wlr_primary_selection_source *source, const char *mime_type, int fd) noexcept:
++    cdef bint transferred = False
+     try:
+         owner = <object> source.data if source != NULL and source.data != NULL else None
+         if owner is None:
+-            os.close(fd)
+             return
+-        owner.send(mime_type.decode("utf8", "replace") if mime_type != NULL else "", fd)
++        target = mime_type.decode("utf8", "replace") if mime_type != NULL else ""
++        transferred = True
++        owner.send(target, fd)
+     except Exception:
+         log.error("Error sending primary selection contents", exc_info=True)
+-        try:
+-            os.close(fd)
+-        except OSError:
+-            pass
++    finally:
++        if not transferred:
++            try:
++                os.close(fd)
++            except OSError:
++                pass
+ 
+ 
+ cdef void primary_source_destroy(wlr_primary_selection_source *source) noexcept:
+@@ -190,7 +200,7 @@ cdef class WaylandSelectionSource:
          if proxy is None:
              os.close(fd)
              return
@@ -1082,7 +2165,7 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
  
  
  cdef class WaylandPrimarySource:
-@@ -241,7 +240,7 @@ cdef class WaylandPrimarySource:
+@@ -241,7 +251,7 @@ cdef class WaylandPrimarySource:
          if proxy is None:
              os.close(fd)
              return
@@ -1091,7 +2174,7 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
  
  
  cdef class WaylandSelection:
-@@ -258,6 +257,7 @@ cdef class WaylandSelection:
+@@ -258,6 +268,7 @@ cdef class WaylandSelection:
              return
          serial = wl_display_next_serial(self.display)
          wlr_seat_set_selection(self.seat, source.source, serial)
@@ -1099,7 +2182,7 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
  
      def clear(self) -> None:
          cdef uint32_t serial
-@@ -265,6 +265,7 @@ cdef class WaylandSelection:
+@@ -265,6 +276,7 @@ cdef class WaylandSelection:
              return
          serial = wl_display_next_serial(self.display)
          wlr_seat_set_selection(self.seat, NULL, serial)
@@ -1107,20 +2190,23 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
  
      def source_targets(self, uintptr_t source_ptr) -> tuple:
          cdef wlr_data_source *source = <wlr_data_source*> source_ptr
-@@ -275,10 +276,11 @@ cdef class WaylandSelection:
+@@ -275,10 +287,12 @@ cdef class WaylandSelection:
      def send_source(self, uintptr_t source_ptr, str target, int fd) -> None:
          cdef bytes mime = bstr(target)
          cdef wlr_data_source *source = <wlr_data_source*> source_ptr
 -        if source == NULL:
+-            os.close(fd)
 +        if source == NULL or self.display == NULL:
-             os.close(fd)
              return
-         wlr_data_source_send(source, <const char*> mime, fd)
+-        wlr_data_source_send(source, <const char*> mime, fd)
++        # wlroots transfers ownership to the source implementation, which
++        # closes this duplicate.  The caller still owns its original FD.
++        wlr_data_source_send(source, <const char*> mime, os.dup(fd))
 +        wl_display_flush_clients(self.display)
  
  
  cdef class WaylandPrimarySelection:
-@@ -295,6 +297,7 @@ cdef class WaylandPrimarySelection:
+@@ -295,6 +309,7 @@ cdef class WaylandPrimarySelection:
              return
          serial = wl_display_next_serial(self.display)
          wlr_seat_set_primary_selection(self.seat, source.source, serial)
@@ -1128,7 +2214,7 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
  
      def clear(self) -> None:
          cdef uint32_t serial
-@@ -302,6 +305,7 @@ cdef class WaylandPrimarySelection:
+@@ -302,6 +317,7 @@ cdef class WaylandPrimarySelection:
              return
          serial = wl_display_next_serial(self.display)
          wlr_seat_set_primary_selection(self.seat, NULL, serial)
@@ -1136,15 +2222,16 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
  
      def source_targets(self, uintptr_t source_ptr) -> Tuple:
          cdef wlr_primary_selection_source *source = <wlr_primary_selection_source*> source_ptr
-@@ -312,16 +316,17 @@ cdef class WaylandPrimarySelection:
+@@ -312,16 +328,16 @@ cdef class WaylandPrimarySelection:
      def send_source(self, uintptr_t source_ptr, str target, int fd) -> None:
          cdef bytes mime = bstr(target)
          cdef wlr_primary_selection_source *source = <wlr_primary_selection_source*> source_ptr
 -        if source == NULL:
+-            os.close(fd)
 +        if source == NULL or self.display == NULL:
-             os.close(fd)
              return
-         wlr_primary_selection_source_send(source, <const char*> mime, fd)
+-        wlr_primary_selection_source_send(source, <const char*> mime, fd)
++        wlr_primary_selection_source_send(source, <const char*> mime, os.dup(fd))
 +        wl_display_flush_clients(self.display)
  
  
@@ -1156,7 +2243,7 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
      }
  
      def __init__(self, selection, compositor):
-@@ -329,57 +334,89 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
+@@ -329,57 +345,112 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
          GObject.GObject.__init__(self)
          self.compositor = compositor
          self.selection_api = WaylandPrimarySelection(compositor.get_display_ptr(), compositor.get_seat_ptr())
@@ -1172,8 +2259,11 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
          self.pending_reads = {}
 -        self.pending_writes = defaultdict(list)
 -        compositor.connect("primary-selection", self.primary_selection_changed)
++        self.pending_read_timers = {}
 +        self.pending_read_counter = 0
++        self.read_limit = lambda: MAX_CLIPBOARD_PACKET_SIZE
 +        self.pending_writes = {}
++        self.pending_write_sources = {}
 +        self.pending_write_counter = 0
 +        self.compositor_handler = compositor.connect(
 +            "primary-selection", self.primary_selection_changed,
@@ -1182,6 +2272,26 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
      def __repr__(self):
          return "WaylandPrimaryClipboardProxy(%s)" % self._selection
  
++    def set_enabled(self, enabled: bool) -> None:
++        revoked = self._enabled and not enabled
++        super().set_enabled(enabled)
++        if revoked:
++            self.client_reset()
++
++    def set_direction(self, can_send: bool, can_receive: bool) -> None:
++        send_revoked = self._can_send and not can_send
++        receive_revoked = self._can_receive and not can_receive
++        super().set_direction(can_send, can_receive)
++        # The other direction keeps its current owner and transfers. In
++        # particular, becoming receive-only must not clear received contents.
++        if send_revoked:
++            self.local_generation += 1
++            self.cancel_pending_reads()
++        if receive_revoked:
++            self.remote_generation += 1
++            self.cancel_pending_writes()
++            self.clear_remote_source()
++
      def cleanup(self) -> None:
 +        if self.closing:
 +            return
@@ -1268,7 +2378,7 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
                  return
              origin = bytestostr(data) if dformat == 8 and data else ""
              if len(origin) > MAX_ORIGIN_SIZE:
-@@ -395,10 +432,65 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
+@@ -395,16 +466,81 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
              self.do_owner_changed()
  
      def primary_source_destroyed(self, source) -> None:
@@ -1309,6 +2419,8 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
 +                continue
 +            self.pending_reads.pop(read_key, None)
 +            GLib.source_remove(source_id)
++            if timer := self.pending_read_timers.pop(read_key, 0):
++                GLib.source_remove(timer)
 +            try:
 +                os.close(rfd)
 +            except OSError:
@@ -1322,19 +2434,33 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
 +
 +    def cancel_pending_writes(self, source=None) -> None:
 +        for write_key, pending in tuple(self.pending_writes.items()):
-+            pending_source, _generation, _target, fd = pending
++            pending_source, _generation, _target, _fd = pending
 +            if source is not None and pending_source is not source:
 +                continue
-+            self.pending_writes.pop(write_key, None)
++            self.finish_pending_write(write_key)
++
++    def finish_pending_write(self, write_key: int) -> None:
++        pending = self.pending_writes.pop(write_key, None)
++        for source_id in self.pending_write_sources.pop(write_key, ()):
++            GLib.source_remove(source_id)
++        if pending is not None:
 +            try:
-+                os.close(fd)
++                os.close(pending[3])
 +            except OSError:
 +                pass
 +
      def do_owner_changed(self) -> None:
          if not self._enabled:
              return
-@@ -412,16 +504,26 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
+         self.schedule_emit_token()
+ 
+     def schedule_emit_token(self, min_delay=0) -> None:
++        if self.closing or not self._enabled or not self._can_send:
++            return
+         self._have_token = False
+         targets = self.targets if (self._want_targets or self._greedy_client) else ()
+         if not self._greedy_client:
+@@ -412,19 +548,33 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
              return
          eager_targets = self.get_eager_targets(targets)
          source_ptr = self.local_source_ptr
@@ -1343,6 +2469,7 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
 +        def generation_is_current() -> bool:
 +            return (
 +                not self.closing
++                and self._enabled and self._can_send
 +                and generation == self.local_generation
 +                and source_ptr == self.local_source_ptr
 +            )
@@ -1363,54 +2490,114 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
  
      def get_contents(self, target: str, got_contents: ClipboardCallback) -> None:
          log("get_contents(%s, %s) source=%#x", target, got_contents, self.local_source_ptr)
-@@ -436,29 +538,43 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
++        if self.closing or not self._enabled or not self._can_send:
++            got_contents("", 0, b"")
++            return
+         if target == "TARGETS":
+             got_contents("ATOM", 32, self.targets)
+             return
+@@ -436,34 +586,87 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
          if not source_ptr or source_ptr == self.remote_source_ptr:
              got_contents(target, 0, b"")
              return
 +        generation = self.local_generation
++        max_size = MAX_ORIGIN_SIZE if target == ORIGIN_MIME_TYPE else self.read_limit()
          rfd, wfd = os.pipe()
-         os.set_blocking(rfd, False)
+-        os.set_blocking(rfd, False)
          data = bytearray()
 +        read_key = self.pending_read_counter
 +        self.pending_read_counter += 1
- 
-         def io_callback(fd, condition):
++        read_registered = False
++
++        def finish_read(valid: bool) -> None:
 +            pending = self.pending_reads.pop(read_key, None)
 +            if pending is None:
-+                return False
-             if condition & GLib.IO_IN:
-                 try:
-                     chunk = os.read(fd, 65536)
-                 except BlockingIOError:
-+                    self.pending_reads[read_key] = pending
-                     return True
-                 if chunk:
-                     data.extend(chunk)
-+                    self.pending_reads[read_key] = pending
-                     return True
--            self.pending_reads.pop(fd, None)
-             try:
-                 os.close(fd)
-             except OSError:
-                 pass
--            got_contents(target, 8, bytes(data))
++                return
++            GLib.source_remove(pending[3])
++            if timer := self.pending_read_timers.pop(read_key, 0):
++                GLib.source_remove(timer)
++            try:
++                os.close(pending[2])
++            except OSError:
++                pass
 +            if (
-+                not self.closing
++                valid
++                and not self.closing
 +                and generation == self.local_generation
 +                and source_ptr == self.local_source_ptr
 +            ):
 +                got_contents(target, 8, bytes(data))
 +            else:
 +                got_contents("", 0, b"")
+ 
+         def io_callback(fd, condition):
++            if read_key not in self.pending_reads:
++                return False
++            if condition & (GLib.IO_ERR | GLib.IO_NVAL):
++                finish_read(False)
++                return False
+             if condition & GLib.IO_IN:
+                 try:
+                     chunk = os.read(fd, 65536)
+-                except BlockingIOError:
++                except (BlockingIOError, InterruptedError):
+                     return True
++                except OSError:
++                    finish_read(False)
++                    return False
+                 if chunk:
++                    if max_size >= 0 and len(data) + len(chunk) > max_size:
++                        log.warn("Warning: native Wayland clipboard data exceeds its size limit")
++                        finish_read(False)
++                        return False
+                     data.extend(chunk)
+                     return True
+-            self.pending_reads.pop(fd, None)
+-            try:
+-                os.close(fd)
+-            except OSError:
+-                pass
+-            got_contents(target, 8, bytes(data))
++            finish_read(True)
++            return False
++
++        def read_timeout():
++            log.warn("Warning: native Wayland clipboard source timed out")
++            finish_read(False)
              return False
  
-         source_id = GLib.io_add_watch(rfd, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, io_callback)
+-        source_id = GLib.io_add_watch(rfd, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, io_callback)
 -        self.pending_reads[rfd] = (data, source_id, got_contents)
-+        self.pending_reads[read_key] = (generation, source_ptr, rfd, source_id, got_contents)
-         self.selection_api.send_source(source_ptr, target, wfd)
+-        self.selection_api.send_source(source_ptr, target, wfd)
          try:
++            os.set_blocking(rfd, False)
++            source_id = GLib.io_add_watch(
++                rfd, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR | GLib.IO_NVAL, io_callback,
++            )
++            self.pending_reads[read_key] = (generation, source_ptr, rfd, source_id, got_contents)
++            read_registered = True
++            self.pending_read_timers[read_key] = GLib.timeout_add(REMOTE_TIMEOUT, read_timeout)
++            self.selection_api.send_source(source_ptr, target, wfd)
++        except Exception:
++            # Release the still-owned write side before a completion can
++            # re-enter and allocate another descriptor with its old number.
              os.close(wfd)
-@@ -483,33 +599,60 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
+-        except OSError:
+-            pass
++            wfd = -1
++            if read_registered:
++                finish_read(False)
++            else:
++                os.close(rfd)
++                got_contents("", 0, b"")
++            raise
++        finally:
++            if wfd >= 0:
++                os.close(wfd)
+ 
+     def got_token(self, targets, target_data=None, claim=True, _synchronous_client=False) -> None:
+         self.cancel_emit_token()
+@@ -483,49 +686,122 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
          if not claim or not self._can_receive:
              return
          if not has_contents:
@@ -1431,40 +2618,24 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
  
 -    def send_remote_contents(self, target: str, fd: int, target_data=None) -> None:
 +    def send_remote_contents(self, source, target: str, fd: int, target_data=None) -> None:
-+        if self.closing or source is not self.remote_source:
++        if self.closing or not self._enabled or not self._can_receive or source is not self.remote_source:
 +            try:
 +                os.close(fd)
 +            except OSError:
 +                pass
 +            return
-         if target_data and target in target_data:
--            dtype, dformat, data = target_data[target]
-+            _dtype, _dformat, data = target_data[target]
-             self.write_fd(fd, data)
-             return
--        self.pending_writes[target].append(fd)
--        self.emit("send-clipboard-request", self._selection, target)
 +        write_key = self.pending_write_counter
 +        self.pending_write_counter += 1
 +        generation = self.remote_generation
 +        self.pending_writes[write_key] = (source, generation, target, fd)
-+
-+        def got_remote_contents(_dtype="", _dformat=0, data=b"") -> None:
-+            pending = self.pending_writes.pop(write_key, None)
-+            if pending is None:
-+                return
-+            pending_source, pending_generation, _pending_target, pending_fd = pending
-+            if (
-+                self.closing
-+                or pending_source is not self.remote_source
-+                or pending_generation != self.remote_generation
-+            ):
-+                try:
-+                    os.close(pending_fd)
-+                except OSError:
-+                    pass
-+                return
-+            self.write_fd(pending_fd, data or b"")
+         if target_data and target in target_data:
+-            dtype, dformat, data = target_data[target]
+-            self.write_fd(fd, data)
++            _dtype, _dformat, data = target_data[target]
++            self.write_fd(write_key, data)
+             return
+-        self.pending_writes[target].append(fd)
+-        self.emit("send-clipboard-request", self._selection, target)
  
 -    def got_contents(self, target: str, dtype="", dformat=0, data=b"") -> None:
 -        if target == "TARGETS" and data:
@@ -1472,20 +2643,109 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
 -        fds = self.pending_writes.pop(target, ())
 -        for fd in fds:
 -            self.write_fd(fd, data or b"")
++        def got_remote_contents(_dtype="", _dformat=0, data=b"") -> None:
++            pending = self.pending_writes.get(write_key)
++            if pending is None:
++                return
++            pending_source, pending_generation, _pending_target, _pending_fd = pending
++            if (
++                self.closing
++                or pending_source is not self.remote_source
++                or pending_generation != self.remote_generation
++            ):
++                self.finish_pending_write(write_key)
++                return
++            self.write_fd(write_key, data or b"")
+ 
+-    @staticmethod
+-    def write_fd(fd: int, data) -> None:
 +        try:
 +            self.emit("send-clipboard-request", self._selection, target, got_remote_contents)
 +        except Exception:
-+            pending = self.pending_writes.pop(write_key, None)
-+            if pending is not None:
-+                try:
-+                    os.close(pending[3])
-+                except OSError:
-+                    pass
++            self.finish_pending_write(write_key)
++            raise
++
++    def write_fd(self, write_key: int, data) -> None:
++        pending = self.pending_writes.get(write_key)
++        if pending is None:
++            return
++        fd = pending[3]
+         try:
+             if isinstance(data, str):
+                 data = data.encode("utf8")
+-            elif isinstance(data, memoryview):
+-                data = bytes(data)
+-            os.write(fd, data or b"")
+-        except OSError:
+-            pass
+-        finally:
++            elif not isinstance(data, bytes):
++                # Byte offsets must not become element offsets for a typed
++                # or strided view.  Own a stable snapshot while output waits.
++                data = bytes(memoryview(data or b""))
++            data = memoryview(data)
++            os.set_blocking(fd, False)
++        except Exception:
++            self.finish_pending_write(write_key)
++            raise
++        offset = 0
++
++        def write_ready(_fd, condition):
++            nonlocal offset
++            current = self.pending_writes.get(write_key)
++            if current is None:
++                return False
++            source, generation, _target, current_fd = current
++            if (
++                self.closing
++                or source is not self.remote_source
++                or generation != self.remote_generation
++                or condition & (GLib.IO_HUP | GLib.IO_ERR | GLib.IO_NVAL)
++            ):
++                self.finish_pending_write(write_key)
++                return False
+             try:
+-                os.close(fd)
++                # One bounded nonblocking write per dispatch keeps the main
++                # loop responsive even when a native consumer stops reading.
++                if offset < len(data):
++                    written = os.write(current_fd, data[offset:offset + 65536])
++                    if written <= 0:
++                        self.finish_pending_write(write_key)
++                        return False
++                    offset += written
++            except (BlockingIOError, InterruptedError):
++                return True
+             except OSError:
+-                pass
++                self.finish_pending_write(write_key)
++                return False
++            if offset == len(data):
++                self.finish_pending_write(write_key)
++                return False
++            return True
++
++        def write_timeout():
++            log.warn("Warning: native Wayland clipboard consumer timed out")
++            self.finish_pending_write(write_key)
++            return False
++
++        if not write_ready(fd, GLib.IO_OUT):
++            return
++        try:
++            watch = GLib.io_add_watch(
++                fd, GLib.IO_OUT | GLib.IO_HUP | GLib.IO_ERR | GLib.IO_NVAL, write_ready,
++            )
++            self.pending_write_sources[write_key] = (watch,)
++            timer = GLib.timeout_add(REMOTE_TIMEOUT, write_timeout)
++            self.pending_write_sources[write_key] = (watch, timer)
++        except Exception:
++            self.finish_pending_write(write_key)
 +            raise
  
-     @staticmethod
-     def write_fd(fd: int, data) -> None:
-@@ -535,26 +678,48 @@ class WaylandClipboardProxy(WaylandPrimaryClipboardProxy):
+ 
+ class WaylandClipboardProxy(WaylandPrimaryClipboardProxy):
+@@ -535,26 +811,51 @@ class WaylandClipboardProxy(WaylandPrimaryClipboardProxy):
          GObject.GObject.__init__(self)
          self.compositor = compositor
          self.selection_api = WaylandSelection(compositor.get_display_ptr(), compositor.get_seat_ptr())
@@ -1501,8 +2761,11 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
          self.pending_reads = {}
 -        self.pending_writes = defaultdict(list)
 -        compositor.connect("selection", self.selection_changed)
++        self.pending_read_timers = {}
 +        self.pending_read_counter = 0
++        self.read_limit = lambda: MAX_CLIPBOARD_PACKET_SIZE
 +        self.pending_writes = {}
++        self.pending_write_sources = {}
 +        self.pending_write_counter = 0
 +        self.compositor_handler = compositor.connect("selection", self.selection_changed)
 +
@@ -1538,7 +2801,7 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
              return
          self.local_source_changed(source_ptr)
  
-@@ -576,14 +741,12 @@ class WaylandClipboardProxy(WaylandPrimaryClipboardProxy):
+@@ -576,14 +877,12 @@ class WaylandClipboardProxy(WaylandPrimaryClipboardProxy):
          if not claim or not self._can_receive:
              return
          if not has_contents:
@@ -1555,7 +2818,7 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
          self.remote_source = source
          self.remote_source_ptr = source.ptr()
          self.selection_api.set_source(source)
-@@ -609,6 +772,11 @@ class WaylandClipboard(ClipboardTimeoutHelper):
+@@ -609,6 +908,27 @@ class WaylandClipboard(ClipboardTimeoutHelper):
      def __repr__(self):
          return "WaylandClipboard"
  
@@ -1564,9 +2827,33 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..d5dbfaae774113111c46e419b049bb76
 +        for proxy in self._clipboard_proxies.values():
 +            proxy.client_reset()
 +
++    def set_direction(self, can_send: bool, can_receive: bool,
++                      max_send_size: int | None = None, max_receive_size: int | None = None) -> None:
++        receive_revoked = self.can_receive and not can_receive
++        super().set_direction(can_send, can_receive, max_send_size, max_receive_size)
++        if receive_revoked:
++            # Native proxies have already retired the revoked consumers.
++            # Release their wire timers without resetting the allowed direction.
++            self._drain_clipboard_requests()
++
++    def native_read_limit(self) -> int:
++        # Explicit send-size policy truncates before the packet-size check and
++        # records the total truncated count.  Preserve that established path.
++        if self.max_clipboard_send_size > 0:
++            return -1
++        return self.max_clipboard_packet_size
++
      def make_proxy(self, selection):
          if selection == "CLIPBOARD" and self.compositor is not None:
              proxy = WaylandClipboardProxy(selection, self.compositor)
+@@ -617,6 +937,7 @@ class WaylandClipboard(ClipboardTimeoutHelper):
+         else:
+             raise RuntimeError(f"unsupported Wayland clipboard selection: {selection!r}")
+         proxy.set_want_targets(self.proxy_want_targets(selection))
++        proxy.read_limit = self.native_read_limit
+         proxy.set_direction(self.can_send, self.can_receive)
+         proxy.connect("send-clipboard-token", self._send_clipboard_token_handler)
+         proxy.connect("send-clipboard-request", self._send_clipboard_request_handler)
 diff --git a/xpra/wayland/server/compositor.pyx b/xpra/wayland/server/compositor.pyx
 index a65d9363f033613d5ad60c3e5b0fe2216b070393..79d1547be85312f8046b86a4da13f023c30e9fab 100644
 --- a/xpra/wayland/server/compositor.pyx

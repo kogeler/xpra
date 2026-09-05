@@ -67,6 +67,15 @@ clears only its still-owned remote source, and disconnects the exact callback
 from the compositor's custom event registry. These same boundaries govern
 replacement, reset, disconnect and teardown, not only initial synchronization.
 
+The server manager separately owns the peer lifetime. It rejects a status
+change from another peer before changing the owner's enabled flag. Deferred
+clipboard packets revalidate the peer, helper, protocol, clipboard enablement,
+readonly policy and manager generation on main-loop execution. Reset, peer
+handoff and direct enablement controls invalidate previously admitted work,
+including a handoff away from and back to the same peer. Packet-ordered status
+changes instead serialize with the following data without invalidating fresh
+packets already queued behind an enable notification.
+
 The case has no other downstream production dependency. Its positive live
 gate installs the selected case at both endpoints because client event
 delivery and server publication/request ownership are both required to prove
@@ -115,6 +124,7 @@ clipboard object:
 | Layer | Responsibility |
 | --- | --- |
 | `xpra/client/subsystem/clipboard.py` | Selects the platform helper, intersects client/server direction policy, configures selections, greedy and target policy, starts initial token synchronization, and transports packets. |
+| `xpra/server/subsystem/clipboard.py` | Owns server peer admission, status changes, deferred-packet generation checks and helper reset before peer handoff. Readonly, current protocol/source and clipboard enablement are checked again when deferred work executes. |
 | `xpra/platform/posix/clipboard.py` | Chooses `X11Clipboard` when X11 bindings are active and otherwise falls back to the generic GTK helper. |
 | `xpra/x11/selection/clipboard.py` | Owns the raw event window, Xpra receiver registration, XFixes subscriptions, proxies, filter lease, and cleanup ordering. |
 | `xpra/x11/selection/proxy.py` | Implements local owner-change state, X selection conversions, target/data caches, token scheduling, generation invalidation, and remote-selection ownership. |
@@ -411,8 +421,8 @@ merged or drained with one generic callback loop:
 | --- | --- | --- |
 | Proxy `_emit_token_timer` and `_block_owner_change` | Deferred local-owner announcement and the short loop-prevention embargo. | `ClipboardProxyCore.cleanup` removes both GLib sources. |
 | Helper `_clipboard_outstanding_requests` | A `clipboard-request` already sent over the Xpra connection, keyed by wire request ID and guarded by `REMOTE_TIMEOUT`; a record may also own one request-specific completion callback. | `ClipboardTimeoutHelper` consumes `clipboard-contents` / `clipboard-contents-none`, removes the timer, and calls that exact callback when present or the legacy selected proxy otherwise.  Reset and cleanup drain each still-live ID once as empty while a guard makes re-entrant requests complete locally instead of recreating network work. |
-| Wayland proxy `pending_writes` | One native consumer FD waiting for the response to one exact remote request.  Its unique local key records the Python source identity, remote generation, target, and FD; it is never a target-wide fan-out table. | The request-bound helper callback atomically pops only its key.  It writes only if source identity and generation are still current; source destruction or cleanup first pops and closes the FD, making a late response harmless even after numeric FD reuse. |
-| Wayland proxy `pending_reads` | One asynchronous pipe read from a native source, keyed independently of its numeric FD and bound to the local source pointer and monotonic ownership generation. | EOF returns data only for the still-current pointer/generation.  Replacement removes the GLib watch, closes the read FD, and empty-completes once; cleanup retires it without starting replacement work. |
+| Wayland proxy `pending_writes` and `pending_write_sources` | One native consumer FD waiting for one exact remote request or draining cached/replied bytes. Its unique key records source identity, remote generation, target, and FD; active output also owns a GLib write watch and deadline. | Ownership lasts through complete nonblocking delivery. Each readiness callback resolves its key and rechecks source/generation. Completion, source destruction, reset, cleanup, I/O failure, or deadline retires the key, FD, watch, and timer once; later callbacks cannot reach a reused FD. |
+| Wayland proxy `pending_reads` and `pending_read_timers` | One asynchronous native-source pipe read, keyed independently of its FD and bound to the source pointer and ownership generation, with a request deadline. | EOF returns data only for the current pointer/generation. Replacement, deadline, size failure, or I/O failure retires the watch, timer, and FD and empty-completes once; cleanup retires without starting replacement work. |
 | X11 proxy `remote_requests` | One or more local X11 `SelectionRequest` consumers waiting for a target which Xpra must fetch from its remote peer.  Requests for the same target share one wire request. | `got_contents` writes each requestor property and sends `SelectionNotify`; proxy cleanup gives every still-attached requestor one empty response, then clears the table.  There is no independent timer in this table. |
 | X11 proxy `local_requests` | Xpra's own `XConvertSelection` operations against the current local X11 owner, keyed by target and local request generation. | Routed `PropertyNotify` or `CONVERT_TIMEOUT` completes the callback.  Cleanup atomically detaches the table and removes its GLib sources without calling those callbacks. |
 | X11 proxy `incr_data_*` and `incr_data_timer` | The currently accumulated incremental property transfer for a local X11 conversion. | Every chunk refreshes the one-second watchdog.  Completion or an error cancels the source before resetting the fields; cleanup does the same. |
@@ -466,6 +476,12 @@ Direction policy remains layered rather than inferred from event presence:
 - `off` disables helper transport entirely;
 - an XFixes event can still be observed while the proxy correctly declines to
   send because `_can_send` is false.
+
+The server uses the opposite send/receive orientation: `to-server` permits
+receiving and `to-client` permits sending. Runtime `clipboard-direction`
+control uses the same predicates as initial helper construction. Applying the
+client orientation in that server command would silently reverse one-way
+policy after startup.
 
 ## Cross-peer token, request, and data flow
 
@@ -571,10 +587,10 @@ own the publication boundary for every operation they enqueue:
 | --- | --- | --- | --- |
 | `CLIPBOARD` | `WaylandSelection.set_source` | Installs Xpra's wlroots data source and queues the new standard data-device offer/selection. | Allocate the replacement and publish its proxy identity/generation first.  The seat setter may synchronously destroy the old source; after it installs the replacement and queues its signal/offer, flush before returning. |
 | `CLIPBOARD` | `WaylandSelection.clear` | Replaces the seat selection with NULL and queues cancellation of the old offer. | Invoke only while the seat still owns this proxy's source.  wlroots synchronously destroys that old source inside the setter, installs NULL and queues its signal/offer; flush after the setter returns.  An explicit wrapper destroy is then only an idempotent fallback for an unavailable seat/display. |
-| `CLIPBOARD` | `WaylandSelection.send_source` | Requests the selected MIME from a native standard data source using the supplied pipe FD. | Call the source send API, flush the request while the source and FD are valid, then let the caller close its local write descriptor. |
+| `CLIPBOARD` | `WaylandSelection.send_source` | Requests the selected MIME using a duplicate of the borrowed pipe FD. | Transfer the duplicate to wlroots, flush the queued request, then let the caller close its independently owned original descriptor. |
 | `PRIMARY` | `WaylandPrimarySelection.set_source` | Installs Xpra's primary-selection source and queues its offer. | Publish the replacement identity/generation, call the primary setter which may synchronously destroy the old source, then flush the installed offer. |
 | `PRIMARY` | `WaylandPrimarySelection.clear` | Replaces the primary selection with NULL and queues cancellation of its offer. | Apply the same synchronous destroy → NULL/install-and-signal → post-call flush order, with the same idempotent explicit-destroy fallback. |
-| `PRIMARY` | `WaylandPrimarySelection.send_source` | Requests a MIME from a native primary-selection source through its pipe FD. | Send, flush while the request resources are live, then close through the existing caller ownership path. |
+| `PRIMARY` | `WaylandPrimarySelection.send_source` | Requests a MIME using a duplicate of the borrowed pipe FD. | Transfer the duplicate, flush the queued request, then close the independently owned original through the caller. |
 
 This symmetry matters even though the live fixture asserts standard
 `CLIPBOARD`.  Both proxy classes share the same lifecycle and either selection
@@ -635,8 +651,10 @@ fixed-marker metadata, and the bounded event order.  `owner-set`, a successful
 self-read before the compositor response, or a sleep after `set_text` is never
 equivalent evidence.
 
-Under `both`, the confirmed native source must subsequently create the third
-XFixes takeover and satisfy the raw reverse conversion.  Under `to-server` and
+Under `both`, the native source must also create the third XFixes takeover and
+satisfy the raw reverse conversion. Native GTK confirmation and remote XFixes
+delivery are independent consequences of that source transition; their order
+relative to each other is not fixed. Under `to-server` and
 `off`, confirmation proves that the Wayland compositor accepted an independent
 native owner even though policy forbids Xpra from taking the X11 selection;
 the XFixes monitor must remain at exactly the two local same-XID updates.  This
@@ -652,8 +670,8 @@ source pointer, API attempt or stale cached value alone:
 
 | Policy and phase | Required ordered transition | Independent authority |
 | --- | --- | --- |
-| `both` or `to-server`, forward | Same-XID X11 owner update and advancing timestamp, local target/data conversion, accepted token, replacement Wayland source, outbound flush, then native sink equality for that generation. | A new server pointer cannot substitute for delivery of its current offer; repeating the initial marker must establish a later generation rather than reuse the first read. |
-| `both`, reverse | F8 input callback, standard seat source installation, native `owner-confirmed`, third XFixes takeover by the Xpra event window, then exact raw X11 reverse conversion. | The native owner's on-demand request must itself be flushed by `send_source`; successful ownership on both peers alone does not prove data delivery. |
+| `both` or `to-server`, forward | Same-XID X11 owner update and advancing timestamp, accepted token, replacement Wayland source and outbound flush, then native sink equality for that generation. | Raw local target/data conversion independently checks each update after its source-publication barrier and before paste; it is not a publication prerequisite. A new server pointer cannot substitute for delivery of its current offer; repeating the initial marker must establish a later generation rather than reuse the first read. |
+| `both`, reverse | F8 input callback, standard seat source installation, native `owner-confirmed` and third XFixes takeover, then exact raw X11 conversion. | Confirmation and takeover are independently delivered observations; neither must precede the other. Both precede conversion, whose native on-demand request must itself be flushed. |
 | `to-server`, reverse control | F8 and native owner confirmation, followed by an unchanged original X11 owner and exactly the two local same-XID monitor events. | Local Wayland ownership completes while direction policy forbids a reverse Xpra claim. |
 | `off`, both directions | All forward reads remain absent; F8 still produces a compositor-accepted native owner, while the original X11 owner and its two local transitions remain unchanged. | With no forwarding helper, the standard compositor listener path must independently complete before blocked transfer can count as policy proof. |
 
@@ -662,6 +680,29 @@ requested transfer is still pending does not satisfy that transfer. Likewise,
 a broken pipe after an ownership timeout and forced teardown is not successful
 `off` behavior. Every scenario retains the zero-length fixture-stderr contract;
 neither warning is environmental noise to discard or allowlist.
+
+Runtime policy changes are also transfer-lifetime boundaries. Disabling the
+owner's clipboard drains outstanding helper requests. Selection disablement
+retires native read/write generations and the still-owned remote source.
+Direction revocation retires only the affected side: loss of send cancels local
+reads; loss of receive cancels remote requests/writes and clears only the
+still-owned remote source. A newer independent native owner, the still-allowed
+direction and pure permission expansion remain intact. Repeated identical
+settings preserve valid transfers. Re-enabling follows the existing client
+selection/token handshake; an old request ID cannot complete a new consumer.
+
+Status and data packets enter one ordered GLib queue. Native policy teardown
+runs only on the UI thread, after revalidating the admitted connection, helper,
+owner epoch and readonly state. A packet-ordered status change does not advance
+that admission epoch: doing so would discard fresh selection/data packets
+already queued behind an enable notification. External reset, owner changes
+and direct policy controls still invalidate their older queued work.
+
+Native acquisition and eager-token publication require enabled send permission.
+Setting only `claim=False` is insufficient: an eager packet can still contain
+clipboard bytes. Incoming remote-source service independently requires receive
+permission. Runtime `to-server` therefore allows the server to receive, while
+`to-client` allows it to send, exactly as during startup.
 
 ### Source and cleanup ordering
 
@@ -697,8 +738,9 @@ only when the adapter had no live seat/display and therefore could not perform
 the clear.  This is not a fictional clear → flush → destroy sequence: the
 wlroots setter owns synchronous destruction.
 
-Each remote source-send request receives its own local `write_key` and helper
-completion.  The pending record stores the exact source object, remote
+Each remote source-send request receives its own local `write_key`; a request
+without cached bytes also receives its own helper completion. The pending
+record stores the exact source object, remote
 generation, target, and FD.  Source destruction or cleanup atomically removes
 and closes matching records; a response/timeout then finds no key and performs
 no I/O.  The closure never captures a raw FD as its authority, so OS-level FD
@@ -706,6 +748,19 @@ reuse cannot redirect an old response into a new source.  Keeping the wire
 request alive until response or the bounded `REMOTE_TIMEOUT` is safe because
 its local callback has already become a no-op; immediate network cancellation
 would require a separate packet/API contract and is not invented here.
+
+Delivery retains that same key after the wire response arrives and for cached
+token bytes. One blocking `os.write` can stall the compositor when a native
+consumer pauses, and one nonblocking write can return only a prefix. Output
+therefore makes the FD nonblocking, performs at most one 64 KiB write per
+dispatch, preserves the remaining offset, and waits on `GLib.IO_OUT` when
+needed. The source/generation check runs before every write. A separate output
+deadline uses the existing `REMOTE_TIMEOUT` budget; completion, timeout, I/O
+failure and source/reset/cleanup cancellation remove both sources and close
+the FD once. No polling or background write thread is involved.
+Non-byte buffer inputs are first copied into immutable contiguous bytes, so a
+typed or strided memoryview has byte-based offsets and later mutation cannot
+change a transfer already in progress.
 
 Each native-source read similarly receives a unique `read_key` and records the
 local generation, source pointer, read FD, GLib watch, and callback.  Every
@@ -715,6 +770,19 @@ once; EOF can return accumulated bytes only while both generation and pointer
 remain current.  Origin reads and every step of eager sequential collection
 use the same predicate, so cancellation cannot make an old collector request
 its next target from a new owner which happens to reuse the pointer.
+
+A native producer also has a `REMOTE_TIMEOUT` deadline, so an owner which never
+closes its pipe cannot leave an origin lookup or paste request alive forever.
+An `IO_IN | IO_HUP` notification drains queued bytes before EOF completion;
+I/O errors return an empty result instead of partial contents. Origin data is
+rejected as soon as it exceeds the existing 64-byte `MAX_ORIGIN_SIZE`. Other
+untruncated reads use the helper's current `max_clipboard_packet_size`, which
+the wire helper checks before compression. Explicit positive `max-send-size`
+policy retains the existing full read followed by prefix truncation and exact
+discarded-byte accounting; the native deadline still applies. It deliberately
+does not impose a smaller data cap which would reject that configured policy.
+Nonblocking configuration, watch, timer and adapter setup failures close both owned
+pipe ends and complete once. A closing proxy cannot start a new read.
 
 Cleanup first marks the proxy closing and advances both generations, preventing
 new reads, writes, or selection callbacks.  It cancels core timers, pipe
@@ -726,10 +794,22 @@ signal API: `connect` returns the exact opaque handler registration consumed by
 callback removed during lifecycle work cannot skip an unrelated peer.
 Repeated cleanup is a no-op.
 
-On a NULL native source or unavailable display, `send_source` closes the
-supplied FD and returns; the caller's guarded close tolerates that handoff.
-With a valid source it queues the source request and flushes before the caller
-closes its write side; the read watch owns and closes its separate descriptor.
+The selection adapters borrow the supplied FD on every path, including a NULL
+source or unavailable display. For a valid source they duplicate it before
+calling wlroots: the source implementation owns and closes that duplicate,
+while the read caller closes its original once after the adapter returns.
+The [wlroots source-send contract](https://wlroots.pages.freedesktop.org/wlroots/wlr/types/wlr_data_device.h.html#wlr_data_source_send)
+already assigns closure to the source implementation. Closing that same numeric
+FD again after the send/flush risks closing an unrelated descriptor which
+reused its number; catching `OSError` cannot make that second close safe. The
+read watch independently owns and closes the read descriptor.
+
+In the opposite adapter direction, wlroots calls Xpra's native source-send
+callback with an owned consumer FD. That callback closes only lookup/decode
+failures before handing the FD to the Python source wrapper. After invoking
+`source.send`, the wrapper/proxy owns closure even if it raises. The native
+callback logs such an exception without closing that numeric FD again, because
+the writer may already have closed it and another operation may have reused it.
 Ordinary and primary sources follow the same set/clear/send and generation
 rules, but the standard listener lifetime must not be inferred from whether
 the optional primary or data-control managers were created.  Compositor
@@ -948,6 +1028,27 @@ terminal once, and `client_reset` must remove every timer, empty-complete every
 detached callback once, and prevent a callback from creating re-entrant wire
 work while the drain guard is active.
 
+`unit.server.subsystem.clipboard_test` exercises the real server manager with
+controlled peers, deferred callbacks and a helper stand-in. Another peer's
+status packets cannot mutate the owner's flag. A current admitted packet
+executes once, and a repeated same-owner notification preserves it. The same
+deferred packet is rejected after reset, disconnect, owner replacement,
+replacement followed by return to the original owner, disable/re-enable,
+direction-policy reversal, helper replacement, protocol removal or
+server/per-peer readonly activation. Peer handoff
+drains old helper state with no published recipient, then configures the new
+peer; removing the owner is a supported transition. All four runtime direction
+policies independently check send and receive authority and match the real
+startup factory arguments. These are manager policy
+and callback-lifetime assertions, separate from the native transfer tests.
+
+The native policy regressions additionally start actual request-ID-bound pipes,
+backpressured output and eager local reads before revocation. They require old
+FDs and watches to retire, forbid further acquisition or eager bytes while
+revoked, and demonstrate a fresh successful transfer after restoration. Both
+selection classes exercise status, direction and selection-list changes,
+including no-op preservation and a newer native owner which must not be cleared.
+
 `unit.wayland.clipboard_test` imports the freshly compiled clipboard and
 compositor extensions and uses their real source wrapper classes with real OS
 pipes.  For both `CLIPBOARD` and `PRIMARY`, source S1 opens request R1, S2
@@ -962,6 +1063,28 @@ destruction when the selection adapter cannot clear, and cleanup of both
 custom compositor event registrations.  A real uninitialized
 `WaylandCompositor` instance binds the exact connect/emit/disconnect API rather
 than substituting GObject signal IDs.
+
+Additional real-pipe tests exceed three pipe capacities on both cached and
+on-demand output paths for both selections, require an independent GLib idle
+callback while the consumer pauses, and compare every byte through EOF. The
+write FD is initially nonblocking so the old single-write code fails with
+truncation instead of hanging the clean control. Backpressured transfers must
+also retire on source destruction, reset, cleanup and a real shortened deadline.
+Native-read tests separately exercise a held-open producer, origin/packet
+overflow before EOF, queued final bytes with HUP, explicit send truncation and
+its exact discarded count, setup fault rollback, and refusal of post-cleanup
+reads. Size tests use a long deadline so timeout cannot stand in for the size
+assertion. These tests complement the live small-marker protocol proof; the
+live fixture alone cannot prove backpressure or bounded producer behavior.
+
+The native send-callback regression calls the actual standard and primary
+wlroots source-send functions through `ctypes.PyDLL` on the compiled extension,
+holding the GIL. It injects nonblocking/watch/timer setup failures in the real
+writer, reuses the retired FD in a cleanup hook, and proves independent bytes
+on that replacement survive the callback's error path. Other real-pipe cases
+cover typed, strided and mutable memoryview payloads larger than pipe capacity.
+Those exercise FD handoff and buffer normalization directly; they do not rely
+on a fabricated Python copy of the C callback.
 
 The atomic `wayland` gate builds `clipboard.pyx` and `compositor.pyx` with the
 explicit clipboard and DMA-BUF Python dependencies required by the latter's
@@ -1026,10 +1149,11 @@ One named run creates fresh sessions for `both`, `to-server`, and `off`.  A
 `Gtk.Clipboard` X11 owner is already active before the Xpra client attaches,
 matching the original initial-sync failure.  An independent raw X11 converter
 first proves that the owner advertises `TARGETS` and returns the fixed marker
-locally.  A raw root-window XFixes monitor starts before the later forward
-changes and remains authoritative through the reverse attempt and final raw
-conversion.  It must not stop after observing only the two same-XID forward
-updates.
+locally. A raw root-window XFixes monitor starts before the later forward
+changes and remains authoritative through the reverse attempt, final raw
+conversion, fixture closure and Xpra client exit. It then synchronizes with the
+X server and drains queued events. Stopping after the forward updates or reverse
+conversion would omit later forbidden takeovers.
 
 The second forward marker is installed by the same owner process and XID: its
 XID must remain stable, its XFixes selection timestamp must advance, and the
@@ -1041,9 +1165,12 @@ The reverse transition has a stricter authority chain.  The command file only
 arms the native-Wayland fixture.  The runner then delivers a real fixed key
 through the Xpra input path, and `Gtk.Clipboard.set_text` runs inside that
 window's key-event callback so GDK has the compositor input serial required by
-Wayland selection ownership.  The fixture's immediate `owner-set` record says
-only that it called the API.  The compositor-driven clipboard owner-change
-callback must publish a separate confirmation before the runner attempts the
+Wayland selection ownership. An `owner-input` record binds that callback before
+`set_text`; the immediate `owner-set` record says only that the API was called.
+The clipboard owner-change schedules one request-bound confirmation after the
+API returns. Duplicate notifications cannot create duplicate confirmations,
+and fixture closure cancels a pending confirmation. The compositor's non-NULL
+source event independently proves acceptance before the runner attempts the
 X11 conversion; a fixed sleep after the API call is not ownership evidence.
 
 That confirmation is required in all three policies, including `off`.  The
@@ -1069,17 +1196,33 @@ ownership.  The policy matrix is exact:
 | `to-server` | the initial, changed, and repeated fixed markers arrive | the pre-existing local marker and owner XID remain; reverse data is blocked |
 | `off` | all three forward transfers are blocked | the pre-existing local marker and owner XID remain; reverse data is blocked |
 
-The event-driven live oracle binds more than final equality.  For each allowed
+The event-driven live oracle binds more than final equality. For each allowed
 forward update, the server must expose the new source transition before the
 fixture publishes a current digest match; the updated `two` read may not return
 the previous 29-byte value, and restoring `one` must prove a later generation
-rather than reuse the initial result.  Under `both`, F8, non-NULL compositor
-selection, GTK `owner-confirmed`, the third XFixes takeover, and the successful
-raw reverse conversion must appear in that order.  Under `to-server` and
-`off`, F8 and native confirmation still occur, while the monitor terminates at
-exactly two local same-XID events and the original raw X11 data remains
-available.  No timeout, packet count, sleep, or last-observed value can replace
-this ordered chain.
+rather than reuse the initial result. Read-only barriers observe the existing
+safe compositor `emit('selection', pointer)` record before each paste, without
+adding another input event. `clipboard-transitions.json` binds contiguous
+initial/updated/repeat/reverse server-log ranges, observation times and the
+client-exit observation. Collection independently derives each range's hash
+and source identities into the report. Each allowed forward range contains
+exactly one non-NULL source; `off`
+contains none. Adjacent forward pointers differ, while later allocator reuse
+is allowed.
+
+The reverse range binds F8 before the non-NULL native source. Under `both`, GTK
+confirmation and the third XFixes takeover must both follow the actual fixture
+input and precede successful raw conversion. Their relative arrival order is
+not imposed across independent processes. After fixture closure, `both`
+requires exactly one terminal NULL-owner release/destroy in addition to its
+three production owner events; this release can precede client exit. The
+monitor is stopped and drained only after confirmed client exit.
+`to-server` and `off` retain
+exactly their two local same-XID events through client exit, and the original
+X11 data remains available. An additional non-NULL takeover fails in every
+policy. Cross-fixture monotonic chronology and the monitor PID are checked
+from retained records. A timeout, packet count, sleep, or last-observed value
+cannot replace this ownership chain.
 
 The gate reuses the ordinary RGB profile's positive window discovery,
 rendering, screenshot/pixel, input, application-exit, process ownership, and
@@ -1194,8 +1337,9 @@ cycle ledger, not this architecture description.
 - A native-Wayland ownership attempt is not authoritative until it occurs in a
   real input callback and the compositor reports the resulting non-NULL owner
   change; `off` must prove this even though it has no forwarding helper.
-- The independent XFixes monitor spans forward and reverse ownership; a
-  forward-only event count cannot accept reverse policy.
+- The independent XFixes monitor spans forward and reverse ownership through
+  Xpra client exit and a final synchronized drain. Exactly one terminal
+  NULL-owner event is required for `both`; extra non-NULL takeovers fail.
 - The clipboard RGB fixture remains static.  A focus-animation or
   buffer-damage mismatch is diagnosed at its own boundary, never hidden by a
   larger pixel tolerance.
@@ -1222,7 +1366,7 @@ instruction to run full suites before every live iteration:
 | Validation | Purpose |
 | --- | --- |
 | Clean tests-only case run | Applies the case-owned tests without the production correction to the frozen embedded source.  It must reach real Xvfb/XFixes assertions and fail for the missing event route or owned lifecycle, not because the image, import, or test discovery is broken. |
-| Patched focused modules `unit.clipboard_core_test`, `unit.client.subsystem.clipboard_test`, `unit.x11.common_test`, and `unit.wayland.clipboard_test` | Prove exact wire-request callbacks and reset drain, the real X11 owner-change/conversion route, GDK XID lifetime, filter lease/refcount, exact token scheduling, lookup import order, Wayland source/read/write generation isolation for both selections, and bounded rollback/cleanup states on the atomic case. |
+| Patched focused modules `unit.clipboard_core_test`, `unit.client.subsystem.clipboard_test`, `unit.server.subsystem.clipboard_test`, `unit.x11.common_test`, and `unit.wayland.clipboard_test` | Prove wire-request completion/reset, peer admission and deferred lifetimes, the real X11 owner-change/conversion route, GDK XID lifetime, filter leases, token scheduling, lookup import order, Wayland source/generation isolation and backpressure, and bounded rollback/cleanup on the atomic case. |
 | Atomic `wayland` gate | Freshly compiles and linkage-checks the modified Wayland clipboard/compositor extensions and runs the native Wayland unit boundary, preventing a focused pass against absent or stale `.so` files. |
 | The same focused modules and `wayland` gate through `STACK=develop` | Prove that earlier and later queue cases do not change those semantics, take accidental ownership of the filter, or break the Wayland lifecycle contract. |
 | `patch-check`, `stack-check`, whitespace, lint, and fork-control units | Prove exact patch digest/path ownership, forward/reverse applicability, dependency order, and automation contracts; they do not prove runtime clipboard delivery. |
