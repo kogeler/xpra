@@ -680,6 +680,22 @@ staging also block cleanup until the exact public `case-recover` or
 Cleanup is branch-agnostic and neither requires nor changes a named remote,
 branch, or ref.
 
+For whole-directory housekeeping, use `artifacts-clean-plan`, then
+`artifacts-clean CONFIRM=<digest>`, and `artifacts-check`. The permanent
+structural allowlist is `fork-maintenance/artifacts.toml`, not an agent-selected
+list of run names, dates, newest results, or cycle prefixes. Shared caches,
+explicit operator records in `retained/`, and lifecycle/recovery authorities
+remain; runtime-bound results and unexported workspaces are protected. All other
+safe output is disposable, including legacy reports and ad hoc scratch. This
+is deliberate evidence disposal, not acceptance or a way around job removal.
+It does not stop processes, remove Podman objects, or promote old results.
+Complete the intended evidence review before invoking it: deleting a named
+result ends its reuse window. Put durable handoffs under `retained/current/`
+and deliberate sealed preservation archives under `retained/checkpoints/`;
+never automatically retain all reports or add current cycle names to the
+policy. Follow the [artifact runbook](fork-maintenance/docs/runbooks/artifacts.md)
+for confirmation, protection reports and interrupted-cleanup recovery.
+
 Do not create tracked `evidence/`, `runs/`, `results/`, or `communications/`
 trees. Git history stores automation, patch inputs, tests, and contracts—not
 the results of running them. Cleanup acts only on exact owned runtime objects
