@@ -88,6 +88,7 @@ SUPPORTED_GATES = frozenset(
         "live-rgb",
         "live-x11-clipboard",
         "live-wayland-keyboard",
+        "live-wayland-subsurface",
         "live-wayland-h264-hardware",
         "live-wayland-opengl-h264-hardware",
     }

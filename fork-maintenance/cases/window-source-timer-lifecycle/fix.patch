@@ -1,0 +1,1874 @@
+diff --git a/tests/unittests/unit/server/window/compress_test.py b/tests/unittests/unit/server/window/compress_test.py
+index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cbe29fa39a 100644
+--- a/tests/unittests/unit/server/window/compress_test.py
++++ b/tests/unittests/unit/server/window/compress_test.py
+@@ -5,11 +5,148 @@
+ # later version. See the file COPYING for details.
+ 
+ import unittest
++import warnings
++from threading import Condition, Event, Lock, Thread
+ from types import SimpleNamespace
+-from unittest.mock import patch
++from unittest.mock import Mock, patch
+ 
+-from xpra.server.window import compress
+-from xpra.server.window.compress import WindowSource
++from xpra.server.source import factory
++from xpra.server.source.client_connection import ClientConnection
++from xpra.server.source.window import WindowsConnection
++from xpra.server.window import compress, video_compress, windowicon
++from xpra.server.window.compress import DelayedRegions, WindowSource
++from xpra.server.window.video_compress import WindowVideoSource
++from xpra.util.rectangle import rectangle
++from xpra.util.objects import typedict
++
++
++class FakeSource:
++
++    def __init__(self, glib, delay) -> None:
++        self.glib = glib
++        self.delay = delay
++        self.callback = None
++        self.source_id = 0
++        self.destroyed = False
++
++    def set_callback(self, callback) -> None:
++        self.callback = callback
++
++    def attach(self, _context) -> int:
++        self.source_id = self.glib.timeout_add(self.delay, self.callback)
++        return self.source_id
++
++    def destroy(self) -> None:
++        if not self.destroyed:
++            self.destroyed = True
++            if self.source_id:
++                self.glib.source_remove(self.source_id)
++
++
++class FakeGLib:
++
++    def __init__(self) -> None:
++        self.lock = Lock()
++        self.next_id = 1
++        self.callbacks = {}
++        self.removed = []
++
++    def register(self, callback, args) -> int:
++        with self.lock:
++            source_id = self.next_id
++            self.next_id += 1
++            self.callbacks[source_id] = lambda: callback(*args)
++        return source_id
++
++    def timeout_add(self, _delay, callback, *args) -> int:
++        return self.register(callback, args)
++
++    def timeout_source_new(self, delay):
++        return FakeSource(self, delay)
++
++    def source_remove(self, source_id: int) -> bool:
++        if source_id <= 0:
++            raise ValueError(f"invalid GLib source id {source_id}")
++        with self.lock:
++            self.removed.append(source_id)
++            return self.callbacks.pop(source_id, None) is not None
++
++    def fire(self, source_id: int):
++        with self.lock:
++            callback = self.callbacks[source_id]
++        try:
++            keep = callback()
++        except BaseException:
++            with self.lock:
++                self.callbacks.pop(source_id, None)
++            raise
++        if not keep:
++            with self.lock:
++                self.callbacks.pop(source_id, None)
++        return keep
++
++
++class BlockingGLib(FakeGLib):
++
++    def __init__(self) -> None:
++        super().__init__()
++        self.timeout_started = Event()
++        self.release_timeout = Event()
++
++    def timeout_add(self, _delay, callback, *args) -> int:
++        source_id = self.register(callback, args)
++        if source_id == 1:
++            self.timeout_started.set()
++            if not self.release_timeout.wait(2):
++                raise RuntimeError("timer publication was not released")
++        return source_id
++
++
++class FailingRemoveGLib(FakeGLib):
++
++    def source_remove(self, source_id: int) -> bool:
++        removed = super().source_remove(source_id)
++        if source_id == 1:
++            raise RuntimeError("cannot remove first timer")
++        return removed
++
++
++class ObservedCondition(Condition):
++
++    def __init__(self, lock, waiter_started: Event) -> None:
++        super().__init__(lock)
++        self.waiter_started = waiter_started
++
++    def wait(self, timeout: float | None = None) -> bool:
++        self.waiter_started.set()
++        return super().wait(timeout)
++
++
++class WaitInterrupted(BaseException):
++    pass
++
++
++class CallbackInterrupted(BaseException):
++    pass
++
++
++class DeferredCleanupInterrupted(BaseException):
++    pass
++
++
++class InterruptingCondition(Condition):
++
++    def __init__(self, lock, interrupted: Event) -> None:
++        super().__init__(lock)
++        self.interrupted = interrupted
++        self.interrupt_next_wait = True
++
++    def wait(self, timeout: float | None = None) -> bool:
++        if self.interrupt_next_wait:
++            self.interrupt_next_wait = False
++            self.interrupted.set()
++            raise WaitInterrupted("timer callback wait interrupted")
++        return super().wait(timeout)
+ 
+ 
+ class CompressTest(unittest.TestCase):
+@@ -132,5 +269,1033 @@ class CompressTest(unittest.TestCase):
+         self.assertEqual(source.get_transparent_encoding(*size, {"quality": 80}, "auto"), "jpega")
+ 
+ 
++class WindowSourceTimerLifecycleTest(unittest.TestCase):
++
++    @staticmethod
++    def make_source() -> WindowSource:
++        source = object.__new__(WindowSource)
++        source.init_vars()
++        source.wid = 7
++        source.encoding = "rgb"
++        source.statistics = SimpleNamespace(
++            encoding_totals={},
++            encoding_pending={},
++            damage_events_count=0,
++        )
++        source.global_statistics = None
++        source.encode_queue = []
++        source._mmap = None
++        source.batch_config = SimpleNamespace(
++            cleanup=Mock(),
++            min_delay=1,
++            expire_delay=100,
++            timeout_delay=1000,
++            max_delay=1000,
++        )
++        source.call_in_encode_thread = Mock(return_value=None)
++        # These slots are initialized by the real constructors, outside
++        # init_vars(), in the clean embedded source.
++        source.send_window_icon_timer = 0
++        source.window_icon_queued = False
++        source.av_sync = True
++        source.av_sync_timer = 0
++        source.av_sync_delay = 0
++        source.av_sync_delay_target = 100
++        return source
++
++    @staticmethod
++    def run_thread(callback, name: str):
++        errors = []
++
++        def run() -> None:
++            try:
++                callback()
++            except BaseException as e:
++                errors.append(e)
++
++        thread = Thread(target=run, name=name, daemon=True)
++        thread.start()
++        return thread, errors
++
++    def test_real_glib_cancelled_dispatch_preserves_exact_source_ownership(self) -> None:
++        real_glib = compress.GLib
++        context = real_glib.MainContext.default()
++        for phase in ("pending", "published"):
++            with self.subTest(phase=phase):
++                source = self.make_source()
++                paused, release = Event(), Event()
++                remove_warnings = []
++                callback = Mock()
++
++                def pause() -> None:
++                    paused.set()
++                    if not release.wait(2):
++                        raise RuntimeError("real GLib ownership handoff was not released")
++
++                class OwnedSource:
++                    def __init__(self, wrapped):
++                        self.wrapped = wrapped
++
++                    def set_callback(self, function):
++                        self.wrapped.set_callback(function)
++
++                    def attach(self, main_context):
++                        source_id = self.wrapped.attach(main_context)
++                        if phase == "pending":
++                            pause()
++                        return source_id
++
++                    def destroy(self):
++                        if phase == "published":
++                            pause()
++                        self.wrapped.destroy()
++
++                class ObservedGLib:
++                    @staticmethod
++                    def timeout_source_new(delay):
++                        return OwnedSource(real_glib.timeout_source_new(delay))
++
++                    @staticmethod
++                    def timeout_add(delay, function, *args):
++                        source_id = real_glib.timeout_add(delay, function, *args)
++                        if phase == "pending":
++                            pause()
++                        return source_id
++
++                    @staticmethod
++                    def source_remove(source_id):
++                        if phase == "published":
++                            pause()
++                        with warnings.catch_warnings(record=True) as caught:
++                            warnings.simplefilter("always")
++                            removed = real_glib.source_remove(source_id)
++                        remove_warnings.extend(str(item.message) for item in caught)
++                        return removed
++
++                with patch.object(compress, "GLib", ObservedGLib):
++                    if phase == "pending":
++                        worker, errors = self.run_thread(
++                            lambda: source._schedule_timer("av_sync_timer", 0, callback), "timer-publish",
++                        )
++                    else:
++                        source._schedule_timer("av_sync_timer", 0, callback)
++                        worker, errors = self.run_thread(
++                            source.cancel_av_sync_timer, "timer-cancel",
++                        )
++                    try:
++                        self.assertTrue(paused.wait(2))
++                        if phase == "pending":
++                            source.cancel_av_sync_timer()
++                        # Dispatch the real source after cancellation detached
++                        # its lease but before the producer/destroyer resumes.
++                        self.assertTrue(context.iteration(False))
++                        release.set()
++                        worker.join(2)
++                        self.assertFalse(worker.is_alive())
++                        self.assertEqual(errors, [])
++                        callback.assert_not_called()
++                        self.assertEqual(remove_warnings, [])
++                        self.assertEqual(source.av_sync_timer, 0)
++                    finally:
++                        release.set()
++                        worker.join(2)
++                        source.cleanup()
++
++    def test_real_glib_source_dispatch_is_one_shot_and_reusable(self) -> None:
++        source = self.make_source()
++        context = compress.GLib.MainContext.default()
++        callback = Mock(return_value=True)
++        try:
++            for count in (1, 2):
++                source_id = source._schedule_timer("av_sync_timer", 0, callback)
++                self.assertGreater(source_id, 0)
++                self.assertTrue(context.iteration(False))
++                self.assertEqual(callback.call_count, count)
++                self.assertEqual(source.av_sync_timer, 0)
++                self.assertEqual(source._timer_leases, {})
++                self.assertIsNone(context.find_source_by_id(source_id))
++        finally:
++            source.cleanup()
++
++    def test_dynamic_connection_close_owns_pending_timer_publication(self) -> None:
++        glib = BlockingGLib()
++        window_source = self.make_source()
++        bases = (ClientConnection, WindowsConnection)
++        with patch.object(factory, "get_needed_based_classes", return_value=bases):
++            connection_class = factory.get_client_connection_class(typedict())
++        connection = object.__new__(connection_class)
++        ClientConnection.__init__(connection, Mock(), Mock(), Mock())
++        WindowsConnection.init_state(connection)
++        connection.statistics = SimpleNamespace(reset=Mock())
++        connection.start_queue_encode = Mock()
++        connection.queue_encode = Mock()
++        connection.window_sources = {window_source.wid: window_source}
++
++        with patch.object(compress, "GLib", glib):
++            worker, errors = self.run_thread(window_source.schedule_av_sync_update, "delay-calculation")
++            try:
++                self.assertTrue(glib.timeout_started.wait(2))
++                with glib.lock:
++                    pending_callback = glib.callbacks[1]
++                early_result = pending_callback()
++                connection.close()
++                glib.release_timeout.set()
++                worker.join(2)
++
++                self.assertFalse(worker.is_alive())
++                self.assertEqual(errors, [])
++                self.assertTrue(early_result)
++                self.assertEqual(glib.removed, [1])
++                self.assertEqual(glib.callbacks, {})
++                self.assertEqual(window_source.av_sync_timer, 0)
++                self.assertTrue(connection.close_event.is_set())
++            finally:
++                glib.release_timeout.set()
++                worker.join(2)
++
++    def test_stale_callback_cannot_clear_replacement(self) -> None:
++        source = self.make_source()
++        glib = FakeGLib()
++        with patch.object(compress, "GLib", glib):
++            source.schedule_av_sync_update()
++            with glib.lock:
++                stale_callback = glib.callbacks[1]
++            source.cancel_av_sync_timer()
++            source.schedule_av_sync_update()
++            self.assertEqual(source.av_sync_timer, 2)
++
++            self.assertFalse(stale_callback())
++
++            self.assertEqual(source.av_sync_timer, 2)
++            self.assertEqual(source.av_sync_delay, 0)
++            self.assertEqual(tuple(glib.callbacks), (2,))
++            source.cleanup()
++
++    def test_cancelled_pending_publication_cannot_replace_new_lease(self) -> None:
++        source = self.make_source()
++        glib = BlockingGLib()
++        with patch.object(compress, "GLib", glib):
++            worker, errors = self.run_thread(source.schedule_av_sync_update, "delay-calculation")
++            try:
++                self.assertTrue(glib.timeout_started.wait(2))
++                with glib.lock:
++                    stale_callback = glib.callbacks[1]
++                self.assertLess(source.av_sync_timer, 0)
++
++                source.cancel_av_sync_timer()
++                source.schedule_av_sync_update()
++                self.assertEqual(source.av_sync_timer, 2)
++                glib.release_timeout.set()
++                worker.join(2)
++
++                self.assertFalse(worker.is_alive())
++                self.assertEqual(errors, [])
++                self.assertEqual(source.av_sync_timer, 2)
++                self.assertEqual(glib.removed, [1])
++                self.assertFalse(stale_callback())
++                source.cleanup()
++                self.assertEqual(glib.removed, [1, 2])
++            finally:
++                glib.release_timeout.set()
++                worker.join(2)
++
++    def test_cleanup_waits_for_claimed_callback_and_cancels_its_rearm(self) -> None:
++        source = self.make_source()
++        glib = FakeGLib()
++        callback_at_rearm = Event()
++        release_callback = Event()
++        cleanup_started = Event()
++        cleanup_done = Event()
++        original_schedule = source.schedule_av_sync_update
++
++        def paused_rearm(delay=0) -> None:
++            callback_at_rearm.set()
++            if not release_callback.wait(2):
++                raise RuntimeError("A/V callback was not released")
++            original_schedule(delay)
++
++        def cleanup() -> None:
++            cleanup_started.set()
++            source.cleanup()
++            cleanup_done.set()
++
++        with patch.object(compress, "GLib", glib):
++            source.schedule_av_sync_update()
++            source.schedule_av_sync_update = paused_rearm
++            callback_thread, callback_errors = self.run_thread(lambda: glib.fire(1), "timer-callback")
++            cleanup_thread = None
++            try:
++                self.assertTrue(callback_at_rearm.wait(2))
++                self.assertTrue(source._timer_lock.acquire(timeout=0.2))
++                source._timer_lock.release()
++                cleanup_thread, cleanup_errors = self.run_thread(cleanup, "connection-close")
++                self.assertTrue(cleanup_started.wait(2))
++                self.assertFalse(cleanup_done.wait(0.1))
++                release_callback.set()
++                callback_thread.join(2)
++                cleanup_thread.join(2)
++
++                self.assertFalse(callback_thread.is_alive())
++                self.assertFalse(cleanup_thread.is_alive())
++                self.assertEqual(callback_errors, [])
++                self.assertEqual(cleanup_errors, [])
++                self.assertTrue(cleanup_done.is_set())
++                self.assertEqual(glib.removed, [])
++                self.assertEqual(glib.callbacks, {})
++                self.assertEqual(source.av_sync_timer, 0)
++            finally:
++                release_callback.set()
++                callback_thread.join(2)
++                if cleanup_thread:
++                    cleanup_thread.join(2)
++
++    def test_connection_and_timer_locks_have_one_direction(self) -> None:
++        source = self.make_source()
++        glib = FakeGLib()
++        connection_lock = Lock()
++        ack_holds_connection_lock = Event()
++        allow_timer_cancel = Event()
++        callback_started = Event()
++        ack_done = Event()
++
++        def publish_packet() -> None:
++            callback_started.set()
++            if not connection_lock.acquire(timeout=1):
++                raise RuntimeError("timer callback could not acquire connection lock")
++            connection_lock.release()
++
++        def acknowledge_packet() -> None:
++            with connection_lock:
++                ack_holds_connection_lock.set()
++                if not allow_timer_cancel.wait(2):
++                    raise RuntimeError("damage ACK was not released")
++                source.cancel_may_send_timer()
++                ack_done.set()
++
++        with patch.object(compress, "GLib", glib):
++            source._schedule_timer("may_send_timer", 10, publish_packet)
++            ack_thread, ack_errors = self.run_thread(acknowledge_packet, "damage-ack")
++            callback_thread = None
++            try:
++                self.assertTrue(ack_holds_connection_lock.wait(2))
++                callback_thread, callback_errors = self.run_thread(lambda: glib.fire(1), "timer-callback")
++                self.assertTrue(callback_started.wait(2))
++                allow_timer_cancel.set()
++                self.assertTrue(ack_done.wait(0.5))
++                ack_thread.join(2)
++                callback_thread.join(2)
++
++                self.assertFalse(ack_thread.is_alive())
++                self.assertFalse(callback_thread.is_alive())
++                self.assertEqual(ack_errors, [])
++                self.assertEqual(callback_errors, [])
++            finally:
++                allow_timer_cancel.set()
++                ack_thread.join(2)
++                if callback_thread:
++                    callback_thread.join(2)
++            source.cleanup()
++
++    def test_expiry_nested_timer_publication_cannot_cross_cleanup(self) -> None:
++        for soft_expired, timer_slot in ((0, "soft_timer"), (1, "timeout_timer")):
++            with self.subTest(timer_slot=timer_slot):
++                source = self.make_source()
++                source.max_soft_expired = 10
++                source.soft_expired = soft_expired
++                source._damage_delayed = DelayedRegions(1, "rgb", {}, [])
++                source.may_send_delayed = Mock()
++                glib = BlockingGLib()
++                with patch.object(compress, "GLib", glib):
++                    worker, errors = self.run_thread(
++                        lambda: source.expire_delayed_region(0, 10), f"{timer_slot}-callback",
++                    )
++                    try:
++                        self.assertTrue(glib.timeout_started.wait(2))
++                        source.cleanup()
++                        glib.release_timeout.set()
++                        worker.join(2)
++
++                        self.assertFalse(worker.is_alive())
++                        self.assertEqual(errors, [])
++                        self.assertEqual(glib.removed, [1])
++                        self.assertEqual(glib.callbacks, {})
++                        self.assertEqual(getattr(source, timer_slot), 0)
++                    finally:
++                        glib.release_timeout.set()
++                        worker.join(2)
++
++    def test_video_nonvideo_expiry_uses_base_timer_lease(self) -> None:
++        source = object.__new__(WindowVideoSource)
++        WindowSource.init_vars(source)
++        video_region = rectangle(0, 0, 100, 100)
++        source.video_subregion = SimpleNamespace(
++            rectangle=video_region,
++            set_at=0,
++            non_max_wait=500,
++        )
++        source.b_frame_flush_timer = 0
++        source.is_tray = False
++        source.video_encodings = ("h264",)
++        source.full_frames_only = False
++        source.window_dimensions = 200, 100
++        source.statistics = SimpleNamespace(damage_events_count=100)
++        source.batch_config = SimpleNamespace(delay=20, expire_delay=100)
++        source.assign_sq_options = Mock(return_value={})
++        source.get_frame_encode_delay = Mock(return_value=50)
++        source.process_damage_region = Mock()
++        source.do_send_regions = Mock()
++        source.expire_delayed_region = Mock(return_value=False)
++        source._damage_delayed = None
++        glib = FakeGLib()
++
++        with patch.object(compress, "GLib", glib), patch.object(video_compress, "GLib", glib):
++            source.send_regions(
++                compress.monotonic(),
++                (video_region, rectangle(100, 0, 100, 100)),
++                "auto",
++                {},
++            )
++            with glib.lock:
++                stale_callback = glib.callbacks[1]
++            self.assertEqual(source.expire_timer, 1)
++            source.cancel_expire_timer()
++            self.assertEqual(source.expire_timer, 0)
++            self.assertEqual(glib.removed, [1])
++            self.assertFalse(stale_callback())
++            source.expire_delayed_region.assert_not_called()
++
++    def test_terminal_cleanup_is_idempotent_and_init_vars_cannot_reopen_it(self) -> None:
++        source = self.make_source()
++        glib = FakeGLib()
++        with patch.object(compress, "GLib", glib):
++            source.cleanup()
++            source.cleanup()
++
++            source.batch_config.cleanup.assert_called_once_with()
++            source.call_in_encode_thread.assert_called_once()
++            source.init_vars()
++            source.schedule_av_sync_update()
++            self.assertEqual(source.av_sync_timer, 0)
++            self.assertEqual(glib.callbacks, {})
++
++    def test_connection_packet_registry_is_deactivated_before_timer_close(self) -> None:
++        source = self.make_source()
++        unregister_events = []
++
++        def unregister(registered_source) -> None:
++            unregister_events.append((registered_source, source._timer_closed))
++
++        source.unregister_damage_packets = unregister
++        glib = FakeGLib()
++        with patch.object(compress, "GLib", glib):
++            source.schedule_av_sync_update()
++            source.cleanup()
++            source.unregister_damage_packets(source)
++
++        self.assertEqual(unregister_events, [(source, False)])
++        self.assertEqual(glib.removed, [1])
++
++    def test_concurrent_cleanup_serializes_packet_registry_deactivation(self) -> None:
++        source = self.make_source()
++        unregister_started = Event()
++        release_unregister = Event()
++        waiter_started = Event()
++        unregister_events = []
++
++        def unregister(registered_source) -> None:
++            unregister_events.append((registered_source, source._timer_closed))
++            unregister_started.set()
++            if not release_unregister.wait(2):
++                raise RuntimeError("packet deactivation was not released")
++
++        source.unregister_damage_packets = unregister
++        source._timer_condition = ObservedCondition(source._timer_lock, waiter_started)
++        glib = FakeGLib()
++        with patch.object(compress, "GLib", glib):
++            source.schedule_av_sync_update()
++            first, first_errors = self.run_thread(source.cleanup, "first-cleanup")
++            second = None
++            try:
++                self.assertTrue(unregister_started.wait(2))
++                second, second_errors = self.run_thread(source.cleanup, "second-cleanup")
++                self.assertTrue(waiter_started.wait(2))
++                self.assertEqual(unregister_events, [(source, False)])
++
++                release_unregister.set()
++                first.join(2)
++                second.join(2)
++
++                self.assertFalse(first.is_alive())
++                self.assertFalse(second.is_alive())
++                self.assertEqual(first_errors, [])
++                self.assertEqual(second_errors, [])
++            finally:
++                release_unregister.set()
++                first.join(2)
++                if second:
++                    second.join(2)
++
++        self.assertEqual(unregister_events, [(source, False)])
++        self.assertEqual(glib.removed, [1])
++        source.batch_config.cleanup.assert_called_once_with()
++        source.call_in_encode_thread.assert_called_once()
++
++    def test_concurrent_cleanup_waits_for_terminal_barrier(self) -> None:
++        source = self.make_source()
++        batch_cleanup_started = Event()
++        release_batch_cleanup = Event()
++        second_cleanup_started = Event()
++        second_cleanup_waiting = Event()
++        second_cleanup_done = Event()
++        events = []
++
++        def batch_cleanup() -> None:
++            batch_cleanup_started.set()
++            if not release_batch_cleanup.wait(2):
++                raise RuntimeError("batch cleanup was not released")
++            raise RuntimeError("batch cleanup failed")
++
++        def queue_encode(optional: bool, callback) -> None:
++            events.append(("barrier", optional, callback))
++
++        def second_cleanup() -> None:
++            second_cleanup_started.set()
++            source.cleanup()
++            events.append(("second-return",))
++            second_cleanup_done.set()
++
++        source.batch_config.cleanup = batch_cleanup
++        source.call_in_encode_thread = queue_encode
++        source._timer_condition = ObservedCondition(source._timer_lock, second_cleanup_waiting)
++        first, first_errors = self.run_thread(source.cleanup, "first-cleanup")
++        second = None
++        try:
++            self.assertTrue(batch_cleanup_started.wait(2))
++            second, second_errors = self.run_thread(second_cleanup, "second-cleanup")
++            self.assertTrue(second_cleanup_started.wait(2))
++            self.assertTrue(second_cleanup_waiting.wait(2))
++            self.assertFalse(second_cleanup_done.is_set())
++
++            release_batch_cleanup.set()
++            first.join(2)
++            second.join(2)
++
++            self.assertFalse(first.is_alive())
++            self.assertFalse(second.is_alive())
++            self.assertEqual(len(first_errors), 1)
++            self.assertRegex(str(first_errors[0]), "batch cleanup failed")
++            self.assertEqual(second_errors, [])
++            self.assertEqual(events, [
++                ("barrier", False, source.encode_ended),
++                ("second-return",),
++            ])
++            self.assertTrue(source._cleanup_complete)
++            self.assertEqual(source._cleanup_owner, 0)
++        finally:
++            release_batch_cleanup.set()
++            first.join(2)
++            if second:
++                second.join(2)
++
++    def test_interrupted_cleanup_waiter_stays_behind_terminal_owner(self) -> None:
++        source = self.make_source()
++        batch_cleanup_started = Event()
++        release_batch_cleanup = Event()
++        waiter_interrupted = Event()
++        waiter_done = Event()
++        events = []
++
++        def batch_cleanup() -> None:
++            batch_cleanup_started.set()
++            if not release_batch_cleanup.wait(2):
++                raise RuntimeError("batch cleanup was not released")
++
++        def queue_encode(optional: bool, callback) -> None:
++            events.append(("barrier", optional, callback))
++
++        def waiting_cleanup() -> None:
++            try:
++                source.cleanup()
++            finally:
++                events.append(("waiter-return",))
++                waiter_done.set()
++
++        source.batch_config.cleanup = batch_cleanup
++        source.call_in_encode_thread = queue_encode
++        source._timer_condition = InterruptingCondition(source._timer_lock, waiter_interrupted)
++        owner, owner_errors = self.run_thread(source.cleanup, "cleanup-owner")
++        waiter = None
++        try:
++            self.assertTrue(batch_cleanup_started.wait(2))
++            waiter, waiter_errors = self.run_thread(waiting_cleanup, "cleanup-waiter")
++            self.assertTrue(waiter_interrupted.wait(2))
++            self.assertFalse(waiter_done.is_set())
++
++            release_batch_cleanup.set()
++            owner.join(2)
++            waiter.join(2)
++
++            self.assertFalse(owner.is_alive())
++            self.assertFalse(waiter.is_alive())
++            self.assertEqual(owner_errors, [])
++            self.assertEqual(len(waiter_errors), 1)
++            self.assertIsInstance(waiter_errors[0], WaitInterrupted)
++            self.assertEqual(events, [
++                ("barrier", False, source.encode_ended),
++                ("waiter-return",),
++            ])
++        finally:
++            release_batch_cleanup.set()
++            owner.join(2)
++            if waiter:
++                waiter.join(2)
++
++        self.assertTrue(source._cleanup_complete)
++        self.assertEqual(source._cleanup_owner, 0)
++
++    def test_cleanup_owner_can_reenter_during_packet_deactivation(self) -> None:
++        source = self.make_source()
++        events = []
++
++        def unregister(registered_source) -> None:
++            events.append("unregister")
++            registered_source.cleanup()
++            events.append("reentrant-return")
++
++        source.unregister_damage_packets = unregister
++        cleanup, cleanup_errors = self.run_thread(source.cleanup, "reentrant-cleanup")
++        cleanup.join(2)
++
++        self.assertFalse(cleanup.is_alive())
++        self.assertEqual(cleanup_errors, [])
++        self.assertEqual(events, ["unregister", "reentrant-return"])
++        source.batch_config.cleanup.assert_called_once_with()
++        source.call_in_encode_thread.assert_called_once_with(False, source.encode_ended)
++        self.assertTrue(source._cleanup_complete)
++        self.assertEqual(source._cleanup_owner, 0)
++
++    def test_timer_callback_can_start_terminal_cleanup(self) -> None:
++        source = self.make_source()
++        glib = FakeGLib()
++        events = []
++
++        def callback_cleanup() -> None:
++            events.append("callback-start")
++            source.cleanup()
++            events.append(("callback-after-cleanup", source._cleanup_complete))
++
++        with patch.object(compress, "GLib", glib):
++            source._schedule_timer("may_send_timer", 10, callback_cleanup)
++            callback, callback_errors = self.run_thread(lambda: glib.fire(1), "timer-cleanup")
++            callback.join(2)
++
++        self.assertFalse(callback.is_alive())
++        self.assertEqual(callback_errors, [])
++        self.assertEqual(events, ["callback-start", ("callback-after-cleanup", False)])
++        self.assertTrue(source._cleanup_complete)
++        self.assertFalse(source._cleanup_requested)
++        self.assertEqual(source._cleanup_owner, 0)
++        source.batch_config.cleanup.assert_called_once_with()
++        source.call_in_encode_thread.assert_called_once_with(False, source.encode_ended)
++
++    def test_nested_callback_cleanup_defers_until_outer_callback_unwinds(self) -> None:
++        source = self.make_source()
++        glib = FakeGLib()
++        events = []
++
++        def inner_callback() -> None:
++            events.append(("inner-depth", source._active_timer_callback_threads.copy()))
++            source.cleanup()
++            events.append(("inner-return", source._cleanup_complete))
++
++        def outer_callback() -> None:
++            events.append(("outer-depth", source._active_timer_callback_threads.copy()))
++            inner_source = source._schedule_timer("av_sync_timer", 10, inner_callback)
++            glib.fire(inner_source)
++            events.append(("outer-return", source._cleanup_complete))
++
++        with patch.object(compress, "GLib", glib):
++            outer_source = source._schedule_timer("may_send_timer", 10, outer_callback)
++            glib.fire(outer_source)
++
++        depths = [next(iter(event[1].values())) for event in events[:2]]
++        self.assertEqual(depths, [1, 2])
++        self.assertEqual(events[2:], [
++            ("inner-return", False),
++            ("outer-return", False),
++        ])
++        self.assertEqual(source._active_timer_callback_threads, {})
++        self.assertTrue(source._cleanup_complete)
++        self.assertFalse(source._cleanup_requested)
++        source.batch_config.cleanup.assert_called_once_with()
++        source.call_in_encode_thread.assert_called_once_with(False, source.encode_ended)
++
++    def test_callback_error_remains_primary_over_deferred_cleanup_error(self) -> None:
++        source = self.make_source()
++        glib = FakeGLib()
++        events = []
++
++        def callback_cleanup() -> None:
++            source.cleanup()
++            raise CallbackInterrupted("callback failed")
++
++        def batch_cleanup() -> None:
++            events.append("batch-cleanup")
++            raise DeferredCleanupInterrupted("deferred cleanup failed")
++
++        def queue_encode(optional: bool, callback) -> None:
++            events.append(("barrier", optional, callback))
++
++        source.batch_config.cleanup = batch_cleanup
++        source.call_in_encode_thread = queue_encode
++        with patch.object(compress, "GLib", glib), patch.object(compress, "log") as test_log:
++            with self.assertRaisesRegex(CallbackInterrupted, "callback failed"):
++                glib_source = source._schedule_timer("may_send_timer", 10, callback_cleanup)
++                glib.fire(glib_source)
++
++        self.assertEqual(events, [
++            "batch-cleanup",
++            ("barrier", False, source.encode_ended),
++        ])
++        self.assertTrue(source._cleanup_complete)
++        self.assertEqual(source._cleanup_owner, 0)
++        self.assertTrue(any(
++            "Additional error during timer-requested window source cleanup" in str(call.args[0])
++            and isinstance(call.kwargs.get("exc_info", (None, None))[1], DeferredCleanupInterrupted)
++            for call in test_log.error.call_args_list
++        ))
++
++    def test_callback_cleanup_request_stays_closed_across_unregister_retry(self) -> None:
++        source = self.make_source()
++        glib = FakeGLib()
++        unregister_started = Event()
++        release_unregister = Event()
++        unregister_calls = []
++        unexpected_callback = Mock()
++
++        def unregister(_registered_source) -> None:
++            unregister_calls.append("unregister")
++            if len(unregister_calls) == 1:
++                unregister_started.set()
++                if not release_unregister.wait(2):
++                    raise RuntimeError("packet deactivation was not released")
++                raise DeferredCleanupInterrupted("packet deactivation failed")
++
++        def request_cleanup() -> None:
++            source.cleanup()
++
++        source.unregister_damage_packets = unregister
++        with patch.object(compress, "GLib", glib):
++            source._schedule_timer("may_send_timer", 10, request_cleanup)
++            callback, callback_errors = self.run_thread(lambda: glib.fire(1), "timer-cleanup")
++            try:
++                self.assertTrue(unregister_started.wait(2))
++                self.assertTrue(source._cleanup_requested)
++                self.assertEqual(
++                    source._schedule_timer("av_sync_timer", 10, unexpected_callback),
++                    0,
++                )
++                self.assertEqual(tuple(glib.callbacks), (1,))
++                release_unregister.set()
++                callback.join(2)
++
++                self.assertFalse(callback.is_alive())
++                self.assertEqual(len(callback_errors), 1)
++                self.assertIsInstance(callback_errors[0], DeferredCleanupInterrupted)
++                self.assertTrue(source._cleanup_requested)
++                self.assertFalse(source._timer_closed)
++                self.assertFalse(source._cleanup_complete)
++                self.assertEqual(source._cleanup_owner, 0)
++
++                source.cleanup()
++            finally:
++                release_unregister.set()
++                callback.join(2)
++
++        self.assertEqual(unregister_calls, ["unregister", "unregister"])
++        unexpected_callback.assert_not_called()
++        self.assertFalse(source._cleanup_requested)
++        self.assertTrue(source._timer_closed)
++        self.assertTrue(source._cleanup_complete)
++        source.batch_config.cleanup.assert_called_once_with()
++        source.call_in_encode_thread.assert_called_once_with(False, source.encode_ended)
++
++    def test_active_callback_does_not_wait_for_external_cleanup_owner(self) -> None:
++        source = self.make_source()
++        glib = FakeGLib()
++        callback_started = Event()
++        enter_callback_cleanup = Event()
++        callback_cleanup_returned = Event()
++        external_cleanup_waiting = Event()
++        cleanup_done = Event()
++
++        def callback_cleanup() -> None:
++            callback_started.set()
++            if not enter_callback_cleanup.wait(2):
++                raise RuntimeError("callback cleanup was not released")
++            source.cleanup()
++            callback_cleanup_returned.set()
++
++        def external_cleanup() -> None:
++            source.cleanup()
++            cleanup_done.set()
++
++        with patch.object(compress, "GLib", glib):
++            source._schedule_timer("may_send_timer", 10, callback_cleanup)
++            callback, callback_errors = self.run_thread(lambda: glib.fire(1), "timer-callback")
++            cleanup = None
++            try:
++                self.assertTrue(callback_started.wait(2))
++                source._timer_condition = ObservedCondition(source._timer_lock, external_cleanup_waiting)
++                cleanup, cleanup_errors = self.run_thread(external_cleanup, "external-cleanup")
++                self.assertTrue(external_cleanup_waiting.wait(2))
++                self.assertFalse(cleanup_done.is_set())
++                enter_callback_cleanup.set()
++                self.assertTrue(callback_cleanup_returned.wait(1))
++                callback.join(2)
++                cleanup.join(2)
++
++                self.assertFalse(callback.is_alive())
++                self.assertFalse(cleanup.is_alive())
++                self.assertEqual(callback_errors, [])
++                self.assertEqual(cleanup_errors, [])
++                self.assertTrue(cleanup_done.is_set())
++            finally:
++                enter_callback_cleanup.set()
++                callback.join(2)
++                if cleanup:
++                    cleanup.join(2)
++
++        self.assertTrue(source._cleanup_complete)
++        self.assertFalse(source._cleanup_requested)
++        self.assertEqual(source._cleanup_owner, 0)
++        source.batch_config.cleanup.assert_called_once_with()
++        source.call_in_encode_thread.assert_called_once_with(False, source.encode_ended)
++
++    def test_interrupted_callback_wait_still_completes_terminal_tail(self) -> None:
++        source = self.make_source()
++        glib = FakeGLib()
++        callback_started = Event()
++        release_callback = Event()
++        wait_interrupted = Event()
++        cleanup_done = Event()
++        events = []
++
++        def blocking_callback() -> None:
++            events.append("callback-start")
++            callback_started.set()
++            if not release_callback.wait(2):
++                raise RuntimeError("timer callback was not released")
++            events.append("callback-end")
++
++        def queue_encode(optional: bool, callback) -> None:
++            events.append(("barrier", optional, callback))
++
++        def terminal_cleanup() -> None:
++            try:
++                source.cleanup()
++            finally:
++                cleanup_done.set()
++
++        source.call_in_encode_thread = queue_encode
++        with patch.object(compress, "GLib", glib):
++            source._schedule_timer("may_send_timer", 10, blocking_callback)
++            callback, callback_errors = self.run_thread(lambda: glib.fire(1), "timer-callback")
++            cleanup = None
++            try:
++                self.assertTrue(callback_started.wait(2))
++                source._timer_condition = InterruptingCondition(source._timer_lock, wait_interrupted)
++                cleanup, cleanup_errors = self.run_thread(terminal_cleanup, "interrupted-cleanup")
++                self.assertTrue(wait_interrupted.wait(2))
++                self.assertFalse(cleanup_done.wait(0.1))
++                self.assertNotIn(("barrier", False, source.encode_ended), events)
++
++                release_callback.set()
++                callback.join(2)
++                cleanup.join(2)
++
++                self.assertFalse(callback.is_alive())
++                self.assertFalse(cleanup.is_alive())
++                self.assertEqual(callback_errors, [])
++                self.assertEqual(len(cleanup_errors), 1)
++                self.assertIsInstance(cleanup_errors[0], WaitInterrupted)
++                self.assertEqual(events, [
++                    "callback-start",
++                    "callback-end",
++                    ("barrier", False, source.encode_ended),
++                ])
++            finally:
++                release_callback.set()
++                callback.join(2)
++                if cleanup:
++                    cleanup.join(2)
++
++        self.assertTrue(source._cleanup_complete)
++        self.assertFalse(source._cleanup_requested)
++        self.assertEqual(source._cleanup_owner, 0)
++        source.batch_config.cleanup.assert_called_once_with()
++
++    def test_packet_registry_deactivation_failure_is_retryable(self) -> None:
++        source = self.make_source()
++        unregister_events = []
++
++        def unregister(registered_source) -> None:
++            unregister_events.append((registered_source, source._timer_closed))
++            if len(unregister_events) == 1:
++                raise RuntimeError("packet deactivation failed")
++
++        source.unregister_damage_packets = unregister
++        glib = FakeGLib()
++        with patch.object(compress, "GLib", glib):
++            source.schedule_av_sync_update()
++            with self.assertRaisesRegex(RuntimeError, "packet deactivation failed"):
++                source.cleanup()
++
++            self.assertFalse(source._cleanup_started)
++            self.assertFalse(source._timer_closed)
++            self.assertEqual(glib.removed, [])
++            self.assertEqual(tuple(glib.callbacks), (1,))
++            source.batch_config.cleanup.assert_not_called()
++            source.call_in_encode_thread.assert_not_called()
++
++            source.cleanup()
++            source.cleanup()
++
++        self.assertEqual(unregister_events, [(source, False), (source, False)])
++        self.assertEqual(glib.removed, [1])
++        self.assertEqual(glib.callbacks, {})
++        source.batch_config.cleanup.assert_called_once_with()
++        source.call_in_encode_thread.assert_called_once()
++        self.assertTrue(source._timer_closed)
++
++    def test_cleanup_exception_does_not_skip_later_owned_steps(self) -> None:
++        source = self.make_source()
++        source.cancel_window_icon_timer = Mock(side_effect=RuntimeError("icon cleanup failed"))
++        glib = FakeGLib()
++        with patch.object(compress, "GLib", glib):
++            with self.assertRaisesRegex(RuntimeError, "icon cleanup failed"):
++                source.cleanup()
++            source.cleanup()
++
++        source.cancel_window_icon_timer.assert_called_once_with()
++        source.batch_config.cleanup.assert_called_once_with()
++        source.call_in_encode_thread.assert_called_once()
++        self.assertTrue(source._timer_closed)
++
++    def test_timer_removal_exception_does_not_skip_other_leases_or_cleanup(self) -> None:
++        source = self.make_source()
++        glib = FailingRemoveGLib()
++        with patch.object(compress, "GLib", glib):
++            source._schedule_timer("av_sync_timer", 10, Mock())
++            source._schedule_timer("may_send_timer", 10, Mock())
++            with self.assertRaisesRegex(RuntimeError, "cannot remove first timer"):
++                source.cleanup()
++            source.cleanup()
++
++        self.assertEqual(glib.removed, [1, 2])
++        self.assertEqual(glib.callbacks, {})
++        source.batch_config.cleanup.assert_called_once_with()
++        source.call_in_encode_thread.assert_called_once()
++        self.assertTrue(source._timer_closed)
++
++    def test_icon_timer_is_part_of_terminal_window_lifecycle(self) -> None:
++        source = self.make_source()
++        source.has_png = True
++        source.suspended = False
++        source.window_icon_data = None
++        source.window_icon_greedy = False
++        source.has_default = False
++        source.window_icon_size = 64, 64
++        source.window_icon_max_size = 64, 64
++        source.window = SimpleNamespace(get_property=Mock(return_value=[object()]))
++        source.choose_icon = Mock(return_value=(1, 1, "png", b"x"))
++        source.batch_config.delay_per_megapixel = 0
++        glib = FakeGLib()
++        with patch.object(compress, "GLib", glib), patch.object(windowicon, "GLib", glib):
++            source.send_window_icon()
++            with glib.lock:
++                stale_callback = glib.callbacks[1]
++            self.assertEqual(source.send_window_icon_timer, 1)
++
++            source.cleanup()
++            self.assertEqual(source.send_window_icon_timer, 0)
++            self.assertEqual(glib.removed, [1])
++            self.assertFalse(stale_callback())
++            self.assertEqual(source.call_in_encode_thread.call_count, 1)
++            optional, callback = source.call_in_encode_thread.call_args.args
++            self.assertFalse(optional)
++            self.assertEqual(callback, source.encode_ended)
++
++    def test_icon_encode_queue_remains_a_single_batch(self) -> None:
++        source = self.make_source()
++        source.has_png = True
++        source.suspended = False
++        source.window_icon_data = None
++        source.window_icon_greedy = False
++        source.has_default = False
++        source.window_icon_size = 64, 64
++        source.window_icon_max_size = 64, 64
++        source.window = SimpleNamespace(get_property=Mock(return_value=[object()]))
++        source.choose_icon = Mock(return_value=(1, 1, "png", b"x"))
++        source.batch_config.delay_per_megapixel = 0
++        glib = FakeGLib()
++        with patch.object(compress, "GLib", glib), patch.object(windowicon, "GLib", glib):
++            source.send_window_icon()
++            self.assertFalse(glib.fire(1))
++            self.assertEqual(source.send_window_icon_timer, 0)
++            self.assertTrue(source.window_icon_queued)
++            self.assertEqual(source.call_in_encode_thread.call_count, 1)
++
++            source.send_window_icon()
++            self.assertEqual(glib.callbacks, {})
++            optional, encode_callback = source.call_in_encode_thread.call_args.args
++            self.assertTrue(optional)
++            source.window_icon_data = None
++            encode_callback()
++            self.assertFalse(source.window_icon_queued)
++
++            source.send_window_icon()
++            self.assertEqual(source.send_window_icon_timer, 2)
++            source.cleanup()
++            self.assertEqual(glib.removed, [2])
++
++    def test_callback_result_and_exception_remain_one_shot(self) -> None:
++        source = self.make_source()
++        glib = FakeGLib()
++        callback = Mock(return_value=True)
++        with patch.object(compress, "GLib", glib):
++            source._schedule_timer("may_send_timer", 10, callback)
++            self.assertFalse(glib.fire(1))
++            callback.assert_called_once_with()
++            self.assertEqual(source.may_send_timer, 0)
++
++            def fail() -> None:
++                raise RuntimeError("timer failed")
++
++            source._schedule_timer("may_send_timer", 10, fail)
++            with self.assertRaisesRegex(RuntimeError, "timer failed"):
++                glib.fire(2)
++            self.assertEqual(source.may_send_timer, 0)
++            source._schedule_timer("may_send_timer", 10, callback)
++            self.assertEqual(source.may_send_timer, 3)
++            source.cleanup()
++
++    def test_timeout_add_exception_releases_pending_lease(self) -> None:
++        source = self.make_source()
++        glib = FakeGLib()
++        with patch.object(compress, "GLib", glib), patch.object(
++            glib, "timeout_add", side_effect=RuntimeError("cannot create timer"),
++        ):
++            with self.assertRaisesRegex(RuntimeError, "cannot create timer"):
++                source._schedule_timer("may_send_timer", 10, Mock())
++            self.assertEqual(source.may_send_timer, 0)
++            self.assertEqual(source._timer_leases, {})
++
++        with patch.object(compress, "GLib", glib):
++            source._schedule_timer("may_send_timer", 10, Mock())
++            self.assertEqual(source.may_send_timer, 1)
++            source.cleanup()
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/xpra/server/window/compress.py b/xpra/server/window/compress.py
+index 8ea0a302f33f1bc5152f39ad06859b737a616c65..bdf3ff06b1be19909678185c766207c63ea4f105 100644
+--- a/xpra/server/window/compress.py
++++ b/xpra/server/window/compress.py
+@@ -11,6 +11,7 @@ from collections import deque
+ from dataclasses import dataclass
+ from time import monotonic, sleep
+ from contextlib import nullcontext
++from threading import Condition, Lock, get_ident
+ from typing import ContextManager, Any
+ from collections.abc import Callable, Iterable, Sequence
+ 
+@@ -161,6 +162,16 @@ class DelayedRegions:
+         )
+ 
+ 
++@dataclass
++class _TimerLease:
++    epoch: int
++    source_id: int = 0
++    source: GLib.Source | None = None
++
++
++_PENDING_TIMER = -1
++
++
+ def capr(v: int) -> int:
+     return min(100, max(0, int(v)))
+ 
+@@ -205,6 +216,18 @@ class WindowSource(WindowIconSource):
+ 
+     (also by 'send_window_icon' and clipboard packets)
+     """
++
++    TIMER_SLOTS = (
++        "decode_error_refresh_timer",
++        "may_send_timer",
++        "refresh_timer",
++        "timeout_timer",
++        "expire_timer",
++        "soft_timer",
++        "av_sync_timer",
++        "send_window_icon_timer",
++    )
++
+     def __init__(self,
+                  ww: int, wh: int,
+                  record_congestion_event: Callable, queue_size: Callable,
+@@ -221,6 +244,7 @@ class WindowSource(WindowIconSource):
+                  rgb_formats: Sequence[str],
+                  default_encoding_options,
+                  mmap_write_area, bandwidth_limit: int, jitter: int, datagram=0):
++        self._init_timer_lifecycle()
+         super().__init__(window_icon_encodings, icons_encoding_options)
+         # mmap:
+         # (this is a `BaseMmapArea` but we can't depend on the mmap module here)
+@@ -245,7 +269,6 @@ class WindowSource(WindowIconSource):
+         self.av_sync_delay_target = av_sync_delay       # the av-sync delay we want at this point in time (can vary quickly)
+         self.av_sync_delay_base = av_sync_delay         # the total av-sync delay we are trying to achieve (including video encoder delay)
+         self.av_sync_frame_delay: int = 0              # how long frames spend in the video encoder
+-        self.av_sync_timer: int = 0
+         self.encode_queue: list[tuple] = []
+         self.encode_queue_max_size: int = 10
+         self.last_scroll_event: float = 0
+@@ -408,6 +431,268 @@ class WindowSource(WindowIconSource):
+     def __repr__(self) -> str:
+         return f"WindowSource({self.wid:#x} : {self.window_dimensions})"
+ 
++    def _init_timer_lifecycle(self) -> None:
++        """Initialize timer ownership once; unlike ``init_vars``, this state is terminal."""
++        if hasattr(self, "_timer_lock"):
++            return
++        self._timer_lock = Lock()
++        self._timer_condition = Condition(self._timer_lock)
++        self._timer_epoch = 0
++        self._timer_closed = False
++        self._cleanup_started = False
++        self._cleanup_complete = False
++        self._cleanup_requested = False
++        self._cleanup_owner = 0
++        self._damage_unregistering = False
++        self._active_timer_callbacks = 0
++        self._active_timer_callback_threads: dict[int, int] = {}
++        self._timer_leases: dict[str, _TimerLease] = {}
++        for slot in self.TIMER_SLOTS:
++            setattr(self, slot, 0)
++
++    def _schedule_timer(self, slot: str, delay: int, callback: Callable, *args) -> int:
++        """Publish one named GLib timeout without losing it across terminal cleanup."""
++        self._init_timer_lifecycle()
++        with self._timer_lock:
++            if self._timer_closed or self._cleanup_requested or slot in self._timer_leases:
++                return 0
++            lease = _TimerLease(self._timer_epoch)
++            self._timer_leases[slot] = lease
++            setattr(self, slot, _PENDING_TIMER)
++
++        def timer_callback(*_user_data) -> bool:
++            callback_owner = get_ident()
++            run_deferred_cleanup = False
++            with self._timer_condition:
++                if self._timer_leases.get(slot) is not lease:
++                    return False
++                # A zero-delay source may be dispatched by the main context before
++                # Source.attach() has returned its ID to a producer thread. Keep it
++                # alive until publication can either commit or remove it exactly.
++                if not lease.source_id:
++                    return True
++                if self._timer_closed or self._cleanup_requested or lease.epoch != self._timer_epoch:
++                    self._timer_leases.pop(slot, None)
++                    if getattr(self, slot, 0) == lease.source_id:
++                        setattr(self, slot, 0)
++                    return False
++                self._timer_leases.pop(slot, None)
++                if getattr(self, slot, 0) == lease.source_id:
++                    setattr(self, slot, 0)
++                self._active_timer_callbacks += 1
++                self._active_timer_callback_threads[callback_owner] = (
++                    self._active_timer_callback_threads.get(callback_owner, 0) + 1
++                )
++            callback_error: tuple[BaseException, Any] | None = None
++            cleanup_error: tuple[BaseException, Any] | None
++            try:
++                # Arbitrary callback code must not run under the timer lock: an
++                # ACK may enter timer cancellation while holding the connection
++                # damage-packet lock, and a callback may publish through that
++                # same connection lock. Terminal cleanup waits on the separate
++                # active-callback count before releasing window resources.
++                callback(*args)
++            except BaseException as e:
++                callback_error = e, e.__traceback__
++            finally:
++                with self._timer_condition:
++                    self._active_timer_callbacks -= 1
++                    callback_depth = self._active_timer_callback_threads[callback_owner] - 1
++                    if callback_depth:
++                        self._active_timer_callback_threads[callback_owner] = callback_depth
++                    else:
++                        self._active_timer_callback_threads.pop(callback_owner, None)
++                    run_deferred_cleanup = (
++                        not self._active_timer_callbacks
++                        and self._cleanup_requested
++                        and not self._cleanup_owner
++                        and not self._cleanup_complete
++                    )
++                    self._timer_condition.notify_all()
++                # A callback cannot synchronously wait for its own completion.
++                # The last active callback converts a terminal request into the
++                # ordinary cleanup path only after leaving the active registry.
++                cleanup_error = None
++                if run_deferred_cleanup:
++                    try:
++                        self.cleanup()
++                    except BaseException as e:
++                        cleanup_error = e, e.__traceback__
++                if callback_error:
++                    if cleanup_error:
++                        error, traceback = cleanup_error
++                        log.error("Additional error during timer-requested window source cleanup: %s", error,
++                                  exc_info=(type(error), error, traceback))
++                    error, traceback = callback_error
++                    raise error.with_traceback(traceback)
++                if cleanup_error:
++                    error, traceback = cleanup_error
++                    raise error.with_traceback(traceback)
++            return False
++
++        timer_source = None
++        try:
++            timer_source = GLib.timeout_source_new(delay)
++            timer_source.set_callback(timer_callback)
++            source_id = timer_source.attach(None)
++        except BaseException:
++            with self._timer_lock:
++                if self._timer_leases.get(slot) is lease:
++                    self._timer_leases.pop(slot, None)
++                    if getattr(self, slot, 0) == _PENDING_TIMER:
++                        setattr(self, slot, 0)
++            if timer_source is not None:
++                timer_source.destroy()
++            raise
++        with self._timer_lock:
++            lease.source_id = source_id
++            lease.source = timer_source
++            if (not self._timer_closed and not self._cleanup_requested
++                    and lease.epoch == self._timer_epoch
++                    and self._timer_leases.get(slot) is lease):
++                setattr(self, slot, source_id)
++                return source_id
++            if self._timer_leases.get(slot) is lease:
++                self._timer_leases.pop(slot, None)
++                if getattr(self, slot, 0) == _PENDING_TIMER:
++                    setattr(self, slot, 0)
++        # Cancellation may have let an already-dispatched callback return
++        # False before attach() returned. Destroy the retained Source itself:
++        # its numeric ID may already be absent or belong to another source.
++        timer_source.destroy()
++        return 0
++
++    def _cancel_timer(self, slot: str) -> bool:
++        """Cancel the exact lease for ``slot``, including pending publication."""
++        self._init_timer_lifecycle()
++        with self._timer_lock:
++            lease = self._timer_leases.pop(slot, None)
++            timer_source = lease.source if lease else None
++            owned = lease is not None
++            setattr(self, slot, 0)
++        if timer_source is not None:
++            timer_source.destroy()
++        return owned
++
++    def _take_timer_leases_locked(self) -> tuple[bool, tuple[GLib.Source, ...]]:
++        if self._timer_closed:
++            return False, ()
++        self._timer_closed = True
++        self._timer_epoch += 1
++        leases, self._timer_leases = tuple(self._timer_leases.items()), {}
++        for slot, _lease in leases:
++            setattr(self, slot, 0)
++        sources = tuple(lease.source for _slot, lease in leases if lease.source is not None)
++        return True, sources
++
++    def _wait_for_timer_callbacks(self) -> None:
++        wait_errors: list[tuple[BaseException, Any]] = []
++        with self._timer_condition:
++            while self._active_timer_callbacks:
++                try:
++                    self._timer_condition.wait()
++                except BaseException as e:
++                    # Completion remains the release boundary even when the
++                    # waiting thread is interrupted.  Preserve the interrupt,
++                    # finish waiting, and let terminal cleanup aggregate it.
++                    wait_errors.append((e, e.__traceback__))
++        if wait_errors:
++            for later_error, later_traceback in wait_errors[1:]:
++                log.error("Additional error waiting for a window source timer callback: %s", later_error,
++                          exc_info=(type(later_error), later_error, later_traceback))
++            error, traceback = wait_errors[0]
++            raise error.with_traceback(traceback)
++
++    @staticmethod
++    def _destroy_timer_sources(sources: tuple[GLib.Source, ...]) -> None:
++        remove_errors: list[tuple[BaseException, Any]] = []
++        for source in sources:
++            try:
++                source.destroy()
++            except BaseException as e:
++                remove_errors.append((e, e.__traceback__))
++        if remove_errors:
++            for later_error, later_traceback in remove_errors[1:]:
++                log.error("Additional error removing a window source timer: %s", later_error,
++                          exc_info=(type(later_error), later_error, later_traceback))
++            error, traceback = remove_errors[0]
++            raise error.with_traceback(traceback)
++
++    def _begin_terminal_cleanup(
++        self,
++    ) -> tuple[bool, tuple[GLib.Source, ...], list[tuple[BaseException, Any]]]:
++        """Deactivate external packet ownership, then atomically close timer publication."""
++        self._init_timer_lifecycle()
++        cleanup_owner = get_ident()
++        wait_errors: list[tuple[BaseException, Any]] = []
++        while True:
++            with self._timer_condition:
++                if self._cleanup_complete:
++                    return False, (), wait_errors
++                if self._active_timer_callback_threads.get(cleanup_owner, 0):
++                    # Synchronous teardown cannot wait for the callback which
++                    # invoked it.  Reject new timer publication now; the last
++                    # active callback will enter cleanup after it unwinds.
++                    self._cleanup_requested = True
++                    return False, (), wait_errors
++                if self._cleanup_owner == cleanup_owner:
++                    # Cleanup callbacks may re-enter this method on the owner
++                    # thread.  Waiting for our own terminal transition would
++                    # deadlock; the outer invocation retains all ownership.
++                    return False, (), wait_errors
++                if self._cleanup_owner:
++                    try:
++                        self._timer_condition.wait()
++                    except BaseException as e:
++                        # A competing caller may be the connection teardown
++                        # boundary which publishes the worker sentinel next.
++                        # Preserve its interrupt, but do not let it return
++                        # before the current owner reaches its terminal tail.
++                        wait_errors.append((e, e.__traceback__))
++                    continue
++                self._cleanup_owner = cleanup_owner
++                self._damage_unregistering = True
++                unregister_damage_packets = getattr(self, "unregister_damage_packets", None)
++
++            try:
++                if unregister_damage_packets:
++                    unregister_damage_packets(self)
++            except BaseException as unregister_error:
++                # Packet deactivation is a prerequisite for timer teardown.
++                # Leave the terminal transition unclaimed so one waiter or a
++                # later explicit cleanup call can retry this idempotent hook.
++                with self._timer_condition:
++                    self._damage_unregistering = False
++                    self._cleanup_owner = 0
++                    self._timer_condition.notify_all()
++                if wait_errors:
++                    error, traceback = wait_errors[0]
++                    log.error("Additional error deactivating window damage packets: %s", unregister_error,
++                              exc_info=(type(unregister_error), unregister_error,
++                                        unregister_error.__traceback__))
++                    raise error.with_traceback(traceback)
++                raise
++
++            with self._timer_condition:
++                self._damage_unregistering = False
++                if unregister_damage_packets:
++                    self.unregister_damage_packets = noop
++                self._cleanup_started = True
++                _, timer_sources = self._take_timer_leases_locked()
++                # The closed epoch is now the authoritative publication fence.
++                self._cleanup_requested = False
++                self._timer_condition.notify_all()
++                return True, timer_sources, wait_errors
++
++    def _finish_terminal_cleanup(self) -> None:
++        """Release cleanup waiters after the owner has published its terminal tail."""
++        with self._timer_condition:
++            if self._cleanup_owner == get_ident():
++                self._cleanup_complete = True
++                self._cleanup_requested = False
++                self._cleanup_owner = 0
++                self._timer_condition.notify_all()
++
+     def insert_encoder(self, encoder_name: str, encoding: str, encode_fn: Callable) -> None:
+         log(f"insert_encoder({encoder_name}, {encoding}, {encode_fn})")
+         self._all_encoders.setdefault(encoding, []).insert(0, encode_fn)
+@@ -458,6 +743,7 @@ class WindowSource(WindowIconSource):
+         self.picture_encodings = tuple(picture_encodings)
+ 
+     def init_vars(self) -> None:
++        self._init_timer_lifecycle()
+         self.server_core_encodings = ()
+         self.server_encodings = ()
+         self.encoding = ""
+@@ -477,8 +763,6 @@ class WindowSource(WindowIconSource):
+         self.strict = STRICT_MODE
+         self.decoder_speed = typedict()
+         #
+-        self.decode_error_refresh_timer: int = 0
+-        self.may_send_timer: int = 0
+         self.auto_refresh_delay = 0
+         self.base_auto_refresh_delay = 0
+         self.min_auto_refresh_delay = 50
+@@ -487,11 +771,7 @@ class WindowSource(WindowIconSource):
+         self.refresh_speed = AUTO_REFRESH_SPEED
+         self.refresh_event_time: float = 0.0
+         self.refresh_target_time: float = 0.0
+-        self.refresh_timer: int = 0
+         self.refresh_regions: list[rectangle] = []
+-        self.timeout_timer: int = 0
+-        self.expire_timer: int = 0
+-        self.soft_timer: int = 0
+         self.soft_expired: int = 0
+         self.max_soft_expired = MAX_SOFT_EXPIRED
+         self.is_OR = False
+@@ -527,15 +807,57 @@ class WindowSource(WindowIconSource):
+         self._damage_packet_sequence: int = 1
+ 
+     def cleanup(self) -> None:
+-        self.cancel_damage(MAX_SEQUENCE)
+-        log("encoding_totals for wid=%#x with primary encoding=%s : %s",
+-            self.wid, self.encoding, self.statistics.encoding_totals)
+-        self.init_vars()
+-        self._mmap = None
+-        self.batch_config.cleanup()
+-        # we can only clear the encoders after clearing the whole encoding queue:
+-        # (because mmap cannot be cancelled once queued for encoding)
+-        self.call_in_encode_thread(False, self.encode_ended)
++        # A connection-level damage registry may call timer cancellation while
++        # holding its own lock. Deactivate this source before entering the timer
++        # lifecycle, without requiring that optional connection integration.
++        # Concurrent callers serialize this external handoff, and a failed
++        # handoff leaves the terminal transition retryable.
++        cleanup_started, timer_sources, cleanup_errors = self._begin_terminal_cleanup()
++        if not cleanup_started:
++            if cleanup_errors:
++                for later_error, later_traceback in cleanup_errors[1:]:
++                    log.error("Additional error waiting for window source cleanup: %s", later_error,
++                              exc_info=(type(later_error), later_error, later_traceback))
++                error, traceback = cleanup_errors[0]
++                raise error.with_traceback(traceback)
++            return
++        try:
++            def run_cleanup_step(callback: Callable, *args) -> None:
++                try:
++                    callback(*args)
++                except BaseException as e:
++                    cleanup_errors.append((e, e.__traceback__))
++
++            run_cleanup_step(self._destroy_timer_sources, timer_sources)
++            # This wait reports an interrupt only after every claimed callback
++            # has returned, so the remaining terminal steps are safe to run.
++            run_cleanup_step(self._wait_for_timer_callbacks)
++            run_cleanup_step(super().cleanup)
++            run_cleanup_step(self.cancel_damage, MAX_SEQUENCE)
++
++            def log_encoding_totals() -> None:
++                log("encoding_totals for wid=%#x with primary encoding=%s : %s",
++                    self.wid, self.encoding, self.statistics.encoding_totals)
++
++            run_cleanup_step(log_encoding_totals)
++            run_cleanup_step(self.init_vars)
++            self._mmap = None
++            run_cleanup_step(self.batch_config.cleanup)
++            # We can only clear the encoders after clearing the whole encoding queue
++            # because mmap cannot be cancelled once queued for encoding. This barrier
++            # must still be attempted when an earlier cleanup step raises.
++            run_cleanup_step(self.call_in_encode_thread, False, self.encode_ended)
++            if cleanup_errors:
++                for later_error, later_traceback in cleanup_errors[1:]:
++                    log.error("Additional error during window source cleanup: %s", later_error,
++                              exc_info=(type(later_error), later_error, later_traceback))
++                error, traceback = cleanup_errors[0]
++                raise error.with_traceback(traceback)
++        finally:
++            # An external caller may use cleanup return as the ordering boundary
++            # before publishing the connection worker sentinel.  Wake it only
++            # after this owner has attempted the mandatory encode-ended barrier.
++            self._finish_terminal_cleanup()
+ 
+     def encode_ended(self) -> None:
+         log("encode_ended()")
+@@ -906,10 +1228,9 @@ class WindowSource(WindowIconSource):
+             return  # already up to date
+         if self.av_sync_timer:
+             return  # already scheduled
+-        self.av_sync_timer = GLib.timeout_add(delay, self.update_av_sync_delay)
++        self._schedule_timer("av_sync_timer", delay, self.update_av_sync_delay)
+ 
+     def update_av_sync_delay(self) -> None:
+-        self.av_sync_timer = 0
+         delta = self.av_sync_delay_target-self.av_sync_delay
+         if delta == 0:
+             return
+@@ -1279,36 +1600,24 @@ class WindowSource(WindowIconSource):
+                 self.statistics.encoding_pending.pop(sequence, None)
+ 
+     def cancel_expire_timer(self) -> None:
+-        if et := self.expire_timer:
+-            self.expire_timer = 0
+-            GLib.source_remove(et)
++        self._cancel_timer("expire_timer")
+ 
+     def cancel_may_send_timer(self) -> None:
+-        if mst := self.may_send_timer:
+-            self.may_send_timer = 0
+-            GLib.source_remove(mst)
++        self._cancel_timer("may_send_timer")
+ 
+     def cancel_soft_timer(self) -> None:
+-        if st := self.soft_timer:
+-            self.soft_timer = 0
+-            GLib.source_remove(st)
++        self._cancel_timer("soft_timer")
+ 
+     def cancel_refresh_timer(self) -> None:
+-        if rt := self.refresh_timer:
+-            self.refresh_timer = 0
+-            GLib.source_remove(rt)
++        if self._cancel_timer("refresh_timer"):
+             self.refresh_event_time = 0
+             self.refresh_target_time = 0
+ 
+     def cancel_timeout_timer(self) -> None:
+-        if tt := self.timeout_timer:
+-            self.timeout_timer = 0
+-            GLib.source_remove(tt)
++        self._cancel_timer("timeout_timer")
+ 
+     def cancel_av_sync_timer(self) -> None:
+-        if avst := self.av_sync_timer:
+-            self.av_sync_timer = 0
+-            GLib.source_remove(avst)
++        self._cancel_timer("av_sync_timer")
+ 
+     def is_cancelled(self, sequence=MAX_SEQUENCE) -> bool:
+         """ See cancel_damage(wid) """
+@@ -1670,7 +1979,7 @@ class WindowSource(WindowIconSource):
+                       (x, y, w, h, options), self.wid, len(regions), 1000*(now-delayed.damage_time))
+             if not self.expire_timer and not self.soft_timer and self.soft_expired == 0:
+                 log.error("Error: bug, found a delayed region without a timer!")
+-                self.expire_timer = GLib.timeout_add(0, self.expire_delayed_region, now)
++                self._schedule_timer("expire_timer", 0, self.expire_delayed_region, now)
+             return
+ 
+         # create a new delayed region:
+@@ -1729,7 +2038,7 @@ class WindowSource(WindowIconSource):
+         damagelog(" delay=%i, elapsed=%i, resize_elapsed=%i, congestion_elapsed=%i, batch=%i, min=%i, inc=%i",
+                   delay, elapsed, resize_elapsed, congestion_elapsed, self.batch_config.delay, min_delay, inc)
+         due = now+expire_delay/1000.0
+-        self.expire_timer = GLib.timeout_add(expire_delay, self.expire_delayed_region, due, target_delay)
++        self._schedule_timer("expire_timer", expire_delay, self.expire_delayed_region, due, target_delay)
+ 
+     def may_update_window_dimensions(self) -> tuple[int, int]:
+         ww, wh = self.window.get_dimensions()
+@@ -1763,7 +2072,6 @@ class WindowSource(WindowIconSource):
+         """ mark the region as expired so damage_packet_acked can send it later,
+             and try to send it now.
+         """
+-        self.expire_timer = 0
+         delayed = self._damage_delayed
+         if not delayed:
+             damagelog("expire_delayed_region() already processed")
+@@ -1787,7 +2095,7 @@ class WindowSource(WindowIconSource):
+             # not due yet, don't allow soft expiry, just try again later:
+             delay = int(1000*(due-now))
+             expire_delay = max(self.batch_config.min_delay, min(self.batch_config.expire_delay, delay))
+-            self.expire_timer = GLib.timeout_add(expire_delay, self.expire_delayed_region, due)
++            self._schedule_timer("expire_timer", expire_delay, self.expire_delayed_region, due)
+             return False
+         # the region has not been sent yet because we are waiting for damage ACKs from the client
+         max_soft_expired = min(1+self.statistics.damage_events_count//2, self.max_soft_expired)
+@@ -1799,7 +2107,7 @@ class WindowSource(WindowIconSource):
+             # we have already waited for "expire delay" to get here,
+             # wait gradually longer as we soft-expire more regions:
+             soft_delay = self.soft_expired*target_delay
+-            self.soft_timer = GLib.timeout_add(soft_delay, self.delayed_region_soft_timeout)
++            self._schedule_timer("soft_timer", soft_delay, self.delayed_region_soft_timeout)
+         else:
+             damagelog("expire_delayed_region: soft expire limit reached: %i", max_soft_expired)
+             if max_soft_expired == self.max_soft_expired:
+@@ -1818,19 +2126,17 @@ class WindowSource(WindowIconSource):
+             # but if somehow they go missing... clean it up from a timeout:
+             if not self.timeout_timer:
+                 delayed_region_time = delayed.damage_time
+-                self.timeout_timer = GLib.timeout_add(self.batch_config.timeout_delay,
+-                                                      self.delayed_region_timeout, delayed_region_time)
++                self._schedule_timer("timeout_timer", self.batch_config.timeout_delay,
++                                     self.delayed_region_timeout, delayed_region_time)
+         return False
+ 
+     def delayed_region_soft_timeout(self) -> bool:
+-        self.soft_timer = 0
+         log("delayed_region_soft_timeout() soft_expired=%i, max_soft_expired=%i",
+             self.soft_expired, self.max_soft_expired)
+         self.do_send_delayed()
+         return False
+ 
+     def delayed_region_timeout(self, delayed_region_time) -> bool:
+-        self.timeout_timer = 0
+         delayed = self._damage_delayed
+         if delayed is None:
+             # delayed region got sent
+@@ -1867,9 +2173,6 @@ class WindowSource(WindowIconSource):
+                 log_fn(" %6i %-5s: %3is", seq, coding, elapsed)
+ 
+     def _may_send_delayed(self) -> None:
+-        # this method is called from the timer,
+-        # we know we can clear it (and no need to cancel it):
+-        self.may_send_timer = 0
+         self.may_send_delayed()
+ 
+     def may_send_delayed(self) -> None:
+@@ -1911,7 +2214,7 @@ class WindowSource(WindowIconSource):
+         def check_again(delay=actual_delay/10.0):
+             # schedules a call to check again:
+             delay = int(min(self.batch_config.max_delay, max(10.0, delay)))
+-            self.may_send_timer = GLib.timeout_add(delay, self._may_send_delayed)
++            self._schedule_timer("may_send_timer", delay, self._may_send_delayed)
+         # locked means a fixed delay we try to honour,
+         # this code ensures that we don't fire too early if called from damage_packet_acked
+         if self.batch_config.locked:
+@@ -2394,7 +2697,7 @@ class WindowSource(WindowIconSource):
+                 int(self.base_auto_refresh_delay * mult),
+             )
+             self.refresh_target_time = now + sched_delay/1000.0
+-            self.refresh_timer = GLib.timeout_add(sched_delay, self.refresh_timer_function, options)
++            self._schedule_timer("refresh_timer", sched_delay, self.refresh_timer_function, options)
+             rec(f"scheduling refresh in {sched_delay}ms (pct={pct}, batch={self.batch_config.delay})")
+             return
+         # some of those rectangles may overlap,
+@@ -2456,7 +2759,6 @@ class WindowSource(WindowIconSource):
+             We figure out if now is the right time to do the refresh,
+             and if not re-schedule.
+         """
+-        self.refresh_timer = 0
+         # timer is running now, clear it so that we don't try to cancel it somewhere else:
+         # re-do some checks that may have changed:
+         if not self.can_refresh():
+@@ -2471,7 +2773,7 @@ class WindowSource(WindowIconSource):
+             self.timer_full_refresh()
+             return False
+         # re-schedule ourselves:
+-        self.refresh_timer = GLib.timeout_add(int(delta*1000), self.refresh_timer_function, damage_options)
++        self._schedule_timer("refresh_timer", int(delta*1000), self.refresh_timer_function, damage_options)
+         refreshlog("refresh_timer_function: rescheduling auto refresh timer with extra delay %ims", int(1000*delta))
+         return False
+ 
+@@ -2792,16 +3094,13 @@ class WindowSource(WindowIconSource):
+         self.global_statistics.decode_errors += 1
+         if self.window and not self.decode_error_refresh_timer:
+             delay = min(1000, 250+self.global_statistics.decode_errors*100)
+-            self.decode_error_refresh_timer = GLib.timeout_add(delay, self.decode_error_refresh)
++            self._schedule_timer("decode_error_refresh_timer", delay, self.decode_error_refresh)
+ 
+     def decode_error_refresh(self) -> None:
+-        self.decode_error_refresh_timer = 0
+         self.full_quality_refresh({})
+ 
+     def cancel_decode_error_refresh_timer(self) -> None:
+-        if dert := self.decode_error_refresh_timer:
+-            self.decode_error_refresh_timer = 0
+-            GLib.source_remove(dert)
++        self._cancel_timer("decode_error_refresh_timer")
+ 
+     def may_use_scrolling(self, _image: ImageWrapper, _options: typedict) -> bool:
+         # overridden in video source
+diff --git a/xpra/server/window/video_compress.py b/xpra/server/window/video_compress.py
+index 8c70c4ecaf4ac1e6f34577b2a973b943aef6b8ab..c5f196e73eb9b2777922546b486f6cc164e1718c 100644
+--- a/xpra/server/window/video_compress.py
++++ b/xpra/server/window/video_compress.py
+@@ -927,7 +927,7 @@ class WindowVideoSource(WindowSource):
+         else:
+             self._damage_delayed = DelayedRegions(damage_time, encoding=coding, options=options, regions=regions)
+             sublog("send_regions: delaying non video regions %s some more by %ims", regions, delay)
+-            self.expire_timer = GLib.timeout_add(delay, self.expire_delayed_region)
++            self._schedule_timer("expire_timer", delay, self.expire_delayed_region)
+ 
+     def must_encode_full_frame(self, encoding: str) -> bool:
+         non_video = self.non_video_encodings
+diff --git a/xpra/server/window/windowicon.py b/xpra/server/window/windowicon.py
+index 913bd1a395ebd40cebd71c3ba141ecd66774c006..968ac4c975c75c3f7ceb5cb385f3c8b527701d0a 100644
+--- a/xpra/server/window/windowicon.py
++++ b/xpra/server/window/windowicon.py
+@@ -85,6 +85,7 @@ class WindowIconSource:
+ 
+         self.window_icon_data: tuple[int, int, str, bytes] | None = None
+         self.send_window_icon_timer = 0
++        self.window_icon_queued = False
+         self.theme_default_icons = icons_encoding_options.strtupleget("default.icons")
+         self.window_icon_greedy = icons_encoding_options.boolget("greedy", False)
+         self.window_icon_size = icons_encoding_options.intpair("size", (64, 64))
+@@ -109,6 +110,9 @@ class WindowIconSource:
+         self.cancel_window_icon_timer()
+ 
+     def cancel_window_icon_timer(self) -> None:
++        if cancel_timer := getattr(self, "_cancel_timer", None):
++            cancel_timer("send_window_icon_timer")
++            return
+         if swit := self.send_window_icon_timer:
+             self.send_window_icon_timer = 0
+             GLib.source_remove(swit)
+@@ -228,19 +232,30 @@ class WindowIconSource:
+             log("no suitable icon")
+             return
+         self.window_icon_data = icon
+-        if not self.send_window_icon_timer:
++        if not self.send_window_icon_timer and not self.window_icon_queued:
+             # call compress via the work queue
+             # and delay sending it by a bit to allow basic icon batching:
+             w, h = self.window_icon_data[:2]
+             delay = min(1000, max(50, w * h * self.batch_config.delay_per_megapixel // 1000000))
+             log("send_window_icon() window=%s, wid=%#x, compression scheduled in %sms for batch delay=%i",
+                 self.window, self.wid, delay, self.batch_config.delay_per_megapixel)
+-            self.send_window_icon_timer = GLib.timeout_add(delay, self.call_in_encode_thread,
+-                                                           True, self.compress_and_send_window_icon)
++            if schedule_timer := getattr(self, "_schedule_timer", None):
++                schedule_timer("send_window_icon_timer", delay, self.queue_window_icon)
++            else:
++                self.send_window_icon_timer = GLib.timeout_add(delay, self.queue_window_icon)
++
++    def queue_window_icon(self) -> None:
++        self.send_window_icon_timer = 0
++        self.window_icon_queued = True
++        try:
++            self.call_in_encode_thread(True, self.compress_and_send_window_icon)
++        except BaseException:
++            self.window_icon_queued = False
++            raise
+ 
+     def compress_and_send_window_icon(self) -> None:
+         # this runs in the work queue
+-        self.send_window_icon_timer = 0
++        self.window_icon_queued = False
+         idata = self.window_icon_data
+         if not idata or not self.has_png:
+             return

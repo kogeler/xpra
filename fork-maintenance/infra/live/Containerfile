@@ -73,24 +73,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=xpra-source /src/xpra /src/xpra
-COPY empty_damage_fixture.c /tmp/xpra-empty-damage-fixture.c
 
 WORKDIR /src/xpra
-
-RUN install -d /opt/xpra-install/usr/local/bin \
-    && wayland-scanner client-header \
-        /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
-        /tmp/xdg-shell-client-protocol.h \
-    && wayland-scanner private-code \
-        /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
-        /tmp/xdg-shell-protocol.c \
-    && cc -std=c11 -O2 -Wall -Wextra -Werror \
-        $(pkg-config --cflags wayland-client) \
-        -I/tmp \
-        /tmp/xpra-empty-damage-fixture.c \
-        /tmp/xdg-shell-protocol.c \
-        $(pkg-config --libs wayland-client) \
-        -o /opt/xpra-install/usr/local/bin/xpra-empty-damage-fixture
 
 RUN python3 setup.py install \
         --root=/opt/xpra-install \
@@ -151,6 +135,32 @@ RUN package_dir="$(find /opt/xpra-install/usr/local/lib -type d -name dist-packa
              python3 tests/unittests/unit/server/subsystem/encoding_test.py \
                EncodingMixinTest.test_reinit_encodings_log_format; \
        fi
+
+# Fixture-only edits retain the preceding Xpra build and native-check layers.
+COPY empty_damage_fixture.c /tmp/xpra-empty-damage-fixture.c
+COPY subsurface_fixture.c /tmp/xpra-subsurface-fixture.c
+
+RUN install -d /opt/xpra-install/usr/local/bin \
+    && wayland-scanner client-header \
+        /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
+        /tmp/xdg-shell-client-protocol.h \
+    && wayland-scanner private-code \
+        /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
+        /tmp/xdg-shell-protocol.c \
+    && cc -std=c11 -O2 -Wall -Wextra -Werror \
+        $(pkg-config --cflags wayland-client) \
+        -I/tmp \
+        /tmp/xpra-empty-damage-fixture.c \
+        /tmp/xdg-shell-protocol.c \
+        $(pkg-config --libs wayland-client) \
+        -o /opt/xpra-install/usr/local/bin/xpra-empty-damage-fixture \
+    && cc -std=c11 -O2 -Wall -Wextra -Werror \
+        $(pkg-config --cflags wayland-client) \
+        -I/tmp \
+        /tmp/xpra-subsurface-fixture.c \
+        /tmp/xdg-shell-protocol.c \
+        $(pkg-config --libs wayland-client) \
+        -o /opt/xpra-install/usr/local/bin/xpra-subsurface-fixture
 
 
 FROM docker.io/library/ubuntu:26.04 AS server
@@ -221,6 +231,7 @@ COPY container_payload.py /opt/xpra-fork-maintenance/container_payload.py
 COPY start_hardware_fixture.sh /opt/xpra-fork-maintenance/start_hardware_fixture.sh
 COPY start_wayland_clipboard_fixture.sh /opt/xpra-fork-maintenance/start_wayland_clipboard_fixture.sh
 COPY start_wayland_keyboard_fixture.sh /opt/xpra-fork-maintenance/start_wayland_keyboard_fixture.sh
+COPY start_wayland_subsurface_fixture.sh /opt/xpra-fork-maintenance/start_wayland_subsurface_fixture.sh
 COPY start_zed.sh /opt/xpra-fork-maintenance/start_zed.sh
 
 RUN test -d /usr/local/share/xpra/css \
@@ -231,6 +242,7 @@ RUN test -d /usr/local/share/xpra/css \
     && chmod 0755 /opt/xpra-fork-maintenance/start_hardware_fixture.sh \
     && chmod 0755 /opt/xpra-fork-maintenance/start_wayland_clipboard_fixture.sh \
     && chmod 0755 /opt/xpra-fork-maintenance/start_wayland_keyboard_fixture.sh \
+    && chmod 0755 /opt/xpra-fork-maintenance/start_wayland_subsurface_fixture.sh \
     && chmod 0755 /opt/xpra-fork-maintenance/start_zed.sh \
     && chmod 0755 /opt/xpra-fork-maintenance/container_payload.py \
     && xpra --version \
@@ -239,7 +251,8 @@ RUN test -d /usr/local/share/xpra/css \
     && python3 -c 'from xpra.clipboard import core' \
     && python3 -c 'from xpra.wayland.server.clipboard import WaylandClipboard' \
     && python3 -c 'from xpra.wayland.server import compositor' \
-    && test -x /usr/local/bin/xpra-empty-damage-fixture
+    && test -x /usr/local/bin/xpra-empty-damage-fixture \
+    && test -x /usr/local/bin/xpra-subsurface-fixture
 
 RUN useradd --create-home --uid 1001 --shell /bin/bash lab \
     && install -d -o lab -g lab -m 0700 /artifacts /run/user/1001
@@ -257,7 +270,9 @@ RUN test -r /opt/xpra-fork-maintenance/interaction_fixture.py \
     && test -r /opt/xpra-fork-maintenance/wayland_clipboard_fixture.py \
     && test -x /opt/xpra-fork-maintenance/start_wayland_clipboard_fixture.sh \
     && test -x /opt/xpra-fork-maintenance/start_wayland_keyboard_fixture.sh \
-    && test -x /usr/local/bin/xpra-empty-damage-fixture
+    && test -x /opt/xpra-fork-maintenance/start_wayland_subsurface_fixture.sh \
+    && test -x /usr/local/bin/xpra-empty-damage-fixture \
+    && test -x /usr/local/bin/xpra-subsurface-fixture
 
 CMD ["sleep", "infinity"]
 
@@ -298,15 +313,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=xpra-source /src/xpra /src/xpra
-COPY xkb_xtest_driver.c /tmp/xpra-xkb-xtest-driver.c
 
 WORKDIR /src/xpra
-
-RUN install -d /opt/xpra-install/usr/local/bin \
-    && cc -std=c11 -O2 -Wall -Wextra -Werror \
-        /tmp/xpra-xkb-xtest-driver.c \
-        $(pkg-config --cflags --libs x11 xtst) \
-        -o /opt/xpra-install/usr/local/bin/xpra-xkb-xtest-driver
 
 RUN python3 setup.py install \
         --root=/opt/xpra-install \
@@ -343,6 +351,15 @@ RUN package_dir="$(find /opt/xpra-install/usr/local/lib -type d -name dist-packa
        python3 tests/unittests/unit/codecs/argb_test.py \
     && PYTHONPATH="$package_dir:/src/xpra/tests/unittests" \
        python3 tests/unittests/unit/codecs/rgb_transform_test.py
+
+# Keep client fixture inputs downstream of the unchanged Xpra native checks.
+COPY xkb_xtest_driver.c /tmp/xpra-xkb-xtest-driver.c
+
+RUN install -d /opt/xpra-install/usr/local/bin \
+    && cc -std=c11 -O2 -Wall -Wextra -Werror \
+        /tmp/xpra-xkb-xtest-driver.c \
+        $(pkg-config --cflags --libs x11 xtst) \
+        -o /opt/xpra-install/usr/local/bin/xpra-xkb-xtest-driver
 
 
 FROM docker.io/library/debian:13-slim AS client

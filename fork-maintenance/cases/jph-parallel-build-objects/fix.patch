@@ -1,0 +1,217 @@
+diff --git a/setup.py b/setup.py
+index 670795ecc83eec44020f83e8305bd7d07ad4e4e5..40a758aece52812fda43147d08d2d46216f7578b 100755
+--- a/setup.py
++++ b/setup.py
+@@ -3654,8 +3654,8 @@ toggle_packages(avif_ENABLED, "xpra.codecs.avif")
+ tace(avif_encoder_ENABLED, "xpra.codecs.avif.encoder", "libavif")
+ tace(avif_decoder_ENABLED, "xpra.codecs.avif.decoder", "libavif")
+ toggle_packages(jph_ENABLED, "xpra.codecs.jph")
+-tace(jph_encoder_ENABLED, "xpra.codecs.jph.encoder,xpra/codecs/jph/jph.cpp", OPENJPH_PKG_CONFIG, language="c++")
+-tace(jph_decoder_ENABLED, "xpra.codecs.jph.decoder,xpra/codecs/jph/jph.cpp", OPENJPH_PKG_CONFIG, language="c++")
++tace(jph_encoder_ENABLED, "xpra.codecs.jph.encoder", OPENJPH_PKG_CONFIG, language="c++")
++tace(jph_decoder_ENABLED, "xpra.codecs.jph.decoder", OPENJPH_PKG_CONFIG, language="c++")
+ toggle_packages(csc_libyuv_ENABLED, "xpra.codecs.libyuv")
+ if csc_libyuv_ENABLED:
+     if libyuv_fallback:
+diff --git a/tests/unittests/unit/codecs/jph_build_test.py b/tests/unittests/unit/codecs/jph_build_test.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ee2e0ace1047dfe53e81295a832d0f8a3da654cc
+--- /dev/null
++++ b/tests/unittests/unit/codecs/jph_build_test.py
+@@ -0,0 +1,164 @@
++#!/usr/bin/env python3
++# This file is part of Xpra.
++# Copyright (C) 2026 kogeler
++# Xpra is released under the terms of the GNU GPL v2, or, at your option, any
++# later version. See the file COPYING for details.
++
++"""Exercise the real setup/Cython object graph without requiring OpenJPH."""
++
++import json
++import os
++from pathlib import Path
++import runpy
++import shutil
++import subprocess
++import sys
++import tarfile
++from tempfile import TemporaryDirectory
++import unittest
++
++
++PLAN_PREFIX = "jph-build-plan="
++JPH_PACKAGE = "xpra.codecs.jph."
++HELPER_PATHS = ("xpra/codecs/jph/jph.cpp", "xpra/codecs/jph/jph.h")
++
++
++def describe_setup(flags):
++    # Run the actual option parser, extension registration and cythonize call.
++    # --skip-build uses setup's own no-pkgconfig path, not fake declarations.
++    # This observes object/dependency planning, never native linkage.
++    sys.argv = [
++        "setup.py", "build_ext", "--minimal", "--with-cython", "--without-codecs",
++        "--without-server", "--without-client", "--without-shadow", "--without-x11", "--without-gtk_x11",
++        "--without-rencodeplus", "--without-brotli", "--without-cityhash", "--without-qrencode",
++        "--without-websockets", "--without-netdev", "--without-vsock", "--without-lz4", "--without-zstd",
++        "--without-pam", "--without-sd_listen", "--without-proc", "--without-landlock", "--without-peercred",
++        "--without-cython_shared", "--skip-build", *flags,
++    ]
++    setup = runpy.run_path("setup.py", run_name="xpra_build_plan")
++    from distutils.ccompiler import new_compiler
++    compiler = new_compiler()
++    extensions = []
++    for extension in setup["setup_options"]["ext_modules"]:
++        if not extension.name.startswith(JPH_PACKAGE):
++            continue
++        extensions.append({
++            "name": extension.name,
++            "language": extension.language,
++            "sources": extension.sources,
++            "depends": extension.depends,
++            "objects": compiler.object_filenames(extension.sources, output_dir="build/jph-objects"),
++        })
++    print(PLAN_PREFIX + json.dumps({"compiler": compiler.compiler_type, "extensions": extensions}))
++
++
++class JPHBuildTest(unittest.TestCase):
++
++    @classmethod
++    def setUpClass(cls):
++        source = Path(__file__).resolve().parents[4]
++        scratch = source / "build"
++        scratch.mkdir(exist_ok=True)
++        cls.temporary = TemporaryDirectory(prefix="jph-build-test-", dir=scratch)
++        cls.addClassCleanup(cls.temporary.cleanup)
++        cls.source = Path(cls.temporary.name) / "source"
++        cls.source.mkdir()
++        # No .git, installed tree, other test results, or operator data enters
++        # the private setup invocation. Its generated files never touch source.
++        for name in ("xpra", "fs"):
++            shutil.copytree(source / name, cls.source / name, ignore=shutil.ignore_patterns(
++                "__pycache__", "*.pyc", "*.so", "*.pyd", "*.dll",
++            ))
++        for name in ("setup.py", "pyproject.toml", "MANIFEST.in", "README.md", "COPYING"):
++            shutil.copy2(source / name, cls.source / name)
++        cls.environment = os.environ.copy()
++        cls.environment.pop("XPRA_EXTRA_BUILD_ARGS", None)
++        cls.environment.update({
++            "PYTHONPATH": str(cls.source),
++            "PYTHONNOUSERSITE": "1",
++            "PYTHONDONTWRITEBYTECODE": "1",
++            "NTHREADS": "0",
++        })
++        # Discard copied generated Cython files through the actual clean path.
++        cls.run_setup("clean", "--minimal")
++        cls.plans = {}
++        for name, flags in (
++                ("both", ("--with-jph",)),
++                ("encoder", ("--with-jph_encoder",)),
++                ("decoder", ("--with-jph_decoder",)),
++        ):
++            output = cls.run_process(str(Path(__file__).resolve()), "--describe-setup", *flags)
++            lines = [line[len(PLAN_PREFIX):] for line in output.splitlines() if line.startswith(PLAN_PREFIX)]
++            if len(lines) != 1:
++                raise AssertionError(f"expected one real setup plan, got {lines!r}:\n{output}")
++            cls.plans[name] = json.loads(lines[0])
++
++    @classmethod
++    def run_process(cls, *args):
++        result = subprocess.run(
++            (sys.executable, *args), cwd=cls.source, env=cls.environment,
++            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
++            timeout=90, check=False,
++        )
++        if result.returncode:
++            raise AssertionError(f"setup probe failed ({result.returncode}):\n{result.stdout}")
++        return result.stdout
++
++    @classmethod
++    def run_setup(cls, *args):
++        return cls.run_process("setup.py", *args)
++
++    def test_parallel_extensions_own_distinct_objects(self):
++        extensions = self.plans["both"]["extensions"]
++        self.assertEqual({entry["name"] for entry in extensions}, {
++            JPH_PACKAGE + "encoder", JPH_PACKAGE + "decoder",
++        })
++        owners = {}
++        for extension in extensions:
++            self.assertEqual(extension["language"], "c++")
++            self.assertTrue(extension["objects"])
++            for obj in extension["objects"]:
++                owners.setdefault(obj, []).append(extension["name"])
++        shared = {obj: names for obj, names in owners.items() if len(names) != 1}
++        self.assertEqual(shared, {}, f"parallel extensions share writable compiler objects: {shared}")
++
++    def test_shared_helper_and_header_remain_dependencies(self):
++        for name, plan in self.plans.items():
++            for extension in plan["extensions"]:
++                with self.subTest(selection=name, extension=extension["name"]):
++                    inputs = set(extension["sources"]) | set(extension["depends"])
++                    self.assertTrue(set(HELPER_PATHS) <= inputs, inputs)
++
++    def test_encoder_and_decoder_remain_independently_selectable(self):
++        for name in ("encoder", "decoder"):
++            with self.subTest(selection=name):
++                self.assertEqual(
++                    [entry["name"] for entry in self.plans[name]["extensions"]],
++                    [JPH_PACKAGE + name],
++                )
++
++    def test_source_distribution_preserves_shared_inputs(self):
++        expected = {
++            name: (self.source / name).read_bytes() for name in (
++                *HELPER_PATHS, "xpra/codecs/jph/encoder.pyx", "xpra/codecs/jph/decoder.pyx",
++            )
++        }
++        self.run_setup("sdist", "--minimal", "--formats=gztar", "--dist-dir=archives")
++        archives = tuple((self.source / "archives").glob("*.tar.gz"))
++        self.assertEqual(len(archives), 1, archives)
++        with tarfile.open(archives[0], "r:gz") as archive:
++            for name, data in expected.items():
++                with self.subTest(path=name):
++                    self.assertEqual((self.source / name).read_bytes(), data, "clean modified handwritten input")
++                    members = [member for member in archive.getmembers() if member.name.endswith("/" + name)]
++                    self.assertEqual(len(members), 1, members)
++                    self.assertTrue(members[0].isfile())
++                    with archive.extractfile(members[0]) as stream:
++                        self.assertEqual(stream.read(), data)
++
++
++if __name__ == "__main__":
++    if len(sys.argv) > 1 and sys.argv[1] == "--describe-setup":
++        describe_setup(sys.argv[2:])
++    else:
++        unittest.main()
+diff --git a/xpra/codecs/jph/decoder.pyx b/xpra/codecs/jph/decoder.pyx
+index bca0577de9e5c48e3ba6bd00af8dadaea8a9dbe8..138040ab6ad17154a38964b91e81f566c96e8894 100644
+--- a/xpra/codecs/jph/decoder.pyx
++++ b/xpra/codecs/jph/decoder.pyx
+@@ -31,6 +31,11 @@ cdef extern from "jph.h":
+                    char *error, size_t error_size) nogil
+ 
+ 
++# Each extension owns its compiled object, even under parallel build_ext.
++cdef extern from "jph.cpp":
++    pass
++
++
+ def get_version() -> Tuple[int, int, int]:
+     return jph_version_major(), jph_version_minor(), jph_version_patch()
+ 
+diff --git a/xpra/codecs/jph/encoder.pyx b/xpra/codecs/jph/encoder.pyx
+index afb5b32c2705707409a1afece8bffdbd3de474bc..602ef4d1a8e17f9231f62092bf89df619475f9bc 100644
+--- a/xpra/codecs/jph/encoder.pyx
++++ b/xpra/codecs/jph/encoder.pyx
+@@ -34,6 +34,11 @@ cdef extern from "jph.h":
+                    char *error, size_t error_size) nogil
+ 
+ 
++# Each extension owns its compiled object, even under parallel build_ext.
++cdef extern from "jph.cpp":
++    pass
++
++
+ INPUT_FORMATS: Dict[str, Tuple[int, int, int, int]] = {
+     "RGB": (3, 0, 1, 2),
+     "BGR": (3, 2, 1, 0),

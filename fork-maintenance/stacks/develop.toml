@@ -2,11 +2,14 @@ schema = 1
 slug = "develop"
 description = "The complete active downstream patch queue"
 series = [
+  "window-source-timer-lifecycle",
+  "video-pipeline-cleanup-race",
+  "wayland-subsurface-stream-ownership",
   "wayland-initial-window-state",
   "wayland-client-keymap-sync",
   "x11-client-clipboard-events",
   "wayland-empty-damage-throttle",
-  "video-pipeline-cleanup-race",
+  "jph-parallel-build-objects",
   "debian-libva-codecs-package",
   "upstream-test-quarantine",
 ]

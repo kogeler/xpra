@@ -1,108 +1,76 @@
 # Restore X11 client clipboard synchronization
 
-## Failure boundary
+## Boundary
 
-A GTK3 X11 client can negotiate clipboard forwarding successfully while never
-delivering local ownership changes to the Xpra clipboard helper.  The helper
-creates its X11 event window, registers it with Xpra's dispatcher, and selects
-XFixes notifications, but it does not acquire the global GDK X11 event filter
-which feeds that dispatcher.  Other optional client subsystems can happen to
-install the filter and mask the omission; a minimal client has no such owner.
+Cross-backend clipboard synchronization requires one complete ownership and
+delivery transaction: detect a local X11 owner, obtain its current targets and
+data, publish the corresponding native-Wayland offer, and service each current
+consumer. An independent native-Wayland owner must remain valid even when
+direction policy forbids forwarding it back to X11. Successful negotiation or
+a clipboard packet proves only part of that transaction.
 
-The clean embedded source reproduces the complete X11 entry boundary.  A fixed-marker
-X11 owner and an independent raw X11 consumer complete `TARGETS` and marker
-conversions on the same display.  The Xpra event window and root window both
-receive raw XFixes owner-change notifications with the new owner and timestamp,
-but the client routes no XFixes or property event and sends no new clipboard
-token.  Enabling the unrelated XSettings subsystem installs the missing filter
-and makes the initial marker cross the unchanged Xpra connection into a native
-Wayland GTK sink.
+On the GTK3 X11 client, `X11Clipboard` owns its raw event window, dispatcher
+receiver, XFixes subscriptions, and one lease on the global GDK event filter.
+The filter delivers both ownership notifications and conversion property
+events to Xpra. Its lifetime cannot depend on optional XSettings or XI2
+subsystems: every successful acquisition has an independent count, and only
+the final matching release removes the filter.
 
-That control also exposes a second boundary which an isolated fix must not
-leave behind.  After Xpra routes a later `XFSelectionNotify`, the filter returns
-`GDK_FILTER_CONTINUE`; GTK then processes the same event and the X11 client
-terminates in native dispatch.  A core captured in the frozen client image and
-resolved against the matching Debian GTK debug package reaches
-`_gdk_x11_screen_process_owner_change(screen=0x0, ...)`: GDK's lookup for the
-Xpra event XID returned no window, so no screen was available after Xpra's
-global filter returned.  The termination remains reproducible with the raw
-monitor disabled, the same owner process and XID retained, and client direction
-set to `to-client`, where the Xpra proxy returns without requesting targets or
-sending a packet.
+The raw `InputOnly` window also has a strongly retained GDK foreign wrapper.
+Xpra's filter returns `GDK_FILTER_CONTINUE`, so GTK must resolve that event XID
+to a valid window and screen when it processes the same XFixes notification.
+Without that association, `_gdk_x11_screen_process_owner_change` can receive a
+NULL screen; merely routing the event to the clipboard proxy does not make
+the later GDK dispatch safe. `StructureNotifyMask` preserves the mapping until
+the server-ordered `DestroyNotify`, after earlier queued events have drained.
 
-The missing mapping is not a GTK limitation for InputOnly windows.  An
-independent A/B registers an otherwise identical raw window with
-`foreign_new_for_display`; GDK then looks it up by the same XID and survives the
-owner change.  The frozen client-only install instead exposes
-`xpra.x11.gtk` as a namespace containing only compiled extensions: `setup.py`
-packages its Python initialization and error bridge only when a server is
-enabled.  Consequently `init_gdk_display_source()` does not install the
-`get_pywindow` adapter, the clipboard stores the fallback object, and GDK never
-learns the subscribed XID.  The X11 correction therefore has to make
-package composition, filter ownership, and the event-window/GDK handoff
-coherent, rather than merely adding an initialization call or changing a
-timeout.
+The applicable client-only installation therefore includes the regular
+`xpra.x11.gtk` Python package as well as its compiled extensions. Its initializer
+installs the error bridge and stable `get_pywindow` lookup delegate before
+`init_gdk_display_source()` binds Xpra to GDK's display. Importing an extension
+through an implicit namespace package is not equivalent to executing that
+initializer. Package composition, shared filter ownership, and the event-XID
+handoff are distinct parts of the same client lifetime.
 
-Once those X11 boundaries were corrected, the complete cross-backend live path
-exposed a separate server-side delivery boundary in the same synchronization
-transaction.  `WaylandSelection` and `WaylandPrimarySelection` change or query
-wlroots state from Xpra packet and GLib clipboard callbacks, but the embedded
-source does not flush the Wayland display after `set_source`, `clear`, or
-`send_source`.  Those calls can enqueue a new offer, a NULL offer, or a native
-source data request without making it visible to the affected Wayland client.
-`WaylandCompositor.process_events()` does flush after dispatching the
-compositor event source, but that is not an ordering guarantee for work queued
-later from a different callback.  In the live reproduction the updated offer
-arrived only after unrelated Wayland activity, the sink first read stale data,
-and the reverse source request never completed.
+On the server, `WaylandSelection` and `WaylandPrimarySelection` publish every
+successful `set_source`, `clear`, and `send_source` operation with an outbound
+display flush. A wlroots call may mutate seat state or queue an offer/request
+without delivering it to the native client. `WaylandCompositor.process_events()`
+flushes its own event-source callback, but cannot order work queued later by an
+Xpra packet or GLib pipe callback. The selection adapter owns that later
+publication; unrelated input must never be its trigger.
 
-The `off` control then exposed the complementary ingress boundary.  The
-compositor always advertises the standard `wl_data_device_manager`, yet the
-clean source registers the seat's standard request/set-selection listeners
-only when Xpra clipboard forwarding is enabled.  With `--clipboard=no`, a
-native GTK client can issue `Gtk.Clipboard.set_text` successfully while the
-compositor never installs the requested source and never returns the
-corresponding selection event.  Local standard `CLIPBOARD` service is a base
-compositor responsibility, shared with data-device operation such as drag and
-drop; only Xpra forwarding, data-control, and the optional primary-selection
-protocol belong behind the clipboard feature gate.
+Local standard `CLIPBOARD` service is base compositor behavior. Its standard
+seat request/set-selection listeners have the same unconditional lifetime as
+`wl_data_device_manager`, including with `--clipboard=no`. Xpra forwarding,
+data-control, and the optional primary-selection protocol retain their feature
+gates. A successful `Gtk.Clipboard.set_text` call is only an ownership request;
+the compositor's accepted non-NULL selection and the native client's resulting
+owner-change event establish ownership independently of forwarding policy.
 
-Reviewing the complete Wayland lifecycle exposed two further stale-generation
-hazards at the same boundary.  A native consumer's source-send request was
-recorded only by MIME target, so a delayed response for an old Xpra-created
-source could be written into a file descriptor opened later for a replacement
-source with the same target.  In the reverse direction, an asynchronous pipe
-read from an old native source was not bound to an ownership generation; its
-completion could outlive a source replacement, including allocator reuse of
-the same pointer, and feed old bytes or continue an eager multi-target
-collection against the new owner.
+Every asynchronous data transfer retains its exact source and request
+identity. `ClipboardTimeoutHelper` binds an optional completion callback to
+the existing wire request ID; legacy X11, GTK, Win32, and macOS proxies retain
+target-based delivery when no callback is supplied. A Wayland completion
+closes over a private monotonic key, whose live record owns the exact Python
+source object, remote generation, target, and FD. Destruction removes that
+record and closes the FD, so a late reply cannot reach a replacement source
+through a repeated target or reused descriptor. Native-source reads use an
+independent key, pointer and local generation; replacement empty-completes old
+reads once and stops their eager multi-target collectors, including when the
+allocator reuses a source pointer.
 
-The wire protocol already gives every `clipboard-request` a unique ID, but
-`ClipboardTimeoutHelper` historically discarded that identity when delivering
-the reply to `proxy.got_contents(target, ...)`.  The Wayland adapter therefore
-needs an optional request-bound completion callback while legacy X11, GTK,
-Win32, and macOS proxies retain the existing target-based delivery path.  Each
-Wayland callback closes over only a private monotonic key; the live table owns
-the exact Python source object, source generation, target, and FD.  Destruction
-removes that table entry and closes the FD, so a late callback is a no-op even
-if the kernel has reused the numeric descriptor.  Local reads use an analogous
-monotonic key plus source pointer and generation, and replacement cancels each
-old callback exactly once with an empty result.
+Helper reset drains outstanding wire requests while their records remain
+resolvable and a re-entry guard prevents new network work. Proxy cleanup
+marks the lifetime closing, invalidates both generations, retires pipes,
+clears only its still-owned remote source, and disconnects the exact callback
+from the compositor's custom event registry. These same boundaries govern
+replacement, reset, disconnect and teardown, not only initial synchronization.
 
-The same audit found that helper reset cleared its outstanding-request table
-before trying to resolve it, leaving timers and request-specific consumers
-stranded, and that the clipboard proxy never unregistered its callback from
-the compositor's custom event-list API.  Reset now drains detached wire
-requests under a re-entry guard, while cleanup marks the proxy closing,
-invalidates both generations, retires pipes, clears only an owned remote
-source, and disconnects the exact compositor callback.  These lifecycle fixes
-are required to make the event/flush correction stable across replacement,
-disconnect, and teardown rather than only for the first marker.
-
-Both Wayland failures are present in the same clean embedded source and do not
-depend on another downstream case.  They were hidden behind the earlier X11
-event loss, which is why the selected case source must be installed at both
-live endpoints before the end-to-end behavior can be accepted.
+The case has no other downstream production dependency. Its positive live
+gate installs the selected case at both endpoints because client event
+delivery and server publication/request ownership are both required to prove
+the complete transaction.
 
 ## Upstream provenance
 
@@ -127,7 +95,8 @@ maintainer-authored 2025 refactor followed by the 2026 token-state work:
   isolation which the downstream correction must preserve;
 - `1f5f73ee619` introduced the current Wayland compositor/clipboard split,
   including the selection adapter methods and compositor event-loop flush
-  boundary now under review;
+  boundary; adaptation on the frozen source must preserve the explicit
+  selection-adapter publication ownership described below;
 - `c732fbd4137` and `d9c1aea45fb` added packet-origin loop detection and
   origin preservation to the Wayland proxies; the publication correction must
   not bypass or weaken that newer ownership design.
@@ -162,12 +131,11 @@ clipboard object:
 | `xpra/wayland/server/compositor.pyx` | Creates the standard data-device global and seat, accepts standard client selection requests, emits compositor selection changes through its custom connect/disconnect registry, and separately feature-gates optional forwarding/data-control/primary-selection facilities. |
 | wlroots and `wl_display` | Mutate seat state synchronously but queue protocol events and file descriptors for clients; explicit display flushing is the outbound publication boundary, not an ownership or event-dispatch substitute. |
 
-The global filter is shared process state.  Every subsystem which successfully
-acquires it needs one independent lease, and cleanup may release only that
-lease.  The current counter increments only during the first acquisition, so a
-second apparent owner is not counted and the first cleanup removes the filter
-from underneath the survivor.  Clipboard setup and the counter semantics must
-be corrected together and tested with two real owners.
+The global filter is shared process state. Every successful acquisition owns
+one independent lease, and cleanup releases only that lease. The counter
+increments on every acquisition; only the zero-to-one transition installs the
+filter and only the one-to-zero transition removes it. Clipboard setup and
+that shared counter contract are tested together with two real owners.
 
 There are three different meanings of "window" at this boundary.  The X
 server owns the integer event-window XID.  Xpra's dispatcher owns a receiver
@@ -573,8 +541,9 @@ the request/data response pair in both modes.  Compatibility mode registers
 both token representations, while no-compat mode deliberately does not
 register `clipboard-token`.  Focused assertions therefore recognize the
 representation selected by the test process rather than hard-coding the
-legacy name; the full no-compat leg is what exercises the modern
-`clipboard-data` announcement and absence of the legacy handler.  An upstream
+legacy name; `focused-no-compat` exercises the modern `clipboard-data`
+announcement and absence of the legacy handler during development, while
+`full-no-compat` retains complete-queue final coverage. An upstream
 adaptation must preserve behavior across both representations instead of
 making the X11 event fix depend on one packet layout.
 
@@ -674,29 +643,25 @@ the XFixes monitor must remain at exactly the two local same-XID updates.  This
 makes the negative policy result non-vacuous: it cannot pass merely because
 the Wayland owner operation itself was broken.
 
-### Diagnostic run 02 timeline
+### Publication and policy completion boundaries
 
-`x11clipfix-20260904-live-clipboard-02` is the frozen diagnostic which separated
-these Wayland boundaries after the X11 route was working.  It is not acceptance
-evidence.  The timeline below deliberately contains only marker IDs, lengths,
-timestamps, pointers/XIDs, and equality outcomes; no marker plaintext is
-reproduced.
+Each permitted ownership transition must complete its own offer and data
+delivery before the fixture advances to the next controlled transition. The
+following order distinguishes current protocol completion from a token,
+source pointer, API attempt or stale cached value alone:
 
-| Policy and phase | Ordered observation | Boundary established |
+| Policy and phase | Required ordered transition | Independent authority |
 | --- | --- | --- |
-| `both`, forward | Initial ordinary/primary pointers appeared at `13:04:09.916`, and the `one` read matched at monotonic `25944806328775`.  The server emitted new pointers at `13:04:15.549`, but the `two` read at `25946458766828` returned 29 bytes with the previous digest and `matches=false`.  A further pointer change at `13:04:16.876` preceded a successful repeat of `one`. | Xpra received and applied the owner updates, but the native sink did not observe each new offer in the same transaction; the fault was after token processing and before current Wayland offer delivery. |
-| `both`, replacement and reverse | GTK reported `gdkselection-wayland.c:283: error reading selection buffer: Operation was cancelled` at `13:04:17.857`.  F8 then produced `owner-set` at `25948584790108`, compositor selection at `13:04:18.629`, `owner-confirmed` at `25948586083254`, and the third XFixes takeover by Xpra XID `8388610` at `25948588599066`.  The raw reverse request kept that XID but completed without the expected payload. | Replacement canceled a still-pending stale read; native ownership and X11 claiming worked, while the request from `send_source` to the native Wayland owner remained unpublished. |
-| `to-server`, forward | Initial pointers appeared at `13:04:49.770`, and the `one` read matched at `25984699656981`.  New server pointers at `13:04:55.463` and `13:04:56.817` bracketed a stale 29-byte `two` result at `25986377727464` followed by a matching repeat of `one`.  GTK emitted the same cancellation warning at `13:04:57.852`. | The stale-offer queue failure is independent of reverse policy and is not an X11 event-loss recurrence. |
-| `to-server`, reverse control | The F8 request produced `owner-set` at `25988534169195`, compositor selection at `13:04:58.579`, and `owner-confirmed` at `25988535525520`; the raw X11 consumer retained owner XID `6291458` and its data, and the monitor ended with exactly two local transitions. | Native Wayland ownership was real while direction policy correctly prevented a reverse Xpra claim. |
-| `off`, forward and owner control | All three forward reads were absent as policy requires, and the monitor recorded exactly two local updates by owner XID `6291458`.  F8 at `13:05:36.137` produced `owner-set` at monotonic `26026093438866`, but there was no nonzero compositor selection line and no `owner-confirmed` before the bounded wait expired at `13:06:37`.  Teardown then produced a display broken-pipe message. | With no Xpra clipboard helper, the standard request listener itself was missing; `owner-set` was not compositor ownership, and the timeout/broken pipe was a consequence rather than valid negative-policy proof. |
+| `both` or `to-server`, forward | Same-XID X11 owner update and advancing timestamp, local target/data conversion, accepted token, replacement Wayland source, outbound flush, then native sink equality for that generation. | A new server pointer cannot substitute for delivery of its current offer; repeating the initial marker must establish a later generation rather than reuse the first read. |
+| `both`, reverse | F8 input callback, standard seat source installation, native `owner-confirmed`, third XFixes takeover by the Xpra event window, then exact raw X11 reverse conversion. | The native owner's on-demand request must itself be flushed by `send_source`; successful ownership on both peers alone does not prove data delivery. |
+| `to-server`, reverse control | F8 and native owner confirmation, followed by an unchanged original X11 owner and exactly the two local same-XID monitor events. | Local Wayland ownership completes while direction policy forbids a reverse Xpra claim. |
+| `off`, both directions | All forward reads remain absent; F8 still produces a compositor-accepted native owner, while the original X11 owner and its two local transitions remain unchanged. | With no forwarding helper, the standard compositor listener path must independently complete before blocked transfer can count as policy proof. |
 
-The two successful-policy cancellation warnings are not benign GTK noise to
-allowlist.  They occur after the stale updated read and identify a pending
-Wayland `SelectionBuffer` being retired by a later offer.  Likewise, the
-`off` broken pipe followed the harness timeout and forced teardown.  A valid
-fresh run must make the ownership/data lifecycle complete and restore the
-existing zero-length fixture-stderr contract; filtering either message would
-hide the disputed boundary.
+In this controlled sequence, a GTK `SelectionBuffer` cancellation while a
+requested transfer is still pending does not satisfy that transfer. Likewise,
+a broken pipe after an ownership timeout and forced teardown is not successful
+`off` behavior. Every scenario retains the zero-length fixture-stderr contract;
+neither warning is environmental noise to discard or allowlist.
 
 ### Source and cleanup ordering
 
@@ -780,18 +745,18 @@ all bytes eagerly to avoid `send_source`, or treat `owner-set` as confirmation.
 None repairs both directions, both selection classes, and deterministic cleanup
 at the actual queue/listener boundary.
 
-## Diagnostics and excluded leads
+## Diagnostic limits and independent controls
 
 `XPRA_X11_DEBUG_EVENTS=XFSelectionNotify` is not a reliable negative control at
 this source boundary.  Core `init_x11_events()` invokes `set_debug_events()`
 before `init_xfixes_events()` later registers the extension name, so the name
 can be reported as unknown even though runtime parsing is eventually active.
-Raw XFixes monitors and structured route evidence were used instead.
+Use raw XFixes monitors and structured route evidence to check actual delivery.
 
 That registration-order issue affects diagnostics, not production routing,
 because `xfixes_selection_input` registers the parser before selecting the
-notification.  It must remain a separate future correction unless a new
-behavioral reproduction proves that production delivery depends on it.  The
+notification. It remains outside this case's production correction unless a
+new behavioral reproduction proves that delivery depends on it. The
 same separation applies to the generic synthetic-event parser policy discussed
 above.
 
@@ -817,14 +782,14 @@ the apparent one-line X11 filter acquisition leaves the client crash;
 packaging only the initializer leaves the helper dependent on an unrelated
 filter owner; registering the GDK window without fixing lease cleanup leaves
 later events vulnerable to another subsystem's teardown.  Conversely, the
-Wayland stale-offer and source-request failures were observable only after the
-corrected X11 owner event crossed the wire, and the `off` listener control is
-what proves a blocked transfer is policy rather than a broken native owner.
+Wayland offer and source-request delivery require the current X11 owner event
+to cross the wire, and the `off` listener control proves that a blocked transfer
+is policy rather than a broken native owner.
 
 The owned behavior is one transaction: detect a new X11 client owner, publish
 its current offer to a native-Wayland server application, service current data,
 then accept an independent native-Wayland owner and either forward or reject it
-according to negotiated policy.  Splitting the late Wayland boundaries into an
+according to negotiated policy. Splitting the Wayland delivery boundaries into an
 independent case would make one case accept only a packet prefix while the
 other depended on this case to reach its reproduction.  Keeping one case does
 not collapse subsystem ownership: the X11 lease remains client-owned, outbound
@@ -1124,13 +1089,11 @@ and a rendered window cannot replace clipboard evidence.
 The clipboard window must also remain a static RGB fixture.  Programmatic
 paste updates do not need keyboard focus, so the entry stays out of the focus
 chain and the input-owned reverse action is handled by the stable toplevel.
-Early diagnostic execution showed that an unrelated GTK focus transition can
-expose a separate Wayland buffer-damage/visible-origin defect and make an
-otherwise static source/client frame pair disagree.  That is a different
-production boundary, not clipboard acceptance evidence.  Do not raise the
-pixel-error tolerance, accept a transient frame, or fold a renderer workaround
-into this case; remove the unrelated animation and retain the ordinary RGB
-pixel contract.
+A GTK focus animation adds independently changing pixels and a separate
+buffer-damage/visible-origin boundary to that comparison. Keep it outside this
+static clipboard fixture rather than accepting a transient source/client
+frame pair. Do not raise the pixel-error tolerance or fold a renderer workaround
+into this case; retain the ordinary RGB pixel contract.
 
 Fixtures emit bounded JSONL records containing marker IDs, expected lengths,
 SHA-256 digests, equality booleans, targets, XIDs, timestamps, event kinds, and
@@ -1147,11 +1110,11 @@ accessibility bus cannot add an AT-SPI warning to its otherwise empty stderr.
 This is fixture isolation, not a relaxation of evidence: every expected
 fixture stderr remains a regular zero-length file, synthetic stderr must still
 fail the gate, and no validator may special-case or discard warning text.  In
-particular, the GTK Wayland `Operation was cancelled` selection-buffer warning
-seen under `both` and `to-server` in diagnostic run 02 is evidence of the stale
-offer lifecycle, not environmental stderr; the `off` broken-pipe message is
-evidence of the failed ownership wait and forced teardown.  Neither is an
-allowlist candidate.
+particular, a GTK Wayland `Operation was cancelled` warning during a controlled
+pending selection read belongs to its offer lifecycle, not accessibility-bus
+isolation. An `off` ownership timeout followed by forced-teardown broken pipes
+is likewise a failed local-owner boundary, not blocked-transfer proof. Neither
+is an allowlist candidate.
 
 The named clipboard checks bind local initial and updated `TARGETS`/marker
 conversions, all three forward-policy outcomes, reverse policy and owner,
@@ -1162,11 +1125,11 @@ aggregate report must bind each scenario name to its policy.  The case-only
 gate does not alter the existing seven complete-stack profiles or their
 clean-client semantics.
 
-Provisional live diagnostics which motivated the input callback, reverse
-monitor lifetime, accessibility isolation, or static-window rules are design
-evidence only.  They are not a successful `live-x11-clipboard` result and must
-not be cited as acceptance; only a fresh named run in which every scenario and
-the aggregate report are green can satisfy the case gate.
+Acceptance requires a named `live-x11-clipboard` result in which every scenario
+and the aggregate report are positive on the required inputs. Input callbacks,
+monitor events, isolated stderr or static pixels alone cannot replace that
+complete policy and ownership proof. Diagnostic runs remain in the ignored
+cycle ledger, not this architecture description.
 
 ## Invariants not to simplify
 
@@ -1249,7 +1212,12 @@ the aggregate report are green can satisfy the case gate.
 ## Required validation
 
 Each required gate answers a different question; one green layer cannot stand
-in for another:
+in for another. Schedule them with
+[development and final acceptance](../../docs/runbooks/validation.md): nearest
+regression after each atomic edit, affected upstream/case/composed modules,
+relevant native/compiled/compatibility modes, and early clipboard live after
+focused/native prerequisites. The table lists final obligations, not an
+instruction to run full suites before every live iteration:
 
 | Validation | Purpose |
 | --- | --- |
@@ -1273,9 +1241,12 @@ refresh cycles may additionally require both real DEB builds under the
 repository contract; those prove distribution packaging, but still do not
 replace this deliberately client-only composition boundary.
 
-Retain the non-vacuous clean result, then run the ladder in order and stop at
-the first unexplained failure.  Clean and patched comparisons keep the frozen
+Retain the non-vacuous clean result and stop escalation at the first unexplained
+failure. After candidate freeze, fill only missing or invalidated requirements;
+an input-verified positive named development run may already satisfy one.
+Clean and patched comparisons keep the frozen
 source, images, displays, fixtures, fixed marker set, and direction policy
 identical.  Any semantic change to the live fixture, monitor, pixel capture, or
 policy validator invalidates earlier live evidence and requires a fresh named
-case run; provisional diagnostic runs never satisfy the table above.
+case run for the affected boundary. Foreground and ad hoc diagnostic output
+never satisfies the table above.

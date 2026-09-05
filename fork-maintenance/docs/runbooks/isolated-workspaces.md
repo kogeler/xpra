@@ -215,15 +215,23 @@ case update and the cycle-clean planner.
 
 ## Build and test
 
+Use [`validation.md`](validation.md) for scheduling and evidence reuse. During
+development, run the nearest regression immediately after an atomic edit,
+including affected upstream modules and relevant dependent/composed tests.
+Exercise native, compiled, no-compat, and live boundaries when the changed
+behavior requires them; the full matrix is not an early live prerequisite.
+Review and freeze the candidate before filling the final acceptance gaps.
+
 Classify the exported diff before starting a job. If the embedded source is
 unchanged and an exact old/new applied-tree comparison contains only comments,
 copyright notices, or documentation—with identical paths, modes, executable
 data, configuration, test assertions, and runner behavior—this is a
 non-semantic refresh. Resolve the queue and run whitespace plus fork-control
 checks, but do not rerun focused, native, full, or live jobs. Record that proof
-in the handoff. A changed embedded source never qualifies: after an upstream
-rebase use the complete post-rebase ladder. Any uncertainty uses the normal
-ladder below.
+in the handoff. A changed embedded source never qualifies: an upstream rebase
+requires complete final acceptance on that new base after adaptation. Other
+semantic changes or uncertainty use the affected development checks, followed
+by the corresponding final requirements.
 
 The Ubuntu runner independently freezes the same embedded source and selection.
 To prove the retained regression against clean production:

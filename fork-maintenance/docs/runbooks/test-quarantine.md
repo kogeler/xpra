@@ -82,6 +82,13 @@ quarantine patch to the new base, run all three gates against clean production
 and clean tests. Merely observing that a master ref advanced does not trigger a
 rebase or block testing the existing `develop` queue.
 
+Follow [`validation.md`](validation.md): reassess once for the actual source,
+image/environment, module union, and per-leg expectations, reusing current
+collected proof while those inputs remain unchanged. Do not block independent
+production-case development or repeat clean quarantine for an unrelated
+production-only edit. Any changed input requires its affected gate proof before
+the quarantined stack can be accepted.
+
 ```bash
 make -C fork-maintenance test-start \
   CASE=upstream-test-quarantine PATCH_MODE=clean \
@@ -117,14 +124,19 @@ control reproduces the same author-owned failure.
 
 ## Patched acceptance
 
-After the clean reassessment, run the case focused gate with the patch applied,
-then all three full stack legs:
+After the clean reassessment, run the case focused gate with the patch applied:
 
 ```bash
 make -C fork-maintenance test-start \
   CASE=upstream-test-quarantine PATCH_MODE=patched \
   TARGET=focused RUN=rebase-quarantine-patched-01
+```
 
+The complete stack still requires all three full legs for final acceptance.
+Wait for the reviewed candidate freeze and fill only missing or invalidated
+results; do not start this matrix after each intermediate duty-case edit:
+
+```bash
 make -C fork-maintenance test-start \
   STACK=develop PATCH_MODE=patched TARGET=full RUN=rebase-full-01
 make -C fork-maintenance test-start \

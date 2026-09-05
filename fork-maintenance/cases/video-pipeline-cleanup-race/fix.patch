@@ -1,20 +1,319 @@
+diff --git a/tests/unittests/unit/server/source/encoding_lifecycle_test.py b/tests/unittests/unit/server/source/encoding_lifecycle_test.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..300ddfa7bd1774ea0ca8e982c5e3352057d1058f
+--- /dev/null
++++ b/tests/unittests/unit/server/source/encoding_lifecycle_test.py
+@@ -0,0 +1,286 @@
++#!/usr/bin/env python3
++# This file is part of Xpra.
++# Copyright (C) 2026 kogeler
++# Xpra is released under the terms of the GNU GPL v2, or, at your option, any
++# later version. See the file COPYING for details.
++
++import unittest
++from threading import Event, Thread
++from time import monotonic
++from types import ModuleType, SimpleNamespace
++from unittest.mock import Mock, patch
++
++from xpra.server.source import encoding, factory
++from xpra.server.source.client_connection import ClientConnection
++from xpra.server.source.encoding import EncodingsConnection
++from xpra.server.source.mmap import MMAP_Connection
++from xpra.server.source.window import WindowsConnection
++from xpra.util.objects import typedict
++
++
++def make_encoding_connection():
++    """Use the real muxer lifecycle for every selected connection subsystem."""
++    bases = (ClientConnection, MMAP_Connection, WindowsConnection, EncodingsConnection)
++    with patch.object(factory, "get_needed_based_classes", return_value=bases):
++        connection_class = factory.get_client_connection_class(typedict())
++    protocol = SimpleNamespace(
++        is_closed=lambda: False,
++        _conn=SimpleNamespace(output_bytecount=0),
++        source_has_more=Mock(),
++        set_packet_source=Mock(),
++    )
++    server = SimpleNamespace(readonly=False, subsystems={
++        "window": SimpleNamespace(
++            get_focus=lambda: 0,
++            get_window_geometry=lambda window: (0, 0, *window.get_dimensions()),
++            window_filters=[],
++        ),
++        "encoding": SimpleNamespace(
++            core_encodings=("rgb24", "rgb32"), encodings=("rgb",),
++            default_encoding="", scaling_control=None,
++            default_quality=0, default_min_quality=0,
++            default_speed=0, default_min_speed=0,
++        ),
++        "mmap": SimpleNamespace(supported=False, dirs=(), files=(), min_size=0),
++    })
++    source = connection_class(protocol, Mock(), server, Mock())
++    source.parse_hello(typedict({
++        "window": {"enabled": True},
++        "encoding": {"options": ("rgb",), "core": ("rgb24", "rgb32"),
++                     "rgb_formats": ("RGB", "RGBX", "RGBA")},
++    }))
++    return source
++
++
++class EncodingConnectionLifecycleTest(unittest.TestCase):
++
++    make_connection = staticmethod(make_encoding_connection)
++
++    def close_connection(self, source) -> None:
++        source.close()
++        if worker := source.encode_thread:
++            worker.join(2)
++            self.assertFalse(worker.is_alive())
++        self.assertTrue(source.encode_work_queue.empty())
++
++    @staticmethod
++    def cuda_module(factory_fn):
++        module = ModuleType("xpra.codecs.nvidia.cuda.context")
++        module.get_device_context = factory_fn
++        return patch.dict("sys.modules", {module.__name__: module})
++
++    def test_cuda_constructor_losing_to_close_frees_unpublished_context(self) -> None:
++        source = self.make_connection()
++        entered, release = Event(), Event()
++        context = SimpleNamespace(free=Mock())
++        results, errors = [], []
++
++        def construct(_options):
++            entered.set()
++            if not release.wait(2):
++                raise AssertionError("CUDA construction was not released")
++            return context
++
++        def allocate():
++            try:
++                results.append(source.allocate_cuda_device_context())
++            except BaseException as error:
++                errors.append(error)
++
++        with self.cuda_module(construct):
++            worker = Thread(target=allocate, daemon=True)
++            worker.start()
++            try:
++                self.assertTrue(entered.wait(2))
++                self.close_connection(source)
++            finally:
++                release.set()
++                worker.join(2)
++            self.assertFalse(worker.is_alive())
++            self.assertEqual(errors, [])
++            self.assertEqual(results, [None])
++            self.assertIsNone(source.cuda_device_context)
++            context.free.assert_called_once_with()
++
++    def test_concurrent_cuda_constructors_publish_one_owner(self) -> None:
++        source = self.make_connection()
++        entered = (Event(), Event())
++        release = (Event(), Event())
++        contexts = (SimpleNamespace(free=Mock()), SimpleNamespace(free=Mock()))
++        results, errors = {}, []
++
++        def construct(_options):
++            index = 1 if entered[0].is_set() else 0
++            entered[index].set()
++            if not release[index].wait(2):
++                raise AssertionError("CUDA construction was not released")
++            return contexts[index]
++
++        def allocate(index):
++            try:
++                results[index] = source.allocate_cuda_device_context()
++            except BaseException as error:
++                errors.append(error)
++
++        with self.cuda_module(construct):
++            workers = [Thread(target=allocate, args=(index,), daemon=True) for index in (0, 1)]
++            try:
++                workers[0].start()
++                self.assertTrue(entered[0].wait(2))
++                workers[1].start()
++                self.assertTrue(entered[1].wait(2))
++                release[0].set()
++                workers[0].join(2)
++                self.assertFalse(workers[0].is_alive())
++                release[1].set()
++                workers[1].join(2)
++                self.assertFalse(workers[1].is_alive())
++                self.assertEqual(errors, [])
++                self.assertIs(results[0], contexts[0])
++                self.assertIs(results[1], contexts[0])
++                self.assertIs(source.cuda_device_context, contexts[0])
++                contexts[0].free.assert_not_called()
++                contexts[1].free.assert_called_once_with()
++            finally:
++                for event in release:
++                    event.set()
++                for worker in workers:
++                    if worker.ident is not None:
++                        worker.join(2)
++                self.close_connection(source)
++            contexts[0].free.assert_called_once_with()
++            contexts[1].free.assert_called_once_with()
++
++    def test_calculation_source_removal_error_does_not_skip_cuda_tail(self) -> None:
++        source = self.make_connection()
++        context = SimpleNamespace(free=Mock())
++        source.cuda_device_context = context
++        source.cancel_recalculate_timer = Mock(side_effect=RuntimeError("calculate source removal failed"))
++        with self.assertRaisesRegex(RuntimeError, "calculate source removal failed"):
++            source.close()
++        self.assertIsNotNone(source.encode_thread, "cleanup error bypassed the mandatory encode tail")
++        source.encode_thread.join(2)
++        self.assertFalse(source.encode_thread.is_alive())
++        self.assertTrue(source.encode_work_queue.empty())
++        self.assertIsNone(source.cuda_device_context)
++        context.free.assert_called_once_with()
++
++    def test_closed_connection_does_not_schedule_calculation(self) -> None:
++        source = self.make_connection()
++        self.close_connection(source)
++        with patch.object(encoding, "add_work_item") as add_work_item:
++            source.may_recalculate(1, encoding.MIN_PIXEL_RECALCULATE)
++        add_work_item.assert_not_called()
++        self.assertEqual(source.calculate_window_ids, set())
++        self.assertEqual(source.calculate_window_pixels, {})
++
++    def test_calculation_timeout_releases_source_before_background_handoff(self) -> None:
++        source = self.make_connection()
++        context = encoding.GLib.MainContext.default()
++        source.calculate_last_time = monotonic()
++        with patch.object(encoding, "add_work_item", return_value=None) as add_work_item:
++            source.may_recalculate(1, encoding.MIN_PIXEL_RECALCULATE)
++            timer = source.calculate_timer
++            if isinstance(timer, int):
++                timer = context.find_source_by_id(timer)
++            self.assertIsNotNone(timer)
++            timer.set_ready_time(0)
++            try:
++                deadline = monotonic() + 1
++                while not add_work_item.called and monotonic() < deadline:
++                    context.iteration(False)
++                add_work_item.assert_called_once_with(source.recalculate_delays)
++                self.assertTrue(timer.is_destroyed())
++                self.assertFalse(source.calculate_timer)
++                self.close_connection(source)
++                with patch.object(source.statistics, "update_averages") as update_averages:
++                    add_work_item.call_args.args[0]()
++                update_averages.assert_not_called()
++            finally:
++                timer.destroy()
++                self.close_connection(source)
++
++    def test_connection_close_waits_for_active_background_calculation(self) -> None:
++        source = self.make_connection()
++        entered, release, closing, closed = Event(), Event(), Event(), Event()
++        retired, errors, used_after_retirement = Event(), [], []
++        from xpra.codecs.loader import load_codec
++        self.assertIsNotNone(load_codec("enc_rgb"))
++        properties = {"depth": 24, "content-types": (), "fullscreen": False}
++        window = SimpleNamespace(
++            get_dimensions=lambda: (64, 64),
++            get_dynamic_property_names=lambda: (),
++            get_internal_property_names=lambda: (),
++            get=properties.get, get_property=properties.__getitem__,
++            is_OR=lambda: False, is_tray=lambda: False,
++            is_shadow=lambda: False, has_alpha=lambda: False,
++            is_managed=lambda: True, disconnect=Mock(),
++        )
++        # The connection creates, initializes and publishes the real source;
++        # downstream source-lifetime owners participate through this same API.
++        ws = source.make_window_source(1, window)
++
++        def update_averages():
++            entered.set()
++            if not release.wait(2):
++                raise AssertionError("background calculation was not released")
++
++        def record_use(*_args):
++            if retired.is_set():
++                used_after_retirement.append(True)
++
++        ws.statistics.update_averages = update_averages
++        ws.calculate_batch_delay = record_use
++        ws.reconfigure = record_use
++
++        ui_cleanup = ws.ui_cleanup
++
++        def retire():
++            ui_cleanup()
++            retired.set()
++
++        ws.ui_cleanup = retire
++        source.calculate_window_ids.add(ws.wid)
++
++        def calculate():
++            try:
++                source.recalculate_delays()
++            except BaseException as error:
++                errors.append(error)
++
++        def close():
++            closing.set()
++            try:
++                self.close_connection(source)
++            except BaseException as error:
++                errors.append(error)
++            finally:
++                closed.set()
++
++        calculate_thread = Thread(target=calculate, daemon=True)
++        close_thread = Thread(target=close, daemon=True)
++        calculate_thread.start()
++        try:
++            self.assertTrue(entered.wait(2))
++            close_thread.start()
++            self.assertTrue(closing.wait(2))
++            self.assertFalse(closed.wait(0.1), "connection retired while its calculator still owned a window")
++            self.assertFalse(retired.is_set())
++        finally:
++            release.set()
++            calculate_thread.join(2)
++            if close_thread.ident is not None:
++                close_thread.join(2)
++        self.assertFalse(calculate_thread.is_alive())
++        self.assertFalse(close_thread.is_alive())
++        self.assertEqual(errors, [])
++        self.assertEqual(used_after_retirement, [])
++        context = encoding.GLib.MainContext.default()
++        deadline = monotonic() + 1
++        while not retired.is_set() and monotonic() < deadline:
++            context.iteration(False)
++        self.assertTrue(retired.is_set())
++
++
++if __name__ == "__main__":
++    unittest.main()
 diff --git a/tests/unittests/unit/server/window/video_compress_test.py b/tests/unittests/unit/server/window/video_compress_test.py
-index 2f5d76b6452..81fcb5d780e 100644
+index 2f5d76b645250e1fc71b6338c279b37d7a207aa5..0833f25f5700343b96656dd83691b5fbeb62c03a 100644
 --- a/tests/unittests/unit/server/window/video_compress_test.py
 +++ b/tests/unittests/unit/server/window/video_compress_test.py
-@@ -4,9 +4,93 @@
+@@ -4,9 +4,529 @@
  # later version. See the file COPYING for details.
  
  import unittest
 -from unittest.mock import Mock
++import warnings
 +from queue import Queue
-+from threading import Event, Thread
++from threading import Event, Lock, RLock, Thread
++from time import monotonic
 +from types import SimpleNamespace
 +from unittest.mock import Mock, patch
  
-+from xpra.server.window import compress, video_compress
++from xpra.net.packet_type import WINDOW_EOS
++from xpra.server.window import compress, video_compress, video_subregion
  from xpra.server.window.video_compress import WindowVideoSource
++from xpra.server.window.video_subregion import VideoSubregion
 +from xpra.util.objects import typedict
++from xpra.util.rectangle import rectangle
++
++from unit.server.source.encoding_lifecycle_test import make_encoding_connection
 +
 +
 +class PipelineElement:
@@ -29,12 +328,27 @@ index 2f5d76b6452..81fcb5d780e 100644
 +            raise RuntimeError("cleanup failed")
 +
 +
++class ScrollOwner:
++
++    def __init__(self) -> None:
++        self.free_count = 0
++
++    def free(self) -> None:
++        self.free_count += 1
++
++
 +class Converter(PipelineElement):
++
++    def __init__(self, init_error: bool = False, clean_error: bool = False) -> None:
++        super().__init__(clean_error)
++        self.init_error = init_error
 +
 +    def init_context(self, src_width, src_height, _src_format,
 +                     dst_width, dst_height, _dst_format, _options) -> None:
 +        self.src_size = src_width, src_height
 +        self.dst_size = dst_width, dst_height
++        if self.init_error:
++            raise RuntimeError("converter init failed")
 +
 +    def get_info(self) -> dict:
 +        return {}
@@ -42,19 +356,163 @@ index 2f5d76b6452..81fcb5d780e 100644
 +
 +class Encoder(PipelineElement):
 +
-+    def __init__(self, init_started=None, finish_init=None) -> None:
-+        super().__init__()
++    def __init__(self, init_started=None, finish_init=None,
++                 init_error: bool = False, clean_error: bool = False,
++                 info_started=None, finish_info=None) -> None:
++        super().__init__(clean_error)
 +        self.init_started = init_started
 +        self.finish_init = finish_init
++        self.init_error = init_error
++        self.info_started = info_started
++        self.finish_info = finish_info
 +
 +    def init_context(self, _encoding, _width, _height, _src_format, _options) -> None:
 +        if self.init_started:
 +            self.init_started.set()
 +        if self.finish_init and not self.finish_init.wait(2):
 +            raise RuntimeError("encoder setup was not released")
++        if self.init_error:
++            raise RuntimeError("encoder init failed")
 +
 +    def get_info(self) -> dict:
++        if self.info_started:
++            self.info_started.set()
++        if self.finish_info and not self.finish_info.wait(2):
++            raise RuntimeError("encoder info was not released")
 +        return {}
++
++
++class EarlyRealGLib:
++    """Use real GLib sources, dispatching each before attachment returns."""
++
++    def __init__(self, glib) -> None:
++        self.glib = glib
++        self.context = glib.MainContext.default()
++        self.remove_warnings = []
++
++    def dispatch(self) -> None:
++        if not self.context.iteration(False):
++            raise RuntimeError("the real GLib source was not ready")
++
++    def timeout_add(self, _delay, callback, *args):
++        source_id = self.glib.timeout_add(0, callback, *args)
++        self.dispatch()
++        return source_id
++
++    def idle_add(self, callback, *args):
++        source_id = self.glib.idle_add(callback, *args)
++        self.dispatch()
++        return source_id
++
++    def source_remove(self, source_id):
++        with warnings.catch_warnings(record=True) as caught:
++            warnings.simplefilter("always")
++            result = self.glib.source_remove(source_id)
++        self.remove_warnings.extend(str(item.message) for item in caught)
++        return result
++
++    def timeout_source_new(self, _delay):
++        return self.wrap(self.glib.timeout_source_new(0))
++
++    def idle_source_new(self):
++        return self.wrap(self.glib.idle_source_new())
++
++    def wrap(self, source):
++        owner = self
++
++        class Source:
++            def set_callback(self, callback):
++                source.set_callback(callback)
++
++            def attach(self, context):
++                source_id = source.attach(context)
++                owner.dispatch()
++                return source_id
++
++            def destroy(self):
++                source.destroy()
++
++        return Source()
++
++
++class FakeSource:
++
++    def __init__(self, registry, delay=None, source_id=0) -> None:
++        self.registry = registry
++        self.delay = delay
++        self.source_id = source_id
++        self.callback = None
++        self.destroyed = False
++
++    def set_callback(self, callback) -> None:
++        self.callback = callback
++
++    def attach(self, _context) -> int:
++        if self.delay is None:
++            self.source_id = self.registry.idle_add(self.callback)
++        else:
++            self.source_id = self.registry.timeout_add(self.delay, self.callback)
++        return self.source_id
++
++    def get_id(self) -> int:
++        return self.source_id
++
++    def destroy(self) -> None:
++        if not self.destroyed:
++            self.destroyed = True
++            if self.source_id:
++                self.registry.source_remove(self.source_id)
++
++
++class BlockingSources:
++
++    def __init__(self, block_timeout=(), block_idle=(), dispatch_timeout=(), dispatch_idle=()) -> None:
++        self.block_timeout = set(block_timeout)
++        self.block_idle = set(block_idle)
++        self.dispatch_timeout = set(dispatch_timeout)
++        self.dispatch_idle = set(dispatch_idle)
++        self.timeout_started = Event()
++        self.idle_started = Event()
++        self.release_timeout = Event()
++        self.release_idle = Event()
++        self.next_id = 100
++        self.timeout_calls: list[tuple[int, object, tuple]] = []
++        self.idle_calls: list[tuple[int, object, tuple]] = []
++        self.callback_results: list[object] = []
++        self.removed: list[int] = []
++
++    def timeout_add(self, _delay, callback, *args) -> int:
++        self.next_id += 1
++        source_id = self.next_id
++        self.timeout_calls.append((source_id, callback, args))
++        if len(self.timeout_calls) in self.dispatch_timeout:
++            self.callback_results.append(callback(*args))
++        if len(self.timeout_calls) in self.block_timeout:
++            self.timeout_started.set()
++            if not self.release_timeout.wait(2):
++                raise RuntimeError("timeout publication was not released")
++        return source_id
++
++    def idle_add(self, callback, *args) -> int:
++        self.next_id += 1
++        source_id = self.next_id
++        self.idle_calls.append((source_id, callback, args))
++        if len(self.idle_calls) in self.dispatch_idle:
++            self.callback_results.append(callback(*args))
++        if len(self.idle_calls) in self.block_idle:
++            self.idle_started.set()
++            if not self.release_idle.wait(2):
++                raise RuntimeError("idle publication was not released")
++        return source_id
++
++    def source_remove(self, source_id: int) -> None:
++        self.removed.append(source_id)
++
++    def timeout_source_new(self, delay):
++        return FakeSource(self, delay)
++
++    def idle_source_new(self):
++        return FakeSource(self)
 +
 +
 +class EncodeWorker:
@@ -94,25 +552,532 @@ index 2f5d76b6452..81fcb5d780e 100644
 +        self.thread.join(2)
 +        if self.thread.is_alive():
 +            raise RuntimeError("encode worker did not stop")
++
++
++class VideoSubregionLifecycleTest(unittest.TestCase):
++
++    def test_real_glib_early_refresh_dispatch_owns_exact_source(self) -> None:
++        for family in ("video", "nonvideo"):
++            with self.subTest(family=family):
++                sources = EarlyRealGLib(video_subregion.GLib)
++                callback = Mock(return_value=True)
++                subregion = VideoSubregion(callback, 150, True)
++                subregion.rectangle = rectangle(0, 0, 64, 64)
++                region = rectangle(0, 0, 32, 32) if family == "video" else rectangle(80, 80, 16, 16)
++                with patch.object(video_subregion, "GLib", sources):
++                    try:
++                        subregion.add_video_refresh(region)
++                        callback.assert_called_once()
++                        self.assertEqual(sources.remove_warnings, [])
++                        self.assertEqual(subregion.refresh_timer, 0)
++                        self.assertEqual(subregion.nonvideo_refresh_timer, 0)
++                    finally:
++                        subregion.cleanup()
++
++    def test_cleanup_waits_for_claimed_refresh_callback(self) -> None:
++        for family in ("video", "nonvideo"):
++            with self.subTest(family=family):
++                sources = BlockingSources()
++                callback_started = Event()
++                release_callback = Event()
++                cleanup_started = Event()
++                cleanup_done = Event()
++                refresh_calls = []
++
++                def refresh(regions) -> bool:
++                    refresh_calls.append(tuple(regions))
++                    callback_started.set()
++                    if not release_callback.wait(2):
++                        raise RuntimeError("refresh callback was not released")
++                    return family == "nonvideo"
++
++                subregion = VideoSubregion(refresh, 150, True)
++                subregion.rectangle = rectangle(0, 0, 64, 64)
++                region = rectangle(0, 0, 32, 32) if family == "video" else rectangle(80, 80, 16, 16)
++                with patch.object(video_subregion, "GLib", sources):
++                    subregion.add_video_refresh(region)
++                    _source_id, callback, args = sources.timeout_calls[0]
++                    dispatch = Thread(target=callback, args=args, daemon=True)
++                    dispatch.start()
++                    self.assertTrue(callback_started.wait(2))
++
++                    def cleanup() -> None:
++                        cleanup_started.set()
++                        subregion.cleanup()
++                        cleanup_done.set()
++
++                    close = Thread(target=cleanup, daemon=True)
++                    close.start()
++                    try:
++                        self.assertTrue(cleanup_started.wait(2))
++                        self.assertFalse(cleanup_done.wait(0.05))
++                        release_callback.set()
++                        dispatch.join(2)
++                        close.join(2)
++                        self.assertFalse(dispatch.is_alive())
++                        self.assertFalse(close.is_alive())
++                        self.assertTrue(cleanup_done.is_set())
++                        self.assertEqual(len(refresh_calls), 1)
++                        self.assertEqual(subregion.refresh_timer, 0)
++                        self.assertEqual(subregion.nonvideo_refresh_timer, 0)
++
++                        for _timer, stale_callback, stale_args in tuple(sources.timeout_calls):
++                            self.assertFalse(stale_callback(*stale_args))
++                        self.assertEqual(len(refresh_calls), 1)
++                    finally:
++                        release_callback.set()
++                        dispatch.join(2)
++                        close.join(2)
++
++    def test_callback_before_timer_publication_is_not_retained(self) -> None:
++        for family in ("video", "nonvideo"):
++            with self.subTest(family=family):
++                sources = BlockingSources(dispatch_timeout=(1,))
++                refresh_calls = []
++                subregion = VideoSubregion(lambda regions: refresh_calls.append(tuple(regions)) or True,
++                                           150, True)
++                subregion.rectangle = rectangle(0, 0, 64, 64)
++                if family == "video":
++                    region = rectangle(0, 0, 32, 32)
++                    timer_name = "refresh_timer"
++                else:
++                    region = rectangle(80, 80, 16, 16)
++                    timer_name = "nonvideo_refresh_timer"
++                with patch.object(video_subregion, "GLib", sources):
++                    subregion.add_video_refresh(region)
++
++                source_id, _callback, _args = sources.timeout_calls[0]
++                self.assertEqual(sources.callback_results, [False])
++                self.assertEqual(sources.removed, [source_id])
++                self.assertEqual(getattr(subregion, timer_name), 0)
++                self.assertEqual(len(refresh_calls), 1)
++
++    def test_cleanup_reclaims_timer_published_after_cancellation(self) -> None:
++        for family in ("video", "nonvideo"):
++            with self.subTest(family=family):
++                sources = BlockingSources(block_timeout=(1,))
++                refresh_calls = []
++                subregion = VideoSubregion(lambda regions: refresh_calls.append(regions), 150, True)
++                subregion.rectangle = rectangle(0, 0, 64, 64)
++                if family == "video":
++                    region = rectangle(0, 0, 32, 32)
++                    timer_name = "refresh_timer"
++                else:
++                    region = rectangle(80, 80, 16, 16)
++                    timer_name = "nonvideo_refresh_timer"
++                with patch.object(video_subregion, "GLib", sources):
++                    schedule = Thread(target=subregion.add_video_refresh, args=(region,), daemon=True)
++                    schedule.start()
++                    try:
++                        self.assertTrue(sources.timeout_started.wait(2))
++                        subregion.cleanup()
++                        sources.release_timeout.set()
++                        schedule.join(2)
++                        self.assertFalse(schedule.is_alive())
++
++                        source_id, callback, args = sources.timeout_calls[0]
++                        self.assertEqual(sources.removed, [source_id])
++                        self.assertEqual(getattr(subregion, timer_name), 0)
++                        self.assertFalse(callback(*args))
++                        self.assertEqual(refresh_calls, [])
++
++                        subregion.reset()
++                        subregion.add_video_refresh(region)
++                        self.assertEqual(len(sources.timeout_calls), 1)
++                    finally:
++                        sources.release_timeout.set()
++                        schedule.join(2)
++
++    def test_cleanup_reclaims_refresh_retry_publication(self) -> None:
++        sources = BlockingSources(block_timeout=(2,))
++        refresh_calls = []
++
++        def refresh(regions) -> bool:
++            refresh_calls.append(tuple(regions))
++            return False
++
++        subregion = VideoSubregion(refresh, 150, True)
++        subregion.rectangle = rectangle(0, 0, 64, 64)
++        with patch.object(video_subregion, "GLib", sources):
++            subregion.add_video_refresh(rectangle(0, 0, 32, 32))
++            _source_id, callback, args = sources.timeout_calls[0]
++            dispatch = Thread(target=callback, args=args, daemon=True)
++            dispatch.start()
++            try:
++                self.assertTrue(sources.timeout_started.wait(2))
++                subregion.cleanup()
++                sources.release_timeout.set()
++                dispatch.join(2)
++                self.assertFalse(dispatch.is_alive())
++
++                retry_id, retry_callback, retry_args = sources.timeout_calls[1]
++                self.assertIn(retry_id, sources.removed)
++                self.assertEqual(subregion.refresh_timer, 0)
++                self.assertEqual(len(refresh_calls), 1)
++                self.assertFalse(retry_callback(*retry_args))
++                self.assertEqual(len(refresh_calls), 1)
++            finally:
++                sources.release_timeout.set()
++                dispatch.join(2)
++
++    def test_cleanup_attempts_both_timer_removals(self) -> None:
++        subregion = VideoSubregion(lambda _regions: True, 150, True)
++        removed = []
++
++        def source_remove(source_id: int) -> None:
++            removed.append(source_id)
++            if source_id == 101:
++                raise RuntimeError("video refresh removal failed")
++
++        registry = SimpleNamespace(source_remove=source_remove)
++        subregion.refresh_timer = FakeSource(registry, source_id=101)
++        subregion.nonvideo_refresh_timer = FakeSource(registry, source_id=102)
++        with patch.object(video_subregion, "GLib", registry), \
++                self.assertRaisesRegex(RuntimeError, "video refresh removal failed"):
++            subregion.cleanup()
++
++        self.assertEqual(removed, [101, 102])
++        self.assertEqual(subregion.refresh_timer, 0)
++        self.assertEqual(subregion.nonvideo_refresh_timer, 0)
++        self.assertTrue(subregion._closed)
++
++
++class ConnectionCleanupOrderTest(unittest.TestCase):
++
++    def test_repeated_close_leaves_no_work_behind_sentinel(self) -> None:
++        events = []
++        source = self.make_connection(events)
++        source.window_sources = {}
++        source.close()
++        source.close()
++        worker = source.encode_thread
++        worker.join(2)
++        self.assertFalse(worker.is_alive())
++        self.assertTrue(source.encode_work_queue.empty())
++        self.assertEqual(events, ["cuda-free"])
++
++    @staticmethod
++    def make_connection(events):
++        source = make_encoding_connection()
++        source.cancel_recalculate_timer = Mock()
++        source.cuda_device_context = SimpleNamespace(free=lambda: events.append("cuda-free"))
++        return source
++
++    def test_queue_sentinel_follows_window_and_shared_resource_cleanup(self) -> None:
++        events = []
++        source = self.make_connection(events)
++
++        def window_cleanup() -> None:
++            source.call_in_encode_thread(False, events.append, "codec-clean")
++
++        source.window_sources = {1: SimpleNamespace(cleanup=window_cleanup)}
++        source.close()
++        worker = source.encode_thread
++        worker.join(2)
++
++        self.assertFalse(worker.is_alive())
++        self.assertEqual(events, ["codec-clean", "cuda-free"])
++        self.assertEqual(source.encode_work_queue.qsize(), 0)
++        self.assertIsNone(source.cuda_device_context)
++
++    def test_mmap_area_outlives_queued_window_encodes(self) -> None:
++        events = []
++        source = self.make_connection(events)
++        area = Mock()
++        area.close.side_effect = lambda: events.append("mmap-close")
++        source.mmap_write_area = area
++
++        def window_cleanup() -> None:
++            source.call_in_encode_thread(
++                False,
++                lambda: events.append("codec-before-mmap-close")
++                if "mmap-close" not in events else events.append("codec-after-mmap-close"),
++            )
++
++        source.window_sources = {1: SimpleNamespace(cleanup=window_cleanup)}
++        source.close()
++        worker = source.encode_thread
++        worker.join(2)
++
++        self.assertFalse(worker.is_alive())
++        self.assertEqual(events, ["codec-before-mmap-close", "cuda-free", "mmap-close"])
++        area.close.assert_called_once_with()
++        self.assertIsNone(source.mmap_write_area)
++
++    def test_queue_sentinel_and_later_mixins_survive_cleanup_error(self) -> None:
++        events = []
++        source = self.make_connection(events)
++
++        def window_cleanup() -> None:
++            source.call_in_encode_thread(False, events.append, "codec-clean")
++            raise RuntimeError("window cleanup failed")
++
++        source.window_sources = {1: SimpleNamespace(cleanup=window_cleanup)}
++        with self.assertRaisesRegex(RuntimeError, "failed to close"):
++            source.close()
++        worker = source.encode_thread
++        worker.join(2)
++
++        self.assertFalse(worker.is_alive())
++        self.assertEqual(events, ["codec-clean", "cuda-free"])
++        self.assertEqual(source.encode_work_queue.qsize(), 0)
++        self.assertIsNone(source.cuda_device_context)
  
  
  class VideoContextCleanTest(unittest.TestCase):
-@@ -119,6 +203,191 @@ class VideoContextCleanTest(unittest.TestCase):
+@@ -14,6 +534,11 @@ class VideoContextCleanTest(unittest.TestCase):
+     @staticmethod
+     def make_source(csc=None, encoder=None) -> WindowVideoSource:
+         source = WindowVideoSource.__new__(WindowVideoSource)
++        source._video_state_lock = RLock()
++        source._video_cleanup_queued = False
++        source._b_frame_flush_generation = 0
++        source._video_source_closed = False
++        source._video_stream_encoder = None
+         source._csc_encoder = csc
+         source._video_encoder = encoder
+         source.cancel_video_encoder_flush = Mock()
+@@ -79,6 +604,26 @@ class VideoContextCleanTest(unittest.TestCase):
+         source.csc_clean.assert_called_once_with(csc)
+         source.ve_clean.assert_called_once_with(encoder)
+ 
++    def test_timer_cancel_error_does_not_bypass_context_cleanup(self) -> None:
++        csc = Mock()
++        encoder = Mock()
++        source = self.make_source(csc, encoder)
++        source.cancel_video_encoder_flush.side_effect = (RuntimeError("timer removal failed"), None)
++
++        with self.assertRaisesRegex(RuntimeError, "timer removal failed"):
++            source.video_context_clean()
++
++        self.assertIsNone(source._csc_encoder)
++        self.assertIsNone(source._video_encoder)
++        source.cancel_video_encoder_timer.assert_called_once_with()
++        source.call_in_encode_thread.assert_called_once()
++
++        _optional, clean = source.call_in_encode_thread.call_args.args
++        clean()
++
++        source.csc_clean.assert_called_once_with(csc)
++        source.ve_clean.assert_called_once_with(encoder)
++
+     def test_ve_clean_still_cancels_its_timer(self) -> None:
+         encoder = Mock()
+         source = self.make_source()
+@@ -119,6 +664,848 @@ class VideoContextCleanTest(unittest.TestCase):
          source.schedule_video_encoder_timer.assert_not_called()
  
  
 +class VideoPipelineLifecycleTest(unittest.TestCase):
 +
++    def test_real_glib_early_video_dispatch_owns_exact_source(self) -> None:
++        for family in ("flush", "watchdog", "av-timeout", "av-idle", "fallback"):
++            with self.subTest(family=family):
++                source = self.make_source()
++                source.batch_config = SimpleNamespace(delay=20)
++                source.call_in_encode_thread = Mock()
++                source.video_context_clean = Mock()
++                source.refresh = Mock()
++                source.encode_queue = [(None,)]
++                sources = EarlyRealGLib(video_compress.GLib)
++                with patch.object(video_compress, "GLib", sources):
++                    if family == "flush":
++                        source.schedule_video_encoder_flush(object(), None, 1, 0, 0, None)
++                        source.call_in_encode_thread.assert_called_once()
++                    elif family == "watchdog":
++                        source.schedule_video_encoder_timer()
++                        source.video_context_clean.assert_called_once_with()
++                    elif family == "av-timeout":
++                        source.schedule_encode_from_queue(25)
++                        source.call_in_encode_thread.assert_called_once_with(True, source.encode_from_queue)
++                    elif family == "av-idle":
++                        source.schedule_encode_from_queue_idle(25)
++                        source.call_in_encode_thread.assert_called_once_with(True, source.encode_from_queue)
++                    else:
++                        source.schedule_video_fallback_refresh()
++                        source.refresh.assert_called_once_with({"novideo": True})
++                    self.assertEqual(sources.remove_warnings, [])
++                    self.assertEqual(source.b_frame_flush_timer, 0)
++                    self.assertEqual(source.video_encoder_timer, 0)
++                    self.assertEqual(source.encode_from_queue_timer, 0)
++                    self.assertEqual(source.encode_from_queue_idle, 0)
++                    self.assertEqual(source.video_fallback_refresh_idle, 0)
++
++    def test_cleanup_cannot_overtake_detached_context_handoff(self) -> None:
++        source = self.make_source()
++        source._csc_encoder = Converter()
++        source._video_encoder = Encoder()
++        entered = Event()
++        release = Event()
++        base_entered = Event()
++        errors = []
++
++        def submit(*_args) -> None:
++            entered.set()
++            if not release.wait(2):
++                raise RuntimeError("context handoff was not released")
++
++        def invoke(fn) -> None:
++            try:
++                fn()
++            except BaseException as error:
++                errors.append(error)
++
++        source.call_in_encode_thread = submit
++        retire = Thread(target=invoke, args=(source.video_context_clean,), daemon=True)
++        cleanup = Thread(target=invoke, args=(source.cleanup,), daemon=True)
++        with patch.object(video_compress.WindowSource, "cleanup", side_effect=base_entered.set):
++            retire.start()
++            self.assertTrue(entered.wait(2))
++            cleanup.start()
++            try:
++                self.assertFalse(base_entered.wait(0.05))
++            finally:
++                release.set()
++                retire.join(2)
++                cleanup.join(2)
++        self.assertFalse(retire.is_alive())
++        self.assertFalse(cleanup.is_alive())
++        self.assertEqual(errors, [])
++        self.assertTrue(base_entered.is_set())
++
++    def test_x264_fallback_refresh_is_cancelled_by_cleanup(self) -> None:
++        source = self.make_source()
++        source._video_encoder = encoder = Mock()
++        encoder.is_closed.return_value = False
++        encoder.get_type.return_value = "x264"
++        source.b_frame_flush_data = (encoder, None, 0, 0, 0, None)
++        source.non_video_encodings = ("rgb32",)
++        source.refresh = Mock()
++        sources = BlockingSources()
++        with patch.object(video_compress, "GLib", sources), \
++                patch.object(video_compress.WindowSource, "cleanup"):
++            source.do_flush_video_encoder()
++            source.cleanup()
++            self.assertEqual(len(sources.idle_calls), 1)
++            source_id, callback, args = sources.idle_calls[0]
++            callback(*args)
++            source.refresh.assert_not_called()
++            self.assertIn(source_id, sources.removed)
++
++    def test_retired_encoder_does_not_close_replacement_stream_file(self) -> None:
++        source = self.make_source()
++        retired = Encoder()
++        current = Encoder()
++        current_file = Mock()
++        source._video_encoder = current
++        source.video_stream_file = current_file
++        source._video_stream_encoder = current
++        with patch.object(video_compress, "SAVE_VIDEO_STREAMS", True):
++            source.ve_clean(retired)
++            current_file.close.assert_not_called()
++            self.assertIs(source.video_stream_file, current_file)
++            source.ve_clean(current)
++        current_file.close.assert_called_once_with()
++        self.assertEqual(retired.clean_count, 1)
++        self.assertEqual(current.clean_count, 1)
++
++    def test_x264_first_frame_flush_retires_whole_pipeline(self) -> None:
++        source = self.make_source()
++        converter = Converter()
++        encoder = Mock()
++        encoder.is_closed.return_value = False
++        encoder.get_type.return_value = "x264"
++        source._csc_encoder = converter
++        source._video_encoder = encoder
++        source.b_frame_flush_data = (encoder, converter, 0, 0, 0, None)
++        source.non_video_encodings = ()
++        source.do_flush_video_encoder()
++        self.assertEqual(converter.clean_count, 1)
++        encoder.clean.assert_called_once_with()
++        self.assertIsNone(source._csc_encoder)
++        self.assertIsNone(source._video_encoder)
++
++    def test_queued_flush_cannot_consume_replacement_payload(self) -> None:
++        source = self.make_source()
++        source.batch_config = SimpleNamespace(delay=20)
++        encoder = Mock()
++        encoder.is_closed.return_value = False
++        encoder.get_type.return_value = "test"
++        encoder.get_width.return_value = 64
++        encoder.get_height.return_value = 64
++        encoder.flush.return_value = None
++        source._video_encoder = encoder
++        work = []
++        source.call_in_encode_thread = lambda optional, fn, *args: work.append((fn, args))
++        sources = BlockingSources()
++        with patch.object(video_compress, "GLib", sources):
++            source.schedule_video_encoder_flush(encoder, None, 1, 0, 0, None)
++            _timer, callback, args = sources.timeout_calls[0]
++            callback(*args)
++            source.schedule_video_encoder_flush(encoder, None, 2, 0, 0, None)
++            for fn, args in work:
++                fn(*args)
++            encoder.flush.assert_not_called()
++            source.cancel_video_encoder_flush()
++
++    def test_immediate_image_is_freed_when_connection_closes_before_encode(self) -> None:
++        source = self.make_source()
++        source.init_vars()
++        source._damage_cancelled = 0
++        image = Mock()
++        image.get_width.return_value = image.get_height.return_value = 64
++        image.is_thread_safe.return_value = True
++        source.make_data_packet_cb = Mock()
++        connection = ConnectionCleanupOrderTest.make_connection([])
++        connection.window_sources = {}
++        source.call_in_encode_thread = connection.call_in_encode_thread
++        release = Event()
++        connection.call_in_encode_thread(False, release.wait, 2)
++        try:
++            now = monotonic()
++            with patch.object(video_compress, "ALWAYS_FREEZE", False):
++                source.do_process_damage_image(now, now, image, "rgb32", 1, typedict())
++            source._video_source_closed = True
++            source._damage_cancelled = 1
++            connection.close()
++        finally:
++            release.set()
++        worker = connection.encode_thread
++        worker.join(2)
++        self.assertFalse(worker.is_alive())
++        image.free.assert_called_once_with()
++        source.make_data_packet_cb.assert_not_called()
++
 +    @staticmethod
 +    def make_source() -> WindowVideoSource:
 +        source = object.__new__(WindowVideoSource)
++        # Initialize the resource fields explicitly so the tests-only clean
++        # control reaches the disputed lifecycle instead of depending on the
++        # candidate's constructor helper.
++        source._video_state_lock = RLock()
++        source._video_refresh_lock = RLock()
++        source._video_cleanup_queued = False
++        source.video_fallback_refresh_idle = 0
++        source._video_fallback_refresh_generation = 0
++        source._video_source_closed = False
++        source._video_stream_encoder = None
 +        source.wid = 7
++        source.video_subregion = VideoSubregion(lambda _regions: True, 150, True)
++        source.video_encoder_timer = 0
++        source._video_encoder_timer_generation = 0
++        source.b_frame_flush_timer = 0
++        source._b_frame_flush_generation = 0
++        source.b_frame_flush_data = ()
++        source.encode_from_queue_timer = 0
++        source.encode_from_queue_due = 0.0
++        source._encode_from_queue_generation = 0
++        source.encode_from_queue_idle = 0
++        source._encode_from_queue_idle_generation = 0
++        source.scroll_data = None
 +        source._csc_encoder = None
 +        source._video_encoder = None
-+        source.video_encoder_timer = 0
-+        source.b_frame_flush_timer = 0
-+        source.b_frame_flush_data = ()
 +        source.video_stream_file = None
++        source._damage_cancelled = 0
++        source._sequence = 1
++        source.encode_queue = []
++        source.encode_queue_max_size = 10
++        source.av_sync_timer = 0
 +        source.queue_packet = lambda *_args: None
 +        return source
 +
@@ -189,6 +1154,86 @@ index 2f5d76b6452..81fcb5d780e 100644
 +                    finish_init.set()
 +                    worker.close()
 +
++    def test_subregion_cleanup_error_does_not_bypass_base_cleanup(self) -> None:
++        source = self.make_source()
++        source.video_subregion = Mock()
++        source.video_subregion.cleanup.side_effect = RuntimeError("subregion cleanup failed")
++
++        with patch.object(video_compress.WindowSource, "cleanup",
++                          side_effect=RuntimeError("base cleanup failed")) as base_cleanup, \
++                self.assertRaisesRegex(RuntimeError, "subregion cleanup failed"):
++            source.cleanup()
++
++        self.assertTrue(source._video_source_closed)
++        base_cleanup.assert_called_once_with()
++
++    def test_damage_cancel_error_does_not_bypass_owned_cleanup(self) -> None:
++        source = self.make_source()
++        source.init_vars()
++        source._damage_cancelled = 0
++        source.statistics = SimpleNamespace(encoding_pending={})
++        source.call_in_encode_thread = Mock()
++        queued_image = Mock()
++        queued_image.is_thread_safe.return_value = True
++        source.encode_queue = [(64, 64, 0, 0, queued_image)]
++        source.b_frame_flush_data = (Mock(), None, 1, 0, 0, None)
++        source.scroll_data = ScrollOwner()
++        source._csc_encoder = Converter()
++        source._video_encoder = Encoder()
++        removed = []
++
++        def source_remove(source_id: int) -> None:
++            removed.append(source_id)
++            if source_id == 101:
++                raise RuntimeError("timer removal failed")
++
++        fake_glib = SimpleNamespace(source_remove=source_remove)
++        source.encode_from_queue_timer = FakeSource(fake_glib, source_id=101)
++        source.encode_from_queue_idle = FakeSource(fake_glib, source_id=102)
++        source.b_frame_flush_timer = FakeSource(fake_glib, source_id=103)
++        source.video_encoder_timer = FakeSource(fake_glib, source_id=104)
++        source.video_subregion.refresh_timer = FakeSource(fake_glib, source_id=105)
++        source.video_subregion.nonvideo_refresh_timer = FakeSource(fake_glib, source_id=106)
++        with patch.object(video_compress, "GLib", fake_glib), \
++                patch.object(video_subregion, "GLib", fake_glib), \
++                self.assertRaisesRegex(RuntimeError, "timer removal failed"):
++            source.cancel_damage(99)
++
++        self.assertEqual(removed, [101, 102, 105, 106, 103, 104])
++        self.assertEqual(source.encode_queue, [])
++        queued_image.free.assert_called_once_with()
++        self.assertEqual(source.video_subregion.refresh_timer, 0)
++        self.assertEqual(source.video_subregion.nonvideo_refresh_timer, 0)
++        self.assertEqual(source.b_frame_flush_timer, 0)
++        self.assertEqual(source.b_frame_flush_data, ())
++        self.assertEqual(source.video_encoder_timer, 0)
++        self.assertIsNone(source._csc_encoder)
++        self.assertIsNone(source._video_encoder)
++        self.assertEqual(
++            [call.args[1].__name__ for call in source.call_in_encode_thread.call_args_list],
++            ["do_free_scroll_data", "clean"],
++        )
++
++    def test_av_timer_cancel_attempts_timeout_and_idle_sources(self) -> None:
++        source = self.make_source()
++        removed = []
++
++        def source_remove(source_id: int) -> None:
++            removed.append(source_id)
++            if source_id == 101:
++                raise RuntimeError("timeout removal failed")
++
++        registry = SimpleNamespace(source_remove=source_remove)
++        source.encode_from_queue_timer = FakeSource(registry, source_id=101)
++        source.encode_from_queue_idle = FakeSource(registry, source_id=102)
++        with patch.object(video_compress, "GLib", registry), \
++                self.assertRaisesRegex(RuntimeError, "timeout removal failed"):
++            source.cancel_encode_from_queue()
++
++        self.assertEqual(removed, [101, 102])
++        self.assertEqual(source.encode_from_queue_timer, 0)
++        self.assertEqual(source.encode_from_queue_idle, 0)
++
 +    def test_reinitialization_cleans_existing_pipeline(self) -> None:
 +        source = self.make_source()
 +        worker = EncodeWorker()
@@ -223,11 +1268,207 @@ index 2f5d76b6452..81fcb5d780e 100644
 +        finally:
 +            worker.close()
 +
++    def test_reinitialization_sweeps_pipeline_published_during_rebuild(self) -> None:
++        source = self.make_source()
++        worker = EncodeWorker()
++        source.call_in_encode_thread = worker.call
++        source._mmap = True
++        source._encoders = {}
++        source.parse_csc_modes = Mock()
++        source.update_encoding_selection = Mock()
++        init_started = Event()
++        finish_init = Event()
++        info_started = Event()
++        finish_info = Event()
++        base_init_started = Event()
++        finish_base_init = Event()
++        converter = Converter()
++        encoder = Encoder(init_started, finish_init, info_started=info_started, finish_info=finish_info)
++        reinit_errors = []
++
++        def base_init() -> None:
++            base_init_started.set()
++            if not finish_base_init.wait(2):
++                raise RuntimeError("registry rebuild was not released")
++
++        def reinitialize() -> None:
++            try:
++                with patch.object(video_compress.WindowSource, "do_init_encoders", side_effect=base_init), \
++                        patch.object(video_compress, "has_codec", return_value=False):
++                    source.init_encoders()
++            except BaseException as e:
++                reinit_errors.append(e)
++
++        worker.call(True, self.setup_pipeline, source, converter, encoder)
++        reinit = Thread(target=reinitialize, name="test-reinitialize", daemon=True)
++        try:
++            self.assertTrue(init_started.wait(2))
++            reinit.start()
++            self.assertTrue(base_init_started.wait(2))
++            finish_init.set()
++            self.assertTrue(info_started.wait(2))
++            self.assertIs(source._csc_encoder, converter)
++            self.assertIs(source._video_encoder, encoder)
++            finish_base_init.set()
++            reinit.join(2)
++            self.assertFalse(reinit.is_alive())
++            self.assertEqual(reinit_errors, [])
++            finish_info.set()
++            worker.drain()
++
++            self.assertEqual(converter.clean_count, 1)
++            self.assertEqual(encoder.clean_count, 1)
++            self.assertIsNone(source._csc_encoder)
++            self.assertIsNone(source._video_encoder)
++            self.assertEqual(worker.errors, [])
++            self.assertFalse(worker.optional[-1])
++        finally:
++            finish_init.set()
++            finish_base_init.set()
++            finish_info.set()
++            reinit.join(2)
++            worker.close()
++
++    def test_terminal_setup_releases_pair_without_publication(self) -> None:
++        source = self.make_source()
++        worker = EncodeWorker()
++        source.call_in_encode_thread = worker.call
++        init_started = Event()
++        finish_init = Event()
++        converter = Converter()
++        encoder = Encoder(init_started, finish_init)
++        worker.call(True, self.setup_pipeline, source, converter, encoder)
++        try:
++            self.assertTrue(init_started.wait(2))
++            with source._video_state_lock:
++                source._video_source_closed = True
++            finish_init.set()
++            worker.drain()
++
++            self.assertEqual(converter.clean_count, 1)
++            self.assertEqual(encoder.clean_count, 1)
++            self.assertIsNone(source._csc_encoder)
++            self.assertIsNone(source._video_encoder)
++            self.assertEqual(worker.errors, [])
++        finally:
++            finish_init.set()
++            worker.close()
++
++    def test_video_timer_callbacks_claim_before_publication(self) -> None:
++        source = self.make_source()
++        source.batch_config = SimpleNamespace(delay=20)
++        source.call_in_encode_thread = Mock()
++        flush_sources = BlockingSources(dispatch_timeout=(1,))
++        with patch.object(video_compress, "GLib", flush_sources):
++            source.schedule_video_encoder_flush(object(), None, 1, 0, 0, None)
++
++        flush_id, _callback, _args = flush_sources.timeout_calls[0]
++        self.assertEqual(flush_sources.callback_results, [False])
++        self.assertEqual(flush_sources.removed, [flush_id])
++        self.assertEqual(source.b_frame_flush_timer, 0)
++        source.call_in_encode_thread.assert_called_once()
++        optional, callback, generation, payload = source.call_in_encode_thread.call_args.args
++        self.assertTrue(optional)
++        self.assertEqual(callback, source.do_flush_video_encoder)
++        self.assertGreater(generation, 0)
++        self.assertEqual(payload[2], 1)
++
++        source = self.make_source()
++        source.video_context_clean = Mock()
++        timeout_sources = BlockingSources(dispatch_timeout=(1,))
++        with patch.object(video_compress, "GLib", timeout_sources), \
++                patch.object(video_compress, "VIDEO_TIMEOUT", 1):
++            source.schedule_video_encoder_timer()
++
++        timeout_id, _callback, _args = timeout_sources.timeout_calls[0]
++        self.assertEqual(timeout_sources.callback_results, [False])
++        self.assertEqual(timeout_sources.removed, [timeout_id])
++        self.assertEqual(source.video_encoder_timer, 0)
++        source.video_context_clean.assert_called_once_with()
++
++    def test_invalid_pipeline_cleanup_attempts_both_elements(self) -> None:
++        source = self.make_source()
++        csc = Converter(clean_error=True)
++        encoder = Encoder()
++        source._csc_encoder = csc
++        source._video_encoder = encoder
++        source.do_check_pipeline = Mock(return_value=False)
++        source.get_video_pipeline_options = Mock()
++        packets = []
++        source.queue_packet = packets.append
++
++        with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
++            source.check_pipeline(("h264",), 64, 64, "BGRX")
++
++        self.assertEqual(csc.clean_count, 1)
++        self.assertEqual(encoder.clean_count, 1)
++        self.assertIsNone(source._csc_encoder)
++        self.assertIsNone(source._video_encoder)
++        self.assertEqual(packets, [(WINDOW_EOS, source.wid)])
++        source.get_video_pipeline_options.assert_not_called()
++
++    def test_failed_option_cleanup_attempts_both_elements(self) -> None:
++        source = self.make_source()
++        csc = Converter(clean_error=True)
++        encoder = Encoder()
++        source.is_cancelled = Mock(return_value=False)
++
++        def fail_option(*_args) -> None:
++            source._csc_encoder = csc
++            source._video_encoder = encoder
++            raise RuntimeError("option failed")
++
++        source.setup_pipeline_option = fail_option
++        packets = []
++        source.queue_packet = packets.append
++
++        with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
++            source.setup_pipeline(((100,),), 64, 64, "BGRX")
++
++        self.assertEqual(csc.clean_count, 1)
++        self.assertEqual(encoder.clean_count, 1)
++        self.assertIsNone(source._csc_encoder)
++        self.assertIsNone(source._video_encoder)
++        self.assertEqual(packets, [(WINDOW_EOS, source.wid)])
++
++    def test_failed_initialization_cleans_unpublished_instances(self) -> None:
++        for converter, encoder in (
++            (Converter(init_error=True), Encoder()),
++            (Converter(), Encoder(init_error=True)),
++            (Converter(clean_error=True), Encoder(init_error=True)),
++        ):
++            with self.subTest(converter=converter, encoder=encoder):
++                source = self.make_source()
++                expected_error = "cleanup failed" if converter.clean_error else "init failed"
++                with self.assertRaisesRegex(RuntimeError, expected_error):
++                    self.setup_pipeline(source, converter, encoder)
++
++                self.assertEqual(converter.clean_count, 1)
++                self.assertEqual(encoder.clean_count, int(not converter.init_error))
++                self.assertIsNone(source._csc_encoder)
++                self.assertIsNone(source._video_encoder)
++
++    def test_stream_file_closes_when_encoder_cleanup_fails(self) -> None:
++        source = self.make_source()
++        encoder = Encoder(clean_error=True)
++        stream_file = Mock()
++        source.video_stream_file = stream_file
++        source._video_stream_encoder = encoder
++
++        with patch.object(video_compress, "SAVE_VIDEO_STREAMS", True):
++            with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
++                source.ve_clean(encoder)
++
++        self.assertIsNone(source.video_stream_file)
++        stream_file.close.assert_called_once_with()
++
 +    def test_full_cleanup_cancels_timer_and_queues_one_barrier(self) -> None:
 +        source = self.make_source()
 +        source.init_vars()
 +        source.av_sync_timer = 0
-+        source.encode_queue = []
++        queued_image = Mock()
++        queued_image.is_thread_safe.return_value = True
++        source.encode_queue = [(64, 64, 0, 0, queued_image)]
 +        source.encode_queue_max_size = 10
 +        source._mmap = None
 +        source.statistics = SimpleNamespace(encoding_totals={}, encoding_pending={})
@@ -255,17 +1496,22 @@ index 2f5d76b6452..81fcb5d780e 100644
 +        removed_sources = []
 +        idle_callbacks = []
 +        fake_glib = SimpleNamespace(
-+            timeout_add=lambda _delay, _callback: 101,
++            timeout_add=lambda _delay, _callback, *_args: 101,
 +            source_remove=removed_sources.append,
 +            idle_add=lambda callback: idle_callbacks.append(callback),
 +        )
++        fake_glib.timeout_source_new = lambda delay: FakeSource(fake_glib, delay)
 +        try:
 +            with patch.object(video_compress, "GLib", fake_glib), \
 +                    patch.object(compress, "GLib", fake_glib):
 +                source.schedule_video_encoder_timer()
-+                self.assertEqual(source.video_encoder_timer, 101)
++                self.assertEqual(source.video_encoder_timer.get_id(), 101)
 +                source.cleanup()
 +                self.assertEqual(removed_sources, [101])
++                self.assertEqual(source.encode_queue, [])
++                queued_image.free.assert_called_once_with()
++                self.assertEqual(old_csc.clean_count, 0)
++                self.assertEqual(old_encoder.clean_count, 0)
 +                finish_work.set()
 +                worker.drain()
 +
@@ -285,15 +1531,721 @@ index 2f5d76b6452..81fcb5d780e 100644
 +            finish_work.set()
 +            worker.close()
 +
++    def test_full_cleanup_preserves_resources_for_worker_sweep(self) -> None:
++        source = self.make_source()
++        source.init_vars()
++        source._mmap = None
++        source.statistics = SimpleNamespace(encoding_totals={}, encoding_pending={})
++        source.batch_config = SimpleNamespace(cleanup=lambda: None)
++        source.queue_packet = lambda *_args: None
++        source.scroll_data = scroll_data = ScrollOwner()
++        worker = EncodeWorker()
++        source.call_in_encode_thread = worker.call
++        old_csc = Converter()
++        old_encoder = Encoder()
++        worker.call(True, self.setup_pipeline, source, old_csc, old_encoder)
++        worker.drain()
++        new_csc = Converter()
++        new_encoder = Encoder()
++        publish_started = Event()
++        publish_resources = Event()
++
++        def publish_after_cleanup() -> None:
++            publish_started.set()
++            if not publish_resources.wait(2):
++                raise RuntimeError("resource publication was not released")
++            source._csc_encoder = new_csc
++            source._video_encoder = new_encoder
++            source.b_frame_flush_data = (new_encoder, new_csc, 1, 0, 0, None)
++            source.b_frame_flush_timer = FakeSource(fake_glib, source_id=202)
++            source.video_encoder_timer = FakeSource(fake_glib, source_id=203)
++
++        worker.call(False, publish_after_cleanup)
++        self.assertTrue(publish_started.wait(2))
++        removed_sources = []
++        idle_callbacks = []
++        fake_glib = SimpleNamespace(
++            source_remove=removed_sources.append,
++            idle_add=lambda callback: idle_callbacks.append(callback),
++        )
++        try:
++            with patch.object(video_compress, "GLib", fake_glib), \
++                    patch.object(compress, "GLib", fake_glib):
++                source.cleanup()
++                self.assertEqual(scroll_data.free_count, 0)
++                self.assertEqual(old_csc.clean_count, 0)
++                self.assertEqual(old_encoder.clean_count, 0)
++                publish_resources.set()
++                worker.drain()
++
++            self.assertEqual(scroll_data.free_count, 1)
++            self.assertEqual(old_csc.clean_count, 1)
++            self.assertEqual(old_encoder.clean_count, 1)
++            self.assertEqual(new_csc.clean_count, 1)
++            self.assertEqual(new_encoder.clean_count, 1)
++            self.assertEqual(set(removed_sources), {202, 203})
++            self.assertEqual(source.b_frame_flush_timer, 0)
++            self.assertEqual(source.b_frame_flush_data, ())
++            self.assertEqual(source.video_encoder_timer, 0)
++            self.assertIsNone(source.scroll_data)
++            self.assertIsNone(source._csc_encoder)
++            self.assertIsNone(source._video_encoder)
++            self.assertEqual(worker.errors, [])
++            self.assertEqual(len(idle_callbacks), 1)
++            self.assertEqual(
++                [callback.__name__ for callback in worker.callbacks],
++                ["setup_pipeline", "publish_after_cleanup", "do_free_scroll_data", "clean", "encode_ended"],
++            )
++        finally:
++            publish_resources.set()
++            worker.close()
++
++    def test_cleanup_reclaims_post_cancel_encode_queue_idle(self) -> None:
++        source = self.make_source()
++        source.init_vars()
++        source._damage_cancelled = 0
++        source._mmap = None
++        source._encoders = {}
++        source.av_sync_delay = 10_000
++        source.update_av_sync_delay = Mock()
++        source.statistics = SimpleNamespace(encoding_totals={}, encoding_pending={})
++        source.batch_config = SimpleNamespace(cleanup=lambda: None)
++        source.call_in_encode_thread = Mock()
++        queued_image = Mock()
++        queued_image.is_thread_safe.return_value = True
++        source.encode_queue = [
++            (64, 64, monotonic(), monotonic(), queued_image, "h264", 1, typedict(), 0),
++        ]
++        sources = BlockingSources(block_idle=(1,))
++        with patch.object(video_compress, "GLib", sources), \
++                patch.object(compress, "GLib", sources):
++            drain = Thread(target=source.encode_from_queue, name="test-av-drain", daemon=True)
++            drain.start()
++            try:
++                self.assertTrue(sources.idle_started.wait(2))
++                source.cleanup()
++                queued_image.free.assert_called_once_with()
++                sources.release_idle.set()
++                drain.join(2)
++                self.assertFalse(drain.is_alive())
++
++                idle_id, callback, args = sources.idle_calls[0]
++                self.assertIn(idle_id, sources.removed)
++                self.assertEqual(source.encode_from_queue_idle, 0)
++                self.assertEqual(source.encode_from_queue_timer, 0)
++                queued_calls = source.call_in_encode_thread.call_count
++                self.assertFalse(callback(*args))
++                self.assertEqual(source.call_in_encode_thread.call_count, queued_calls)
++                self.assertEqual(sources.timeout_calls, [])
++            finally:
++                sources.release_idle.set()
++                drain.join(2)
++
++    def test_av_sync_update_does_not_hold_video_state_lock(self) -> None:
++        source = self.make_source()
++        state_lock = Lock()
++        source._video_state_lock = state_lock
++        source.av_sync_delay = 0
++        source.make_data_packet_cb = Mock()
++        queued_image = Mock()
++        source.encode_queue = [
++            (64, 64, 0.0, 0.0, queued_image, "h264", 1, typedict(), 0),
++        ]
++        lock_was_available = []
++
++        def update_av_sync_delay() -> None:
++            acquired = state_lock.acquire(blocking=False)
++            lock_was_available.append(acquired)
++            if acquired:
++                state_lock.release()
++
++        source.update_av_sync_delay = update_av_sync_delay
++
++        source.encode_from_queue()
++
++        self.assertEqual(lock_was_available, [True])
++        source.make_data_packet_cb.assert_called_once()
++
++    def test_callback_before_av_source_publication_is_not_retained(self) -> None:
++        source = self.make_source()
++        source.call_in_encode_thread = Mock()
++        source.encode_queue = [(None,)]
++        timeout_sources = BlockingSources(dispatch_timeout=(1,))
++        with patch.object(video_compress, "GLib", timeout_sources):
++            self.assertFalse(source.schedule_encode_from_queue(25))
++
++        timeout_id, _callback, _args = timeout_sources.timeout_calls[0]
++        self.assertEqual(timeout_sources.callback_results, [False])
++        self.assertEqual(timeout_sources.removed, [timeout_id])
++        self.assertEqual(source.encode_from_queue_timer, 0)
++        self.assertEqual(source.encode_from_queue_due, 0)
++        source.call_in_encode_thread.assert_called_once_with(True, source.encode_from_queue)
++
++        source = self.make_source()
++        source.call_in_encode_thread = Mock()
++        source.av_sync_delay = 10_000
++        source.update_av_sync_delay = Mock()
++        queued_image = Mock()
++        source.encode_queue = [
++            (64, 64, monotonic(), monotonic(), queued_image, "h264", 1, typedict(), 0),
++        ]
++        idle_sources = BlockingSources(dispatch_idle=(1,))
++        with patch.object(video_compress, "GLib", idle_sources):
++            source.encode_from_queue()
++            timeout = source.encode_from_queue_timer
++            timeout_id = timeout.get_id() if hasattr(timeout, "get_id") else timeout
++            source.cancel_encode_from_queue()
++            source.free_encode_queue_images()
++
++        idle_id, _callback, _args = idle_sources.idle_calls[0]
++        self.assertFalse(idle_sources.callback_results[0])
++        self.assertIn(timeout_id, idle_sources.removed)
++        # The fixed path owns the idle ID until its callback-side claim; the
++        # clean control never records it, but both must avoid retaining it.
++        if idle_id in idle_sources.removed:
++            self.assertEqual(idle_sources.removed, [idle_id, timeout_id])
++        self.assertEqual(source.encode_from_queue_idle, 0)
++        self.assertEqual(source.encode_from_queue_timer, 0)
++        source.call_in_encode_thread.assert_not_called()
++        queued_image.free.assert_called_once_with()
++
 +
  def main() -> None:
      unittest.main()
  
+diff --git a/xpra/server/source/client_connection.py b/xpra/server/source/client_connection.py
+index 7459cb1a2008514e9f8a5a046fb26ca05bb901d2..15b3bd1672c28ad1e2d8d8440c343c23f3aeba38 100644
+--- a/xpra/server/source/client_connection.py
++++ b/xpra/server/source/client_connection.py
+@@ -8,7 +8,7 @@
+ from typing import Any, TypeAlias
+ from collections.abc import Callable, Sequence
+ from time import sleep, monotonic
+-from threading import Event
++from threading import Event, RLock
+ from collections import deque
+ from queue import SimpleQueue
+ 
+@@ -75,12 +75,16 @@ class ClientConnection(StubClientConnection):
+         # the functions should add the packets they generate to the 'packet_queue'
+         self.encode_work_queue: SimpleQueue[None | tuple[bool, Callable, Sequence[Any]]] = SimpleQueue()
+         self.encode_thread = None
++        self._encode_lock = RLock()
++        self._encode_queue_closed = False
++        self._cleanup_lock = RLock()
++        self._cleanup_started = False
++        self.encode_end_callbacks: list[tuple[Callable, Sequence[Any]]] = []
+         self.ordinary_packets: list[tuple[Packet, bool, bool]] = []
+ 
+         self.suspended = False
+         self.client_packet_types = ()
+         self.setting_changed = setting_changed
+-        self.queue_encode: Callable[[ENCODE_WORK_ITEM], None] = self.start_queue_encode
+ 
+         def suspend() -> None:
+             self.suspended = True
+@@ -111,6 +115,20 @@ class ClientConnection(StubClientConnection):
+     def cleanup(self) -> None:
+         log("%s.close()", self)
+         self.close_event.set()
++        # Every subsystem has now had a chance to queue its mandatory cleanup.
++        # Run resource owners which must outlive those callbacks, then terminate
++        # the worker.  Both this tail and its sentinel belong to the base queue.
++        with self._encode_lock:
++            if self._encode_queue_closed:
++                return
++            # Seal and publish the tail under the same lock used by producers.
++            # No accepted work can land behind the final sentinel.
++            self.start_queue_encode()
++            self._encode_queue_closed = True
++            callbacks, self.encode_end_callbacks = self.encode_end_callbacks, []
++            for fn, args in callbacks:
++                self.encode_work_queue.put((False, fn, args))
++            self.encode_work_queue.put(None)
+         self.protocol = None
+         self.statistics.reset(0)
+ 
+@@ -126,14 +144,22 @@ class ClientConnection(StubClientConnection):
+ 
+     # The encode thread loop management:
+     #
+-    def start_queue_encode(self, item: ENCODE_WORK_ITEM) -> None:
+-        # start the encode work queue:
+-        # holds functions to call to compress data (pixels, clipboard)
+-        # items placed in this queue are picked off by the "encode" thread,
+-        # the functions should add the packets they generate to the 'packet_queue'
+-        self.queue_encode = self.encode_work_queue.put
+-        self.queue_encode(item)
+-        self.encode_thread = start_thread(self.encode_loop, "encode")
++    def start_queue_encode(self) -> None:
++        # Called only while _encode_lock is held. Start before accepting the
++        # first item, so failure to create a worker does not orphan that item.
++        if self.encode_thread is None:
++            self.encode_thread = start_thread(self.encode_loop, "encode")
++
++    def queue_encode(self, item: ENCODE_WORK_ITEM) -> None:
++        with self._encode_lock:
++            if self._encode_queue_closed:
++                if item is not None and item[0]:
++                    return
++                raise RuntimeError("cannot queue mandatory work after encode termination")
++            if item is None:
++                raise ValueError("only ClientConnection.cleanup may terminate the encode queue")
++            self.start_queue_encode()
++            self.encode_work_queue.put(item)
+ 
+     def encode_queue_size(self) -> int:
+         return self.encode_work_queue.qsize()
+@@ -146,6 +172,13 @@ class ClientConnection(StubClientConnection):
+         self.statistics.compression_work_qsizes.append((monotonic(), self.encode_queue_size()))
+         self.queue_encode((optional, fn, args))
+ 
++    def call_in_encode_thread_at_end(self, fn: Callable, *args) -> None:
++        """Run after subsystem cleanup work and immediately before queue termination."""
++        with self._encode_lock:
++            if self._encode_queue_closed:
++                raise RuntimeError("cannot register cleanup after encode termination")
++            self.encode_end_callbacks.append((fn, args))
++
+     def queue_packet(self, packet: Packet, wid=0, pixels=0,
+                      wait_for_more=False) -> None:
+         """
+@@ -181,8 +214,8 @@ class ClientConnection(StubClientConnection):
+                 continue
+             try:
+                 fn(*args)
+-            except Exception as e:
+-                if self.is_closed():
++            except BaseException as e:
++                if optional_when_closing and self.is_closed():
+                     log("ignoring encoding error calling %s because the source is already closed:", item)
+                     log(" %s", e)
+                 else:
+diff --git a/xpra/server/source/encoding.py b/xpra/server/source/encoding.py
+index ee448cef7f7acd0dbd45a23ab0a23fbfacec9690..df112d54ab155f298ced035d0ab23f2d82000384 100644
+--- a/xpra/server/source/encoding.py
++++ b/xpra/server/source/encoding.py
+@@ -5,6 +5,7 @@
+ # later version. See the file COPYING for details.
+ 
+ import os
++from threading import RLock
+ from math import sqrt
+ from typing import Any
+ from time import sleep, monotonic
+@@ -58,6 +59,9 @@ class EncodingsConnection(StubClientConnection):
+         return bool(caps.dictget("encoding") or caps.strtupleget("encodings")) or wants_windows(caps)
+ 
+     def init_state(self) -> None:
++        self._encoding_state_lock = RLock()
++        self._calculate_execution_lock = RLock()
++        self._encoding_closed = False
+         # contains default values, some of which may be supplied by the client:
+         self.default_batch_config = batch_config.DamageBatchConfig()
+         self.global_batch_config = self.default_batch_config.clone()  # global batch config
+@@ -78,7 +82,7 @@ class EncodingsConnection(StubClientConnection):
+         # for managing the recalculate_delays work:
+         self.calculate_window_pixels: dict[int, int] = {}
+         self.calculate_window_ids: set[int] = set()
+-        self.calculate_timer = 0
++        self.calculate_timer: GLib.Source | int = 0
+         self.calculate_last_time: float = 0
+ 
+         self.video_helper = getVideoHelper()
+@@ -110,17 +114,41 @@ class EncodingsConnection(StubClientConnection):
+                     ws.cuda_device_context = self.cuda_device_context
+ 
+     def cleanup(self) -> None:
+-        self.cancel_recalculate_timer()
+-        if self.cuda_device_context:
+-            self.queue_encode((False, self.free_cuda_device_context, ()))
+-        # Warning: this mixin must come AFTER the window mixin!
+-        # to make sure that it is safe to add the end of queue marker:
+-        # (all window sources will have stopped queuing data)
+-        self.queue_encode(None)
++        with self._encoding_state_lock:
++            if self._encoding_closed:
++                return
++            self._encoding_closed = True
++        errors: list[tuple[BaseException, Any]] = []
++        try:
++            self.cancel_recalculate_timer()
++        except BaseException as error:
++            errors.append((error, error.__traceback__))
++        # The calculation worker is not the connection's encode worker. Drain
++        # its current producer before the reverse muxer traversal cleans window
++        # state. Never hold the short publication lock while waiting for it:
++        # draw acknowledgements may still own a window-operation claim.
++        with self._calculate_execution_lock:
++            with self._encoding_state_lock:
++                self.calculate_window_ids.clear()
++                self.calculate_window_pixels.clear()
++                has_context = bool(self.cuda_device_context)
++        if has_context:
++            try:
++                self.call_in_encode_thread_at_end(self.free_cuda_device_context)
++            except BaseException as error:
++                errors.append((error, error.__traceback__))
++        if errors:
++            for error, traceback in errors[1:]:
++                log.error("Additional error during encoding cleanup: %s", error,
++                          exc_info=(type(error), error, traceback))
++            error, traceback = errors[0]
++            raise error.with_traceback(traceback)
+ 
+     def free_cuda_device_context(self) -> None:
+-        if cdd := self.cuda_device_context:
++        with self._encoding_state_lock:
++            cdd = self.cuda_device_context
+             self.cuda_device_context = None
++        if cdd:
+             cdd.free()
+ 
+     def all_window_sources(self) -> tuple:
+@@ -164,7 +192,13 @@ class EncodingsConnection(StubClientConnection):
+             and `WindowSource.statistics` (`WindowPerformanceStatistics`) for each window id in calculate_window_ids,
+             this runs in the worker thread.
+         """
+-        self.calculate_timer = 0
++        with self._calculate_execution_lock:
++            with self._encoding_state_lock:
++                if self._encoding_closed or self.is_closed():
++                    return
++            self._recalculate_delays()
++
++    def _recalculate_delays(self) -> None:
+         if self.is_closed():
+             return
+         now = monotonic()
+@@ -246,29 +280,51 @@ class EncodingsConnection(StubClientConnection):
+                 normalized_delay, delay, wdelay, avg_size, ratio)
+ 
+     def may_recalculate(self, wid: int, pixel_count: int) -> None:
+-        if wid in self.calculate_window_ids:
+-            return  # already scheduled
+-        v = self.calculate_window_pixels.get(wid, 0) + pixel_count
+-        self.calculate_window_pixels[wid] = v
+-        if v < MIN_PIXEL_RECALCULATE:
+-            return  # not enough pixel updates
+-        statslog("may_recalculate(%#x, %i) total %i pixels, scheduling recalculate work item", wid, pixel_count, v)
+-        self.calculate_window_ids.add(wid)
+-        if self.calculate_timer:
+-            # already due
+-            return
+-        delta = monotonic() - self.calculate_last_time
+-        RECALCULATE_DELAY = 1.0  # 1s
+-        if delta > RECALCULATE_DELAY:
+-            add_work_item(self.recalculate_delays)
+-        else:
++        with self._encoding_state_lock:
++            if self._encoding_closed or self.is_closed():
++                return
++            if wid in self.calculate_window_ids:
++                return  # already scheduled
++            v = self.calculate_window_pixels.get(wid, 0) + pixel_count
++            self.calculate_window_pixels[wid] = v
++            if v < MIN_PIXEL_RECALCULATE:
++                return  # not enough pixel updates
++            statslog("may_recalculate(%#x, %i) total %i pixels, scheduling recalculate work item", wid, pixel_count, v)
++            self.calculate_window_ids.add(wid)
++            if self.calculate_timer:
++                return  # already due
++            delta = monotonic() - self.calculate_last_time
++            RECALCULATE_DELAY = 1.0  # 1s
++            if delta > RECALCULATE_DELAY:
++                add_work_item(self.recalculate_delays)
++                return
+             delay = int(1000 * (RECALCULATE_DELAY - delta))
+-            self.calculate_timer = GLib.timeout_add(delay, add_work_item, self.recalculate_delays)
++            timer = GLib.timeout_source_new(delay)
++
++            def enqueue_recalculate(*_args) -> bool:
++                with self._encoding_state_lock:
++                    if self.calculate_timer is not timer:
++                        return False
++                    self.calculate_timer = 0
++                    if not self._encoding_closed and not self.is_closed():
++                        add_work_item(self.recalculate_delays)
++                return False
++
++            timer.set_callback(enqueue_recalculate)
++            self.calculate_timer = timer
++            try:
++                timer.attach()
++            except BaseException:
++                self.calculate_timer = 0
++                timer.destroy()
++                raise
+ 
+     def cancel_recalculate_timer(self) -> None:
+-        if ct := self.calculate_timer:
++        with self._encoding_state_lock:
++            timer = self.calculate_timer
+             self.calculate_timer = 0
+-            GLib.source_remove(ct)
++        if timer:
++            timer.destroy()
+ 
+     def parse_client_caps(self, c: typedict) -> None:
+         # batch options:
+@@ -405,24 +461,39 @@ class EncodingsConnection(StubClientConnection):
+ 
+     def allocate_cuda_device_context(self):
+         cudalog = Logger("cuda")
+-        cudalog(f"allocate_cuda_device_context() cuda_device_context={self.cuda_device_context}")
+-        if not self.cuda_device_context:
+-            try:
+-                # pylint: disable=import-outside-toplevel
+-                from xpra.codecs.nvidia.cuda.context import get_device_context
+-            except ImportError as e:
+-                cudalog(f"unable to import cuda context: {e}")
++        with self._encoding_state_lock:
++            if self._encoding_closed or self.is_closed():
+                 return None
+-            try:
+-                self.cuda_device_context = get_device_context(self.encoding_options)
+-                cudalog("cuda_device_context=%s", self.cuda_device_context)
+-            except Exception as e:
+-                cudalog("failed to get a cuda device context using encoding options %s",
+-                        self.encoding_options, exc_info=True)
+-                cudalog.error("Error: failed to allocate a CUDA context:")
+-                cudalog.estr(e)
+-                cudalog.error(" NVJPEG and NVENC will not be available")
+-        return self.cuda_device_context
++            if self.cuda_device_context:
++                return self.cuda_device_context
++        try:
++            # pylint: disable=import-outside-toplevel
++            from xpra.codecs.nvidia.cuda.context import get_device_context
++        except ImportError as e:
++            cudalog(f"unable to import cuda context: {e}")
++            return None
++        try:
++            candidate = get_device_context(self.encoding_options)
++        except Exception as e:
++            cudalog("failed to get a cuda device context using encoding options %s",
++                    self.encoding_options, exc_info=True)
++            cudalog.error("Error: failed to allocate a CUDA context:")
++            cudalog.estr(e)
++            cudalog.error(" NVJPEG and NVENC will not be available")
++            return None
++        if not candidate:
++            return None
++        with self._encoding_state_lock:
++            if self._encoding_closed or self.is_closed():
++                current = None
++            elif current := self.cuda_device_context:
++                pass
++            else:
++                self.cuda_device_context = current = candidate
++        if current is not candidate:
++            candidate.free()
++        cudalog("cuda_device_context=%s", current)
++        return current
+ 
+     def print_encoding_info(self) -> None:
+         log("print_encoding_info() core-encodings=%s, server-core-encodings=%s",
+diff --git a/xpra/server/source/factory.py b/xpra/server/source/factory.py
+index 5e1ca3bcf1e35cd3e27db79c5a1dc2d5c279e76c..3044411a5d38204ed6de5dd3d99b22e1e3a24031 100644
+--- a/xpra/server/source/factory.py
++++ b/xpra/server/source/factory.py
+@@ -165,17 +165,33 @@ def get_client_connection_class(caps: typedict):
+             return False
+ 
+         def close(self) -> None:
++            # Serialize the complete muxer traversal, not just the final queue
++            # sentinel. A re-entrant or repeated close cannot replay mixins.
++            with self._cleanup_lock:
++                if self._cleanup_started:
++                    return
++                self._cleanup_started = True
++                self.close_event.set()
++                self._cleanup_subsystems()
++
++        def _cleanup_subsystems(self) -> None:
+             log("%s.close() %s", self, csv(CC_BASES))
++            cleanup_errors: list[tuple[type, BaseException, Any]] = []
+             for bc in reversed(CC_BASES):
+                 log("%s.cleanup()", bc)
+                 try:
+                     bc.cleanup(self)
+-                except Exception as e:
++                except BaseException as e:
+                     log("%s.cleanup()", bc, exc_info=True)
+                     log.error("Error closing connection,")
+                     log.error(" %s in %s module:", type(e).__name__, bc.__name__)
+                     log.estr(e)
+-                    raise RuntimeError(f"failed to close {bc}: {e}") from None
++                    cleanup_errors.append((bc, e, e.__traceback__))
++            if cleanup_errors:
++                bc, error, traceback = cleanup_errors[0]
++                if isinstance(error, Exception):
++                    raise RuntimeError(f"failed to close {bc}: {error}") from None
++                raise error.with_traceback(traceback)
+ 
+         def send_hello(self, server_capabilities: dict) -> None:
+             capabilities = server_capabilities.copy()
+diff --git a/xpra/server/source/mmap.py b/xpra/server/source/mmap.py
+index b6d7a23506524050da5f7b2ffd1017aac8dd7c44..289505d83d4770fdcd5472738a9ec6d6f1dd2757 100644
+--- a/xpra/server/source/mmap.py
++++ b/xpra/server/source/mmap.py
+@@ -94,11 +94,34 @@ class MMAP_Connection(StubClientConnection):
+         self.mmap_write_area = None
+ 
+     def cleanup(self) -> None:
+-        clean_mmap_area(self.mmap_read_area)
++        read_area = self.mmap_read_area
++        write_area = self.mmap_write_area
+         self.mmap_read_area = None
+-        clean_mmap_area(self.mmap_write_area)
+         self.mmap_write_area = None
+ 
++        def clean_areas() -> None:
++            errors = []
++            for area in (read_area, write_area):
++                try:
++                    clean_mmap_area(area)
++                except BaseException as e:
++                    errors.append((e, e.__traceback__))
++            if errors:
++                for later_error, later_traceback in errors[1:]:
++                    log.error("Additional error closing mmap area: %s", later_error,
++                              exc_info=(type(later_error), later_error, later_traceback))
++                error, traceback = errors[0]
++                raise error.with_traceback(traceback)
++
++        # A queued window encode may still be writing its captured area.  The
++        # dynamically composed connection provides an at-end queue whose
++        # callbacks run after every subsystem has submitted mandatory work and
++        # immediately before the encode worker sentinel.
++        if queue_at_end := getattr(self, "call_in_encode_thread_at_end", None):
++            queue_at_end(clean_areas)
++        else:
++            clean_areas()
++
+     def mmap_path(self, filename: str, index: int) -> str:
+         """
+             The path we should use for the area the client has described,
 diff --git a/xpra/server/window/video_compress.py b/xpra/server/window/video_compress.py
-index a7fe7df9a82..f8812677989 100644
+index 8c70c4ecaf4ac1e6f34577b2a973b943aef6b8ab..dc01f0e7b50efbbcecf39378aa4d24669be9f39d 100644
 --- a/xpra/server/window/video_compress.py
 +++ b/xpra/server/window/video_compress.py
-@@ -276,6 +276,11 @@ class WindowVideoSource(WindowSource):
+@@ -8,6 +8,7 @@ import time
+ import operator
+ from math import sqrt, ceil
+ from functools import reduce
++from threading import RLock
+ from time import monotonic
+ from typing import Any
+ from collections.abc import Callable, Iterable, Sequence
+@@ -30,7 +31,7 @@ from xpra.server.window.compress import (
+ from xpra.net.common import Packet, BACKWARDS_COMPATIBLE
+ from xpra.net.packet_type import WINDOW_EOS
+ from xpra.util.rectangle import rectangle, merge_all
+-from xpra.server.window.video_subregion import VideoSubregion, VIDEO_SUBREGION
++from xpra.server.window.video_subregion import VideoSubregion, VIDEO_SUBREGION, attach_source
+ from xpra.server.window.video_scoring import get_pipeline_score
+ from xpra.codecs.constants import PREFERRED_ENCODING_ORDER, EDGE_ENCODING_ORDER, preforder, CSCSpec
+ from xpra.codecs.protocols import VideoEncoder
+@@ -185,17 +186,65 @@ class WindowVideoSource(WindowSource):
+ 
+     def __init__(self, *args):
+         self.supports_scrolling: bool = False
++        self._init_video_lifecycle()
+         # this will call init_vars():
+         super().__init__(*args)
+         self.scroll_min_percent: int = self.encoding_options.intget("scrolling.min-percent", SCROLL_MIN_PERCENT)
+         self.scroll_preference: int = self.encoding_options.intget("scrolling.preference", 100)
+         self.supports_video_b_frames: Sequence[str] = self.encoding_options.strtupleget("video_b_frames", ())
+         self.video_max_size = self.encoding_options.inttupleget("video_max_size", (8192, 8192), 2, 2)
+-        self.video_stream_file = None
++        self.video_subregion = VideoSubregion(self.refresh_subregion, self.auto_refresh_delay, VIDEO_SUBREGION)
++        self.video_subregion.supported = VIDEO_SUBREGION
+ 
+     def __repr__(self) -> str:
+         return f"WindowVideoSource({self.wid:#x} : {self.window_dimensions})"
+ 
++    def _init_video_lifecycle(self) -> None:
++        """Initialize resource ownership once, before reusable policy state."""
++        self._video_state_lock = RLock()
++        self._video_refresh_lock = RLock()
++        self._video_source_closed = False
++        self._video_cleanup_queued = False
++        self.video_fallback_refresh_idle = 0
++        self._video_fallback_refresh_generation = 0
++        self.video_subregion: VideoSubregion | None = None
++        self.video_encoder_timer: GLib.Source | int = 0
++        self._video_encoder_timer_generation = 0
++        self.b_frame_flush_timer: GLib.Source | int = 0
++        self._b_frame_flush_generation = 0
++        self.b_frame_flush_data: tuple = ()
++        self.encode_from_queue_timer: GLib.Source | int = 0
++        self.encode_from_queue_due = 0.0
++        self._encode_from_queue_generation = 0
++        self.encode_from_queue_idle: GLib.Source | int = 0
++        self._encode_from_queue_idle_generation = 0
++        self.scroll_data = None
++        self._csc_encoder: ColorspaceConverter | None = None
++        self._video_encoder: VideoEncoder | None = None
++        self.video_stream_file = None
++        self._video_stream_encoder = None
++
++    @staticmethod
++    def _raise_video_cleanup_errors(scope: str, errors: list[tuple[BaseException, Any]]) -> None:
++        if not errors:
++            return
++        for later_error, later_traceback in errors[1:]:
++            log.error("Additional error during %s: %s", scope, later_error,
++                      exc_info=(type(later_error), later_error, later_traceback))
++        error, traceback = errors[0]
++        raise error.with_traceback(traceback)
++
++    @classmethod
++    def _remove_video_sources(cls, *sources: GLib.Source | int) -> None:
++        remove_errors: list[tuple[BaseException, Any]] = []
++        for source in sources:
++            if source:
++                try:
++                    source.destroy()
++                except BaseException as e:
++                    remove_errors.append((e, e.__traceback__))
++        cls._raise_video_cleanup_errors("video timer removal", remove_errors)
++
+     def init_vars(self) -> None:
+         super().init_vars()
+         # these constraints get updated with real values
+@@ -212,30 +261,17 @@ class WindowVideoSource(WindowSource):
+         self.last_pipeline_scores : tuple = ()
+         self.last_pipeline_time: float = 0.0
+ 
+-        self.video_subregion = VideoSubregion(self.refresh_subregion, self.auto_refresh_delay, VIDEO_SUBREGION)
+-        self.video_subregion.supported = VIDEO_SUBREGION
+         self.video_encodings: Sequence[str] = ()
+         self.common_video_encodings: Sequence[str] = ()
+         self.non_video_encodings: Sequence[str] = ()
+         self.video_fallback_encodings: dict = {}
+         self.edge_encoding: str = ""
+         self.start_video_frame: int = 0
+-        self.video_encoder_timer: int = 0
+-        self.b_frame_flush_timer: int = 0
+-        self.b_frame_flush_data : tuple = ()
+-        self.encode_from_queue_timer: int = 0
+-        self.encode_from_queue_due = 0
+-        self.scroll_data = None
+         self.last_scroll_time = 0.0
+-
+-        self._csc_encoder: ColorspaceConverter | None = None
+-        self._video_encoder: VideoEncoder | None = None
+         self._last_pipeline_check = 0
+ 
+     def do_init_encoders(self) -> None:
+         super().do_init_encoders()
+-        self._csc_encoder = None
+-        self._video_encoder = None
+         self._last_pipeline_check = 0
+ 
+         def add(enc, encode_fn) -> None:
+@@ -276,6 +312,11 @@ class WindowVideoSource(WindowSource):
          if "scroll" in self.server_core_encodings:
              add("scroll", self.scroll_encode)
  
@@ -305,10 +2257,59 @@ index a7fe7df9a82..f8812677989 100644
      def do_set_auto_refresh_delay(self, min_delay, delay) -> None:
          super().do_set_auto_refresh_delay(min_delay, delay)
          if r := self.video_subregion:
-@@ -372,16 +377,20 @@ class WindowVideoSource(WindowSource):
-         def clean() -> None:
-             if DEBUG_VIDEO_CLEAN:
-                 log.warn("video_context_clean() done")
+@@ -357,57 +398,95 @@ class WindowVideoSource(WindowSource):
+             "src_format"    : src_format
+         }
+ 
+-    def video_context_clean(self, encode_thread: bool = False) -> None:
++    def video_context_clean(self, encode_thread: bool = False, send_eos: bool = False) -> None:
+         """Detach the video context and clean it from the encode thread."""
+-        self.cancel_video_encoder_flush()
+-        self.cancel_video_encoder_timer()
+-        csce = self._csc_encoder
+-        ve = self._video_encoder
+-        if csce or ve:
+-            if DEBUG_VIDEO_CLEAN:
+-                log.warn("video_context_clean() for wid %i: %s and %s", self.wid, csce, ve, backtrace=True)
++        cleanup_errors: list[tuple[BaseException, Any]] = []
++        for cancel in (self.cancel_video_encoder_flush, self.cancel_video_encoder_timer):
++            try:
++                cancel()
++            except BaseException as e:
++                cleanup_errors.append((e, e.__traceback__))
++        with self._video_state_lock:
++            if self._video_cleanup_queued and not encode_thread:
++                self._raise_video_cleanup_errors("video context cleanup", cleanup_errors)
++                return
++            csce = self._csc_encoder
++            ve = self._video_encoder
+             self._csc_encoder = None
+             self._video_encoder = None
++            if (csce or ve) and DEBUG_VIDEO_CLEAN:
++                log.warn("video_context_clean() for wid %i: %s and %s", self.wid, csce, ve, backtrace=True)
++
++            def clean() -> None:
++                if DEBUG_VIDEO_CLEAN:
++                    log.warn("video_context_clean() done")
++                try:
++                    try:
++                        if csce:
++                            self.csc_clean(csce)
++                    finally:
++                        if ve:
++                            if send_eos:
++                                self.ve_clean(ve, True)
++                            else:
++                                self.ve_clean(ve)
++                finally:
++                    # Work ahead of this callback may have published a pair.
++                    # Its late sweep is serialized by the same encode worker.
++                    if not encode_thread:
++                        self.video_context_clean(True)
+ 
+-        def clean() -> None:
+-            if DEBUG_VIDEO_CLEAN:
+-                log.warn("video_context_clean() done")
 -            if csce:
 -                self.csc_clean(csce)
 -            if ve:
@@ -317,22 +2318,1304 @@ index a7fe7df9a82..f8812677989 100644
 -            # but the `video_context_clean` may have been called from another thread,
 -            # in which case we want to run it again to close video contexts
 -            # that may have been instantiated in the meantime:
--            if not encode_thread:
+             if not encode_thread:
 -                self.video_context_clean(True)
-+            try:
 +                try:
-+                    if csce:
-+                        self.csc_clean(csce)
-+                finally:
-+                    if ve:
-+                        self.ve_clean(ve)
-+            finally:
-+                # this function always runs from the encode thread
-+                # but the `video_context_clean` may have been called from another thread,
-+                # in which case we want to run it again to close video contexts
-+                # that may have been instantiated in the meantime:
-+                if not encode_thread:
-+                    self.video_context_clean(True)
++                    # Keep detachment and FIFO publication in one critical
++                    # section: terminal cleanup cannot overtake this owner.
++                    self.call_in_encode_thread(False, clean)
++                    if self._video_source_closed:
++                        self._video_cleanup_queued = True
++                except BaseException as e:
++                    cleanup_errors.append((e, e.__traceback__))
  
-         if encode_thread:
-             # already in the correct thread
+-        if encode_thread:
+-            # already in the correct thread
+-            clean()
+-        else:
+-            self.call_in_encode_thread(False, clean)
++        try:
++            if encode_thread:
++                # Native teardown never executes under the video-state lock.
++                clean()
++        except BaseException as e:
++            cleanup_errors.append((e, e.__traceback__))
++        self._raise_video_cleanup_errors("video context cleanup", cleanup_errors)
+ 
+     # noinspection PyMethodMayBeStatic
+     def csc_clean(self, csce) -> None:
+         if csce:
+             csce.clean()
+ 
+-    def ve_clean(self, ve) -> None:
++    def clean_unpublished_pipeline(self, csce, ve) -> None:
++        """Release codec instances which have not been transferred to the source fields."""
++        try:
++            if csce:
++                self.csc_clean(csce)
++        finally:
++            if ve:
++                ve.clean()
++
++    def ve_clean(self, ve, send_eos: bool | None = None) -> None:
+         self.cancel_video_encoder_timer()
+         if ve:
+-            ve.clean()
++            if send_eos is None:
++                send_eos = self._video_encoder == ve
++            try:
++                ve.clean()
++            finally:
++                if SAVE_VIDEO_STREAMS and self._video_stream_encoder is ve:
++                    self.close_video_stream_file()
+             # only send eos if this video encoder is still current,
+             # (otherwise, sending the new stream will have taken care of it already,
+             # and sending eos then would close the new stream, not the old one!)
+-            if self._video_encoder == ve:
++            if send_eos:
+                 log("sending eos for wid %i", self.wid)
+                 self.queue_packet((WINDOW_EOS, self.wid))
+-            if SAVE_VIDEO_STREAMS:
+-                self.close_video_stream_file()
+ 
+     def close_video_stream_file(self) -> None:
++        self._video_stream_encoder = None
+         if vsf := self.video_stream_file:
+             self.video_stream_file = None
+             with log.trap_error(f"Error closing video stream file {vsf}"):
+@@ -417,6 +496,27 @@ class WindowVideoSource(WindowSource):
+         super().ui_cleanup()
+         self.video_subregion = None
+ 
++    def cleanup(self) -> None:
++        with self._video_state_lock:
++            self._video_source_closed = True
++        cleanup_errors: list[tuple[BaseException, Any]] = []
++        try:
++            self.cancel_video_fallback_refresh()
++        except BaseException as e:
++            cleanup_errors.append((e, e.__traceback__))
++        try:
++            if vs := self.video_subregion:
++                vs.cleanup()
++        except BaseException as e:
++            cleanup_errors.append((e, e.__traceback__))
++        try:
++            # A subregion failure must not bypass inherited timer, icon,
++            # damage, encoder-barrier, or model cleanup.
++            super().cleanup()
++        except BaseException as e:
++            cleanup_errors.append((e, e.__traceback__))
++        self._raise_video_cleanup_errors("video source cleanup", cleanup_errors)
++
+     def set_new_encoding(self, encoding : str, strict=None) -> None:
+         if self.encoding != encoding:
+             # ensure we re-init the codecs asap:
+@@ -658,16 +758,30 @@ class WindowVideoSource(WindowSource):
+         super().update_window_dimensions(ww, wh)
+ 
+     def cancel_damage(self, limit: int = 0) -> None:
+-        self.cancel_encode_from_queue()
+-        self.free_encode_queue_images()
++        # Publish the sequence cancellation before transferring ownership of
++        # queued images.  A concurrent capture which loses this race will then
++        # free its image instead of appending it after the drain.
++        cleanup_errors: list[tuple[BaseException, Any]] = []
++
++        def run_cleanup_step(callback: Callable, *args) -> None:
++            try:
++                callback(*args)
++            except BaseException as e:
++                cleanup_errors.append((e, e.__traceback__))
++
++        run_cleanup_step(super().cancel_damage, limit)
++        run_cleanup_step(self.cancel_encode_from_queue)
++        run_cleanup_step(self.cancel_video_fallback_refresh)
++        run_cleanup_step(self.free_encode_queue_images)
+         if vsr := self.video_subregion:
+-            vsr.cancel_refresh_timer()
+-        self.free_scroll_data()
++            run_cleanup_step(vsr.cancel_refresh_timer)
++            run_cleanup_step(vsr.cancel_nonvideo_refresh_timer)
++        run_cleanup_step(self.free_scroll_data)
+         self.last_scroll_time = 0
+-        super().cancel_damage(limit)
+         # we must clean the video encoder to ensure
+         # we will resend a key frame because we may be missing a frame
+-        self.video_context_clean()
++        run_cleanup_step(self.video_context_clean)
++        self._raise_video_cleanup_errors("video damage cancellation", cleanup_errors)
+ 
+     def full_quality_refresh(self, damage_options: dict) -> None:
+         vs = self.video_subregion
+@@ -972,19 +1086,26 @@ class WindowVideoSource(WindowSource):
+                 image.freeze()
+ 
+         def call_encode(ew: int, eh: int, eimage: ImageWrapper, encoding: str, flush: int) -> None:
+-            if self.is_cancelled(sequence):
+-                free_image_wrapper(eimage)
+-                log("call_encode: sequence %s is cancelled", sequence)
+-                return
+             now = monotonic()
+             log("process_damage_region: wid=%#x, sequence=%i, adding pixel data to encode queue (%4ix%-4i - %5s), elapsed time: %3.1f ms, request time: %3.1f ms, frame delay=%3ims",   # noqa: E501
+                 self.wid, sequence, ew, eh, encoding, 1000*(now-damage_time), 1000*(now-rgb_request_time), av_delay)
+             item = (ew, eh, damage_time, now, eimage, encoding, sequence, eoptions, flush)
+-            if av_delay <= 0:
+-                self.call_in_encode_thread(True, self.make_data_packet_cb, *item)
+-            else:
+-                self.encode_queue.append(item)
+-                self.schedule_encode_from_queue(av_delay)
++            with self._video_state_lock:
++                if self._video_source_closed or self.is_cancelled(sequence):
++                    queued = False
++                elif av_delay <= 0:
++                    # The image is already captured: even a closing connection
++                    # must execute its owner so cancellation can free it.
++                    self.call_in_encode_thread(False, self._encode_or_free_image, item)
++                    return
++                else:
++                    self.encode_queue.append(item)
++                    queued = True
++            if not queued:
++                free_image_wrapper(eimage)
++                log("call_encode: sequence %s is cancelled", sequence)
++                return
++            self.schedule_encode_from_queue(av_delay)
+         # now figure out if we need to send edges separately:
+         ee = self.edge_encoding
+         ow = w
+@@ -1013,6 +1134,14 @@ class WindowVideoSource(WindowSource):
+                 call_encode(w, h, image, coding, flush-i)
+         return True
+ 
++    def _encode_or_free_image(self, item: tuple) -> None:
++        with self._video_state_lock:
++            cancelled = self._video_source_closed or self.is_cancelled(item[6])
++        if cancelled:
++            free_image_wrapper(item[4])
++        else:
++            self.make_data_packet_cb(*item)
++
+     def get_frame_encode_delay(self, options: dict) -> int:
+         if not self.av_sync:
+             return 0
+@@ -1027,100 +1156,175 @@ class WindowVideoSource(WindowSource):
+             # default to off unless content-type says otherwise:
+             if "audio" in content_types:
+                 return 0
+-        l = len(self.encode_queue)
++        with self._video_state_lock:
++            l = len(self.encode_queue)
+         if l >= self.encode_queue_max_size:
+             # we must free some space!
+             return 0
+         return self.av_sync_delay
+ 
+     def cancel_encode_from_queue(self) -> None:
+-        # free all items in the encode queue:
+-        self.encode_from_queue_due = 0
+-        eqt: int = self.encode_from_queue_timer
+-        avsynclog("cancel_encode_from_queue() timer=%s for wid=%#x", eqt, self.wid)
+-        if eqt:
++        with self._video_state_lock:
++            self.encode_from_queue_due = 0
++            self._encode_from_queue_generation += 1
++            eqt = self.encode_from_queue_timer
+             self.encode_from_queue_timer = 0
+-            GLib.source_remove(eqt)
++            self._encode_from_queue_idle_generation += 1
++            eqi = self.encode_from_queue_idle
++            self.encode_from_queue_idle = 0
++        avsynclog("cancel_encode_from_queue() timer=%s, idle=%s for wid=%#x", eqt, eqi, self.wid)
++        self._remove_video_sources(eqt, eqi)
+ 
+     def free_encode_queue_images(self) -> None:
+-        eq = self.encode_queue
++        with self._video_state_lock:
++            eq, self.encode_queue = self.encode_queue, []
+         avsynclog("free_encode_queue_images() freeing %i images for wid=%#x", len(eq), self.wid)
+-        if not eq:
+-            return
+-        self.encode_queue = []
+         for item in eq:
+             image = item[4]
+             with log.trap_error(f"Error: cannot free image wrapper {image}"):
+                 free_image_wrapper(image)
+ 
+-    def schedule_encode_from_queue(self, av_delay: int) -> None:
++    def schedule_encode_from_queue(self, av_delay: int) -> bool:
+         # must be called from the UI thread for synchronization
+         # we ensure that the timer will fire no later than av_delay
+         # re-scheduling it if it was due later than that
+         due = monotonic()+av_delay/1000.0
+-        if self.encode_from_queue_due == 0 or due < self.encode_from_queue_due:
+-            self.cancel_encode_from_queue()
++        with self._video_state_lock:
++            if self._video_source_closed or not self.encode_queue or self.is_cancelled():
++                return False
++            if self.encode_from_queue_due and due >= self.encode_from_queue_due:
++                return False
++            old_timer = self.encode_from_queue_timer
++            self.encode_from_queue_timer = 0
+             self.encode_from_queue_due = due
+-            self.encode_from_queue_timer = GLib.timeout_add(av_delay, self.timer_encode_from_queue)
++            self._encode_from_queue_generation += 1
++            generation = self._encode_from_queue_generation
++        if old_timer:
++            old_timer.destroy()
++        timer = attach_source(GLib.timeout_source_new(av_delay), self.timer_encode_from_queue, generation)
++        with self._video_state_lock:
++            if (self._video_source_closed or not self.encode_queue or self.is_cancelled()
++                    or generation != self._encode_from_queue_generation):
++                remove = True
++            else:
++                self.encode_from_queue_timer = timer
++                remove = False
++        if remove:
++            timer.destroy()
++        return False
++
++    def timer_encode_from_queue(self, generation: int) -> bool:
++        with self._video_state_lock:
++            if generation != self._encode_from_queue_generation:
++                return False
++            self._encode_from_queue_generation += 1
++            self.encode_from_queue_timer = 0
++            self.encode_from_queue_due = 0
++            if self._video_source_closed or not self.encode_queue or self.is_cancelled():
++                return False
++            self.call_in_encode_thread(True, self.encode_from_queue)
++        return False
++
++    def schedule_encode_from_queue_idle(self, av_delay: int) -> None:
++        with self._video_state_lock:
++            if self._video_source_closed or not self.encode_queue or self.is_cancelled():
++                return
++            self._encode_from_queue_idle_generation += 1
++            generation = self._encode_from_queue_idle_generation
++            old_idle = self.encode_from_queue_idle
++            self.encode_from_queue_idle = 0
++        if old_idle:
++            old_idle.destroy()
++        idle = attach_source(GLib.idle_source_new(), self.idle_encode_from_queue, generation, av_delay)
++        with self._video_state_lock:
++            if (self._video_source_closed or not self.encode_queue or self.is_cancelled()
++                    or generation != self._encode_from_queue_idle_generation):
++                remove = True
++            else:
++                self.encode_from_queue_idle = idle
++                remove = False
++        if remove:
++            idle.destroy()
+ 
+-    def timer_encode_from_queue(self) -> None:
+-        self.encode_from_queue_timer = 0
+-        self.encode_from_queue_due = 0
+-        self.call_in_encode_thread(True, self.encode_from_queue)
++    def idle_encode_from_queue(self, generation: int, av_delay: int) -> bool:
++        with self._video_state_lock:
++            if generation != self._encode_from_queue_idle_generation:
++                return False
++            self._encode_from_queue_idle_generation += 1
++            self.encode_from_queue_idle = 0
++            if self._video_source_closed or self.is_cancelled():
++                return False
++        self.schedule_encode_from_queue(av_delay)
++        return False
+ 
+     def encode_from_queue(self) -> None:
+         # note: we use a queue here to ensure we preserve the order
+         # (so we encode frames in the same order they were grabbed)
+-        eq = self.encode_queue
+-        avsynclog("encode_from_queue: %s items for wid=%#x", len(eq), self.wid)
+-        if not eq:
+-            return      # nothing to encode, must have been picked off already
+-        self.update_av_sync_delay()
+-        # find the first item which is due
+-        # in seconds, same as monotonic():
+-        if len(self.encode_queue) >= self.encode_queue_max_size:
+-            av_delay = 0        # we must free some space!
+-        elif FORCE_AV_DELAY > 0:
+-            av_delay = FORCE_AV_DELAY/1000.0
+-        else:
+-            av_delay = self.av_sync_delay/1000.0
+-        now = monotonic()
++        cancelled_images = []
++        encode_item = None
+         still_due = []
+-        remove = []
+-        index = 0
++        av_delay = 0.0
++        index = -1
+         item = None
+         sequence = None
+-        done_packet = False     # only one packet per iteration
+-        try:
+-            for index, item in enumerate(eq):
+-                # item = (w, h, damage_time, now, image, coding, sequence, options, flush)
+-                sequence = item[6]
+-                if self.is_cancelled(sequence):
+-                    free_image_wrapper(item[4])
+-                    remove.append(index)
+-                    continue
+-                ts = item[3]
+-                due = ts + av_delay
+-                if due <= now and not done_packet:
+-                    # found an item which is due
+-                    remove.append(index)
+-                    avsynclog("encode_from_queue: processing item %s/%s (overdue by %ims)",
+-                              index+1, len(self.encode_queue), int(1000*(now-due)))
+-                    self.make_data_packet_cb(*item)
+-                    done_packet = True
++        with self._video_state_lock:
++            if self._video_source_closed or not self.encode_queue:
++                return
++        # This inherited update may acquire the base WindowSource timer lock
++        # when it schedules the next gradual A/V adjustment.  Keep the two
++        # lifecycle domains unnested by invoking it outside the video lock.
++        self.update_av_sync_delay()
++        with self._video_state_lock:
++            eq = self.encode_queue
++            avsynclog("encode_from_queue: %s items for wid=%#x", len(eq), self.wid)
++            terminal = self._video_source_closed
++            if terminal or not eq:
++                eq = None
++            else:
++                # find the first item which is due
++                # in seconds, same as monotonic():
++                if len(eq) >= self.encode_queue_max_size:
++                    av_delay = 0        # we must free some space!
++                elif FORCE_AV_DELAY > 0:
++                    av_delay = FORCE_AV_DELAY/1000.0
+                 else:
+-                    # we only process one item per call (see "done_packet")
+-                    # and just keep track of extra ones:
+-                    still_due.append(int(1000*(due-now)))
++                    av_delay = self.av_sync_delay/1000.0
++                now = monotonic()
++                remove = []
++                for index, item in enumerate(eq):
++                    # item = (w, h, damage_time, now, image, coding, sequence, options, flush)
++                    sequence = item[6]
++                    if self.is_cancelled(sequence):
++                        cancelled_images.append(item[4])
++                        remove.append(index)
++                        continue
++                    ts = item[3]
++                    due = ts + av_delay
++                    if due <= now and encode_item is None:
++                        remove.append(index)
++                        encode_item = item
++                        avsynclog("encode_from_queue: processing item %s/%s (overdue by %ims)",
++                                  index+1, len(eq), int(1000*(now-due)))
++                    else:
++                        # we only process one item per call and keep track of the rest:
++                        still_due.append(int(1000*(due-now)))
++                for remove_index in reversed(remove):
++                    eq.pop(remove_index)
++        if eq is None:
++            # If cleanup won the gap around the external timer update, reclaim
++            # any A/V timer it may just have published after base cleanup.
++            if terminal:
++                self.cancel_av_sync_timer()
++            return
++        for image in cancelled_images:
++            free_image_wrapper(image)
++        try:
++            if encode_item:
++                self.make_data_packet_cb(*encode_item)
+         except RuntimeError:
+             if not self.is_cancelled(sequence):
+                 avsynclog.error("error processing encode queue at index %i", index)
+                 avsynclog.error("item=%s", item, exc_info=True)
+-        # remove the items we've dealt with:
+-        # (in reverse order since we pop them from the queue)
+-        if remove:
+-            for x in reversed(remove):
+-                eq.pop(x)
+         # if there are still some items left in the queue, re-schedule:
+         if not still_due:
+             avsynclog("encode_from_queue: nothing due")
+@@ -1128,7 +1332,7 @@ class WindowVideoSource(WindowSource):
+         first_due = max(ENCODE_QUEUE_MIN_GAP, min(still_due))
+         avsynclog("encode_from_queue: first due in %ims, due list=%s (av-sync delay=%i, actual=%i, for wid=%#x)",
+                   first_due, still_due, self.av_sync_delay, av_delay, self.wid)
+-        GLib.idle_add(self.schedule_encode_from_queue, first_due)
++        self.schedule_encode_from_queue_idle(first_due)
+ 
+     def update_encoding_video_subregion(self) -> None:
+         """
+@@ -1732,8 +1936,7 @@ class WindowVideoSource(WindowSource):
+         videolog("check_pipeline%s setting up a new pipeline as check failed - encodings=%s",
+                  (encodings, width, height, src_format), encodings)
+         # cleanup existing one if needed:
+-        self.csc_clean(self._csc_encoder)
+-        self.ve_clean(self._video_encoder)
++        self.video_context_clean(True, send_eos=True)
+         # and make a new one:
+         w = width & self.width_mask
+         h = height & self.height_mask
+@@ -1887,8 +2090,7 @@ class WindowVideoSource(WindowSource):
+                     return False
+                 videolog.warn("Warning: failed to setup video pipeline %s", option, exc_info=True)
+             # we're here because an exception occurred, cleanup before trying again:
+-            self.csc_clean(self._csc_encoder)
+-            self.ve_clean(self._video_encoder)
++            self.video_context_clean(True, send_eos=True)
+         end = monotonic()
+         videolog("setup_pipeline(..) failed! took %.2fms", (end-start) * 1000)
+         return False
+@@ -1936,11 +2138,15 @@ class WindowVideoSource(WindowSource):
+             csc_options["full-range"] = encoder_spec.full_range
+             csc_start = monotonic()
+             csce = csc_spec.make_instance()
+-            csce.init_context(csc_width, csc_height, src_format,
+-                              enc_width, enc_height, enc_in_format, csc_options)
+-            csc_end = monotonic()
+-            csclog("setup_pipeline: csc=%s, info=%s, setup took %.2fms",
+-                   csce, csce.get_info(), (csc_end - csc_start) * 1000)
++            try:
++                csce.init_context(csc_width, csc_height, src_format,
++                                  enc_width, enc_height, enc_in_format, csc_options)
++                csc_end = monotonic()
++                csclog("setup_pipeline: csc=%s, info=%s, setup took %.2fms",
++                       csce, csce.get_info(), (csc_end - csc_start) * 1000)
++            except BaseException:
++                self.clean_unpublished_pipeline(csce, None)
++                raise
+         else:
+             csce = None
+             # use the encoder's mask directly since that's all we have to worry about!
+@@ -1955,41 +2161,56 @@ class WindowVideoSource(WindowSource):
+                 videolog("scaling is now enabled, so skipping %s", encoder_spec)
+                 return False
+         enc_start = monotonic()
+-        ve = encoder_spec.make_instance()
+-        options.update(self.get_video_encoder_options(encoding, width, height))
+-        if self.encoding == "grayscale":
+-            options["grayscale"] = True
+-        if encoder_scaling != (1, 1):
+-            n, d = encoder_scaling
+-            options["scaling"] = encoder_scaling
+-            options["scaled-width"] = enc_width*n//d
+-            options["scaled-height"] = enc_height*n//d
+-        options["dst-formats"] = dst_formats
+-        options["datagram"] = self.datagram
+-        # the encoder consumes images in the range the csc was asked to produce,
+-        # so that it can signal it in the bitstream from the very first frame:
+-        options["full-range"] = encoder_spec.full_range
+-
+-        ve.init_context(encoding, enc_width, enc_height, enc_in_format, typedict(options))
+-        # record new actual limits:
+-        self.actual_scaling = scaling
+-        self.width_mask = width_mask
+-        self.height_mask = height_mask
+-        self.min_w = min_w
+-        self.min_h = min_h
+-        self.max_w = max_w
+-        self.max_h = max_h
+-        enc_end = monotonic()
+-        self.start_video_frame = 0
+-        # publish both together, back-to-back, to narrow the window during which
+-        # video_context_clean() (running on another thread) could observe a
+-        # half-updated pair and end up clearing only one of the two:
+-        self._csc_encoder = csce
+-        self._video_encoder = ve
+-        videolog("setup_pipeline: csc=%s, video encoder=%s, info: %s, setup took %.2fms",
+-                 csce, ve, ve.get_info(), (enc_end - enc_start) * 1000)
+-        scalinglog("setup_pipeline: scaling=%s, encoder_scaling=%s", scaling, encoder_scaling)
+-        return True
++        ve = None
++        published = False
++        released = False
++        try:
++            ve = encoder_spec.make_instance()
++            options.update(self.get_video_encoder_options(encoding, width, height))
++            if self.encoding == "grayscale":
++                options["grayscale"] = True
++            if encoder_scaling != (1, 1):
++                n, d = encoder_scaling
++                options["scaling"] = encoder_scaling
++                options["scaled-width"] = enc_width*n//d
++                options["scaled-height"] = enc_height*n//d
++            options["dst-formats"] = dst_formats
++            options["datagram"] = self.datagram
++            # the encoder consumes images in the range the csc was asked to produce,
++            # so that it can signal it in the bitstream from the very first frame:
++            options["full-range"] = encoder_spec.full_range
++
++            ve.init_context(encoding, enc_width, enc_height, enc_in_format, typedict(options))
++            # record new actual limits:
++            self.actual_scaling = scaling
++            self.width_mask = width_mask
++            self.height_mask = height_mask
++            self.min_w = min_w
++            self.min_h = min_h
++            self.max_w = max_w
++            self.max_h = max_h
++            enc_end = monotonic()
++            self.start_video_frame = 0
++            # Publication and terminal teardown share one ownership boundary.
++            # A completed constructor which loses this race remains local and
++            # is released here rather than becoming visible on a closed source.
++            with self._video_state_lock:
++                if not self._video_source_closed:
++                    self._csc_encoder = csce
++                    self._video_encoder = ve
++                    published = True
++            if not published:
++                released = True
++                self.clean_unpublished_pipeline(csce, ve)
++                return False
++            videolog("setup_pipeline: csc=%s, video encoder=%s, info: %s, setup took %.2fms",
++                     csce, ve, ve.get_info(), (enc_end - enc_start) * 1000)
++            scalinglog("setup_pipeline: scaling=%s, encoder_scaling=%s", scaling, encoder_scaling)
++            return True
++        except BaseException:
++            if not published and not released:
++                self.clean_unpublished_pipeline(csce, ve)
++            raise
+ 
+     def get_video_encoder_options(self, encoding, width, height) -> dict[str, Any]:
+         # tweaks for "real" video:
+@@ -2031,7 +2252,9 @@ class WindowVideoSource(WindowSource):
+         return packet
+ 
+     def free_scroll_data(self) -> None:
+-        self.call_in_encode_thread(False, self.do_free_scroll_data)
++        with self._video_state_lock:
++            if not self._video_cleanup_queued:
++                self.call_in_encode_thread(False, self.do_free_scroll_data)
+ 
+     def do_free_scroll_data(self) -> None:
+         sd = self.scroll_data
+@@ -2469,6 +2692,7 @@ class WindowVideoSource(WindowSource):
+             if SAVE_VIDEO_PATH:
+                 stream_filename = os.path.join(SAVE_VIDEO_PATH, stream_filename)
+             self.video_stream_file = open(stream_filename, "wb")
++            self._video_stream_encoder = ve
+             log.info("saving new %s stream for window %i to %s", ve.get_encoding(), self.wid, stream_filename)
+         if self.video_stream_file and data:
+             self.video_stream_file.write(data)
+@@ -2515,33 +2739,72 @@ class WindowVideoSource(WindowSource):
+         return actual_encoding, Compressed(actual_encoding, data), client_options, width, height, 0, 24
+ 
+     def cancel_video_encoder_flush(self) -> None:
+-        self.cancel_video_encoder_flush_timer()
+-        self.b_frame_flush_data = ()
++        with self._video_state_lock:
++            self._b_frame_flush_generation += 1
++            bft = self.b_frame_flush_timer
++            self.b_frame_flush_timer = 0
++            self.b_frame_flush_data = ()
++        self._remove_video_sources(bft)
+ 
+     def cancel_video_encoder_flush_timer(self) -> None:
+-        if bft := self.b_frame_flush_timer:
++        with self._video_state_lock:
++            self._b_frame_flush_generation += 1
++            bft = self.b_frame_flush_timer
+             self.b_frame_flush_timer = 0
+-            GLib.source_remove(bft)
++        self._remove_video_sources(bft)
+ 
+     def schedule_video_encoder_flush(self, ve, csc, frame, x: int, y: int, scaled_size) -> None:
+         flush_delay: int = max(150, min(500, int(self.batch_config.delay*10)))
+-        self.b_frame_flush_data = (ve, csc, frame, x, y, scaled_size)
+-        self.b_frame_flush_timer = GLib.timeout_add(flush_delay, self.flush_video_encoder)
++        with self._video_state_lock:
++            if self._video_source_closed:
++                return
++            self._b_frame_flush_generation += 1
++            generation = self._b_frame_flush_generation
++            old_timer = self.b_frame_flush_timer
++            self.b_frame_flush_timer = 0
++            self.b_frame_flush_data = (ve, csc, frame, x, y, scaled_size)
++        if old_timer:
++            old_timer.destroy()
++        timer = attach_source(GLib.timeout_source_new(flush_delay), self.flush_video_encoder, generation)
++        with self._video_state_lock:
++            if self._video_source_closed or generation != self._b_frame_flush_generation:
++                remove = True
++            else:
++                self.b_frame_flush_timer = timer
++                remove = False
++        if remove:
++            timer.destroy()
+ 
+     def flush_video_encoder_now(self) -> None:
+         # this can be called before the timer is due
+         self.cancel_video_encoder_flush_timer()
+         self.flush_video_encoder()
+ 
+-    def flush_video_encoder(self) -> None:
++    def flush_video_encoder(self, generation: int = 0) -> bool:
+         # this runs in the UI thread as scheduled by schedule_video_encoder_flush,
+         # but we want to run from the encode thread to access the encoder:
+-        self.b_frame_flush_timer = 0
+-        if self.b_frame_flush_data:
+-            self.call_in_encode_thread(True, self.do_flush_video_encoder)
++        with self._video_state_lock:
++            if generation and generation != self._b_frame_flush_generation:
++                return False
++            if self._video_source_closed or not self.b_frame_flush_data:
++                return False
++            self._b_frame_flush_generation += 1
++            worker_generation = self._b_frame_flush_generation
++            self.b_frame_flush_timer = 0
++            flush_data = self.b_frame_flush_data
++            # Preserve the requested frame across the UI-to-worker handoff.
++            # A later encode or cancellation invalidates this exact generation.
++            self.call_in_encode_thread(True, self.do_flush_video_encoder, worker_generation, flush_data)
++        return False
+ 
+-    def do_flush_video_encoder(self) -> None:
+-        flush_data = self.b_frame_flush_data
++    def do_flush_video_encoder(self, generation: int = 0, flush_data: tuple = ()) -> None:
++        with self._video_state_lock:
++            if generation and (self._video_source_closed or generation != self._b_frame_flush_generation):
++                return
++            self._b_frame_flush_generation += 1
++            if not flush_data:
++                flush_data = self.b_frame_flush_data
++            self.b_frame_flush_data = ()
+         videolog("do_flush_video_encoder: %s", flush_data)
+         if not flush_data:
+             return
+@@ -2550,10 +2813,10 @@ class WindowVideoSource(WindowSource):
+             return
+         if frame == 0 and ve.get_type() == "x264":
+             # x264 has problems if we try to re-use a context after flushing the first IDR frame
+-            self.ve_clean(self._video_encoder)
++            self.video_context_clean(True, send_eos=True)
+             if self.non_video_encodings:
+                 log("do_flush_video_encoder() scheduling novideo refresh")
+-                GLib.idle_add(self.refresh, {"novideo": True})
++                self.schedule_video_fallback_refresh()
+                 videolog("flushed frame 0, novideo refresh requested")
+             return
+         w = ve.get_width()
+@@ -2598,25 +2861,83 @@ class WindowVideoSource(WindowSource):
+             if closed:
+                 self.video_context_clean(True)
+ 
++    def cancel_video_fallback_refresh(self) -> None:
++        # A claimed UI refresh may enter generic timer code. Fence it with its
++        # own lock so no refresh body runs under _video_state_lock.
++        with self._video_refresh_lock:
++            with self._video_state_lock:
++                self._video_fallback_refresh_generation += 1
++                source = self.video_fallback_refresh_idle
++                self.video_fallback_refresh_idle = 0
++            self._remove_video_sources(source)
++
++    def schedule_video_fallback_refresh(self) -> None:
++        self.cancel_video_fallback_refresh()
++        with self._video_state_lock:
++            if self._video_source_closed:
++                return
++            generation = self._video_fallback_refresh_generation
++        source = attach_source(GLib.idle_source_new(), self.video_fallback_refresh, generation)
++        with self._video_state_lock:
++            if self._video_source_closed or generation != self._video_fallback_refresh_generation:
++                remove = True
++            else:
++                self.video_fallback_refresh_idle = source
++                remove = False
++        if remove:
++            self._remove_video_sources(source)
++
++    def video_fallback_refresh(self, generation: int) -> bool:
++        with self._video_refresh_lock:
++            with self._video_state_lock:
++                if self._video_source_closed or generation != self._video_fallback_refresh_generation:
++                    return False
++                self._video_fallback_refresh_generation += 1
++                self.video_fallback_refresh_idle = 0
++            self.refresh({"novideo": True})
++        return False
++
+     def cancel_video_encoder_timer(self) -> None:
+-        if vet := self.video_encoder_timer:
++        with self._video_state_lock:
++            self._video_encoder_timer_generation += 1
++            vet = self.video_encoder_timer
+             self.video_encoder_timer = 0
+-            GLib.source_remove(vet)
++        self._remove_video_sources(vet)
+ 
+     def schedule_video_encoder_timer(self) -> None:
+-        if not self.video_encoder_timer:
++        with self._video_state_lock:
++            if self._video_source_closed or self.video_encoder_timer:
++                return
+             vs = self.video_subregion
+             if vs and vs.detection:
+                 timeout = VIDEO_TIMEOUT
+             else:
+                 timeout = VIDEO_NODETECT_TIMEOUT
+-            if timeout > 0:
+-                self.video_encoder_timer = GLib.timeout_add(timeout*1000, self.video_encoder_timeout)
++            if timeout <= 0:
++                return
++            self._video_encoder_timer_generation += 1
++            generation = self._video_encoder_timer_generation
++        timer = attach_source(GLib.timeout_source_new(timeout*1000), self.video_encoder_timeout, generation)
++        with self._video_state_lock:
++            if self._video_source_closed or generation != self._video_encoder_timer_generation:
++                remove = True
++            else:
++                self.video_encoder_timer = timer
++                remove = False
++        if remove:
++            timer.destroy()
+ 
+-    def video_encoder_timeout(self) -> None:
+-        videolog("video_encoder_timeout() will close video encoder=%s", self._video_encoder)
+-        self.video_encoder_timer = 0
+-        self.video_context_clean()
++    def video_encoder_timeout(self, generation: int) -> bool:
++        with self._video_state_lock:
++            if generation != self._video_encoder_timer_generation:
++                return False
++            self._video_encoder_timer_generation += 1
++            self.video_encoder_timer = 0
++            if self._video_source_closed:
++                return False
++            videolog("video_encoder_timeout() will close video encoder=%s", self._video_encoder)
++            self.video_context_clean()
++        return False
+ 
+     def csc_image(self, image: ImageWrapper, width: int, height: int) -> tuple:
+         """
+diff --git a/xpra/server/window/video_subregion.py b/xpra/server/window/video_subregion.py
+index 84bb1b10d614a44ec2d351eeb5e467c8cec2e013..4944e295e64084d15068c1d4b3bcd97c309894a0 100644
+--- a/xpra/server/window/video_subregion.py
++++ b/xpra/server/window/video_subregion.py
+@@ -4,6 +4,7 @@
+ # later version. See the file COPYING for details.
+ 
+ import math
++from threading import RLock
+ from time import monotonic
+ from typing import Any
+ from collections.abc import Callable, Sequence
+@@ -57,8 +58,25 @@ def scoreinout(ww: int, wh: int, region, incount: int, outcount: int) -> int:
+     return max(0, int(score))
+ 
+ 
++def attach_source(source: GLib.Source, callback: Callable, *args) -> GLib.Source:
++    """Retain the exact GLib source across callback-before-attach-return."""
++    try:
++        source.set_callback(lambda *_user_data: callback(*args))
++        source.attach(None)
++    except BaseException:
++        source.destroy()
++        raise
++    return source
++
++
+ class VideoSubregion:
+     def __init__(self, refresh_cb: Callable, auto_refresh_delay: int, supported=False):
++        self._lifecycle_lock = RLock()
++        self._closed = False
++        self._refresh_generation = 0
++        self._nonvideo_refresh_generation = 0
++        self.refresh_timer = 0
++        self.nonvideo_refresh_timer = 0
+         self.refresh_cb = refresh_cb  # usage: refresh_cb(window, regions)
+         self.auto_refresh_delay = auto_refresh_delay
+         self.supported = supported
+@@ -76,194 +94,338 @@ class VideoSubregion:
+         self.set_at = 0  # value of the "damage event count" when the region was set
+         self.counter = 0  # value of the "damage event count" recorded at "time"
+         self.time: float = 0  # see above
+-        self.refresh_timer = 0
+         self.refresh_regions: list[rectangle] = []
+         self.last_scores: dict[rectangle | None, int] = {}
+         self.nonvideo_regions: list[rectangle] = []
+-        self.nonvideo_refresh_timer = 0
+         # keep track of how much extra we batch non-video regions (milliseconds):
+         self.non_max_wait = 150
+         self.min_time = monotonic()
+ 
++    def _cancel_timers_locked(self) -> tuple[GLib.Source | int, GLib.Source | int]:
++        """Invalidate both timer leases and return their retained source objects."""
++        self._refresh_generation += 1
++        refresh_timer = self.refresh_timer
++        self.refresh_timer = 0
++        self._nonvideo_refresh_generation += 1
++        nonvideo_refresh_timer = self.nonvideo_refresh_timer
++        self.nonvideo_refresh_timer = 0
++        return refresh_timer, nonvideo_refresh_timer
++
++    @staticmethod
++    def _remove_timers(*timers: GLib.Source | int) -> None:
++        remove_errors: list[tuple[BaseException, Any]] = []
++        for timer in timers:
++            if timer:
++                try:
++                    timer.destroy()
++                except BaseException as e:
++                    remove_errors.append((e, e.__traceback__))
++        if remove_errors:
++            for later_error, later_traceback in remove_errors[1:]:
++                refreshlog.error("Additional error removing a video subregion timer: %s", later_error,
++                                 exc_info=(type(later_error), later_error, later_traceback))
++            error, traceback = remove_errors[0]
++            raise error.with_traceback(traceback)
++
+     def reset(self) -> None:
+-        self.cancel_refresh_timer()
+-        self.cancel_nonvideo_refresh_timer()
+-        self.init_vars()
++        with self._lifecycle_lock:
++            if self._closed:
++                return
++            timers = self._cancel_timers_locked()
++            self.init_vars()
++        self._remove_timers(*timers)
+ 
+     def cleanup(self) -> None:
+-        self.reset()
++        with self._lifecycle_lock:
++            if self._closed:
++                return
++            self._closed = True
++            timers = self._cancel_timers_locked()
++            self.init_vars()
++        self._remove_timers(*timers)
+ 
+     def __repr__(self):
+         return f"VideoSubregion({self.rectangle})"
+ 
+     def set_enabled(self, enabled: bool) -> None:
+-        self.enabled = enabled
+-        if not enabled:
+-            self.novideoregion("disabled")
++        with self._lifecycle_lock:
++            if self._closed:
++                return
++            self.enabled = enabled
++            if not enabled:
++                self.novideoregion("disabled")
+ 
+     def set_detection(self, detection: bool) -> None:
+-        self.detection = detection
+-        if not self.detection:
++        with self._lifecycle_lock:
++            if self._closed:
++                return
++            self.detection = detection
++        if not detection:
+             self.reset()
+ 
+     def set_region(self, x: int, y: int, w: int, h: int) -> None:
+-        sslog("set_region%s", (x, y, w, h))
+-        if self.detection:
+-            sslog("video region detection is on - the given region may or may not stick")
+-        if x == 0 and y == 0 and w == 0 and h == 0:
+-            self.novideoregion("empty")
+-        else:
+-            self.rectangle = rectangle(x, y, w, h)
++        with self._lifecycle_lock:
++            if self._closed:
++                return
++            sslog("set_region%s", (x, y, w, h))
++            if self.detection:
++                sslog("video region detection is on - the given region may or may not stick")
++            if x == 0 and y == 0 and w == 0 and h == 0:
++                self.novideoregion("empty")
++            else:
++                self.rectangle = rectangle(x, y, w, h)
+ 
+     def set_exclusion_zones(self, zones) -> None:
+         rects = []
+         for (x, y, w, h) in zones:
+             rects.append(rectangle(int(x), int(y), int(w), int(h)))
+-        self.exclusion_zones = rects
+-        # force expire:
+-        self.counter = 0
++        with self._lifecycle_lock:
++            if self._closed:
++                return
++            self.exclusion_zones = rects
++            # force expire:
++            self.counter = 0
+ 
+     def set_auto_refresh_delay(self, d: int) -> None:
+         refreshlog("subregion auto-refresh delay: %s", d)
+         if not isinstance(d, int):
+             raise ValueError(f"delay is not an int: {d} ({type(d)})")
+-        self.auto_refresh_delay = d
++        with self._lifecycle_lock:
++            if not self._closed:
++                self.auto_refresh_delay = d
+ 
+     def cancel_refresh_timer(self) -> None:
+-        if rt := self.refresh_timer:
++        with self._lifecycle_lock:
++            self._refresh_generation += 1
++            rt = self.refresh_timer
++            self.refresh_timer = 0
++        if rt:
+             refreshlog("%s.cancel_refresh_timer() timer=%s", self, rt)
++            rt.destroy()
++
++    def _publish_refresh_timer(self, delay: int, generation: int) -> None:
++        with self._lifecycle_lock:
++            if self._closed or generation != self._refresh_generation:
++                return
++        timer = attach_source(GLib.timeout_source_new(delay), self.refresh, generation)
++        with self._lifecycle_lock:
++            if self._closed or generation != self._refresh_generation:
++                remove = True
++            else:
++                self.refresh_timer = timer
++                remove = False
++        if remove:
++            timer.destroy()
++
++    def schedule_refresh(self, delay: int) -> None:
++        with self._lifecycle_lock:
++            if self._closed:
++                return
++            self._refresh_generation += 1
++            generation = self._refresh_generation
++            old_timer = self.refresh_timer
+             self.refresh_timer = 0
+-            GLib.source_remove(rt)
++        if old_timer:
++            old_timer.destroy()
++        self._publish_refresh_timer(delay, generation)
++
++    def _publish_nonvideo_refresh_timer(self, delay: int, generation: int) -> None:
++        with self._lifecycle_lock:
++            if self._closed or generation != self._nonvideo_refresh_generation:
++                return
++        timer = attach_source(GLib.timeout_source_new(delay), self.nonvideo_refresh, generation)
++        with self._lifecycle_lock:
++            if self._closed or generation != self._nonvideo_refresh_generation:
++                remove = True
++            else:
++                self.nonvideo_refresh_timer = timer
++                remove = False
++        if remove:
++            timer.destroy()
++
++    def schedule_nonvideo_refresh(self, delay: int) -> None:
++        with self._lifecycle_lock:
++            if self._closed:
++                return
++            self._nonvideo_refresh_generation += 1
++            generation = self._nonvideo_refresh_generation
++            old_timer = self.nonvideo_refresh_timer
++            self.nonvideo_refresh_timer = 0
++        if old_timer:
++            old_timer.destroy()
++        self._publish_nonvideo_refresh_timer(delay, generation)
+ 
+     def get_info(self) -> dict[str, Any]:
+-        r = self.rectangle
+-        info: dict[str, Any] = {
+-            "supported": self.supported,
+-            "enabled": self.enabled,
+-            "detection": self.detection,
+-            "counter": self.counter,
+-            "auto-refresh-delay": self.auto_refresh_delay,
+-        }
+-        if r is None:
++        with self._lifecycle_lock:
++            r = self.rectangle
++            info: dict[str, Any] = {
++                "supported": self.supported,
++                "enabled": self.enabled,
++                "detection": self.detection,
++                "counter": self.counter,
++                "auto-refresh-delay": self.auto_refresh_delay,
++            }
++            if r is None:
++                return info
++            info.update({
++                "x": r.x,
++                "y": r.y,
++                "width": r.width,
++                "height": r.height,
++                "rectangle": (r.x, r.y, r.width, r.height),
++                "set-at": self.set_at,
++                "time": int(self.time),
++                "min-time": int(self.min_time),
++                "non-max-wait": self.non_max_wait,
++                "timer": self.refresh_timer.get_id() if self.refresh_timer else 0,
++                "nonvideo-timer": self.nonvideo_refresh_timer.get_id() if self.nonvideo_refresh_timer else 0,
++                "in-out": self.inout,
++                "score": self.score,
++                "fps": self.fps,
++                "damaged": self.damaged,
++                "exclusion-zones": [(r.x, r.y, r.width, r.height) for r in self.exclusion_zones]
++            })
++            if ls := self.last_scores:
++                # convert rectangles into tuples:
++                info["scores"] = {r.get_geometry(): score for r, score in ls.items() if r is not None}
++            rr = tuple(self.refresh_regions)
++            if rr:
++                for i, r in enumerate(rr):
++                    info[f"refresh_region[{i}]"] = (r.x, r.y, r.width, r.height)
++            nvrr = tuple(self.nonvideo_regions)
++            if nvrr:
++                for i, r in enumerate(nvrr):
++                    info[f"nonvideo_refresh_region[{i}]"] = (r.x, r.y, r.width, r.height)
+             return info
+-        info.update({
+-            "x": r.x,
+-            "y": r.y,
+-            "width": r.width,
+-            "height": r.height,
+-            "rectangle": (r.x, r.y, r.width, r.height),
+-            "set-at": self.set_at,
+-            "time": int(self.time),
+-            "min-time": int(self.min_time),
+-            "non-max-wait": self.non_max_wait,
+-            "timer": self.refresh_timer,
+-            "nonvideo-timer": self.nonvideo_refresh_timer,
+-            "in-out": self.inout,
+-            "score": self.score,
+-            "fps": self.fps,
+-            "damaged": self.damaged,
+-            "exclusion-zones": [(r.x, r.y, r.width, r.height) for r in self.exclusion_zones]
+-        })
+-        if ls := self.last_scores:
+-            # convert rectangles into tuples:
+-            info["scores"] = {r.get_geometry(): score for r, score in ls.items() if r is not None}
+-        rr = tuple(self.refresh_regions)
+-        if rr:
+-            for i, r in enumerate(rr):
+-                info[f"refresh_region[{i}]"] = (r.x, r.y, r.width, r.height)
+-        nvrr = tuple(self.nonvideo_regions)
+-        if nvrr:
+-            for i, r in enumerate(nvrr):
+-                info[f"nonvideo_refresh_region[{i}]"] = (r.x, r.y, r.width, r.height)
+-        return info
+ 
+     def remove_refresh_region(self, region) -> None:
+-        remove_rectangle(self.refresh_regions, region)
+-        remove_rectangle(self.nonvideo_regions, region)
+-        refreshlog("remove_refresh_region(%s) updated refresh regions=%s, nonvideo regions=%s",
+-                   region, self.refresh_regions, self.nonvideo_regions)
++        with self._lifecycle_lock:
++            if self._closed:
++                return
++            remove_rectangle(self.refresh_regions, region)
++            remove_rectangle(self.nonvideo_regions, region)
++            refreshlog("remove_refresh_region(%s) updated refresh regions=%s, nonvideo regions=%s",
++                       region, self.refresh_regions, self.nonvideo_regions)
+ 
+     def add_video_refresh(self, region) -> None:
+         # called by add_refresh_region if the video region got painted on
+         # Note: this does not run in the UI thread!
+-        rect = self.rectangle
+-        if not rect:
+-            return
+-        # something in the video region is still refreshing,
+-        # so we re-schedule the subregion refresh:
+-        self.cancel_refresh_timer()
+-        # add the new region to what we already have:
+-        add_rectangle(self.refresh_regions, region)
+-        # do refresh any regions which are now outside the current video region:
+-        # (this can happen when the region moves or changes size)
+-        nonvideo = []
+-        for r in self.refresh_regions:
+-            if not rect.contains_rect(r):
+-                nonvideo += r.subtract_rect(rect)
+-        delay = max(150, self.auto_refresh_delay)
+-        self.nonvideo_regions += nonvideo
+-        if self.nonvideo_regions:
+-            if not self.nonvideo_refresh_timer:
+-                # refresh via timeout_add so this will run in the UI thread:
+-                self.nonvideo_refresh_timer = GLib.timeout_add(delay, self.nonvideo_refresh)
+-            # only keep the regions still in the video region:
+-            inrect = (rect.intersection_rect(r) for r in self.refresh_regions)
+-            self.refresh_regions = [r for r in inrect if r is not None]
+-        refreshlog("add_video_refresh(%s) rectangle=%s, delay=%ims, nonvideo=%s, refresh_regions=%s",
+-                   region, rect, delay, self.nonvideo_regions, self.refresh_regions)
+-        # re-schedule the video region refresh (if we still have regions to fresh):
+-        if self.refresh_regions:
+-            self.refresh_timer = GLib.timeout_add(delay, self.refresh)
++        with self._lifecycle_lock:
++            rect = self.rectangle
++            if self._closed or not rect:
++                return
++            # Something in the video region is still refreshing, so invalidate
++            # and replace its timer as one locked state transition.
++            self._refresh_generation += 1
++            refresh_generation = self._refresh_generation
++            old_refresh_timer = self.refresh_timer
++            self.refresh_timer = 0
++            # add the new region to what we already have:
++            add_rectangle(self.refresh_regions, region)
++            # do refresh any regions which are now outside the current video region:
++            # (this can happen when the region moves or changes size)
++            nonvideo = []
++            for r in self.refresh_regions:
++                if not rect.contains_rect(r):
++                    nonvideo += r.subtract_rect(rect)
++            delay = max(150, self.auto_refresh_delay)
++            self.nonvideo_regions += nonvideo
++            schedule_nonvideo = bool(self.nonvideo_regions) and not self.nonvideo_refresh_timer
++            if schedule_nonvideo:
++                self._nonvideo_refresh_generation += 1
++                nonvideo_generation = self._nonvideo_refresh_generation
++            else:
++                nonvideo_generation = 0
++            if self.nonvideo_regions:
++                # only keep the regions still in the video region:
++                inrect = (rect.intersection_rect(r) for r in self.refresh_regions)
++                self.refresh_regions = [r for r in inrect if r is not None]
++            schedule_refresh = bool(self.refresh_regions)
++            refreshlog("add_video_refresh(%s) rectangle=%s, delay=%ims, nonvideo=%s, refresh_regions=%s",
++                       region, rect, delay, self.nonvideo_regions, self.refresh_regions)
++        if schedule_nonvideo:
++            self._publish_nonvideo_refresh_timer(delay, nonvideo_generation)
++        if old_refresh_timer:
++            old_refresh_timer.destroy()
++        if schedule_refresh:
++            self._publish_refresh_timer(delay, refresh_generation)
+ 
+     def cancel_nonvideo_refresh_timer(self) -> None:
+-        if nvrt := self.nonvideo_refresh_timer:
+-            refreshlog("cancel_nonvideo_refresh_timer() timer=%s", nvrt)
++        with self._lifecycle_lock:
++            self._nonvideo_refresh_generation += 1
++            nvrt = self.nonvideo_refresh_timer
+             self.nonvideo_refresh_timer = 0
+-            GLib.source_remove(nvrt)
+-            self.nonvideo_regions = []
+-
+-    def nonvideo_refresh(self) -> None:
+-        self.nonvideo_refresh_timer = 0
+-        nonvideo = tuple(self.nonvideo_regions)
+-        refreshlog("nonvideo_refresh() nonvideo regions=%s", nonvideo)
+-        if not nonvideo:
+-            return
+-        if self.refresh_cb(nonvideo):
+             self.nonvideo_regions = []
+-        # if the refresh didn't fire (refresh_cb() returned False),
+-        # then we should end up re-scheduling the nonvideo refresh
+-        # from add_video_refresh()
+-
+-    def refresh(self) -> None:
+-        regions = self.refresh_regions
+-        rect = self.rectangle
+-        refreshlog("refresh() refresh_timer=%s, refresh_regions=%s, rectangle=%s",
+-                   self.refresh_timer, regions, rect)
+-        # runs via timeout_add, safe to call UI!
+-        self.refresh_timer = 0
+-        if rect and len(regions) >= 2:
+-            # figure out if it makes sense to refresh the whole area,
+-            # or if we just send the list of smaller rectangles:
+-            pixels = sum(r.width * r.height for r in regions)
+-            if pixels >= rect.width * rect.height // 2:
+-                regions = [rect]
+-        refreshlog("refresh() calling %s with regions=%s", self.refresh_cb, regions)
+-        if self.refresh_cb(regions):
+-            self.refresh_regions = []
+-        else:
+-            # retry later
+-            self.refresh_timer = GLib.timeout_add(1000, self.refresh)
++        if nvrt:
++            refreshlog("cancel_nonvideo_refresh_timer() timer=%s", nvrt)
++            nvrt.destroy()
++
++    def nonvideo_refresh(self, generation: int) -> bool:
++        with self._lifecycle_lock:
++            if self._closed or generation != self._nonvideo_refresh_generation:
++                return False
++            self._nonvideo_refresh_generation += 1
++            claimed_generation = self._nonvideo_refresh_generation
++            self.nonvideo_refresh_timer = 0
++            nonvideo = tuple(self.nonvideo_regions)
++            refreshlog("nonvideo_refresh() nonvideo regions=%s", nonvideo)
++            if not nonvideo:
++                return False
++            # Cleanup must not return while a callback which already claimed
++            # this owner can still reach its refresh callback.
++            if (self.refresh_cb(nonvideo)
++                    and claimed_generation == self._nonvideo_refresh_generation):
++                self.nonvideo_regions = []
++        # If the refresh did not fire, add_video_refresh() will schedule a
++        # replacement when the region is damaged again.
++        return False
++
++    def refresh(self, generation: int) -> bool:
++        with self._lifecycle_lock:
++            if self._closed or generation != self._refresh_generation:
++                return False
++            self._refresh_generation += 1
++            claimed_generation = self._refresh_generation
++            regions = tuple(self.refresh_regions)
++            rect = self.rectangle
++            refreshlog("refresh() refresh_timer=%s, refresh_regions=%s, rectangle=%s",
++                       self.refresh_timer, regions, rect)
++            # runs via timeout_add, safe to call UI!
++            self.refresh_timer = 0
++            if rect and len(regions) >= 2:
++                # figure out if it makes sense to refresh the whole area,
++                # or if we just send the list of smaller rectangles:
++                pixels = sum(r.width * r.height for r in regions)
++                if pixels >= rect.width * rect.height // 2:
++                    regions = (rect,)
++            refreshlog("refresh() calling %s with regions=%s", self.refresh_cb, regions)
++            # Keep the callback claim until it has finished.  cleanup() uses
++            # the same lock, so its return is the terminal callback boundary.
++            refreshed = self.refresh_cb(regions)
++            retry_generation = 0
++            if claimed_generation == self._refresh_generation:
++                if refreshed:
++                    self.refresh_regions = []
++                else:
++                    self._refresh_generation += 1
++                    retry_generation = self._refresh_generation
++        if retry_generation:
++            self._publish_refresh_timer(1000, retry_generation)
++        return False
+ 
+     def novideoregion(self, msg, *args) -> None:
+-        sslog("novideoregion: " + msg, *args)
+-        self.rectangle = None
+-        self.time = 0
+-        self.set_at = 0
+-        self.counter = 0
+-        self.inout = 0, 0
+-        self.score = 0
+-        self.fps = 0
+-        self.damaged = 0
++        with self._lifecycle_lock:
++            if self._closed:
++                return
++            sslog("novideoregion: " + msg, *args)
++            self.rectangle = None
++            self.time = 0
++            self.set_at = 0
++            self.counter = 0
++            self.inout = 0, 0
++            self.score = 0
++            self.fps = 0
++            self.damaged = 0
+ 
+     def excluded_rectangles(self, rect, ww: int, wh: int) -> list:
+         rects = [rect]
+@@ -284,6 +446,14 @@ class VideoSubregion:
+ 
+     def identify_video_subregion(self, ww: int, wh: int, damage_events_count, last_damage_events,
+                                  starting_at=0.0, children=()):
++        with self._lifecycle_lock:
++            if self._closed:
++                return
++            self._identify_video_subregion(ww, wh, damage_events_count, last_damage_events,
++                                           starting_at, children)
++
++    def _identify_video_subregion(self, ww: int, wh: int, damage_events_count, last_damage_events,
++                                  starting_at=0.0, children=()):
+         if not self.enabled or not self.supported:
+             self.novideoregion("disabled")
+             return

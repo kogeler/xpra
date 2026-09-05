@@ -1,5 +1,12 @@
 # Run Direct Xpra And Physical-GPU Tests
 
+Use [`validation.md`](validation.md) to schedule these fixed positive gates.
+During development, run the relevant profile after its nearest focused/native
+checks; all three full upstream suites are not a prerequisite. Final acceptance
+fills only missing or invalidated atomic/stack requirements after candidate
+freeze. Development-stage named results may count when their exact final
+inputs and assertions remain valid; foreground diagnostics cannot.
+
 ## Preconditions
 
 Create and verify the hash-locked analysis environment:
@@ -16,7 +23,9 @@ inherit that lock. If creation was interrupted, the next `live-venv` validates
 
 Verify Podman and the private process-supervisor state, inspect the default
 render-node and Zed-path availability, and prove repository identity plus
-current patch resolution:
+current selected patch resolution. These examples use the complete stack;
+for an early atomic run use its admitted `CASE=<slug>` in workspace creation
+instead of `STACK=develop`:
 
 ```bash
 make -C fork-maintenance doctor
@@ -75,7 +84,7 @@ make -C fork-maintenance live-profile-list
 ```
 
 Pass any name returned above to any of the seven complete-stack wrappers or to
-the case-only clipboard wrapper:
+either case-only wrapper:
 
 ```bash
 make -C fork-maintenance live-h264 \
@@ -95,9 +104,10 @@ policy below each transport. The runner adds only genuinely dynamic values
 such as endpoint, session name, child command, display, and selected device. Do
 not duplicate a tracked YAML value in Python, Make, or a unit-test assertion.
 
-The standard acceptance ladder runs each complete-stack wrapper once with the
+The final complete-queue coverage includes each complete-stack wrapper with the
 YAML default and runs every case-owned wrapper declared by a retained
-production manifest separately. Selecting the other network profiles is
+production manifest separately. Reuse input-verified completed results rather
+than rerunning them at a phase transition. Selecting the other network profiles is
 optional coverage, not a larger mandatory release matrix. It changes only
 client tuning: all codec, hardware, pixel, input, lifecycle, and cleanup gates
 remain identical and must still pass. The strict loader, both YAML files, and
@@ -110,6 +120,13 @@ created from the inspected immutable server/client image IDs, not from mutable
 tag names. The final report and status bind the source, both selections and
 resolution digests, context archives/trees, Zed and harness/input digests, and
 the actual image IDs with their complete ownership labels.
+
+The server and client build stages install Xpra and run their existing native
+checks before copying/compiling independent C fixtures. A fixture-only edit
+still changes the complete context/image identity, but need not invalidate the
+unchanged Xpra build layer. Do not move fixture inputs ahead of that layer or
+drop them from context hashes. Native flags, output paths and runtime checks
+remain mandatory; record an actual cache hit before claiming a measured saving.
 
 Live image build contexts use the common validated stdin tar transport. The
 optional Zed directory is first frozen into the run-owned input snapshot and
@@ -135,8 +152,9 @@ unchanged, then run only resolution, whitespace, and fork-control checks and
 record the proof. This exception cannot cross `develop-rebase`; every upstream
 rebase requires every production case's declared live gates with its atomic
 case selection and all seven fixed positive live profiles with the complete
-stack selection. Any semantic difference on an unchanged base also requires
-the declared live gates.
+stack selection on the final adapted candidate. A semantic difference on an
+unchanged base requires the affected profile checks during development and
+corresponding final coverage, not every live profile after every edit.
 
 Every named live acceptance run requires one nonempty reviewed `CASE` or
 `STACK` selection. A clean-source diagnostic is not live acceptance and must
@@ -149,8 +167,8 @@ fixtures prove that invalid evidence is rejected; every named live target
 itself must prove its intended Xpra behavior and finish positive. Their
 acceptance dimensions are fixed;
 `NETWORK_PROFILE` is the orthogonal client-only tuning overlay described above.
-`live-x11-clipboard` is an additional case-only positive gate and does not
-change this seven-profile stack set.
+`live-x11-clipboard` and `live-wayland-subsurface` are additional case-only
+positive gates and do not change this seven-profile stack set.
 
 ## Native-Wayland client keymap synchronization
 
@@ -233,8 +251,10 @@ The wrapper fixes RGB, application-exit, strict H.264 policy, and the default
 alpha scenario. Unlike the seven complete-stack profiles, this client-side
 regression builds the exact selected case source for both the Debian 13 X11
 client and Ubuntu 26.04 native-Wayland server. Input freeze and final
-collection require identical selection, resolution, context, and immutable
-image provenance at both endpoints. The client CLI is taken only from
+collection require identical selection, resolution, and source context at both
+endpoints. The Ubuntu and Debian images have independently bound immutable
+image IDs and verified role labels; their IDs are not required to match.
+The client CLI is taken only from
 `live-cli.yml` and fixes `xsettings=no` and `input-devices=noxi2`; this keeps
 unrelated XSettings and XI2 filter owners from masking a missing clipboard
 filter lease.
@@ -270,6 +290,209 @@ it must not contain marker plaintext or sample the operator's clipboard. The
 ordinary rendering/pixel, input, application-exit, container/network, and
 owned-cleanup checks still apply. A local conversion alone, an empty initial
 token, a reconnect, a longer timeout, or polling cannot satisfy the gate.
+
+## Native-Wayland subsurface stream ownership
+
+Run the subsurface case through its dedicated wrapper; it accepts neither
+another case nor a stack selection:
+
+```bash
+make -C fork-maintenance live-wayland-subsurface \
+  CASE=wayland-subsurface-stream-ownership \
+  RUN=wayland-subsurface-stream-ownership-live-01
+make -C fork-maintenance live-wait \
+  RUN=wayland-subsurface-stream-ownership-live-01
+make -C fork-maintenance live-status \
+  RUN=wayland-subsurface-stream-ownership-live-01
+make -C fork-maintenance live-logs \
+  RUN=wayland-subsurface-stream-ownership-live-01
+make -C fork-maintenance live-remove \
+  RUN=wayland-subsurface-stream-ownership-live-01
+```
+
+The wrapper fixes RGB, application-exit, strict H.264 policy, and the default
+alpha scenario. The exact selected case source and resolution are applied to
+both the Ubuntu 26.04 native-Wayland server and Debian 13 GTK X11 client:
+server composition transactions and client backing semantics are one atomic
+wire contract. Input freeze, image contexts, final report, and collection must
+all preserve and verify the matching endpoint identities. The profile's fixed
+client arguments select Cairo; mapped GTK OpenGL replacement and close are
+covered separately by the case's real-Xvfb focused regression, not inferred
+from this Cairo run.
+
+The dedicated C fixture creates a 420x300 primary and 360x260 secondary
+`xdg_toplevel`. Its 220x140 lower and 160x100 upper children use real ARGB
+`wl_subsurface` buffers with fixed partial alpha and premultiplied patterned
+channels over heterogeneous parent pixels. The lower uses a 440x280 scale-2
+buffer; the upper uses transform 180 and is committed before its first
+subsurface role exists.
+
+The fixture emits schema 6. For `2 <= N <= 256` continuous generations its
+exact `15 + N` event sequence is:
+
+```text
+ready
+lower-state
+lower-state
+lower-moved
+sibling-created
+lower-updated-under-upper
+lower-frame-generation
+lower-frame-generation
+continuous-start
+continuous-generation x N
+continuous-stop
+sibling-click
+lower-destroyed
+upper-detached
+upper-reparented
+exit
+```
+
+Every object has the exact declared field set, schema value, zero-based
+sequence, and strictly increasing monotonic timestamp. The first fixed phases
+bind initial, changed, restored, move-without-attach, overlap, lower update,
+and two marker-gated frame generations. Each frame generation consumes one
+real callback ID/data pair and advances the exact attach, commit, update, and
+done counts.
+
+Continuous commits also require a 50 ms monotonic cadence floor. The same
+sampled commit timestamp is emitted in the event stream; an immediate callback
+does not bypass the floor, and a late wake-up does not trigger a catch-up burst.
+The loop remains responsive to Wayland input and the stop marker. The observer
+has five seconds from continuous-start for its active proof, including packet
+collection and the subsequent fresh producer sample. The separate schema-3
+active/drain record fixes an exclusive packet frontier from the first primary
+inventory before fetching other streams. Validate every packet below it as
+complete transactions plus one root-stage tail, then independently bind that
+exact prefix to the final immutable packet ledger. Later packets still require
+complete drain, pixel and global packet/ACK validation; a frontier cannot hide
+an interior gap or delete later evidence. Bounded per-attempt diagnostics retain
+the stage, reason, role counts/frontiers and monotonic durations, not pixels.
+The observer records its initial
+generation count/time and requires a later generation, while the unchanged
+256-generation cap remains a hard guard. This fixture timing does not impose
+a production frame rate on Xpra or require a packet for every source commit.
+
+After `continuous-start`, the same lower surface alternates two fixed buffers.
+The odd-generation buffer is a dedicated image: only the advertised 32x32
+lower-local damage rectangle differs from the final full-frame buffer. Every
+pixel outside that rectangle is identical in both continuous buffers and in
+the preceding frame. Partial damage therefore describes the complete buffer
+change, including when Xpra retains and later replays the whole surface.
+It may commit the next generation only after the previous
+`wl_surface_frame` callback fires. Before requesting stop, capture a retained
+active-liveness artifact while the process is alive, the stop marker is absent,
+the producer is active, `2 <= active_generation_count < 256`, at least two
+complete three-stage transactions exist, and their lower payloads include both
+fixed digests. After `continuous-stop`, accept a terminal `N` up to the
+inclusive 256 safety cap, require the last callback either completed or was
+explicitly cancelled with no ambiguous state. Count `N` fixture commits and
+their callbacks separately from the `M` immutable composition captures:
+`2 <= M <= N`, because uncaptured pending damage may coalesce. The captured
+pixel states must form an ordered subsequence of the generated states; the
+last captured state must equal the final committed state. Every captured
+transaction has exactly three stages and one complete set of packet/ACK
+records. Require zero pending-region and in-flight composition counters in
+addition to drained encoding and ACK queues. A transaction or frame completed
+only after the producer stopped cannot satisfy the active proof.
+
+The upper role is later destroyed, roundtripped, and recreated under the second
+parent without another buffer attach or child commit. Because the underlying
+`wl_surface` stays alive, its fixture proxy, retained buffer, Xpra wrapper, and
+internal WID all remain identical. Only native surface destruction may retire
+that identity.
+
+Establish startup as a separate bounded history before issuing the first
+controlled change. The initial server full damage and client-map refresh may
+coalesce: accept one or two complete primary root/lower transactions and
+independently one or two ordinary secondary full-canvas packets. Retain and
+validate every packet, including the canonical raw pixels, exact transaction
+stages and epochs, client draw and ACK, and global/source sequence inventory.
+Bind fresh server focus handlers for both exact parent WIDs after their GTK
+map packets on the same connection, then require a stable drained source
+snapshot. Retain the bounded focus-log interval and revalidate it at collection;
+an unawaited X11 activation or an old focus line is not a map barrier.
+For the ordinary secondary, bind both initial/map damage requests and every
+resulting full-window capture from the server log, with the final capture
+after the final request. Check both parents' existing encoding/ACK queues and
+exact packet counts as well as the composite and child counters.
+The last entries bind the named
+initial capture; they must not hide earlier packets. Derive cumulative source
+counts from that exact startup history, retaining exact later phase deltas.
+
+For each subsequent fixed phase, wait for its one complete transaction and
+drained `xpra info` snapshot before taking both parent-window captures. Record
+a separate continuous-final capture and drained info boundary after stopping
+the producer. Role creation in `stacked` and role reattachment in `reparented`
+require their exact full-primary/full-secondary reconciliation plans; role
+removal repairs only the removed footprint and surviving intersections.
+Stable-tree content damage remains local. Do not accept an arbitrary superset
+or a partial substitute for any phase's exact production-owned repair plan.
+The first published packet in every transaction must carry the
+exact clipped dirty-union `subsurface-reset`; every packet must name
+`premultiplied-source-over-v1`, and no later layer may repeat the reset. Bind
+parent/root, lower, and upper packet order to wlroots bottom-to-top stacking.
+Each child packet must be positive raw RGB32 with an alpha-bearing
+`BGRA`/`RGBA` format. Match every child sequence across saved packet metadata,
+the internal-source/current-parent publication line, the parent-wire client
+draw, and its source-routed ACK. All parent and child sequences are globally
+unique, source packet counts advance exactly, encoding queues drain, and the
+connection ACK-owner count returns to zero at every fixed and continuous drain
+boundary.
+
+Retained packet payloads and their `save_update` metadata are the transport
+pixel authority. Independently regenerate the fixture's logical surface
+patterns and require each raw packet to match its exact source crop, including
+alpha. The oracle describes logical pixels before Xpra; the C fixture stores
+the inverse-transformed and scale-2 buffer representation. Their formulas are
+cross-checked by compiling and executing the actual C pixel generator in the
+focused infrastructure regression. This separates source normalization from
+client composition and makes a consistently wrong transform or channel order
+observable. Reject compression, bad rowstride or dimensions, unsafe paths,
+digest mismatch, unknown packed formats, and any non-RGB32 composite stage.
+Starting from the retained parent baseline, clear the exact reset, replay every
+layer in protocol order, and compute each channel as
+`Cpremul + round(P * (255 - alpha) / 255)` without premultiplying child bytes a
+second time. Compare the complete reconstructed parent to the bound client
+capture with zero mean absolute error. Also compare each reconstructed complete
+parent against the independently composed fixture scene, including the area
+outside continuous damage. Async source screenshots are neither
+collected nor accepted as packet-correlated evidence.
+
+The exact comparisons on both parents cover initial, changed, restored, moved,
+stacked, lower-updated, both fixed frame generations, continuous-final,
+lower-destroyed, upper-detached, and reparented state. They prove restoration
+is not stale, movement clears the old footprint, every lower change preserves
+the unchanged upper, the continuous producer makes bounded forward progress,
+destruction and detach repair the primary root, and the unchanged upper buffer
+composites over the heterogeneous secondary root.
+
+Send one real pointer click into the known sibling overlap and require the
+client parent-wire button records, exact upper-child server focus and
+press/release records, and the fixture's upper-local event within three
+seconds. At destroy/detach, require removal of the obsolete nested info entry,
+the expected active-source decrement, no post-removal source packet, and no
+child-WID EOS while both parent windows continue drawing. Finally signal the
+ordered fixture exit and require status zero before normal Xpra
+application-exit and owned cleanup.
+
+Before those controlled phases, bind both actual client mapped XID/WM-title
+tuples and require them unchanged before fixture exit. Preserve the complete
+normal title decoration; diagnostics alone may be bounded. Client XIDs and WM
+titles are not server wire IDs and fixture titles: the exact server inventory
+continues to be checked independently at every phase.
+
+Collection reparses the schema-6 dynamic fixture JSONL, the complete bounded
+startup ledger, eleven fixed phase info snapshots, the separate continuous
+active/drain artifacts, endpoint logs,
+saved packet metadata and bounded raw payloads, and deterministic client
+captures. It recomputes all 36 named classifier results; report booleans are
+only cached summaries. A missing layer, wrong reset, mixed or partial
+transaction, generation starvation, callback/capture accounting mismatch, straight-alpha
+oracle, sequence collision, stale pixels, retained source, pending ACK, or
+altered artifact must fail collection. The fixture pixels are fixed and never
+sample an operator desktop or clipboard.
 
 ## RGB control
 
@@ -357,6 +580,76 @@ Fallback classifiers remain unit-diagnostic helpers only. They are not
 accepted live profiles, cannot be started as named live jobs, and cannot
 produce acceptance evidence.
 
+## H.264 packet-sequence authority
+
+Choose the packet namespace from the frozen selected source and corroborating
+runtime identity, never from the presence of a numerical gap. Without
+`wayland-subsurface-stream-ownership`, the supported legacy source allocates
+damage packet IDs per window and each saved window history must remain
+positive, ordered, and numerically dense. With that case selected, every
+ordinary parent and internal child uses the connection allocator, even when
+the workload has no active subsurfaces. The shared H.264 observer admits this
+connection-global namespace only with one confirmed active connection bound
+to the owned run, server UUID, client UUID, session ID, connection time, and
+endpoint. A client UUID may recur across runs; it and a client-info index are
+not sufficient session identity. Actual initial
+`damage.next-packet-sequence` and `damage.ack-owners` values corroborate the
+namespace only. They neither limit a later observation frontier nor prove
+terminal drain. Source selection and runtime state must agree; absent or
+conflicting authority fails closed rather than triggering a compatibility
+fallback.
+
+For the connection-global namespace, retain an exact ledger across all
+declared, title-bound ordinary windows of the profile. Keep each original
+packet sequence and source WID, saved metadata path, metadata/payload digests,
+and payload length. The ordered projection onto one window may have a gap
+only when every intervening ID is accounted for by a packet of another
+declared window in the same verified ledger. A merely increasing list, a
+renumbered list, an unrelated window's counter, or an undeclared producer
+cannot establish completeness. Duplicate global IDs, a missing primary
+packet, or an unexplained connection-wide hole fails the gate.
+This is an exact-accounting requirement for the controlled profile, not a
+general protocol guarantee that every reserved ID is published. Production
+may consume an ID for cancelled stale work; do not change that behavior or
+reuse the ID merely to make a trace numerically dense.
+
+Seal a bounded startup prefix before using it as active-stream evidence.
+Artifact reads from different window streams need not be simultaneous; the
+explicit frontier determines which complete prefix is being checked. Final
+acceptance requires the complete retained declared-window history, an exact
+match for the sealed prefix, and all applicable client draw, ACK, and terminal
+checks. Do not infer a final allocator value or zero ACK owners from the
+initial namespace snapshot; either claim needs an actual fresh quiescent
+observation.
+Later packets cannot be discarded by choosing an earlier successful prefix.
+The existing final encoder/decoder shutdown checks remain separate; their
+narrow terminal-frame exception does not excuse a ledger omission.
+
+All per-window H.264 consumers use this same namespace authority: startup and
+IDR selection, damage groups, stimulus intervals, full stream suffixes, and
+client packet-chain checks. They retain the actual IDs rather than generating
+surrogate per-window sequences. H.264 context frame indexes remain contiguous;
+storage bucket indexes and each descending `flush` countdown remain exact.
+The codec, frame-alpha, crop/edge, hardware, and pixel requirements do not
+change when another owned window interleaves a packet.
+
+The frozen host runner computes this ordinary-root H.264 ledger from the saved
+packet metadata and payloads. It records readiness and profile-owned baseline/
+stimulus cuts in `h264-sequence-observations.json`, then rebuilds the ledger
+from the final artifact inventory and checks the retained prefixes and tails.
+Named-job collection independently
+verifies the frozen source/input/harness provenance, artifact digests and report
+embedding; it does not independently replay this H.264 ledger's semantics.
+Keep that trust boundary distinct from the case-only subsurface RGB collector,
+which has its own semantic reconstruction. Neither a report boolean nor a
+reinterpretation of an old negative run replaces the required positive runtime
+observation.
+
+This shared observer covers ordinary-root H.264 and its picture auxiliary.
+It does not replace or weaken the separate case-only WSSO RGB transaction
+ledger, which owns internal-source/current-parent routing, transaction stages,
+epochs, raw premultiplied payloads, and exact source ACKs.
+
 ## Xpra-only lifecycle profiles
 
 These profiles use direct TCP and deliberately exclude SSH ControlMaster or
@@ -433,8 +726,11 @@ targets.
 Each opaque primary's first saved `window.info` is explicitly an initial
 snapshot and must report `BGRX` or `RGBX`; it is not final/per-frame evidence.
 Every exact-window `video` frame-state record must remain `BGRX`/`RGBX` with
-`want-alpha=False`. The saved packet history must have positive contiguous
-sequence numbers in recorded order. Rounded damage-time directories are
+`want-alpha=False`. The saved packet history must have positive sequence
+numbers in recorded order and be complete in its
+[verified namespace](#h264-packet-sequence-authority): dense per window for
+the legacy allocator, or an exact window projection of the complete owned
+connection ledger when WSSO is selected. Rounded damage-time directories are
 storage buckets, not group identity: several real damage groups may share one
 millisecond bucket. The descending `flush` countdown reconstructs each exact
 group, while bucket-local indexes remain contiguous. Startup layout and picture
@@ -507,6 +803,12 @@ Only named-job execution is acceptance-capable. Foreground `run.py` output is
 diagnostic. `live-wait` requires successful supervisor completion, hashed log,
 exact report binding, current runner/supervisor digests, and no run-owned
 Podman objects.
+
+Keep every harness input unchanged until the run has been collected and its
+owned runtime removed. Input freezing isolates the worker from later host
+edits; it does not authorize collection with a different current harness.
+Parallel work may inspect the harness or edit unrelated documentation, but
+must not change a shared harness input while any live job still owns it.
 
 Every report, screenshot, trace, status, and log remains under ignored
 `.artifacts/fork-maintenance/`. Never copy a final-looking report into the

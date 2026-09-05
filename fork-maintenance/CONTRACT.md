@@ -8,6 +8,30 @@ automation, patch development, isolated testing, and physical-GPU validation
 in one repository without allowing fork changes onto `master`. It also keeps
 fork GitHub CI as a minimal caller of this tracked automation.
 
+## Exclusive fork-process authority
+
+The fork-owned root `AGENTS.md` and maintained content under
+`fork-maintenance/` are the only repository authorities for fork-maintenance
+processes, subject to explicit operator instructions. They define workflow,
+agent coordination, development and acceptance stages, test/build scheduling,
+reruns, evidence requirements, cleanup, and publication.
+
+Nothing inherited from `master` may define, override, or expand those process
+rules. Upstream agent guides, `CLAUDE.md`, `CONTRIBUTING.md`, READMEs, other
+documentation, workflows, commit messages, and maintainer process advice are
+not fork-workflow authorities. Copying or relocating an upstream file, such as
+a disabled workflow rename, does not grant it that authority. Advancing or
+rebasing onto `master` does not import a new maintenance procedure.
+
+Do not edit upstream-owned files to establish or change our flow, and do not
+change fork-process rules merely to follow an upstream instruction. Process
+changes belong only in the fork-owned root guide and this directory. Upstream
+source, tests, build configuration and documentation remain technical inputs
+for understanding and adapting patches. Referring to their commands or
+dependencies does not adopt their scheduling, test selection policy, or
+development/release procedure. A check of upstream compatibility runs because
+this fork's policy requires it, not because an upstream document orders it.
+
 ## Repository identities
 
 The enclosing Git repository is the only source checkout. It has exactly these
@@ -154,12 +178,14 @@ may never be reclassified as production, including during a path-transition
 admission.
 
 The manifest schema retains the `[evidence]` table name for runner
-compatibility, but `required_gates` is only a declarative validation list. It
-does not authorize tracking reports or results. Every gate in that list must be
-self-contained under the exact `CASE=<slug>` selection. A boundary which needs
-production behavior or diagnostics owned by another active patch is declared
-by the complete stack and documented in the case README instead; an empty case
-list does not waive that stack-owned boundary.
+compatibility. `required_gates` is the sole live-profile admission authority
+for a case selection, but remains only a declarative validation list: admission
+does not prove that a gate ran or passed and does not authorize tracking or
+publishing reports or results. Every gate in that list must be self-contained
+under the exact `CASE=<slug>` selection. A boundary which needs production
+behavior or diagnostics owned by another active patch is declared by the
+complete stack and documented in the case README instead; an empty case list
+does not waive that stack-owned boundary.
 
 Every patch must satisfy all of these conditions:
 
@@ -204,13 +230,16 @@ its publication start gate. Derived fields are never edited by hand.
 
 Only these active cases are retained:
 
-1. `wayland-initial-window-state`;
-2. `wayland-client-keymap-sync`;
-3. `x11-client-clipboard-events`;
-4. `wayland-empty-damage-throttle`;
-5. `video-pipeline-cleanup-race`;
-6. `debian-libva-codecs-package`;
-7. `upstream-test-quarantine`.
+1. `window-source-timer-lifecycle`;
+2. `video-pipeline-cleanup-race`;
+3. `wayland-subsurface-stream-ownership`;
+4. `wayland-initial-window-state`;
+5. `wayland-client-keymap-sync`;
+6. `x11-client-clipboard-events`;
+7. `wayland-empty-damage-throttle`;
+8. `jph-parallel-build-objects`;
+9. `debian-libva-codecs-package`;
+10. `upstream-test-quarantine`.
 
 ## Stack contract
 
@@ -434,6 +463,12 @@ procedure in
 the active-case, quarantine, repair, package, test, or live scope. The agent
 derives one unique cycle identifier rather than requesting another input:
 
+The sequence below states the refresh's complete obligations. Within adaptation,
+use the development loop and early relevant live checks from
+[`validation.md`](docs/runbooks/validation.md); schedule full matrix/package
+and remaining live acceptance only after a reviewed candidate freeze. Reuse
+exact valid new-base controls instead of repeating them at each numbered phase.
+
 1. require `develop`; inspect every non-ignored tracked and untracked change,
    reject unsafe, unexplained, secret, generated, or applied-Xpra-source content,
    and, when legitimate changes exist, create the one complete preservation
@@ -464,7 +499,8 @@ derives one unique cycle identifier rather than requesting another input:
    changes;
 10. reproduce any newly failing author test on this exact clean master before
     adding it to the single duty quarantine, then rerun its clean quarantine
-    gates and the complete patched matrix;
+    gates for changed inputs and fill the final patched-matrix gaps after the
+    updated candidate is stable;
 11. run `develop-check` before handoff only when the resulting branch is clean;
     otherwise leave every reviewed refresh result uncommitted and report this
     final gate as intentionally outstanding for the operator. Do not create an
@@ -615,16 +651,24 @@ must not copy concrete profile names, arguments, or values into assertions.
 Both YAML files and the loader are part of the frozen harness digest. The main
 owner and final report bind the selected network-profile name.
 
-The seven complete-stack profiles bind the selected case or stack to the
-server and the clean embedded source to the client. The case-only
+The seven complete-stack profiles bind an admitted server selection to the
+server and the clean embedded source to the client. Their case-versus-stack
+admission is defined in the validation contract below; three profiles are
+stack-only rather than available to every case. The case-only
 `live-x11-clipboard` profile instead requires
 `CASE=x11-client-clipboard-events` and binds that exact selected source and
 resolution to both endpoints; its client-side production boundary cannot be
 tested with the ordinary clean-client image. The frozen input and final report
 must prove these endpoint identities rather than infer them from image tags.
-The final client-image preflight follows the same split: every selection must
-import the ordinary GTK client, while only the exact clipboard case may require
-its patch-owned X11 GTK adapter symbol and helper importability.
+The separate case-only `live-wayland-subsurface` profile requires
+`CASE=wayland-subsurface-stream-ownership` and binds that selected source and
+resolution to both endpoints. The native-Wayland server owns the surface graph,
+stream transactions, and acknowledgement routes; the GTK X11 client owns the
+corresponding premultiplied source-over backing contract. Neither half can be
+accepted through a clean endpoint. The final client-image preflight still
+requires every selection to import the ordinary GTK client, while the exact
+clipboard case additionally requires its patch-owned X11 GTK adapter symbol
+and helper importability.
 
 Every positive live wrapper accepts `NETWORK_PROFILE=<name>`. Omitting it uses
 the `default_profile` declared only in `profiles.yml`. The normal required
@@ -665,17 +709,29 @@ exclusions.
 
 Before emitting its tar, the builder reads the control and data archives of
 every actual DEB and rejects duplicate package names or overlapping regular
-payload ownership. It resolves the required libva encoder, libva decoder, and
-libyuv converter from that complete inventory, requires one matching amd64
-CPython ABI for each, and requires all three to belong to ordinary
-`xpra-codecs`. It then extracts the actual `xpra-common` and `xpra-codecs`
+payload ownership. It resolves five required native modules from that complete
+inventory: the libva encoder/decoder, libyuv converter and JPH encoder/decoder.
+Each must have exactly one matching amd64 CPython ABI extension, all owned by
+ordinary `xpra-codecs`. It then extracts the actual `xpra-common` and `xpra-codecs`
 packages into a private root, imports those modules with the distribution
-Python, and runs `dpkg-shlibdeps` on the packaged ELF objects. Every dynamically
-resolved library dependency must occur in the final `xpra-codecs` `Depends`,
+Python and checks their exact inventoried paths. The extracted JPH pair must
+encode deterministic nonuniform 32x32 RGB24 pixels at quality 100 and decode a
+nonempty codestream to correctly sized packed BGRX24. All decoded RGB bytes must
+match the input exactly using the actual rowstride and ignoring X/row padding;
+this is not an alpha-preservation test. Both image owners must be released even
+if a check fails. This mandatory core capability applies to the supported
+Ubuntu 26.04 and Debian 13 complete-stack builds, not to a hard-coded case slug.
+
+The builder runs `dpkg-shlibdeps` on all five packaged ELF objects. Every
+dynamically resolved library dependency must occur in the final `xpra-codecs` `Depends`,
 including `libva-drm2`, `libva2`, and `libyuv0`; the package must not depend on
-an Xpra vendor-specific or extras codec package. The host independently parses
-the returned Debian archives and repeats the package-set, payload ownership,
-module ABI, and dependency checks without trusting the builder manifest.
+an Xpra vendor-specific or extras codec package. OpenJPH dependencies come from
+the actual resolver, never a guessed distribution SONAME. The host independently
+parses returned ar/control/data archives and repeats package-set, payload
+ownership, filename ABI and declared dependency-name checks without trusting
+the builder manifest. It does not parse ELF dynamic sections or execute native
+modules: imports, exact RGB execution and dynamic dependency resolution belong
+to the container-side validation of the actual extracted packages.
 
 The builder uses only the configured Ubuntu or Debian distribution archives
 for Debian build dependencies. It does not install the source tree's
@@ -898,15 +954,56 @@ evidence.
 
 ## Validation contract
 
-For one patch, validate in increasing scope:
+Validation has two phases governed by
+[`docs/runbooks/validation.md`](docs/runbooks/validation.md): development and
+final acceptance, separated by a reviewed candidate freeze. Gate declarations
+are final coverage obligations, not commands to repeat after every edit.
 
-1. embedded-clean-source failure or another non-vacuous focused regression;
-2. selected focused tests;
-3. affected native/subsystem checks;
-4. all three clean quarantine reassessment gates when the active queue contains
-   the duty quarantine case;
-5. `full`, `full-cython`, and `full-no-compat`;
-6. each live gate declared by the production cases and complete stack.
+Development establishes a non-vacuous embedded-clean-source control, runs the
+nearest real regression after each atomic change, and selects affected existing
+upstream modules, case regressions and dependent/composed tests. Native,
+Cythonized and no-compat execution follows the changed behavior. Relevant
+positive live gates run early, after their focused/native prerequisites; no
+full upstream matrix prerequisite may delay them. Full builds may run early
+when the build/package boundary itself is being diagnosed, not by habit.
+
+Final acceptance freezes reviewed code, tests, queue composition, fixture/oracle
+and build inputs, then fills only missing or invalidated requirements:
+clean/focused/native controls, current clean quarantine reassessment, complete
+fork-control tests, `full`, `full-cython`, `full-no-compat`, and required atomic
+and complete-stack live/package gates. Full queue/rebase acceptance includes
+both real DEB builds and all seven stack live profiles. Evidence from development
+may satisfy an unchanged final requirement; its phase or age alone is not
+invalidation. Do not alter immutable reports to claim new provenance.
+
+Stop escalation at an unexplained failure. A final defect returns its owner to
+the development loop; stabilize the correction before scheduling affected final
+jobs. Do not automatically restart independent valid checks, all full legs,
+package builds or every live profile after each intermediate edit. Keep shared
+runner and other bound inputs frozen until named jobs are collected/removed.
+
+Reuse is evaluated per requirement, not solely by a global harness hash. An
+already collected named result with a different raw runner identity may remain
+valid for an unchanged requirement only with an exact old/new diff and consumer
+map proving that its applied source, test inventory/mode or live profile,
+assertions, executed runner/build paths, image, relevant installed toolchain,
+configuration and environment are unchanged. Record both original identities
+and that proof in the ignored ledger; never rewrite the result. A change to any
+of those exercised inputs invalidates that requirement. Uncertainty is not
+equivalence. This permits reuse of an independent profile after a correction
+confined to another profile; it does not permit using a newly weakened oracle
+to reinterpret a failed run as success. Actual cache-key changes still require
+an exact newly verified cache/image for future runs. No admission, ownership,
+current-runner collection or cleanup guard may be bypassed for reuse.
+
+For changes confined to fork tooling, validation follows the affected automation
+and exercised downstream boundary. Scheduling/documentation-only changes do
+not require functional Xpra rebuilds or a full matrix. A new focused execution
+mode requires narrow infrastructure tests and a representative real named run;
+it does not require the unchanged full-suite commands merely to test its
+dispatch. Complete offline fork-control checks follow a stable tooling
+candidate. Changed Xpra source or full-suite execution still requires its
+corresponding final gates.
 
 A proven non-semantic refresh does not restart this ladder. It requires the
 same embedded source commit plus an exact old/new applied-tree diff limited to
@@ -916,7 +1013,8 @@ runner behavior, and live assertions must remain unchanged. Refresh derived
 digests, resolve the current queue, run whitespace checks and the affected
 fork-control tests, and describe the proof at handoff. Do not spend container,
 native, full-matrix, or live resources on that refresh. If any condition is
-uncertain, the exception does not apply and the normal ladder is required. A
+uncertain, the exception does not apply: use the affected development checks
+and corresponding final gates. A
 `develop-rebase` necessarily changes the embedded source and therefore never
 qualifies: its acceptance always includes the complete fork-control suite,
 clean quarantine reassessment, tests-only controls for production cases which
@@ -924,14 +1022,21 @@ own retained tests, documented semantic inspection for those which do not,
 patched focused and native gates, every case-specific durable package boundary
 against the complete resulting stack, all three author-test legs, every
 production case's declared live gates with its atomic case selection, and all
-seven fixed positive live profiles with the complete stack selection.
+seven fixed positive live profiles with the complete stack selection. These
+are requirements on the stable new-base candidate, not after each adaptation.
 
-Ordinary acceptance is green. A pre-existing failure outside the selected
-paths is investigated against canonical CI before any costly local clean
-control. It is never skipped, weakened, reconfigured, or fixed inside a
-production case. With explicit user scope, an exact current clean-source
-failure may be added only to the duty quarantine case and must then satisfy its
-reassessment gates. No exception is implied by prior acceptance results.
+Ordinary acceptance is green. Investigate a failure outside selected paths with
+the narrowest supported same-mode clean control under the task's existing
+diagnostic scope. Exact canonical CI evidence may help, but its availability
+does not authorize or block fork diagnosis and never replaces the required
+current clean-source proof for quarantine admission. Do not automatically run a
+clean full suite when a narrow control can establish the boundary. The failure
+is never skipped, weakened, reconfigured, or fixed inside an unrelated
+production case. With explicit user scope (including an already-authorized
+queue-wide refresh), an exact current clean-source failure may enter only the
+duty quarantine and must satisfy its reassessment gates. Prior acceptance does
+not excuse a current failure; materially new repair/quarantine scope still
+requires operator direction.
 
 A failure before a downstream test target starts is a control-plane failure,
 not a failed Xpra test. When the change only removes or narrows that pre-test
@@ -940,7 +1045,8 @@ preflight command. Do not run the expensive downstream matrix if the exact
 frozen fork source commit, selection and patch digests, image inputs, container
 entrypoint, and test commands are unchanged: those tests cannot validate
 whether the removed guard still blocks them. Any change to a downstream input
-or execution path restores the normal validation ladder.
+or execution path requires the affected development checks and corresponding
+final gates, not automatic execution of the entire ladder after every edit.
 
 The live runner keeps direct Xpra boundaries distinct from SSH orchestration.
 Its exact complete-stack positive set is Zed RGB, adaptive-alpha Zed H.264,
@@ -952,6 +1058,36 @@ selection allowed by that profile. Foreground, clean-source, and
 picture-fallback probes are diagnostic and cannot publish acceptance. A
 positive fault-injection profile first proves rendering and input, then proves
 the intended disconnect and survival behavior.
+
+Live-profile admission is derived from the complete fixed profile tuple, not
+from the application name alone. A `cases/<slug>` selection is accepted only
+when that tuple's exact gate is present in the case's
+`[evidence].required_gates`; gate-like entries in `[tests].list` confer no live
+authority. Adaptive-alpha Zed H.264, detach, and transport-loss remain
+stack-only. A stack accepts exactly the seven complete-stack profiles and
+never either case-only profile. The supervisor rejects a stable incompatible
+selection before publishing input-freeze ownership, then semantically replays
+the selection kind, digest, cases, patches, and evidence-only gates from the
+content-verified frozen `validated-manifests` snapshot before launching the
+frozen runner. The runner repeats admission from that frozen provenance and
+does not consult mutable host manifests after freeze.
+
+Selection kind and evidence-only gates are also explicit endpoint provenance
+inside each build-context manifest. Changing either value intentionally changes
+the context digest and image tag, invalidates the prior image-cache identity,
+and requires the resulting image inputs to traverse their applicable heavy
+gates. Such a change cannot use the unchanged-image-input exception for a
+control-plane guard, even when the selected Xpra source and patch bytes are
+otherwise unchanged.
+
+In both live build stages, copy and compile the owned C fixtures only after
+Xpra installation and its existing native build-time checks. Fixture inputs
+must not invalidate an otherwise unchanged Xpra compilation layer. Preserve
+the complete fixture/context identity, compiler flags, installed output paths
+and runtime checks: this is ordinary layer dependency ordering, not a separate
+mutable installation cache or permission to reuse a mismatched image. Verify
+new layout behavior in a named live run; claim measured cache savings only
+after observing the corresponding fixture-only rebuild.
 
 The additional positive `live-x11-clipboard` gate is case-only and is not an
 eighth complete-stack profile. Its wrapper requires exactly
@@ -992,6 +1128,163 @@ booleans; collected endpoint logs and reports must not expose marker text or
 arbitrary operator clipboard contents. Rendering, input, lifecycle, and owned
 cleanup remain positive acceptance boundaries rather than substitutes for the
 clipboard assertions.
+
+The additional positive `live-wayland-subsurface` gate is likewise case-only
+and is not an eighth complete-stack profile. Its wrapper requires exactly
+`CASE=wayland-subsurface-stream-ownership` with no stack selection and fixes
+`APPLICATION=subsurface`, `LIFECYCLE=application-exit`, `ENCODING=rgb`, strict
+H.264 policy, and the default alpha scenario. The selected case source,
+resolution, and source build-context digest must match on the Ubuntu 26.04
+native-Wayland server and Debian 13 GTK X11 client. Each distribution/role has
+its own independently bound immutable image ID and verified ownership labels;
+the two endpoint image IDs need not be equal. The live
+profile's fixed client arguments select Cairo. The case must additionally run
+its mapped real-Xvfb OpenGL regression so backing replacement and close cannot
+strand a deferred GL draw or its acknowledgement.
+
+The native fixture creates two live fixed-size `xdg_toplevel` parents and two
+real ARGB `wl_subsurface` siblings. The heterogeneous root buffers and every
+child buffer are deterministic. Child RGB channels are already premultiplied;
+their alpha is fixed strictly between zero and 255. The lower child is
+committed state-one, state-two, state-one on one surface, then moved without a
+new buffer attach or child commit. An upper sibling is attached above it with a
+known non-empty overlap. The lower sibling changes again while the upper is
+unchanged, then completes two marker-gated frame-callback generations.
+
+Initial full damage and the later client-map refresh are independent valid
+startup requests. Before the first controlled change, retain a bounded startup
+ledger containing one or two complete primary root/lower transactions and
+independently one or two ordinary full-canvas secondary packets, according to
+coalescing. Every retained entry must satisfy the canonical raw-pixel oracle,
+exact stage/reset/epoch rules, client draw and ACK routes, global sequence
+inventory, and final stable queue/composition drain. The latest entries bind
+the named initial capture but cannot replace or discard earlier evidence.
+Fresh server focus handlers for both exact owned parent WIDs establish that
+the GTK map packets ahead of them on the same connection have been processed;
+their bounded log interval is retained and checked again during collection.
+X11 activation alone does not establish this server-side ordering boundary.
+For the ordinary secondary, the final full-window capture must follow its
+final initial/map damage request in the retained server log; both parents'
+encoding and ACK queues and exact packet counts are checked directly.
+Later per-source cumulative counts advance from the exact recorded startup
+count by their fixed phase deltas; an extra startup packet or an incomplete
+transaction is not an acceptable duplicate.
+
+Phase geometry follows its repair owner. New-role reconciliation in `stacked`
+rebuilds the complete primary root and both complete child layers; reattachment
+in `reparented` rebuilds the complete secondary root and its retained child.
+Role removal instead repairs the old footprint and remaining intersections.
+Stable-tree content changes stay local. These are exact distinct plans, not
+permission to accept arbitrary larger updates or smaller child-only repairs.
+
+The same lower surface next alternates two fixed buffers continuously, and
+only after each real `wl_surface_frame` callback completes the preceding
+commit and a 50 ms monotonic minimum interval has elapsed. One sampled commit
+timestamp drives both scheduling and event evidence. Late callbacks start a new
+interval; there are no catch-up bursts, blocking sleeps or per-frame runner
+commands. These buffers and the preceding state differ only inside the exact
+advertised 32x32 lower-local damage rectangle. The producer remains active
+while the runner proves at least two
+complete three-layer transactions with distinct lower payload digests, then it
+is stopped and drained. The lower sibling is destroyed while both parents and
+the upper remain alive. The upper is detached and reattached beneath the second
+parent using the same Wayland surface and buffer without another attach. A
+subsurface-role lifetime is not a `wl_surface` lifetime: the internal wrapper
+and WID remain stable across that detach and reparent, and disappear only when
+the native surface itself is destroyed.
+
+The schema-6 fixture stream contains exactly `15 + N` ordered events for
+`2 <= N <= 256` continuous generations. Its active liveness record must be
+captured before the 256-generation safety cap, with the fixture process alive,
+the stop marker absent, the producer still active, and at least two complete
+transactions already retained. Producer activity is sampled again after those
+packets are retained, so an earlier active observation cannot conceal a stopped
+producer. Retain the initial observation's generation count and timestamp and
+require a later source generation. The complete active proof, including packet
+collection and the fresh producer check, must finish within five seconds of the
+fixture's continuous-start. The 50 ms floor keeps the unchanged 256-generation
+cap outside that budget; the cap itself remains an independent failure guard.
+The separate active/drain artifact uses schema 3. Before fetching the other
+streams, freeze the first primary inventory's maximum continuous packet
+sequence plus one as an exclusive frontier. The active snapshot must contain
+every packet below that frontier: complete transactions followed by exactly
+one primary stage of the next transaction. Recompute this exact prefix from
+the final immutable ledger; missing interior stages, altered bytes or a shifted
+frontier fail. Later packets are excluded only from that active observation,
+never from mandatory final drain, pixel or global packet/ACK accounting.
+Retain bounded per-attempt stage, reason, counts and timing diagnostics without
+pixel payloads; a generic polling timeout is not proof of a production stall.
+Count the `N` commits and their callbacks separately from the `M`
+captured transactions: `2 <= M <= N`, because uncaptured pending damage may
+coalesce. Compare `M` with the fresh post-transfer generation prefix, not an
+earlier count sampled before packets arrived. Captured states form an ordered
+subsequence of generated states;
+each capture has exactly three stages and complete packet/ACK accounting.
+After stop, callback/attach/commit/update counts must agree exactly, the last
+capture must match the last committed source state, and no pending region,
+in-flight capture, partial transaction, or ACK owner may remain.
+
+Every composition transaction is a connection-global ordered stream. Its
+first actually published packet carries exactly one
+`subsurface-reset=(x,y,w,h)` for the clipped dirty union, every packet carries
+`subsurface-composite=premultiplied-source-over-v1`, and subsequent layers may
+not repeat the reset. Packets cover every intersecting layer in wlroots
+bottom-to-top order, including the parent/root pixels needed to reset the
+backing and unchanged siblings which must be replayed over a changed lower
+layer. Child layers are positive alpha-bearing RGB32 picture packets only;
+each server publication names its internal source and current parent wire WID,
+the client draw uses that parent and the same globally unique sequence, and the
+acknowledgement routes to the exact source owner. Per-source packet counts must
+advance as declared, encoding and ACK queues must drain after every phase, and
+the connection ACK-owner count returns to zero at each bounded phase and
+continuous-drain `xpra info` snapshot. Both `damage.subsurface-pending` and
+`damage.subsurface-inflight` must also be zero: an empty ACK map alone does not
+prove that a pending capture has been encoded and published.
+
+Pixel acceptance recomputes every complete client parent image from retained
+raw packet payloads and their exact `save_update` metadata. Before replay,
+every raw source crop, including alpha, must equal the independently generated
+logical fixture pixels. The C fixture's actual pixel routines are compiled and
+cross-checked by a focused infrastructure regression, including scale and
+inverse-transform storage. Complete reconstructed scenes must also match the
+independently composed fixture scene, including outside partial damage. These
+checks distinguish a correct composition of wrong packets from correct source
+normalization and delivery. Async source
+screenshots are neither collected nor accepted as packet-correlated authority.
+For each channel the oracle uses the wire formula
+`Cpremul + round(P * (255 - alpha) / 255)` and applies overlapping layers in
+protocol stacking order; treating the child channels as straight alpha and
+premultiplying them again is invalid. Exact comparisons cover the initial,
+changed, restored, moved, overlapping, lower-updated, two fixed frame,
+continuous-final, lower-destroyed, upper-detached, and reparented states on
+both parents. They therefore prove the move clears the old footprint, every
+lower update preserves the upper sibling, continuous commits complete rather
+than starve, destruction restores root plus survivor pixels, detach restores
+the first parent, and reparent composites the unchanged upper buffer over the
+second heterogeneous root.
+
+One real X11-client pointer click targets the overlap and must traverse the
+primary parent wire window, resolve to the upper native child, and produce the
+fixture's bounded event within three seconds. Bind each client's mapped XID and
+full actual WM title at initial discovery and require that exact tuple at the
+end. The normal host decoration is part of that captured title, not a reason
+to strip it or compare with a bare server title. Independently require the
+unchanged server wire-WID and exact fixture-title inventory at each phase.
+Destroy and detach phases require
+the old source subtrees and active-pixel ownership to disappear, no packet may
+arrive from an obsolete source after its reset transaction, and no internal
+child WID may receive EOS. Both parents remain present until the ordered
+fixture exit, whose status must be zero before normal Xpra application-exit and
+owned cleanup. A missing layer, duplicate reset, stale pixels, sequence reuse,
+post-removal packet, retained child, pending ACK, changed surface or buffer
+during reparent, or report-only assertion fails closed.
+
+The fixture pixels and command markers are fixed and non-sensitive. Retained
+evidence is limited to deterministic parent-window captures, bounded raw packet
+payloads and metadata, the continuous active/drain record, fixture events,
+proxy/internal/wire IDs, offsets, stacking, coding, reset geometry, packet
+sequences, counts, hashes, equality results, and existing endpoint logs. It
+never captures an operator desktop or clipboard.
 
 The detach and transport-loss profiles identify their GTK application only
 from `interaction.identity.json`, atomically published by that fixture from its
@@ -1054,6 +1347,30 @@ restore alpha already discarded by H.264, repair server codec cleanup, or
 satisfy the direct hardware-presentation gate. CSC-module selection is also
 independent of the codec allowlist; it must not be treated as codec discovery.
 
+Shared H.264 evidence binds the packet-sequence namespace to the frozen
+selection and one confirmed active connection, identified by the owned run,
+server UUID, client UUID, session ID, connection time, and endpoint. A client
+UUID or client-info index alone is not session identity. A supported legacy
+selection retains dense per-window IDs. Selecting WSSO requires its
+connection-global namespace corroborated by initial next-packet-sequence and
+ACK-owner counters, even for ordinary roots without active subsurfaces. Those
+counters do not bound a later frontier or establish final drain.
+Missing or conflicting authority fails closed. The global mode retains an
+exact ledger for every declared title-bound window, including original IDs,
+source WIDs, saved metadata paths, metadata/payload digests, and lengths.
+Each gap in a per-window projection must be explained by the exact packets of
+another declared window; duplicates, undeclared producers, missing packets,
+and unexplained global holes fail this controlled profile. Reserved but
+unpublished IDs remain valid production behavior; acceptance accounting does
+not authorize changing cancellation or reusing IDs. IDs are never renumbered.
+A sealed startup
+prefix supports bounded active observation, but final acceptance requires
+the complete retained ledger, the unchanged prefix, and all applicable client
+draw, ACK, and terminal checks. A claim of exact final allocator value or zero
+ACK owners requires its own fresh quiescent observation, never the initial
+namespace snapshot. This common ordinary-root H.264 ledger does not replace
+the case-only RGB subsurface transaction/pixel/ACK oracle.
+
 The two named multi-window hardware-H.264 gates are the fixed application-exit
 profiles `APPLICATION=hardware` and `APPLICATION=opengl`, both with
 `ENCODING=h264`, `H264_CLIENT_POLICY=adaptive-alpha`, and
@@ -1062,16 +1379,18 @@ GTK Xpra window independently from their exact titles; registration order is
 never authority. The primary's first saved
 `window.info` is only an initial `BGRX`/`RGBX` snapshot. Every exact-window
 frame-state record must remain opaque, and its complete saved packet history
-must have positive contiguous sequence numbers in recorded order. The rounded
-damage-time directory is storage only: one millisecond may contain multiple
+must have positive sequence numbers in recorded order with exact completeness
+in the verified namespace above. The rounded damage-time directory is storage
+only: one millisecond may contain multiple
 damage groups, which are reconstructed by each exact descending `flush`
 countdown. Startup layout/picture groups remain structurally validated but are
 not production evidence. Once both title-bound windows are stable, the runner
 records a baseline against the active exact IDR group and its saved source
-geometry, then an end sequence before auxiliary exit. Each group in that interval has
-contiguous sequences, one terminal positive H.264 main region, and only the
-exact positive one-pixel right or bottom lossless RGB24/RGB32 edges allowed by
-its crop. Every observed `(window-size, main-region-size)` crop signature must
+geometry, then an end sequence before auxiliary exit. Each group in that
+interval has exactly accounted sequences in that namespace, one terminal
+positive H.264 main region, and only the exact positive one-pixel right or
+bottom lossless RGB24/RGB32 edges allowed by its crop. Every observed
+`(window-size, main-region-size)` crop signature must
 gain one complete required edge set in the interval; an unchanged edge need not
 be resent with every H.264 frame. Missing signature coverage, duplicate,
 dangling, cross-group, arbitrary, interior, larger, or alpha-bearing RGB regions

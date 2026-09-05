@@ -57,6 +57,7 @@ export XPRA_FORK_SELECTOR := $(SELECTOR)
 AUTOMATION_PYTHON := $(shell find tools infra cases -type f -name '*.py' -print 2>/dev/null | sort)
 AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_wayland_clipboard_fixture.sh \
 	infra/live/start_wayland_keyboard_fixture.sh \
+	infra/live/start_wayland_subsurface_fixture.sh \
 	infra/live/start_zed.sh \
 	infra/upstream-tests/entrypoint.sh
 
@@ -73,13 +74,15 @@ AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_waylan
 	test-image test-image-start test-image-status test-image-logs test-image-wait \
 	test-image-collect test-image-remove test-image-abort test-image-cache-remove test-versions \
 	test-start test-status test-logs test-wait test-collect test-remove test-abort \
-	test-patch-check test-focused test-quarantine test-quarantine-cython \
+	test-patch-check test-focused test-focused-cython test-focused-no-compat \
+	test-quarantine test-quarantine-cython \
 	test-quarantine-no-compat test-wayland test-libyuv \
 	test-full test-full-cython test-full-no-compat \
 	live-profile-list live-start live-status live-logs live-wait live-collect live-remove live-abort \
 	live-rgb live-h264 live-xpra-detach live-xpra-transport-loss live-xpra-hardware \
 	live-xpra-opengl-hardware live-wayland-keyboard live-x11-clipboard \
-	live-x11-clipboard-policy-check \
+	live-wayland-subsurface live-x11-clipboard-policy-check \
+	live-wayland-subsurface-policy-check \
 	deb-start deb-status deb-logs deb-wait deb-collect deb-remove deb-abort
 
 help:
@@ -130,6 +133,7 @@ help:
 		'make -C fork-maintenance stack-unapply STACK=develop' \
 		'    Apply or remove the complete queue in declared order' \
 		'make -C fork-maintenance test-start STACK=develop TARGET=focused RUN=unique-name' \
+		'    focused, focused-cython and focused-no-compat build Xpra and run selected modules' \
 		'make -C fork-maintenance test-wait RUN=unique-name' \
 		'    Run a durable embedded-source container test job' \
 		'make -C fork-maintenance test-abort RUN=unique-name' \
@@ -142,6 +146,7 @@ help:
 		'    List tracked client network profiles; profiles.yml supplies the default' \
 		'make -C fork-maintenance live-xpra-opengl-hardware STACK=develop RUN=unique-name' \
 		'make -C fork-maintenance live-x11-clipboard CASE=x11-client-clipboard-events RUN=unique-name' \
+		'make -C fork-maintenance live-wayland-subsurface CASE=wayland-subsurface-stream-ownership RUN=unique-name' \
 		'make -C fork-maintenance live-wait RUN=unique-name' \
 		'make -C fork-maintenance live-abort RUN=unique-name' \
 		'    Run or abort a durable physical-GPU profile; outputs stay below .artifacts/' \
@@ -346,7 +351,7 @@ image-run-name-check:
 
 test-target-check:
 	@case "$${XPRA_FORK_TARGET}" in \
-		versions|patch-check|focused|quarantine|quarantine-cython|quarantine-no-compat|wayland|libyuv|full|full-cython|full-no-compat) ;; \
+		versions|patch-check|focused|focused-cython|focused-no-compat|quarantine|quarantine-cython|quarantine-no-compat|wayland|libyuv|full|full-cython|full-no-compat) ;; \
 		*) printf 'unsupported TARGET: %s\n' "$${XPRA_FORK_TARGET}" >&2; exit 2 ;; \
 	esac
 	@case "$${XPRA_FORK_PATCH_MODE}" in clean|tests-only|patched) ;; \
@@ -358,7 +363,7 @@ live-options-check:
 		"$${XPRA_FORK_APPLICATION}" "$${XPRA_FORK_LIFECYCLE}" \
 		"$${XPRA_FORK_ENCODING}" "$${XPRA_FORK_H264_CLIENT_POLICY}" \
 		"$${XPRA_FORK_ALPHA_SCENARIOS}" "$${XPRA_FORK_NETWORK_PROFILE}" \
-		--selection "$${XPRA_FORK_SELECTOR}"
+		--selection "$${XPRA_FORK_SELECTOR}" --lab-root "$(AUTOMATION_ROOT)"
 
 live-profile-list:
 	@$(LIVE_CONFIG) list-profiles
@@ -390,7 +395,8 @@ test-status test-logs test-wait test-collect test-remove test-abort: run-name-ch
 	@$(MAKE) --no-print-directory -C "$(UPSTREAM_TESTS)" \
 		background-$(patsubst test-%,%,$@) BACKGROUND_NAME="$${XPRA_FORK_RUN}"
 
-test-patch-check test-focused test-quarantine test-quarantine-cython \
+test-patch-check test-focused test-focused-cython test-focused-no-compat \
+test-quarantine test-quarantine-cython \
 test-quarantine-no-compat test-wayland test-libyuv test-full test-full-cython \
 test-full-no-compat:
 	@$(MAKE) --no-print-directory test-start TARGET="$(patsubst test-%,%,$@)"
@@ -456,6 +462,18 @@ live-x11-clipboard-policy-check:
 live-x11-clipboard: live-x11-clipboard-policy-check
 	@$(MAKE) --no-print-directory live-start \
 		APPLICATION=clipboard LIFECYCLE=application-exit ENCODING=rgb \
+		H264_CLIENT_POLICY=strict ALPHA_SCENARIOS=default
+
+live-wayland-subsurface-policy-check:
+	@test "$${XPRA_FORK_CASE}" = wayland-subsurface-stream-ownership \
+		&& test -z "$${XPRA_FORK_STACK}" || { \
+		printf '%s\n' 'live-wayland-subsurface requires CASE=wayland-subsurface-stream-ownership and no STACK' >&2; \
+		exit 2; \
+	}
+
+live-wayland-subsurface: live-wayland-subsurface-policy-check
+	@$(MAKE) --no-print-directory live-start \
+		APPLICATION=subsurface LIFECYCLE=application-exit ENCODING=rgb \
 		H264_CLIENT_POLICY=strict ALPHA_SCENARIOS=default
 
 deb-policy-check:

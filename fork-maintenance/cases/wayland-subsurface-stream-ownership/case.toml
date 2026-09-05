@@ -1,0 +1,76 @@
+schema = 1
+slug = "wayland-subsurface-stream-ownership"
+kind = "production"
+title = "Compose native Wayland surface trees atomically"
+commit_subject = "Compose native Wayland surface trees atomically"
+patch_sha256 = "030aa4e99b63fdd44a0dd9bba0c32a8d1a9780ca408c663cc86b0b6a369765ab"
+dependencies = []
+paths = [
+  "tests/unittests/unit/client/cairo_backing_test.py",
+  "tests/unittests/unit/client/gtk3/subsystem/display_test.py",
+  "tests/unittests/unit/client/opengl_backing_test.py",
+  "tests/unittests/unit/client/subsystem/window_test.py",
+  "tests/unittests/unit/client/terminal/terminal_client_test.py",
+  "tests/unittests/unit/client/terminal/terminal_window_test.py",
+  "tests/unittests/unit/server/window/subsurface_source_test.py",
+  "tests/unittests/unit/wayland/pointer_test.py",
+  "tests/unittests/unit/wayland/subsurface_discovery_client.c",
+  "tests/unittests/unit/wayland/subsurface_discovery_test.py",
+  "tests/unittests/unit/wayland/subsurface_stream_test.py",
+  "xpra/cairo/backing.py",
+  "xpra/cairo/backing_base.py",
+  "xpra/client/gtk3/client_base.py",
+  "xpra/client/gtk3/opengl/drawing_area.py",
+  "xpra/client/gtk3/opengl/glarea_backing.py",
+  "xpra/client/gui/ui_client_base.py",
+  "xpra/client/gui/window/backing.py",
+  "xpra/client/gui/window_base.py",
+  "xpra/client/subsystem/window/draw.py",
+  "xpra/client/subsystem/window/manager.py",
+  "xpra/common.py",
+  "xpra/opengl/backing.py",
+  "xpra/opengl/shaders.py",
+  "xpra/server/source/avsync.py",
+  "xpra/server/source/bandwidth.py",
+  "xpra/server/source/client_connection.py",
+  "xpra/server/source/encoding.py",
+  "xpra/server/source/window.py",
+  "xpra/server/subsystem/display.py",
+  "xpra/server/subsystem/window.py",
+  "xpra/server/window/compress.py",
+  "xpra/server/window/subsurface_source.py",
+  "xpra/wayland/server/compositor.pyx",
+  "xpra/wayland/server/models/subsurface_window.py",
+  "xpra/wayland/server/models/window.py",
+  "xpra/wayland/server/pointer.pyx",
+  "xpra/wayland/server/subsurface.pxd",
+  "xpra/wayland/server/subsurface.pyx",
+  "xpra/wayland/server/subsystem/pointer.py",
+  "xpra/wayland/server/subsystem/window.py",
+  "xpra/wayland/server/surface.pxd",
+  "xpra/wayland/server/surface.pyx",
+  "xpra/wayland/server/wayland_surface.pyx",
+  "xpra/wayland/server/wlroots.pxd",
+]
+
+[tests]
+list = [
+  "unit.client.cairo_backing_test",
+  "unit.client.gtk3.subsystem.display_test",
+  "unit.client.opengl_backing_test",
+  "unit.client.subsystem.window_test",
+  "unit.client.terminal.terminal_client_test",
+  "unit.client.terminal.terminal_window_test",
+  "unit.server.window.subsurface_source_test",
+  "unit.wayland.pointer_test",
+  "unit.wayland.subsurface_discovery_test",
+  "unit.wayland.subsurface_stream_test",
+  "unit.wayland.window_test",
+  "wayland",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = ["live-wayland-subsurface"]
