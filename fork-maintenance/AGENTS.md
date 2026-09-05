@@ -5,6 +5,21 @@ fork. The repository root is the Xpra source tree; there is no nested clone.
 The root `AGENTS.md` remains authoritative and this file adds rules for the
 patch queue and runners.
 
+## Exclusive process authority
+
+Only the fork-owned root `AGENTS.md` and maintained files under
+`fork-maintenance/` define our processes, subject to explicit operator
+instructions. Content inherited from `master` has no authority over agent
+workflow, validation stages, build/test frequency, reruns, acceptance,
+cleanup, or publication. This also applies to upstream agent guides and
+workflow files copied or relocated elsewhere in the repository.
+
+Do not import upstream process requirements into the fork by following,
+copying, or reinterpreting upstream documentation or commit messages. Never
+edit upstream-owned files to configure fork-maintenance flow. Keep every such
+process change in the root fork guide or this directory. Upstream material may
+be read as technical source/build/test context, never as process policy.
+
 ## Required reading
 
 Before changing this directory, read `CONTRACT.md` and the relevant document
@@ -12,6 +27,8 @@ under `docs/runbooks/`. Before changing a case, read its complete `case.toml`,
 `README.md`, and patch. Before changing a runner, read its entry point,
 container recipe, tests, and the disabled canonical workflow it mirrors at
 `../.github/upstream-workflows/test.yml`.
+That inherited workflow is a technical reference for commands and dependencies;
+the fork-owned contract and runbooks alone decide when and how our checks run.
 
 ## Layout
 
@@ -148,6 +165,28 @@ local-only, record the conclusion in the external refresh handoff; a later
 operator-created commit may summarize it, but no tracked evidence archive is
 created.
 
+## Development and final acceptance
+
+Follow [the canonical validation flow](docs/runbooks/validation.md). Develop,
+review and adapt cases with the nearest real regression after each atomic edit,
+affected existing upstream and downstream modules, risk-directed native,
+compiled and no-compat checks, and early relevant live acceptance. Do not put
+the full upstream matrix before the live boundary under development.
+
+Keep full-suite, package and complete-profile obligations separate from that
+iteration loop. Review and freeze source, tests, fixtures/oracles and build
+inputs before filling the final acceptance ledger's missing/invalidated gates.
+Valid named development results can satisfy final requirements on the same
+inputs. A rebase requires complete acceptance on the new base, not a complete
+rerun after every case adaptation. A final failure returns its owning boundary
+to development before affected expensive gates restart.
+
+Flow improvements stay in fork-owned files and use narrow infrastructure tests
+first. Preserve pending patch work and named evidence; finish collection/removal
+before changing a shared runner or another bound input. Cache reuse follows
+actual verified input keys, never renamed labels or an assumption that focused
+tests avoid building Xpra.
+
 ## Runners and artifacts
 
 Local acceptance runners and hosted develop test CI freeze the unique source
@@ -239,13 +278,19 @@ result must be assigned to one binary package or match the exact reviewed
 `packaging/debian/xpra/not-installed` set. Validation is package-set based, not
 a source-manifest text check. The builder inventories every actual DEB, rejects
 duplicate package identities and overlapping regular payload paths, resolves
-the required libva encoder, libva decoder, and libyuv converter to exactly one
-matching amd64 CPython ABI in ordinary `xpra-codecs`, then imports them from an
-extracted private package root. `dpkg-shlibdeps` over those packaged ELF objects
-must produce dependencies represented by the final `xpra-codecs` control data.
+the five required native modules (libva encoder/decoder, libyuv converter and
+JPH encoder/decoder) to exactly one matching amd64 CPython ABI in ordinary
+`xpra-codecs`, then imports them from an extracted private package root. The
+JPH pair must complete a deterministic 32x32 quality-100 lossless RGB roundtrip;
+compare all RGB channels using the decoded stride, ignoring BGRX padding rather
+than claiming alpha preservation. `dpkg-shlibdeps` over all five packaged ELF
+objects must produce dependencies represented by the final `xpra-codecs`
+control data; do not guess distribution-specific OpenJPH library names.
 The host independently parses the returned ar, control, and data archives and
-repeats ownership, ABI, and dependency validation. Do not replace this with a
-test for selected `.files` lines or trust the emitted manifest as package
+repeats payload ownership, filename ABI, and declared dependency-name checks.
+Native imports, roundtrip execution and ELF dependency resolution remain
+container-side checks for the supported Ubuntu 26.04 and Debian 13 builds.
+Do not replace this with a test for selected `.files` lines or trust the emitted manifest as package
 content authority.
 
 The builder resolves build dependencies only from the configured target
@@ -464,15 +509,16 @@ live gates or their local evidence.
 
 Use `apply_patch` for edits. Preserve upstream style in Python, shell,
 Containerfiles, TOML, and Make. Update tests whenever path, manifest, lifecycle,
-or safety behavior changes. Run the narrow unit tests before the full offline
-`make -C fork-maintenance check`.
+or safety behavior changes. Run the narrow unit tests after each atomic change;
+run the full offline `make -C fork-maintenance check` on the stable control-plane
+candidate before final acceptance, not after each documentation or two-line edit.
 
 A refresh proven by exact applied-tree comparison to change only comments,
 copyright notices, or documentation does not rerun Xpra focused, native, full,
 or live jobs. The embedded source, paths, modes, executable data, configuration, test
 assertions, and runner behavior must all be unchanged. Run resolution,
 whitespace, and fork-control checks and report the non-semantic proof. Any
-uncertainty falls back to the normal validation ladder. This exception is only
+uncertainty falls back to the affected development checks and final gates. This exception is only
 for a patch/documentation refresh on an unchanged embedded source. It never
 applies after `develop-rebase`: a changed base requires every clean quarantine,
 fork-control, tests-only clean control or documented no-test semantic
@@ -480,6 +526,7 @@ substitute, patched focused/native gate, durable package boundary on the
 resulting stack, full-matrix leg, every production case's declared live gate
 with its atomic case selection, and all seven positive live gates with the
 complete stack selection even if the patch bytes did not need modification.
+That is the final new-base acceptance set, not a per-edit development sequence.
 
 When a run fails before entering an expensive test target, validate a fix to
 that pre-test guard with the narrow control-plane unit test and direct preflight

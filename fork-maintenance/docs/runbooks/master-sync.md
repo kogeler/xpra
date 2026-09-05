@@ -107,15 +107,18 @@ make -C fork-maintenance patch-start-check
 ```
 
 Resolve every rebase conflict, reassess the quarantine case, resolve the active
-queue, and run the complete post-rebase ladder before publishing the rewritten
-`develop` with an exact-SHA force-with-lease. The ladder is mandatory even when
+queue, and follow development then frozen-candidate final acceptance in
+[`validation.md`](validation.md) before publishing the rewritten `develop`
+with an exact-SHA force-with-lease. Final coverage is mandatory even when
 the queue applies unchanged: offline fork checks, clean quarantine reassessment,
 tests-only controls for cases which own retained tests, case-specific no-test
 semantic inspection, durable package boundaries against the resulting stack,
 including both real Ubuntu 26.04 and Debian 13 builds, patched focused/native
 gates, all three full author-test legs, every production case's declared live
 gates with its atomic case selection, and all seven fixed positive live
-profiles with the complete stack selection. If the operator does not choose
+profiles with the complete stack selection. Do not execute that complete set
+after each intermediate case adaptation; retain input-verified development
+results and fill final gaps. If the operator does not choose
 this refresh,
 current `develop` continues to be tested and published against its existing
 embedded source regardless of later master movement.

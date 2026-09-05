@@ -53,3 +53,15 @@ assigned module makes only that assignment stale; remove the patch path and
 union entry only when no leg still needs it. A newly failing complement is a
 separate admission decision. Refresh this one case through the documented
 atomic `ALLOW_PATH_CHANGE=1` workspace transition before accepting the stack.
+
+## Required validation
+
+Follow [the quarantine runbook](../../docs/runbooks/test-quarantine.md) and
+[development and final acceptance](../../docs/runbooks/validation.md). The
+three clean gates are required before applying the duty after rebase; retain
+their current collected results while source, image/environment, module union,
+and per-leg expectations remain unchanged. Independent production-case
+development need not wait, and unrelated production-only edits do not require
+reassessment. After a duty edit, run its nearest regression and affected clean
+gate checks. The complete patched matrix belongs to final acceptance on the
+stable resulting stack, not after every intermediate quarantine edit.

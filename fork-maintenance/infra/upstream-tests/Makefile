@@ -53,7 +53,8 @@ export XPRA_FORK_IMAGE_BACKGROUND_NAME := $(IMAGE_BACKGROUND_NAME)
 	image image-check ci-image ci image-background-start image-background-name-check \
 	image-background-status image-background-logs image-background-wait \
 	image-background-collect image-background-remove image-background-abort image-remove \
-	versions patch-check focused quarantine quarantine-cython quarantine-no-compat \
+	versions patch-check focused focused-cython focused-no-compat \
+	quarantine quarantine-cython quarantine-no-compat \
 	wayland libyuv full full-cython full-no-compat run background-start background-name-check \
 	background-status background-logs background-wait background-collect \
 	background-remove background-abort
@@ -74,6 +75,8 @@ help:
 		'make image-remove            Remove only the exact verified upstream-test image' \
 		'make patch-check          Apply and whitespace-check the selection' \
 		'make focused              Build and run the selected regression tests' \
+		'make focused-cython       Build compiled Python and run the same selected modules' \
+		'make focused-no-compat    Build and run selected modules without compatibility' \
 		'make quarantine           Confirm declared failures on clean baseline' \
 		'make quarantine-cython    Confirm declared failures on clean Cython build' \
 		'make quarantine-no-compat Confirm declared failures without compatibility' \
@@ -221,7 +224,8 @@ image-background-collect image-background-remove image-background-abort: image-b
 	@python3 "$(JOB)" image $(patsubst image-background-%,%,$@) \
 		"$${XPRA_FORK_IMAGE_BACKGROUND_NAME}"
 
-versions patch-check focused quarantine quarantine-cython quarantine-no-compat \
+versions patch-check focused focused-cython focused-no-compat \
+	quarantine quarantine-cython quarantine-no-compat \
 	wayland libyuv full full-cython full-no-compat: selection-check source-snapshot image
 	@python3 "$(JOB)" test foreground --target "$@" \
 		--selection "$${XPRA_FORK_SELECTION}" --patch-mode "$${XPRA_PATCH_MODE}" \

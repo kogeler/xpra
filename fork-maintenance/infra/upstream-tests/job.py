@@ -51,6 +51,8 @@ TARGETS = {
     "versions",
     "patch-check",
     "focused",
+    "focused-cython",
+    "focused-no-compat",
     "quarantine",
     "quarantine-cython",
     "quarantine-no-compat",

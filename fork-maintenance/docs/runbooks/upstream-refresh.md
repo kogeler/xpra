@@ -28,6 +28,14 @@ not ask the operator to name one.
 
 ## Purpose
 
+Use the development, candidate-freeze, and final-acceptance phases in
+[`validation.md`](validation.md). Adapt and review the complete queue with
+nearest regressions, affected upstream/case modules, relevant native/compiled
+checks, and early relevant live profiles. Only after the candidate is stable
+fill the final evidence gaps. The complete requirements below are not a matrix
+to rerun after each case edit; input-verified development results may already
+satisfy them.
+
 This is the canonical autonomous end-to-end runbook for an operator-selected
 upstream refresh. Use it after the operator has synchronized
 `kogeler/xpra:master` from `Xpra-org/xpra:master` and wants the agent to move
@@ -69,7 +77,9 @@ required inputs.
 Replace placeholders such as `<case>` and `<cycle>` in every example; never
 pass the angle brackets literally.
 
-Read completely before changing anything:
+Read completely before changing anything. Fork-owned guides, contracts,
+runbooks, and manifests alone define this process; inherited source documents,
+workflows, and history supply technical context, never workflow authority:
 
 1. root `AGENTS.md` and `fork-maintenance/AGENTS.md`;
 2. `fork-maintenance/CONTRACT.md` and this runbook;
@@ -91,6 +101,9 @@ Read completely before changing anything:
    [`deb-packages.md`](deb-packages.md);
 8. [`cycle-cleanup.md`](cycle-cleanup.md) and
    [`publish-develop.md`](publish-develop.md).
+
+Also read [`validation.md`](validation.md) for scheduling, candidate freeze,
+and the exact evidence-reuse rules.
 
 Resolve one reviewed Ruff executable before the first control-plane check and
 record its version. `<ruff>` below is its absolute path. A system `ruff` is
@@ -617,13 +630,14 @@ git range-diff \
 
 The rebase changes commit identities even when patch content is unchanged.
 
-The authority and source context read before the rebase belonged to the old
-embedded source. Before resolving a patch or making any post-rebase edit,
-re-read the current `AGENTS.md`, `fork-maintenance/AGENTS.md`,
-`fork-maintenance/CONTRACT.md`, `CLAUDE.md`, `CONTRIBUTING.md`,
-and `pyproject.toml` completely. At this point the disabled workflow copy has
-not yet passed its post-rebase byte-identity gate, so read the canonical
-workflow directly from the recorded new source rather than trusting that copy:
+After rebase, re-read the current fork-owned `AGENTS.md`,
+`fork-maintenance/AGENTS.md`, and `fork-maintenance/CONTRACT.md` before resolving
+a patch or making any post-rebase edit. Separately re-read `CLAUDE.md`,
+`CONTRIBUTING.md`, and `pyproject.toml` completely for the new technical
+source/build/test context; none is fork-process authority. At this point the
+disabled workflow copy has not yet passed its post-rebase byte-identity gate,
+so read the canonical workflow directly from the recorded new source rather
+than trusting that copy:
 
 ```bash
 git show <new-source>:.github/workflows/test.yml
@@ -632,7 +646,8 @@ git show <new-source>:.github/workflows/test.yml
 Re-read the active manifests and owning runbooks if the replay or a conflict
 changed them, then inspect the new surrounding source, adjacent tests, and
 current maintainer-authored history for every path being reassessed.
-New-source authority supersedes the pre-refresh copy and old handoff notes.
+New source behavior supersedes old technical assumptions and handoff notes;
+inherited instructions cannot alter the fork-owned process.
 
 Before making any new tracked edit, prove the clean rebased branch and inspect
 each case separately so a first stack failure does not hide later status:
@@ -681,6 +696,11 @@ complete-stack heavy tests:
 - any changed upstream workflow boundary must be reconciled;
 - no applied production source may remain in host `develop`.
 
+These resolution checks are necessary but not sufficient for final scheduling.
+Complete the candidate-freeze review in [`validation.md`](validation.md),
+including tests, live oracles, compiled risks, and build inputs, before starting
+the complete-stack final workload.
+
 If any case diverges, its clean control passes, skips, or no longer observes its
 claimed defect, perform the complete semantic mapping and keep/adapt/retire
 analysis below for that case in this same pass. Do not request scope expansion,
@@ -719,10 +739,13 @@ diverged case uses the provenance-bound `PATCH_MODE=reconstruct` flow below;
 never fall back to an intermediate commit merely to make the next case
 possible.
 
-## Prepare the test image and reassess quarantine
+## Prepare the test image and plan quarantine reassessment
 
-Do this before adapting production cases. The quarantine must resolve before
-its named clean gates can start. If its old patch is `diverged`,
+Verify the image before the first test which uses it. Reassess quarantine for
+the new source and actual image/module/gate inputs before applying the duty
+case, but do not block independent production-case development on that work.
+Reuse current collected reassessment results when those inputs are unchanged.
+The quarantine must resolve before its named clean gates can start. If its old patch is `diverged`,
 use the isolated reconstruction flow below to preserve only the still-required
 declared test-module changes, publish that complete candidate, and then return
 here. If current upstream makes the correct candidate empty, retire the duty
@@ -798,8 +821,10 @@ assigned module which becomes green makes that assignment stale; a complement
 failure requires current clean-source diagnosis and an exact new assignment.
 The autonomous invocation already authorizes that queue-wide duty update.
 Update the case through the atomic admission sequence in
-[`test-quarantine.md`](test-quarantine.md), then run all three clean gates
-again.
+[`test-quarantine.md`](test-quarantine.md), then complete the clean gates whose
+source, environment, module union, or expected subset changed. Every one of the
+three final assignments still requires current, exact proof; an unrelated
+production-only edit does not require another reassessment.
 
 If any duty module remains, prove that the current quarantine patch itself
 applies and its focused module selection is valid:
@@ -823,12 +848,15 @@ required by [`test-quarantine.md`](test-quarantine.md) and omit this case-only
 patched command. The resulting stack-focused and full legs below remain
 mandatory.
 
-Complete any quarantine or CI-layout repair before production adaptation. Run
-its individual resolution and available case-only gates as soon as they are
-meaningful, but keep every repair uncommitted. Later case work continues through
+Complete CI-layout repair before source builds and quarantine reassessment
+before applying the duty case. Run their individual resolution and available
+case-only gates as soon as they are meaningful, but keep every repair
+uncommitted. Independent case work continues through
 the isolated applicable/reconstruction flows without touching the host source
-or index. The complete `check` and `stack-check` remain mandatory after every
-case resolves; do not claim them early while the queue is still divergent.
+or index. Once all cases resolve and the candidate is reviewed and frozen,
+complete the missing or invalidated `check` and `stack-check` coverage. Do not
+repeat the complete offline suite after each individual case adaptation, or
+claim complete-stack acceptance while the queue is still divergent.
 
 ## Reassess every production case semantically
 
@@ -1086,12 +1114,18 @@ provenance schema, immutable inventories, mutation tests, contract, and live
 runbook together. Prove the migrated gate with `STACK=develop`. Otherwise keep
 the case; an upstream unit test alone does not satisfy this live-input boundary.
 
-## Complete post-rebase validation
+## Final post-rebase acceptance
 
-There is no documentation-only or unchanged-patch exception after rebase.
-Every command below uses the new embedded source and current patch/selection
-digests. Stop at the first unexplained failure and use a new run identity for
-every retry.
+After the development loop and reviewed candidate freeze, reconcile the ledger
+against all requirements below. Run only missing or invalidated checks; do not
+repeat a valid development result merely because final acceptance has begun.
+The evidence-reuse rules in [`validation.md`](validation.md) retain original
+run identities and require exact input proof.
+
+There is no old-base or unchanged-patch waiver after rebase: every requirement
+must be proved on the new embedded source and final candidate. Stop escalation
+at the first unexplained failure, return its owner to development, and stabilize
+the correction before scheduling affected final gates with new run identities.
 
 ### Offline, clean controls, focused, and native
 
@@ -1119,9 +1153,9 @@ rg -n --fixed-strings '<case>' \
 Exit status 1 with no output is the expected no-match result; any other nonzero
 status is an error. Review every match; no current active reference may remain.
 
-Repeat the tests-only focused control for every production case in the current
-stack which owns tests. Also repeat every
-native/subsystem target declared by such a case in `PATCH_MODE=tests-only`;
+Ensure a valid tests-only focused control for every production case in the
+current stack which owns tests, and every native/subsystem target declared by
+such a case in `PATCH_MODE=tests-only`;
 these are available clean controls after every rebase, not only when retirement
 is already expected. Give each case/target pair a distinct `RUN`, inspect its
 exact expected regression, and remove it through the ordinary lifecycle. For a
@@ -1133,13 +1167,15 @@ native target absent from that case's manifest. If any clean control passes,
 skips, or ceases to reproduce the exact retained regression, return to that
 case's already-authorized semantic keep/adapt/retire analysis before
 continuing. Do the same when a no-test case's semantic inspection indicates
-that upstream may now replace its behavior. Do not proceed to package, full,
-or live acceptance until every such decision is resolved.
+that upstream may now replace its behavior. Do not freeze or accept the final
+complete queue until every such decision is resolved. Independent case
+development, including its relevant early live gate after focused/native
+prerequisites, may continue under [`validation.md`](validation.md).
 
-For every retained or adapted production case, run its individual focused
-selection with the complete patch. Enumerate the current stack and give every
-case a distinct `RUN`; do not infer atomic self-sufficiency from the later
-stack result:
+For every retained or adapted production case, ensure its individual focused
+selection passes with the complete patch. Enumerate the current stack and use
+a distinct `RUN` for each missing or invalidated result; do not infer atomic
+self-sufficiency from the later stack result:
 
 ```bash
 make -C fork-maintenance test-start \
@@ -1159,8 +1195,9 @@ Do not run this `CASE` command for a retired case. If a case declares a
 downstream dependency which prevents an atomic case selection from resolving,
 use a maintained smallest dependency-complete selection; if no such selection
 mechanism exists, stop and close that tooling/test-ownership gap rather than
-silently relying only on the full stack. In every decision branch, also run the
-resulting complete stack:
+silently relying only on the full stack. After the keep/adapt/retire decisions,
+also ensure one valid focused result for the resulting complete stack; launch
+it only if that final requirement is missing or invalidated:
 
 ```bash
 make -C fork-maintenance test-start \
@@ -1172,10 +1209,11 @@ make -C fork-maintenance test-logs RUN=<cycle>-stack-focused-01
 make -C fork-maintenance test-remove RUN=<cycle>-stack-focused-01
 ```
 
-For every retained or adapted production case, run every native/subsystem
-target that case declares with its individual `CASE=<slug>` selection and a
-unique run identity. In every decision branch, also run every native/subsystem
-target declared by the resulting stack. The current Wayland examples are:
+For every retained or adapted production case, ensure every declared
+native/subsystem target has a valid result with its individual `CASE=<slug>`
+selection. In every decision branch, also ensure coverage of the resulting
+stack's declared native/subsystem targets. Launch missing or invalidated checks
+with unique run identities. The current Wayland examples are:
 
 ```bash
 make -C fork-maintenance test-start \
@@ -1203,8 +1241,9 @@ cleanup.
 
 ### Three full upstream legs
 
-Start each leg with a distinct run identity; they may execute concurrently when
-resources allow:
+After candidate freeze, complete each missing or invalidated full leg with a
+distinct run identity. They may execute concurrently when resources allow;
+do not start them automatically after each intermediate adaptation:
 
 Only the detached test payloads run concurrently. Collection, abort, and
 removal are terminal lifecycle transitions protected by one retained lock, so
@@ -1251,7 +1290,9 @@ leg and follow the already-authorized queue-wide quarantine procedure in
 
 Before the first case-declared or stack live gate, create and verify the
 hash-locked analysis environment, inspect the host boundary, and prove that the
-complete resulting stack can be materialized in an isolated workspace:
+selected case or stack can be materialized in an isolated workspace. The
+example below selects the complete queue; for an early atomic live run, use
+that wrapper's admitted `CASE=<slug>` instead of `STACK=develop`:
 
 ```bash
 make -C fork-maintenance live-venv
@@ -1272,9 +1313,11 @@ do not recreate it between otherwise unchanged runs.
 
 ### Case-declared real boundaries
 
-Only after all three full legs pass, enumerate every retained or adapted
-production case and run every live gate in its `required_gates` with that exact
-`CASE=<case>` selection. If two cases
+Enumerate every retained or adapted production case and ensure every live gate
+in its `required_gates` has a valid result with that exact `CASE=<case>`
+selection. Run a relevant gate during development after its focused/native
+prerequisites, without waiting for the full upstream matrix. Final acceptance
+fills only the remaining input-verified gaps. If two cases
 declare the same gate, run it once for each case: the atomic selections prove
 different patch boundaries. A case with an empty list contributes no live run
 here. After retirement, omit that retired case's patched run only when its
@@ -1303,6 +1346,7 @@ boundaries remain mandatory only in the complete-stack matrix below.
 | `live-rgb` | `live-rgb` |
 | `live-wayland-keyboard` | `live-wayland-keyboard` |
 | `live-x11-clipboard` | `live-x11-clipboard` |
+| `live-wayland-subsurface` | `live-wayland-subsurface` |
 | `live-wayland-h264-hardware` | `live-xpra-hardware` |
 | `live-wayland-opengl-h264-hardware` | `live-xpra-opengl-hardware` |
 
@@ -1334,7 +1378,9 @@ the case README.
 Run both real package builds and their independent package/import validation
 for every autonomous refresh, regardless of whether the Debian-packaging case
 is retained, adapted, or retired. They are an unconditional post-rebase
-boundary, not a focused unit-test substitute:
+final boundary, not a focused unit-test substitute or an automatic step after
+each case edit. Reuse an already valid result only under
+[`validation.md`](validation.md); the commands below fill missing results:
 
 ```bash
 make -C fork-maintenance deb-start \
@@ -1374,8 +1420,9 @@ fresh RUN name.
 
 Using the already verified live preflight above, run all seven wrappers
 sequentially with `STACK=develop` and the YAML-declared default
-`NETWORK_PROFILE`. Do not replace them with CI, clean diagnostics, or fallback
-classifiers:
+`NETWORK_PROFILE`, omitting only requirements already covered by input-verified
+results on the final candidate. Do not replace them with CI, clean diagnostics,
+or fallback classifiers:
 
 ```bash
 make -C fork-maintenance live-rgb \

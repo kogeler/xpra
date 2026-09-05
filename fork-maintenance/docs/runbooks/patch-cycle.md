@@ -2,6 +2,12 @@
 
 ## Default isolated cycle
 
+Scheduling follows [`validation.md`](validation.md): iterate atomic edits with
+the nearest real regression, affected upstream/case/dependency modules and
+relevant native/compiled/live checks, then review and freeze the candidate.
+Full matrix, DEB, and complete live requirements are final coverage obligations,
+not a checklist repeated after each edit.
+
 For an existing case, stay on `develop` and use the isolated workspace flow:
 
 ```bash
@@ -158,7 +164,8 @@ configuration, test assertions, and runner behavior are identical, classify it
 as non-semantic. Run resolution, whitespace, and fork-control checks only; do
 not launch focused, native, matrix, or live jobs. State the comparison in the
 handoff. A rebase changes the embedded source and never qualifies for this
-exception. Any other change follows the full validation ladder.
+exception. Any other change uses the affected development checks and the
+corresponding final requirements under [`validation.md`](validation.md).
 
 Review the staged source representation and stored patch representation. Then
 restore the committed source tree:
@@ -230,7 +237,8 @@ still assigns it; forward applicability alone is never evidence that a
 quarantine remains necessary.
 
 An upstream rebase always invalidates the previous functional acceptance,
-including when every patch still applies byte-for-byte. Run the complete
+including when every patch still applies byte-for-byte. After development and
+candidate freeze, complete any missing or invalidated requirements: the complete
 offline fork-control suite, a tests-only clean control for every production
 case which owns retained tests and the documented no-test semantic inspection
 otherwise, every patched focused and native gate, all three complete upstream
@@ -239,7 +247,9 @@ resulting stack including both real Ubuntu 26.04 and Debian 13 builds, every
 production case's declared live gates with its atomic `CASE=<slug>` selection,
 and all seven fixed positive stack live profiles. A new author-test failure may
 enter the single quarantine only after the same module fails on this exact
-clean source; then rerun the quarantine gates and complete patched matrix.
+clean source. Reassess changed quarantine inputs, stabilize the candidate, then
+fill the affected final matrix gaps; do not restart full suites after every
+intermediate quarantine or production edit.
 
 An `apply` case uses the ordinary isolated `PATCH_MODE=patched` flow. A
 `diverged` case cannot: both `patch-apply` and ordinary patched workspace
