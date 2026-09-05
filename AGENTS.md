@@ -460,6 +460,11 @@ F8 event delivered through Xpra, then requires a compositor `owner-change`
 confirmation. The root XFixes monitor remains active through that phase: it
 must record a third takeover matching the raw reverse consumer under `both`
 and exactly the two local same-XID updates under `to-server` and `off`.
+It also covers controlled Xpra client shutdown and drains queued X11 events
+after client exit. Only an exact shutdown-only zero-owner notification may be
+separated from production takeovers; late nonzero takeovers remain failures.
+Retained compositor source intervals and cross-stream fixture chronology are
+reparsed during collection.
 
 The separate `live-wayland-subsurface` case-only gate requires exactly
 `CASE=wayland-subsurface-stream-ownership` and applies that source to both the

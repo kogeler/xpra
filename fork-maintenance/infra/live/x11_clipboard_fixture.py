@@ -615,6 +615,7 @@ def run_monitor(
         stop_file.unlink(missing_ok=True)
     emitter.emit(
         "monitor-ready",
+        pid=os.getpid(),
         event_base=int(event_base.value),
         owner_before_xid=x11.owner(selection),
         root_xid=x11.root,
@@ -623,44 +624,60 @@ def run_monitor(
     events: list[dict[str, object]] = []
     overflow = False
     stop_requested = False
+    stop_requested_ns = 0
+    drained_ns = 0
     deadline = time.monotonic() + timeout
+
+    def drain_events() -> None:
+        nonlocal overflow
+        while x11.lib.XPending(x11.display):
+            event = XEvent()
+            x11.lib.XNextEvent(x11.display, byref(event))
+            if event.type != event_base.value:
+                continue
+            observed = event.xfixes
+            item = {
+                "owner_xid": int(observed.owner),
+                "selection_is_clipboard": int(observed.selection) == selection,
+                "selection_timestamp": int(observed.selection_timestamp),
+                "send_event": bool(observed.send_event),
+                "subtype": int(observed.subtype),
+                "timestamp": int(observed.timestamp),
+                "window_xid": int(observed.window),
+            }
+            events.append(item)
+            emitter.emit("xfixes-selection-notify", **item)
+            if len(events) >= MAX_MONITOR_EVENTS:
+                overflow = True
+                break
+
     try:
-        while time.monotonic() < deadline and not overflow and not stop_requested:
-            while x11.lib.XPending(x11.display):
-                event = XEvent()
-                x11.lib.XNextEvent(x11.display, byref(event))
-                if event.type != event_base.value:
-                    continue
-                observed = event.xfixes
-                item = {
-                    "owner_xid": int(observed.owner),
-                    "selection_is_clipboard": int(observed.selection) == selection,
-                    "selection_timestamp": int(observed.selection_timestamp),
-                    "send_event": bool(observed.send_event),
-                    "subtype": int(observed.subtype),
-                    "timestamp": int(observed.timestamp),
-                    "window_xid": int(observed.window),
-                }
-                events.append(item)
-                emitter.emit("xfixes-selection-notify", **item)
-                if len(events) >= MAX_MONITOR_EVENTS:
-                    overflow = True
-                    break
-            if stop_file is not None:
+        while time.monotonic() < deadline and not overflow:
+            drain_events()
+            if stop_file is not None and not stop_requested:
                 stop_requested = take_monitor_stop(stop_file)
                 if stop_requested:
+                    stop_requested_ns = time.monotonic_ns()
+                    # The runner stops us only after the Xpra client's exit.
+                    # Drain a server round trip as well as Xlib's local queue.
+                    x11.lib.XSync(x11.display, False)
+                    drain_events()
+                    drained_ns = time.monotonic_ns()
                     break
             time.sleep(0.005)
         emitter.emit(
             "monitor-result",
+            pid=os.getpid(),
             event_count=len(events),
             events=events,
             overflow=overflow,
             owner_after_xid=x11.owner(selection),
             stop_requested=stop_requested,
+            stop_requested_ns=stop_requested_ns,
+            drained_ns=drained_ns,
             subscribed_window_xids=windows,
         )
-        stopped_cleanly = stop_file is None or stop_requested
+        stopped_cleanly = stop_file is None or bool(stop_requested and drained_ns)
         return 0 if events and not overflow and stopped_cleanly else 1
     finally:
         x11.close()
