@@ -100,6 +100,66 @@ class VerificationSelectionTest(unittest.TestCase):
         with self.assertRaisesRegex(selection.SelectionError, "may only modify tests/"):
             selection.load_selection(self.lab, "verifications/current-behavior")
 
+    def test_required_gate_projection_excludes_tests_list_gates(self) -> None:
+        manifest = self.directory / "verification.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                "required_gates = []",
+                'required_gates = ["live-rgb"]',
+            ),
+            encoding="utf-8",
+        )
+        selected = selection.load_selection(
+            self.lab,
+            "verifications/current-behavior",
+        )
+        self.assertEqual(tuple(selection.iter_required_gates(selected)), ("live-rgb",))
+        self.assertEqual(tuple(selection.iter_gates(selected)), ("full", "live-rgb"))
+
+        arguments = (
+            "selection.py",
+            "--lab-root",
+            str(self.lab),
+            "--selection",
+            "verifications/current-behavior",
+            "required-gates",
+        )
+        with patch("sys.argv", arguments), redirect_stdout(StringIO()) as stdout:
+            self.assertEqual(selection.main(), 0)
+        self.assertEqual(stdout.getvalue(), "live-rgb\n")
+
+    def test_wayland_subsurface_live_gate_is_a_supported_evidence_gate(self) -> None:
+        manifest = self.directory / "verification.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                "required_gates = []",
+                'required_gates = ["live-wayland-subsurface"]',
+            ),
+            encoding="utf-8",
+        )
+
+        selected = selection.load_selection(
+            self.lab,
+            "verifications/current-behavior",
+        )
+        self.assertEqual(
+            tuple(selection.iter_required_gates(selected)),
+            ("live-wayland-subsurface",),
+        )
+
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                "live-wayland-subsurface",
+                "live-wayland-subsurface-typo",
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(selection.SelectionError, "invalid verification.*gate"):
+            selection.load_selection(
+                self.lab,
+                "verifications/current-behavior",
+            )
+
     def write_resolution(self) -> tuple[Path, Path, str, str]:
         selected = selection.load_selection(
             self.lab,

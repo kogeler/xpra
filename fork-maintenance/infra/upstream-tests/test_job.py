@@ -6,6 +6,7 @@ import argparse
 import fcntl
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,7 @@ import unittest
 from contextlib import contextmanager, nullcontext, redirect_stderr
 from io import StringIO
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import Mock, call, patch
 
 import job
@@ -1586,6 +1588,298 @@ class BackgroundContainerTest(unittest.TestCase):
             status = publish.call_args.args[1]
             self.assertEqual(status["validation_ok"], 0)
             self.assertEqual(status["result"], "failed")
+
+
+class FocusedEntrypointTest(unittest.TestCase):
+    MODES: ClassVar[dict[str, tuple[str, str]]] = {
+        "focused": ("without", "1"),
+        "focused-cython": ("with", "1"),
+        "focused-no-compat": ("without", "0"),
+    }
+    MODULES = ("unit.server.first_test", "unit.client.second_test")
+
+    def run_focused(
+        self,
+        target: str,
+        *,
+        patch_mode: str = "patched",
+        modules: tuple[str, ...] = MODULES,
+        missing: str = "",
+        selector_status: int = 0,
+        gates: tuple[str, ...] = (),
+        gate_status: int = 0,
+        install_status: int = 0,
+        native_status: int = 0,
+        tree_output: str = "a" * 40,
+        tree_status: int = 0,
+    ) -> subprocess.CompletedProcess[str]:
+        entrypoint = (job.RUNNER_ROOT / "entrypoint.sh").read_text(encoding="utf-8")
+
+        def function(name: str, following: str) -> str:
+            marker = f"{name}() {{\n"
+            return marker + entrypoint.split(marker, 1)[1].split(
+                f"\n{following}() {{", 1
+            )[0] + "\n"
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for module in modules:
+                if module == missing:
+                    continue
+                path = root / "tests/unittests" / (module.replace(".", "/") + ".py")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            (root / "setup.py").write_text(
+                "import json, os, sys\n"
+                "print('focused_invocation=' + json.dumps({\n"
+                "    'arguments': sys.argv[1:],\n"
+                "    'cythonize': os.environ.get('CYTHONIZE_MORE'),\n"
+                "    'compat': os.environ.get('XPRA_BACKWARDS_COMPATIBLE'),\n"
+                "    'cflags': os.environ.get('CFLAGS'),\n"
+                "    'cxxflags': os.environ.get('CXXFLAGS'),\n"
+                "    'extra_args': os.environ.get('EXTRA_ARGS'),\n"
+                "}))\n"
+                f"sys.exit({install_status})\n",
+                encoding="utf-8",
+            )
+            harness = (
+                "set -euo pipefail\n"
+                f"WORK={shlex.quote(str(root))}\n"
+                f"PATCH_MODE={shlex.quote(patch_mode)}\n"
+                "SELECTION=cases/focused-subject\n"
+                # Ambient values must never choose the named mode.
+                "export CYTHONIZE_MORE=ambient XPRA_BACKWARDS_COMPATIBLE=ambient\n"
+                "prepare_source() { printf 'prepared_source\\n'; }\n"
+                "git() {\n"
+                "    test \"$*\" = \"-C $WORK write-tree\" || return 91\n"
+                f"    printf '%s' {shlex.quote(tree_output)}\n"
+                f"    return {tree_status}\n"
+                "}\n"
+                "selection_tool() {\n"
+                "    case \"$1\" in\n"
+                f"        unit-tests) printf '%s' {shlex.quote(chr(10).join(modules))}; "
+                f"return {selector_status} ;;\n"
+                f"        gates) printf '%s' {shlex.quote(chr(10).join(gates))}; "
+                f"return {gate_status} ;;\n"
+                "        *) return 99 ;;\n"
+                "    esac\n"
+                "}\n"
+                "check_focused_native_modules() { "
+                "printf 'checked_native=%s:%s\\n' \"$CYTHONIZE_MORE\" \"$XPRA_BACKWARDS_COMPATIBLE\"; "
+                f"return {native_status}; }}\n"
+                + function("selected_focused_tests", "selected_gate_names")
+                + function("selected_gate_names", "validate_inputs")
+                + function("run_focused", "run_wayland")
+                + '\ncase "${1:-help}" in\n'
+                + entrypoint.rsplit('\ncase "${1:-help}" in\n', 1)[1]
+            )
+            return subprocess.run(
+                ("bash", "-s", "--", target),
+                input=harness,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    def test_named_modes_pin_environment_and_ordered_modules(self) -> None:
+        for target, (cythonize, compat) in self.MODES.items():
+            for patch_mode in ("patched", "tests-only"):
+                with self.subTest(target=target, patch_mode=patch_mode):
+                    result = self.run_focused(target, patch_mode=patch_mode)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    calls = [
+                        json.loads(line.split("=", 1)[1])
+                        for line in result.stdout.splitlines()
+                        if line.startswith("focused_invocation=")
+                    ]
+                    self.assertEqual(calls, [{
+                        "arguments": [
+                            "unittests", "unit/server/first_test.py", "unit/client/second_test.py",
+                        ],
+                        "cythonize": cythonize,
+                        "compat": compat,
+                        "cflags": "-O0 -g0",
+                        "cxxflags": "-O0 -g0",
+                        "extra_args": "--with-terminal_client",
+                    }])
+                    for marker in (
+                        f"focused_mode={target}",
+                        f"focused_cythonize_more={cythonize}",
+                        f"focused_backwards_compatible={compat}",
+                        "focused_applied_tree=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    ):
+                        self.assertEqual(result.stdout.splitlines().count(marker), 1)
+                    self.assertEqual(
+                        [line for line in result.stdout.splitlines() if line.startswith("focused_unit_test=")],
+                        [f"focused_unit_test={module}" for module in self.MODULES],
+                    )
+                    self.assertEqual(
+                        result.stdout.splitlines().count(f"checked_native={cythonize}:{compat}"), 1,
+                    )
+
+    def test_each_mode_rejects_empty_missing_or_failed_module_inventory(self) -> None:
+        faults = (
+            ({"modules": ()}, "selection has no focused unit tests"),
+            ({"missing": self.MODULES[1]}, "selected unit test is missing after patching"),
+            ({"selector_status": 23}, "cannot read focused unit tests"),
+            ({"gate_status": 23}, "cannot read gates"),
+            ({"modules": ("unit.test_util",)}, "selected unit module is not an executable test"),
+        )
+        for target in self.MODES:
+            for options, message in faults:
+                with self.subTest(target=target, options=options):
+                    result = self.run_focused(target, **options)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn(message, result.stderr)
+                    self.assertNotIn("focused_invocation=", result.stdout)
+                    self.assertNotIn("checked_native", result.stdout)
+
+    def test_each_mode_requires_tests_only_or_patched_source(self) -> None:
+        for target in self.MODES:
+            with self.subTest(target=target):
+                result = self.run_focused(target, patch_mode="clean")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("focused regressions require", result.stderr)
+                self.assertNotIn("prepared_source", result.stdout)
+
+    def test_applied_tree_failure_cannot_publish_a_focused_plan_or_run_tests(self) -> None:
+        for options, message in (
+            ({"tree_status": 23}, "cannot determine focused applied source tree"),
+            ({"tree_output": ""}, "invalid focused applied source tree"),
+            ({"tree_output": "a" * 39}, "invalid focused applied source tree"),
+        ):
+            with self.subTest(options=options):
+                result = self.run_focused("focused", **options)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn("focused_mode=", result.stdout)
+                self.assertNotIn("focused_invocation=", result.stdout)
+
+    def test_each_mode_preserves_native_build_requirements_and_failure(self) -> None:
+        for target in self.MODES:
+            with self.subTest(target=target):
+                result = self.run_focused(target, gates=("wayland", "libyuv"), native_status=19)
+                self.assertEqual(result.returncode, 19, result.stderr)
+                invocation = next(
+                    json.loads(line.split("=", 1)[1]) for line in result.stdout.splitlines()
+                    if line.startswith("focused_invocation=")
+                )
+                self.assertEqual(
+                    invocation["extra_args"],
+                    "--with-terminal_client --with-csc_libyuv --with-argb "
+                    "--with-keyboard --with-wayland_server --with-clipboard --with-dmabuf",
+                )
+
+    def test_failed_build_does_not_reach_native_success(self) -> None:
+        for target in self.MODES:
+            with self.subTest(target=target):
+                result = self.run_focused(target, install_status=17)
+                self.assertEqual(result.returncode, 17, result.stderr)
+                self.assertNotIn("checked_native", result.stdout)
+
+    def test_root_make_and_named_parser_admit_exact_focused_targets(self) -> None:
+        for target in (*self.MODES, "focused-typo"):
+            with self.subTest(target=target):
+                result = subprocess.run(
+                    ("make", "--no-print-directory", "-s", "test-target-check", f"TARGET={target}"),
+                    cwd=job.MAINTENANCE_ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 2 if target == "focused-typo" else 0, result.stderr)
+                arguments = [
+                    "test", "start", "focused-mode", "--target", target,
+                    "--selection", "cases/focused-subject", "--patch-mode", "patched",
+                    "--source-head", "1" * 40, "--source-remote", "origin",
+                    "--image", "localhost/xpra:test", "--image-input-sha256", "2" * 64,
+                    "--source", "3" * 40, "--workflow-sha256", "4" * 64,
+                ]
+                if target == "focused-typo":
+                    with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                        job.parser().parse_args(arguments)
+                else:
+                    args = job.parser().parse_args(arguments)
+                    self.assertIs(args.handler, job.test_start)
+                    labels = job.test_labels(
+                        args, image_id="5" * 64, run_id="owned-run",
+                        runner_digest="6" * 64, selection_sha256="7" * 64,
+                    )
+                    self.assertEqual(labels["io.xpra.fork-maintenance.target"], target)
+
+
+class FocusedRuntimeModeTest(unittest.TestCase):
+    def validate(
+        self,
+        *,
+        cythonize: str,
+        compat: str,
+        compiled: bool,
+        actual_compat: bool,
+        outside: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        entrypoint = (job.RUNNER_ROOT / "entrypoint.sh").read_text(encoding="utf-8")
+        validator = entrypoint.split("<<'FOCUSED_MODE_PY'\n", 1)[1].split(
+            "\nFOCUSED_MODE_PY", 1
+        )[0]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            installed = root / "installed"
+            installed.mkdir()
+            module = (root if outside else installed) / ("common.so" if compiled else "common.py")
+            module.touch()
+            # The validator's metadata controls do not claim to compile Xpra;
+            # the named container smoke must import the real installed module.
+            setup = (
+                "import sys\nfrom types import ModuleType\n"
+                "xpra = ModuleType('xpra')\n"
+                "net = ModuleType('xpra.net')\n"
+                "common = ModuleType('xpra.net.common')\n"
+                f"common.__file__ = {str(module)!r}\n"
+                f"common.BACKWARDS_COMPATIBLE = {actual_compat!r}\n"
+                "xpra.net = net\nnet.common = common\n"
+                "sys.modules.update({'xpra': xpra, 'xpra.net': net, 'xpra.net.common': common})\n"
+            )
+            return subprocess.run(
+                (sys.executable, "-", str(installed), cythonize, compat),
+                input=setup + validator,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    def test_installed_runtime_must_match_each_explicit_mode(self) -> None:
+        for cythonize, compat in FocusedEntrypointTest.MODES.values():
+            with self.subTest(cythonize=cythonize, compat=compat):
+                result = self.validate(
+                    cythonize=cythonize, compat=compat,
+                    compiled=cythonize == "with", actual_compat=compat == "1",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"focused_runtime_compiled={int(cythonize == 'with')}\n", result.stdout)
+                self.assertIn(f"focused_runtime_backwards_compatible={compat}\n", result.stdout)
+
+    def test_wrong_compiled_or_compatibility_mode_is_not_native_success(self) -> None:
+        for cythonize, compat in FocusedEntrypointTest.MODES.values():
+            for fault in ("compiled", "compatibility"):
+                with self.subTest(cythonize=cythonize, compat=compat, fault=fault):
+                    compiled = cythonize == "with"
+                    actual_compat = compat == "1"
+                    result = self.validate(
+                        cythonize=cythonize, compat=compat,
+                        compiled=not compiled if fault == "compiled" else compiled,
+                        actual_compat=not actual_compat if fault == "compatibility" else actual_compat,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(fault, result.stderr)
+                    self.assertNotIn("focused_runtime_module=", result.stdout)
+
+    def test_host_or_source_import_cannot_stand_in_for_the_installed_module(self) -> None:
+        result = self.validate(
+            cythonize="with", compat="1", compiled=True, actual_compat=True, outside=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("outside the installed Xpra tree", result.stderr)
 
 
 class QuarantineEntrypointTest(unittest.TestCase):

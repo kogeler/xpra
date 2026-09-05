@@ -6225,11 +6225,14 @@ class ManifestTest(unittest.TestCase):
             set(cases),
             {
                 "debian-libva-codecs-package",
+                "jph-parallel-build-objects",
                 "upstream-test-quarantine",
+                "wayland-subsurface-stream-ownership",
                 "wayland-client-keymap-sync",
                 "wayland-empty-damage-throttle",
                 "wayland-initial-window-state",
                 "video-pipeline-cleanup-race",
+                "window-source-timer-lifecycle",
                 "x11-client-clipboard-events",
             },
         )
@@ -6254,23 +6257,31 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(
             stack.series,
             (
+                "window-source-timer-lifecycle",
+                "video-pipeline-cleanup-race",
+                "wayland-subsurface-stream-ownership",
                 "wayland-initial-window-state",
                 "wayland-client-keymap-sync",
                 "x11-client-clipboard-events",
                 "wayland-empty-damage-throttle",
-                "video-pipeline-cleanup-race",
+                "jph-parallel-build-objects",
                 "debian-libva-codecs-package",
                 "upstream-test-quarantine",
             ),
         )
 
-    def test_video_cleanup_live_boundary_is_stack_owned(self) -> None:
+    def test_case_and_stack_live_boundaries_are_exact(self) -> None:
         cases = contrib.load_cases()
         stack = contrib.load_stacks(cases)["develop"]
         self.assertEqual(cases["video-pipeline-cleanup-race"].required_gates, ())
+        self.assertEqual(cases["jph-parallel-build-objects"].required_gates, ())
         self.assertEqual(
             cases["x11-client-clipboard-events"].required_gates,
             ("live-x11-clipboard",),
+        )
+        self.assertEqual(
+            cases["wayland-subsurface-stream-ownership"].required_gates,
+            ("live-wayland-subsurface",),
         )
         self.assertEqual(
             cases["wayland-initial-window-state"].required_gates,
@@ -6393,6 +6404,28 @@ class PatchQueueFixture(unittest.TestCase):
             patch.object(contrib, "selected_cases", return_value=(selected,)),
             patch.object(contrib, "selection_resolution", return_value=self.resolution),
         )
+
+    def test_subsurface_live_gate_is_supported_and_typos_fail_closed(self) -> None:
+        manifest = self.case_dir / "case.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                "required_gates = []",
+                'required_gates = ["live-wayland-subsurface"]',
+            ),
+            encoding="utf-8",
+        )
+        case = contrib.load_case(self.case_dir)
+        self.assertEqual(case.required_gates, ("live-wayland-subsurface",))
+
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                "live-wayland-subsurface",
+                "live-wayland-subsurface-typo",
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(contrib.ContribError, "unsupported gate"):
+            contrib.load_case(self.case_dir)
 
     def test_apply_and_unapply_are_inverse_index_operations(self) -> None:
         verify, sync, selected, resolution = self.mocks()

@@ -61,6 +61,11 @@ inherited newly active upstream workflow is a publication blocker.
 
 ## Validation summary
 
+Use the final-acceptance ledger from [`validation.md`](validation.md). Verify
+that development results reused here still match their final requirements and
+that every missing or invalidated gate was completed. Publication review is
+not a reason to repeat an unchanged accepted workload.
+
 The handoff states:
 
 - exact `master` and `develop` commits;

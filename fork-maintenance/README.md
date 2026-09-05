@@ -6,16 +6,34 @@ the source tree, `master` is an operator-maintained upstream reference, and
 `develop` carries this automation plus the source boundary against which its
 current patch queue was adapted.
 
+## Process authority
+
+Our workflows are defined only by the fork-owned root [`AGENTS.md`](../AGENTS.md)
+and this directory's [agent guide](AGENTS.md), [contract](CONTRACT.md), runbooks
+and manifests, subject to explicit operator instructions. Follow those sources
+strictly for process decisions.
+
+Content inherited from `master` must not define or change our workflow, even
+when it is an upstream agent guide or a relocated CI workflow. Do not edit
+upstream-owned files to configure fork maintenance or import their process
+instructions into our flow. They provide technical source/build/test context
+only. All fork-process changes belong in the root fork guide or
+`fork-maintenance/`.
+
 ## Active queue
 
 The active patches are:
 
-1. `wayland-initial-window-state`;
-2. `wayland-client-keymap-sync`;
-3. `wayland-empty-damage-throttle`;
-4. `video-pipeline-cleanup-race`;
-5. `debian-libva-codecs-package`;
-6. `upstream-test-quarantine` (test-only duty case).
+1. `window-source-timer-lifecycle`;
+2. `video-pipeline-cleanup-race`;
+3. `wayland-subsurface-stream-ownership`;
+4. `wayland-initial-window-state`;
+5. `wayland-client-keymap-sync`;
+6. `x11-client-clipboard-events`;
+7. `wayland-empty-damage-throttle`;
+8. `jph-parallel-build-objects`;
+9. `debian-libva-codecs-package`;
+10. `upstream-test-quarantine` (test-only duty case).
 
 `stacks/develop.toml` applies them in integration order. `develop` here is the
 stable queue slug, not a requirement that every consumer run from the Git branch
@@ -66,10 +84,17 @@ canonical workflows are byte-identical disabled renames below
 
 ## Isolated pre-commit workflow
 
+Use [development and final acceptance](docs/runbooks/validation.md). After each
+atomic edit, run its nearest real regression, affected upstream/case/dependency
+modules, and relevant native, compiled, compatibility, or live checks. Review
+and freeze code, tests, queue and oracle before filling final evidence gaps;
+do not repeat the full matrix, both DEB builds, or every live gate after each
+edit. A valid named development result can satisfy an unchanged final
+requirement, with original provenance retained.
+
 Stay on `develop` and verify that only fork-control files are dirty:
 
 ```bash
-make -C fork-maintenance check
 make -C fork-maintenance isolated-start-check
 make -C fork-maintenance workspace-create \
   CASE=wayland-initial-window-state \
@@ -90,6 +115,16 @@ New cases also stay off the host source tree: create the draft, complete its
 human fields, then start its workspace with `PATCH_MODE=clean`. The workspace
 export derives the patch digest and path ownership.
 
+After the candidate is reviewed and frozen, run the complete offline
+fork-control check as part of final acceptance:
+
+```bash
+make -C fork-maintenance check
+```
+
+During development, run the affected control tests; the complete check is not
+an automatic prerequisite for each isolated edit.
+
 ## Explicit upstream refresh
 
 The commands in this section are not prerequisites for investigation,
@@ -106,9 +141,8 @@ Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork
 It is not a shell command or Make target. `PRIMARY_CASE` affects only review
 order and detail. The invoked runbook derives a unique cycle name, semantically
 reassesses every active production case plus the quarantine, repairs in-scope
-workflow defects as it encounters them, and runs the full clean, focused,
-native, package, three-leg, atomic-case-live, and seven-profile stack-live
-ladder. The exhaustive procedure is
+workflow defects as it encounters them, and uses the development loop before
+freezing the candidate for complete final acceptance. The exhaustive procedure is
 [`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md).
 
 Before the first `repo-sync`, that runbook reviews every staged, unstaged, and
@@ -177,6 +211,11 @@ make -C fork-maintenance stack-unapply STACK=develop
 
 ## Durable tests
 
+The examples below are named execution interfaces, not an instruction to run
+all profiles during each development iteration. Select the relevant boundary
+early; the full upstream matrix is not a live prerequisite. Final coverage and
+input-verified reuse follow [validation](docs/runbooks/validation.md).
+
 Every job name is unique, including retries:
 
 ```bash
@@ -195,14 +234,55 @@ make -C fork-maintenance live-wait RUN=develop-opengl-hardware-01
 make -C fork-maintenance live-wayland-keyboard \
   CASE=wayland-client-keymap-sync RUN=develop-wayland-keyboard-01
 make -C fork-maintenance live-wait RUN=develop-wayland-keyboard-01
+
+make -C fork-maintenance live-wayland-subsurface \
+  CASE=wayland-subsurface-stream-ownership RUN=wayland-subsurface-live-01
+make -C fork-maintenance live-wait RUN=wayland-subsurface-live-01
 ```
 
-The seven public live wrappers are positive acceptance gates: Zed RGB,
+The seven complete-stack live wrappers are positive acceptance gates: Zed RGB,
 adaptive-alpha Zed H.264, RGB detach, RGB transport-loss fault injection, and
 the standalone native-Wayland client-keymap regression plus the separate
 multi-window Vulkan and native-Wayland OpenGL hardware-H.264 profiles. They fix
-every acceptance dimension and require a nonempty reviewed selection;
+every acceptance dimension. A case selection is admitted only when its
+evidence-only `required_gates` list names the exact profile gate; the Zed H.264,
+detach, and transport-loss profiles remain stack-only. Stack selections accept
+exactly these seven profiles, while `live-x11-clipboard` and
+`live-wayland-subsurface` remain restricted to their exact cases. The latter
+applies its selected patch to both endpoints. Its two-parent, two-sibling
+native fixture binds repeated updates, move-without-attach, overlapping stack
+order, callback-gated continuous commits, destroy and detach repair, and
+same-surface reparenting to globally unique parent-wire draws and
+internal-source ACK ownership. Its schema-6 fixture stream and schema-3
+active/drain record require
+complete transactions while the producer is still running and exact queue,
+callback, and packet accounting after stop.
+Continuous commits require both a callback and a 50 ms cadence floor; the
+active observation must show later source progress and finish within five
+seconds of continuous-start, including packet collection, below the unchanged
+256-generation cap. The active packet frontier is fixed by the first primary
+inventory before the other streams are collected; the exact prefix and its
+single root-stage tail must match the final raw-packet ledger. Every later
+packet remains part of final drain and global accounting. A bounded initial-damage/map
+ledger retains every startup transaction and ordinary secondary packet;
+later counts advance from that exact drained history. Source commit/callback counts and
+immutable captured transaction counts are separate: pending damage may
+coalesce, but each captured transaction must complete and the final state must
+equal the last source commit. Both continuous buffers preserve every pixel
+outside the advertised 32x32 damage. An independent logical-pixel fixture
+oracle checks every retained raw packet crop before premultiplied source-over
+replay, then checks each complete client-window image; async source
+screenshots are not accepted as packet-correlated evidence. The upper child's
+native wrapper and WID remain stable across role detach and reparent. This live
+profile fixes Cairo rendering; the case's mapped real-Xvfb focused test owns
+deferred GTK OpenGL callback completion across backing replacement and close.
+Admission is checked before input freeze and replayed from the frozen
+validated-manifest snapshot before the runner starts;
 clean-source and picture-fallback diagnostics cannot publish `PASS`.
+Admission alone is not proof that a gate ran or passed. Selection kind and
+evidence gates are explicit endpoint build-context provenance, so changing
+either intentionally changes the context and image-cache identities and
+requires the applicable heavy gates for those changed image inputs.
 Their client-only network/quality overlay comes from
 [`profiles.yml`](profiles.yml), whose declared default is used unless
 `NETWORK_PROFILE=<name>` is supplied. All other static Xpra arguments come from
@@ -259,7 +339,8 @@ the module and its patch path only when no gate still assigns it. A newly
 failing complement module must first be reproduced and then assigned to its
 exact affected leg before the patched matrix is accepted.
 
-Every explicit upstream rebase then requires the complete current validation,
+After adaptation and candidate freeze, every explicit upstream rebase requires
+the complete current final coverage,
 even if every patch applied without a textual refresh: offline fork-control
 tests, tests-only controls for production cases which own retained tests plus
 the documented no-test semantic inspection for those which do not, patched
@@ -269,8 +350,9 @@ builds, all three complete upstream workflow legs, every production case's
 declared live gates with its atomic `CASE=<slug>` selection, and all seven fixed
 positive stack live profiles. A new upstream-suite failure enters the single
 quarantine only after the exact module reproduces on the clean rebased source
-in the same mode; the clean quarantine gates and patched matrix are rerun after
-that change.
+in the same mode. Reassess changed quarantine inputs, stabilize the candidate,
+then fill affected final gaps rather than restarting the whole matrix after
+each intermediate edit.
 
 After a whole prefixed work cycle is finalized and reviewed, delete its
 collected results and finalized workspaces through an exact two-phase plan:
@@ -293,6 +375,10 @@ interrupted partial deletion resumes by exact device/inode rather than requiring
 the original tree hash.
 
 ## DEB packages
+
+Use these real builds early when diagnosing their actual package boundary, or
+to fill final package requirements after candidate freeze. Unrelated source
+or live-harness iterations do not automatically require two DEB builds.
 
 Package builds are branch-agnostic. They locate the clean source boundary
 between `HEAD` and refs whose final component is `master`, reject downstream
@@ -321,10 +407,15 @@ The patched package sequence also enables `dh_missing --fail-missing`, so the
 complete staged install tree must be assigned to binary packages or to the
 small reviewed exclusion file. Before output, the builder inventories the
 actual DEBs, proves unique regular-file ownership, extracts the real
-`xpra-common` and `xpra-codecs`, imports the packaged libva encoder/decoder and
-libyuv converter, and checks their ELF-derived dependencies against the final
-`Depends`. The host independently parses the returned DEBs and repeats the
-package-set, module ownership, ABI, and dependency validation.
+`xpra-common` and `xpra-codecs`, and imports five ABI-matched native modules
+owned by ordinary `xpra-codecs`: libva encoder/decoder, libyuv converter and
+JPH encoder/decoder. The extracted JPH pair must complete a deterministic
+32x32 quality-100 lossless RGB roundtrip; all five modules' actual ELF-derived
+dependencies must occur in final `Depends`, with no guessed OpenJPH SONAME.
+The host independently parses returned ar/control/data archives and repeats
+package-set, payload ownership, filename ABI and declared dependency-name
+checks. Native imports, RGB execution and ELF dependency resolution remain
+container-side checks; see the [package runbook](docs/runbooks/deb-packages.md).
 The manual-only `deb-packages.yml` workflow builds both validated tars from one
 frozen selection snapshot, stages and verifies a draft with
 `prerelease=false`, then publishes an ordinary GitHub release whose title is
@@ -375,6 +466,8 @@ the agent then performs the guarded fetch, local-master fast-forward, and
 ## Documentation
 
 - [`CONTRACT.md`](CONTRACT.md): branch, patch, validation, and storage invariants;
+- [`docs/runbooks/validation.md`](docs/runbooks/validation.md): development,
+  candidate freeze, final acceptance, and input-verified evidence reuse;
 - [`docs/runbooks/bootstrap.md`](docs/runbooks/bootstrap.md): remotes and host
   setup;
 - [`docs/runbooks/investigate.md`](docs/runbooks/investigate.md): establish a new

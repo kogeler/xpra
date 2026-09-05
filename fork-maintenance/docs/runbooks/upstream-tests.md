@@ -1,5 +1,12 @@
 # Run Upstream-Compatible Tests
 
+Test scheduling is owned by [`validation.md`](validation.md). Development uses
+nearest regressions, affected existing upstream and downstream case modules,
+and relevant composed/native/compiled/compatibility boundaries. A full suite
+is not a prerequisite for a relevant early live check. The full matrix below
+is final coverage on a reviewed frozen candidate; fill only missing or
+invalidated results.
+
 ## Frozen source model
 
 Every local acceptance job archives the unique source merge base already
@@ -122,9 +129,10 @@ are comments, copyright notices, or documentation, with identical paths,
 modes, executable data, configuration, test assertions, source
 selection/application, build commands, and runner behavior. Refresh derived
 digests, resolve the selection, run whitespace and fork-control checks, and
-report the proof instead. Any uncertainty or semantic difference resumes the
-normal ladder. This exception never spans an upstream rebase. After
-`develop-rebase`, run the clean quarantine reassessment, tests-only controls
+report the proof instead. Any uncertainty or semantic difference requires the
+affected development checks and final coverage. This exception never spans an
+upstream rebase. After adaptation and candidate freeze following
+`develop-rebase`, complete the clean quarantine reassessment, tests-only controls
 for cases which own retained tests, case-specific no-test semantic inspection
 for those which do not, patched focused/native gates, every case-specific
 durable package boundary against the complete resulting stack, and every full
@@ -134,8 +142,33 @@ is
 
 ## Focused tests
 
+Choose the mode which exercises the changed boundary; all three use the same
+ordered manifest `unit.*` inventory and native-module requirements:
+
+| `TARGET` | `CYTHONIZE_MORE` | `XPRA_BACKWARDS_COMPATIBLE` |
+| --- | --- | --- |
+| `focused` | `without` | `1` |
+| `focused-cython` | `with` | `1` |
+| `focused-no-compat` | `without` | `0` |
+
+These values are pinned for both `setup.py unittests` and the post-build native
+import checks. The runner checks the installed `xpra.net.common` path, whether
+it is a compiled extension in the compiled mode, and its actual compatibility
+value. That sentinel is a technical build contract, not an optional check to
+skip after an upstream package-layout change; reassess the build and installed
+module mapping if it stops holding. Logs retain `focused_mode`,
+`focused_cythonize_more`,
+`focused_backwards_compatible`, the `focused_applied_tree` Git tree identity,
+and each ordered `focused_unit_test`. They supplement the ordinary frozen
+selection, source and image provenance; they do not replace it.
+
+Every mode still creates fresh source and performs the Xpra install/build
+required by `setup.py unittests`. Reusing the dependency image and ccache does
+not make these build-free or incremental installed-Xpra tests. The focused
+modes select narrow modules, not the complete final upstream matrix.
+
 First run the retained regression against unmodified embedded-source production
-code by applying only the selected test paths:
+code by applying only the selected test paths in the relevant mode:
 
 ```bash
 make -C fork-maintenance test-start \
@@ -164,7 +197,30 @@ make -C fork-maintenance test-start \
 make -C fork-maintenance test-wait RUN=wayland-focused-01
 ```
 
-Run the complete queue before handoff:
+For compiled Python or compatibility-policy changes, respectively:
+
+```bash
+make -C fork-maintenance test-start \
+  CASE=wayland-initial-window-state TARGET=focused-cython \
+  RUN=wayland-focused-cython-01
+make -C fork-maintenance test-wait RUN=wayland-focused-cython-01
+
+make -C fork-maintenance test-start \
+  CASE=x11-client-clipboard-events TARGET=focused-no-compat \
+  RUN=clipboard-focused-no-compat-01
+make -C fork-maintenance test-wait RUN=clipboard-focused-no-compat-01
+```
+
+Use the same typed target with `PATCH_MODE=tests-only` when the clean control
+depends on that execution mode. Each run has its own lifecycle; inspect and
+remove it as described below. The root aliases `test-focused`,
+`test-focused-cython` and `test-focused-no-compat` forward to named `test-start`
+and still require `RUN`. Only the lower-level `infra/upstream-tests/Makefile`
+focused targets run in the foreground for diagnostics; those do not replace
+named local acceptance runs.
+
+Use composed focused checks during development when interfaces overlap, and
+ensure a current complete-queue result before final handoff:
 
 ```bash
 make -C fork-maintenance test-start \
@@ -172,8 +228,10 @@ make -C fork-maintenance test-start \
 make -C fork-maintenance test-wait RUN=develop-focused-01
 ```
 
-Focused execution derives unit modules from the selected manifests. A missing
-subject module is a failure, not a skip.
+Focused execution derives unit modules from the selected manifests. Each
+`unit.*` entry must resolve to an existing executable module whose filename
+ends in `test.py`; an invalid name or missing subject fails before the build,
+not as a skipped test.
 When the selection declares the `wayland` gate, focused setup enables the
 native Wayland server extension for any owning case; this is gate-driven and
 must not depend on the `wayland-initial-window-state` slug.
@@ -193,7 +251,7 @@ process. Do not replace it with a copied test or a mock-only probe.
 
 ## Full Ubuntu matrix
 
-Use a new `RUN` for every leg:
+After candidate freeze, use a new `RUN` for every missing or invalidated leg:
 
 ```bash
 make -C fork-maintenance test-start \
@@ -208,16 +266,18 @@ make -C fork-maintenance test-wait RUN=develop-full-cython-01
 make -C fork-maintenance test-wait RUN=develop-full-no-compat-01
 ```
 
-All three legs are required locally even if upstream marks Cython-heavy CI
-non-blocking. The container mirrors workflow dependencies and commands, but it
-does not claim to be the GitHub-hosted runner image.
+The fork's validation contract requires all three final legs. Upstream
+workflow dependencies and commands are technical build/test inputs, not
+authority over this scheduling. The container does not claim to be the
+GitHub-hosted runner image.
 
 After an explicit upstream rebase these three legs are mandatory as the full
 repository-author test suite for the rebased source. A failure is not added to
 the quarantine from the patched run alone: first reproduce its exact module on
 the clean embedded source in the same leg, update only the single duty
-quarantine when that control proves it is upstream-owned, and rerun the clean
-quarantine gates plus all three patched legs.
+quarantine when that control proves it is upstream-owned. Reassess the changed
+quarantine inputs and stabilize the candidate before filling the affected final
+matrix gaps; a quarantine edit does not automatically launch three full suites.
 
 The fork's hosted `develop` workflow fans the same three patched legs out to
 three independent matrix runners. Every runner uses the same thin entry point:
@@ -257,17 +317,30 @@ unignored failure, skipped module, or count mismatch fails closed. Follow
 [`test-quarantine.md`](test-quarantine.md) to remove stale assignments or admit
 a newly affected leg before the patched full matrix.
 
+Reuse current reassessment results while the actual source, image/environment,
+module union, and gate expectations remain unchanged. Independent CASE
+development need not wait for unrelated quarantine work; an unrelated
+production-only edit does not invalidate its clean-source evidence.
+
 ## Failure triage
 
-Stop at the first unexplained failure. If it is outside selected paths, inspect
-canonical Actions for the exact base and leg before running an expensive clean
-control. An identical canonical failure is recorded in local notes and reported
-as non-green; it is never skipped or fixed in the current production patch.
-Only explicit user scope may admit it to the single duty quarantine, after a
-current clean reproduction.
+Stop escalation at the first unexplained failure. Inspect the affected module
+and surrounding source; matching upstream Actions output for the exact base
+and leg is technical diagnostic context, not a scheduling authority or a
+substitute for the current clean reproduction required for quarantine.
+Keep an unrelated failure out of the current production patch. Admission to
+the single duty quarantine requires existing task authority (including the
+autonomous refresh directive) and a non-vacuous same-mode clean control; ask
+for scope only when that authority is absent.
 
-Run a clean control only when exact upstream CI proof is unavailable and the
-user explicitly requests that additional run:
+Use the narrowest supported control which observes the failure. The focused
+family rejects `PATCH_MODE=clean`, and the quarantine targets select only their
+declared module union; there is no generic named clean-module selector. If the
+needed narrow control is unavailable, record that tooling boundary and either
+implement/test it under authorized workflow scope or justify a broader clean
+control. Do not invent a command or edit shared runner inputs during active
+jobs. An expensive clean full leg is appropriate only when a narrower control
+cannot reproduce the disputed boundary; record that reason before launching it:
 
 ```bash
 make -C fork-maintenance test-start \

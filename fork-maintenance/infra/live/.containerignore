@@ -12,7 +12,9 @@
 !start_hardware_fixture.sh
 !start_wayland_clipboard_fixture.sh
 !start_wayland_keyboard_fixture.sh
+!start_wayland_subsurface_fixture.sh
 !start_zed.sh
+!subsurface_fixture.c
 !wayland_keyboard_fixture.py
 !wayland_clipboard_fixture.py
 !x11_clipboard_fixture.py

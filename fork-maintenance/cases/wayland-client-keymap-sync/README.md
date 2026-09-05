@@ -1,21 +1,21 @@
 # Client-driven Wayland keymap synchronization
 
-## Failure boundary
+## Boundary
 
-The native Wayland server starts its wlroots virtual keyboard with a one-group
-`us` keymap. Its keyboard manager discards the client's structured keyboard
-properties, the Wayland keyboard configuration does not parse or apply RMLVO
-data, and the manager inherits the generic no-op keymap installer. Client key
-events may carry a group, but a group that was never compiled cannot select the
-client's layout. The device also flattens every group into one first-win
-`keysym -> keycode` map, which is wrong for collisions such as `us,fr` A/Q.
+The native Wayland server maintains one shared wlroots virtual keyboard whose
+installed keymap is selected transactionally from normalized per-client RMLVO
+configuration. Each source retains its own ordered layout groups, variants,
+modifier meanings, validation state, and press-time translations. The current
+owner's complete map is compiled and installed on the shared device; other
+eligible clients translate their symbols and group identities against that
+installed map without treating foreign raw keycodes as native keycodes.
 
-This is not only a missing `set_layout()` call. Xpra receives keyboard state
-through several packet generations, allows multiple input clients to share one
-server seat, and tracks key presses, modifiers, repeat, focus, and readonly
-policy in different subsystems. Replacing only the bootstrap layout would
-leave releases translated through a different map, let non-owners overwrite a
-shared device, or silently accept an approximate legacy representation.
+This contract spans more than native `set_layout()`. Xpra receives keyboard
+state through several packet generations, allows multiple input clients to
+share one server seat, and tracks key presses, modifiers, repeat, focus, and
+readonly policy in different subsystems. Wire negotiation, normalization,
+candidate compilation, device replacement, input settlement, ownership
+promotion, and release/repeat identity therefore form one atomic behavior.
 
 ## Surrounding code and ownership map
 
@@ -143,8 +143,8 @@ clears the barrier and sends the newest configuration at most once. With
 `DELAY_KEYBOARD_DATA` it pre-marks the initial configuration as pending; with
 delay disabled it sends only when an early change actually occurred. Thus
 multiple pre-handshake changes coalesce, a delayed client always completes its
-reservation, and a no-delay client retains its historical no-initial-packet
-behavior without racing exact-RMLVO negotiation.
+reservation, and a no-delay client retains the established no-initial-packet
+compatibility behavior without racing exact-RMLVO negotiation.
 
 The normalizer also recognizes the established `xkbmap_*` aliases. Packet
 envelopes remain strict: nested and flat payloads must be dictionaries, their
@@ -324,8 +324,8 @@ The Cython device is constructed with a small hard `evdev/pc105/us` map so a
 no-client or legacy session always has a keyboard. Startup then normalizes and
 tries the configured server default transactionally. The successfully
 installed startup/default snapshot is retained as
-`WaylandKeyboardManager.bootstrap_config`; despite that historical attribute
-name, it may be a configured map such as `de/pc104`, not the hard US map. Owner
+`WaylandKeyboardManager.bootstrap_config`. This state may be a configured map
+such as `de/pc104`, not the hard US map. Owner
 departure first promotes the earliest remaining eligible client whose source
 configuration was validated; only when no such promotion succeeds does it
 restore this installed snapshot. If configured normalization or compilation
@@ -549,10 +549,11 @@ remains usable.
 
 This case has no semantic dependency on another production case and declares
 the native `wayland` gate itself. It must apply and test standalone. The
-maintained stack nevertheless orders `wayland-initial-window-state`, this case,
-and then `wayland-empty-damage-throttle`; all three touch
-`xpra/wayland/server/subsystem/window.py` and
-`tests/unittests/unit/wayland/window_test.py` near one another.
+maintained stack nevertheless places it after
+`wayland-subsurface-stream-ownership` and `wayland-initial-window-state`, and
+before `wayland-empty-damage-throttle`. These cases touch
+`xpra/wayland/server/subsystem/window.py` and the shared Wayland test boundary;
+WSSO additionally overlaps `wlroots.pxd` and the pointer subsystem.
 
 `WaylandWindowServerFocusTest` must remain a top-level class alongside the
 initial-state and empty-damage test classes after the whole stack is applied.
@@ -563,8 +564,24 @@ test discovery when neighboring patches use short context. Inspect the applied
 class order and run the focused window test through both the standalone case
 and `stacks/develop` after any adjacent edit.
 
+The shared paths have this strict semantic split:
+
+| Case | Authority in the overlapping Wayland boundary |
+| --- | --- |
+| `wayland-client-keymap-sync` | Keyboard RMLVO/device ABI, shared-seat map ownership, focus-source attribution, readonly/recording arbitration, group-aware key delivery, and source-tagged modifiers. |
+| `wayland-initial-window-state` | Current buffer format, frame-alpha publication, popup initial damage ordering, and video-selector inputs; it does not select or mutate the keyboard device. |
+| `wayland-empty-damage-throttle` | Ordinary non-composite toplevel frame-callback pacing and empty-damage acknowledgement; it does not own focus or input translation. |
+| `wayland-subsurface-stream-ownership` | Surface-tree ABI declarations, native pointer leaf targeting, topology, child frame completion, and parent-backing composition; it preserves the keyboard focus and modifier hooks already installed in the subsystem. |
+
+Conflict resolution must keep both keyboard and surface-tree Cython
+declarations and must not infer keyboard ownership from WSSO's pointer focus
+WID. Likewise, the keymap case must not acquire buffer, frame-callback, or
+subsurface transaction ownership merely because those behaviors meet in the
+same server subsystem classes.
+
 That focus test runs under the native gate, but its autospec signature trap
-belongs to the `full-cython` leg: `CYTHONIZE_MORE` compiles the inherited
+requires `focused-cython` during development and `full-cython` for final
+complete-queue coverage: `CYTHONIZE_MORE` compiles the inherited
 generic window subsystem. A call arriving through that compiled parent and a
 pure-Python call do not expose identical autospec arguments; the compiled call
 may omit an explicit positional `self`. Keep the robust assertion as one call
@@ -577,8 +594,9 @@ compiled generic `KeyboardManager.do_process_keyboard_event(..., kattrs:
 dict)` accepts only an exact builtin `dict`, not that subclass. Its `super()`
 call must therefore pass an exact copy containing the already sanitized group.
 Pure Python and the native-extension-only `wayland` gate both accept the
-subclass and cannot detect this regression; the complete `full-cython` leg is
-the owning proof.
+subclass and cannot detect this regression. The focused compiled mode exposes
+the argument boundary early; the complete `full-cython` leg supplies final
+integration coverage.
 
 The large Wayland keyboard tests deliberately combine a fake device/manager
 layer with real compiled-XKB checks. Fake lookup tables prove policy and state
@@ -757,20 +775,24 @@ contract, and live runbook updated together. The migrated
 
 ## Required validation
 
-Follow the current isolated-workspace, upstream-test, and live-test runbooks;
+Follow [development and final acceptance](../../docs/runbooks/validation.md)
+and the current isolated-workspace, upstream-test, and live-test runbooks;
 do not apply the production source to the host checkout or use ad hoc output as
 acceptance. The retained tests-only regression must fail non-vacuously against
 the embedded clean source. Run all focused modules declared by `case.toml`
-with the completed standalone case, then run the native `wayland` boundary.
-Repeat the affected focused and native boundaries through `stacks/develop` so
-adjacent Wayland patches and generic interface changes are exercised together.
+with the standalone case after atomic changes, including affected upstream
+modules and the real compiled mixin boundary when relevant, then run the native
+`wayland` boundary. Exercise the affected focused and native boundaries through
+`stacks/develop` so adjacent Wayland patches and generic interface changes are
+exercised together.
 
-Reassess the clean quarantine modules, run all three full Ubuntu 26.04 legs,
-and run the dedicated positive `live-wayland-keyboard` gate. The live result
+Run the dedicated positive `live-wayland-keyboard` gate early after its
+focused/native prerequisites, without waiting for full suites. The live result
 must retain the exact versioned scenario digest, both four-group maps, every
 press/release observation, authoritative eight-character application sequence,
 runtime replacement, connection/process identities, information snapshot,
-fixture exit, lifecycle, and owned cleanup. Before publication, run all seven
-fixed positive live profiles required by the fork contract so this keyboard
+fixture exit, lifecycle, and owned cleanup. After candidate freeze, fill only
+missing or invalidated final requirements, including current quarantine,
+the full matrix, and all seven fixed positive stack profiles so this keyboard
 case is also tested with the complete rendering, detach, transport-loss,
 empty-damage, Vulkan, and OpenGL stack boundaries.

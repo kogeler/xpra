@@ -1,5 +1,11 @@
 # Investigate A Downstream Patch
 
+Use the development loop in [`validation.md`](validation.md): nearest real
+regression after each atomic edit, affected upstream/case/dependency modules,
+relevant native or compiled modes, and early relevant live checks. Full matrix,
+package, and complete live coverage belongs to final acceptance after review
+and candidate freeze, not to every investigative edit.
+
 ## Establish current state without switching branches
 
 Stay on `develop` and prove the isolated boundary:
@@ -17,8 +23,9 @@ source commit.
 
 Read the current affected source, adjacent tests, recent maintainer-authored
 history, `CLAUDE.md`, `CONTRIBUTING.md`, the current test workflow, and lint
-configuration. Record the first directly observed failing boundary, not a
-root-cause guess based on an older symptom.
+configuration as technical context only. Fork-owned instructions define the
+investigation and validation process. Record the first directly observed
+failing boundary, not a root-cause guess based on an older symptom.
 
 ## Create one case
 
@@ -106,8 +113,8 @@ make -C fork-maintenance workspace-create \
 
 For a claimed upstream replacement, map each original trigger, production
 path, state transition, and postcondition to current code. Then run the retained
-focused regression on the clean embedded source. Do not retire a patch from commit-message
-similarity alone.
+focused regression on the clean embedded source. Do not retire a patch from
+commit-message similarity alone.
 
 If existing tests do not observe the disputed path, improve the case-owned test
 or durable runner first. A copied test, temporary source rewrite, or one-off
@@ -120,8 +127,10 @@ endpoint distribution, render node, dimensions, compositor, application, and
 profile. Prefer the real application when buffer format or damage cadence is
 part of the failure.
 
-When a full-suite test outside selected paths fails, inspect canonical Actions
-for the exact base and leg before starting a local clean control. Never skip,
-weaken, reconfigure, or repair that foreign test inside the current production
-case. Explicitly authorized quarantine belongs only in the duty case and must
-pass its clean reassessment gates.
+When a test outside selected paths fails, follow the narrow same-mode control
+procedure in [upstream tests](upstream-tests.md#failure-triage). Matching
+canonical Actions output is technical diagnostic context, not a prerequisite
+or substitute for current clean proof. Never skip, weaken, reconfigure, or
+repair that foreign test inside the current production case. Admission to the
+duty quarantine requires task authority and its clean reassessment gates;
+request new scope only when the existing task does not authorize that repair.

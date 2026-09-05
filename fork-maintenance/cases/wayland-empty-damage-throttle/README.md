@@ -1,4 +1,4 @@
-# wayland-empty-damage-throttle
+# Paced Wayland empty-damage acknowledgement
 
 ## Boundary
 
@@ -9,52 +9,66 @@ so synchronously from the same compositor event dispatch. A client that commits
 again from every callback can otherwise continuously re-arm both sides of that
 dispatch and delay unrelated input packets.
 
-The retained Zed reproducer opens a second parented toplevel. While both Zed
-surfaces are present, the unmodified server processes about 1,861 empty-damage
-commits per second and delays pointer or keyboard packets for multiple seconds.
-Once an input packet is scheduled, surface routing, application activation,
-and all window-destruction boundaries complete normally.
+This case owns a shared, bounded, coalescing acknowledgement timer for ordinary
+non-composite mapped toplevels. Empty commits join that timer only while a live
+consumer can observe the window. Real damage, visibility changes, consumer
+replacement, unmap, destruction, and terminal cleanup move the callback back
+to the normal damage owner or remove only the timer entry that is no longer
+valid. The resulting event-loop boundary preserves frame-callback liveness
+without allowing an empty-commit producer to monopolize compositor dispatch or
+delay unrelated pointer and keyboard work.
 
-## Upstream provenance
+The server methods `schedule_empty_damage_ack()`,
+`cancel_empty_damage_ack()`, and `cancel_empty_damage_acks()`, together with
+the model's `mark_wayland_damage_frame_pending()`,
+`clear_wayland_damage_frame_pending()`,
+`has_wayland_damage_frame_pending()`, and
+`acknowledge_empty_changes()`, form the ordinary-root composition seam. They
+are intentionally named, externally callable methods rather than private
+details of `commit()`: the authoritative surface-tree adapter supplied by
+`wayland-subsurface-stream-ownership` uses this seam whenever its root remains
+an ordinary non-composite toplevel. WEDT still owns all timer and guard state;
+WSSO owns only the classification which decides whether ordinary ownership is
+applicable.
 
-This case is a corrective follow-up to
+## Embedded-source and upstream boundary
+
+The ordinary mapped-empty liveness branch entered upstream through
 [Xpra-org/xpra#5002](https://github.com/Xpra-org/xpra/pull/5002), authored by
 `kogeler` and squash-merged upstream as
 [`a11b97fc02be`](https://github.com/Xpra-org/xpra/commit/a11b97fc02be0172ec6dc169f6bb0b936dba5663)
-on 2026-08-19. That change correctly restored liveness for mapped empty-damage
-commits: because they queue no damage rectangle, the normal delayed
-damage/batching path never acknowledges the surface and a client can remain
-blocked waiting for `frame_done`.
+on 2026-08-19. That branch establishes that a mapped empty commit still needs
+an acknowledgement because it does not enter the ordinary delayed
+damage/batching path. `models.window.Window.acknowledge_changes()` performs the
+actual `frame_done` and Wayland-client flush synchronously, so this case keeps
+that mechanism but gives its empty-commit caller a separate scheduled
+ownership boundary.
 
-The upstream implementation acknowledged the surface directly inside the
-compositor commit handler. `models.window.Window.acknowledge_changes()` sends
-`frame_done` and flushes Wayland clients, so a client which empty-commits again
-from every frame callback forms an unpaced event-loop feedback cycle. The
-embedded source containing #5002 but without this downstream correction can
-consequently spend its dispatch capacity servicing empty commits and delay
-unrelated input. This patch preserves #5002's liveness guarantee while pacing
-and coalescing acknowledgements outside the current commit dispatch. Damage,
-unmap, or destruction cancels only a scheduled empty-ack entry; an already
-queued wlroots callback remains pending until normal damage/visibility
-acknowledgement or destruction settles it.
+The embedded source therefore contributes the liveness decision and common
+acknowledgement primitive; this patch contributes pacing, coalescing, consumer
+selection, and terminal timer ownership. Damage, unmap, or destruction cancels
+only a scheduled empty-ack entry. Any already queued native callback remains
+pending until the normal damage/visibility owner or surface destruction
+settles it. On an upstream refresh, equivalent behavior must preserve both
+halves rather than merely retaining either the immediate branch or the timer.
 
 ## Surrounding code and acknowledgement ownership
 
 This behavior crosses the native Wayland surface, generic Xpra window, and
-per-client compression layers. Treating only the obvious call in
-`WaylandWindowServer.commit()` as the whole feature caused the original review
-to miss the important ownership boundaries.
+per-client compression layers. `WaylandWindowServer.commit()` classifies the
+commit, but scheduling, consumer eligibility, acknowledgement, and cancellation
+belong to different owners.
 
 | Layer | Relevant responsibility |
 | --- | --- |
 | `xpra/wayland/server/surface.pyx` | Reads `wlr_surface.buffer_damage`, captures the mapped surface, emits `surface-image`, and then emits the generic `commit` with damage rectangles and subsurface geometry. |
 | `xpra/wayland/server/wayland_surface.pyx` | Implements synchronous `Surface.frame_done()` by calling `wlr_surface_send_frame_done()`. It does not schedule a future callback. |
-| `xpra/wayland/server/subsystem/window.py` | Updates the Python window model, classifies mapped commits as damaged or empty, fans real damage out to Xpra consumers, and owns the new shared empty-ack timer. |
+| `xpra/wayland/server/subsystem/window.py` | Updates the Python window model, classifies ordinary mapped toplevel commits as damaged or empty, fans real damage out to Xpra consumers, and owns the shared empty-ack timer. A composed WSSO tree has separate root/child completion owners. |
 | `xpra/server/subsystem/window.py` and `xpra/server/source/window.py` | Route a damage rectangle to every eligible client connection and its `WindowSource`; the generic source also suppresses pixels for windows hidden from a client's `sharing=combine` display area. |
 | `xpra/server/window/compress.py` | Owns normal batching and backlog decisions. `WindowSource.send_delayed_regions()` acknowledges the Wayland surface on the UI thread before extracting and encoding delayed regions. |
 | `xpra/wayland/server/models/window.py` | Is the common acknowledgement boundary reached both by normal `WindowSource` work and by the empty-damage timer. The damage guard therefore belongs here, not only in the Wayland server timer. |
 
-The normal flow is:
+The ordinary non-composite toplevel flow is:
 
 ```text
 wlroots surface commit
@@ -77,6 +91,34 @@ commit bookkeeping. The empty branch must remain after toplevel tracking,
 colourspace and size updates, and subsurface geometry propagation. The focused
 test deliberately verifies that these side effects finish before the delayed
 acknowledgement.
+
+With WSSO composed, `commit()` accepts two deliberately distinct shapes. The
+legacy `list` remains the standalone ordinary Wayland route above. An
+authoritative `tuple` contains the root marker and enters WSSO topology
+reconciliation before acknowledgement ownership is selected:
+
+```text
+authoritative root-only commit
+  -> empty and no successful repair: schedule_empty_damage_ack()
+  -> explicit damage or successful full repair:
+       cancel_empty_damage_ack()
+       mark_wayland_damage_frame_pending()
+       retain normal WindowSource acknowledgement ownership
+
+authoritative root with active children
+  -> cancel_empty_damage_ack()
+  -> redirect connection damage into WSSO composite transactions
+  -> WSSO acknowledges the native root commit exactly once
+```
+
+A source which is refused or whose reconciliation fails is handled for packet
+routing, but that is not a successful repair and cannot manufacture an
+ordinary damage acknowledgement owner. A root-only empty generation therefore
+still delegates to the WEDT timer when no source received repair damage.
+Conversely, an actual repair remains on the normal damage path and is protected
+by the WEDT guard until `WindowSource` acknowledges it. Per-root reconciliation
+sets are kept by WSSO; a repair or refusal for another affected root has no
+bearing on this root's timer or guard.
 
 The native path currently captures the mapped surface before it classifies the
 damage list and emits `commit`. This patch therefore limits callback dispatch
@@ -147,7 +189,7 @@ second scheduling layer.
 Do not clear the guard on unmap and do not substitute
 `WindowsConnection.cancel_damage(wid)`. That generic operation drops delayed
 regions and timers and invalidates queued or in-flight encodes for the affected
-consumer. The corrective patch must not redefine Xpra's existing unmap or
+consumer. This case must not redefine Xpra's existing unmap or
 damage-loss behavior merely to make the local boolean easier to manage.
 `Window.do_unmanaged()` also clears the guard as terminal model cleanup, but it
 does not take over the subsystem's timer ownership.
@@ -196,14 +238,13 @@ iconic, ownership, or application-specific tests here unless the generic
 damage path adopts the same rule. In particular, `is_idle` changes batching
 policy but does not make ordinary window damage ineligible.
 
-The hidden-window predicate was added upstream with `sharing=combine` after
-the first version of this patch. Native Wayland currently rejects that sharing
-layout, while the seamless X11 server is its supported producer, but the
-generic `WindowsConnection.damage()` boundary is shared and now suppresses
-damage for such a hidden window. Keeping the empty-callback test aligned avoids
-a latent invisible-render loop if Wayland later gains that layout, and the
-fire-time recheck covers a connection whose visibility changes after the timer
-was armed.
+The hidden-window predicate is part of the current generic
+`WindowsConnection.damage()` boundary for `sharing=combine`. Native Wayland
+currently rejects that sharing layout, while the seamless X11 server is its
+supported producer, but the shared consumer predicate must still remain
+aligned. This avoids an invisible-render loop if Wayland gains that layout,
+and the fire-time recheck covers a connection whose visibility changes after
+the timer was armed.
 
 With no eligible consumer the callback is intentionally retained instead of
 driving an invisible application at roughly the timer cadence. A newly
@@ -222,37 +263,51 @@ model has no remaining liveness duty; a missing consumer waits for a later
 ordinary delivery or visibility transition. Adding a retry timer here would
 turn the rate limiter into polling and could again drive invisible clients.
 
-## Separate surface paths
+## Separate surface and composite paths
 
 The timer applies only to the generic toplevel `Surface.commit()` path.
 
 - Popup native commits use the popup-specific `popup_commit()` and
   `surface_image()` handling. This case does not route them through the generic
   empty timer; their completion semantics are owned elsewhere in the queue.
-- A native `Subsurface.commit()` emits `subsurface-image`, not the generic
-  toplevel `commit`. Its `SubsurfaceWindow` facade is retained in
-  `subsurface_facades`, not `_id_to_window`, and it has no damage-guard or
-  acknowledgement API.
+- With this case selected alone, a native `Subsurface.commit()` emits its
+  dedicated image event rather than the generic toplevel `commit`; its facade
+  is not an ordinary toplevel model and has no empty-damage guard.
+- With `wayland-subsurface-stream-ownership` composed, a child emits one atomic
+  `subsurface-commit` and WSSO completes that native child callback exactly
+  once after installing or invalidating the generation. A tuple-backed root
+  with active children is likewise acknowledged once by the WSSO root owner
+  after interception, independently of peer count. Neither composite route
+  enters this shared empty-ack timer.
+- A tuple-backed root with no active child is still an ordinary root. Its empty
+  generation delegates to `schedule_empty_damage_ack()`; its real or repaired
+  damage cancels that entry and joins the model guard. Tuple authority changes
+  topology provenance, not WEDT's ordinary-root ownership.
 - A toplevel commit still updates the geometry of its listed subsurfaces before
   taking the empty branch.
 
-Do not spread the generic timer or model methods to popups or subsurfaces
-without a separate lifecycle and acknowledgement analysis. Their superficially
-similar commit events do not have the same model ownership.
+Do not spread the generic timer or model methods to popups, child surfaces, or
+active composite roots. Their superficially similar commit events have
+different callback owners and completion points.
 
 ## Patch-queue and test integration traps
 
 This case has no semantic dependency on another production fix and must apply
-and test standalone. The maintained `develop` series nevertheless applies
-`wayland-initial-window-state`, then `wayland-client-keymap-sync`, then this
-case. Both earlier cases touch nearby clean-base context:
+and test standalone. The maintained `develop` series places it after
+`wayland-subsurface-stream-ownership`, `wayland-initial-window-state`, and
+`wayland-client-keymap-sync`. All four cases touch nearby clean-base
+context:
 
 - `wayland-initial-window-state` changes the same Wayland model, subsystem, and
   `window_test.py`, adding `WaylandWindowServerFrameStateTest`;
 - `wayland-client-keymap-sync` changes `_focus` immediately after configure and
   adds `WaylandWindowServerFocusTest` to the same test module.
+- WSSO changes native root/child commit routing, topology reconciliation,
+  composite-root acknowledgement, and the same model/subsystem/test paths. It
+  must preserve this case's ordinary non-composite timer and damage guard while
+  keeping composite-root and child completion in its own state machine.
 
-The final patch therefore intentionally uses one line of Git diff context.
+The maintained patch therefore intentionally uses one line of Git diff context.
 When exporting a changed candidate, preserve that through the official
 workspace transaction rather than hand-editing `fix.patch`, `patch_sha256`, or
 `paths`:
@@ -265,19 +320,28 @@ make -C fork-maintenance workspace-update \
   CASE=wayland-empty-damage-throttle WORKSPACE=<owned-workspace>
 ```
 
-Low-context application has its own hazard. An earlier version applied and
-reversed cleanly but placed the new methods inside the preceding
-`WaylandWindowServerFrameStateTest` when the complete stack was assembled.
-`stack-check` proved only textual applicability and did not detect the changed
-test ownership. Keep `WaylandWindowServerEmptyDamageTest` as a separate class
-and run the focused/native test through the fully applied stack; inspect test
-discovery or the applied class order whenever adjacent context changes.
+Low-context application can remain textually valid while placing new methods
+inside the preceding `WaylandWindowServerFrameStateTest`. Apply/reverse checks
+therefore establish patch mechanics, not Python test ownership. Keep
+`WaylandWindowServerEmptyDamageTest` as a separate class, run the
+focused/native test through the fully applied stack, and inspect discovery or
+the applied class order whenever adjacent context changes.
 
 The subsystem unit tests call unbound real `WaylandWindowServer` methods on a
 mock server. New helper methods are otherwise created as permissive child mocks
 and may silently test nothing. The test setup explicitly bridges each real
 helper with `side_effect` and emulates model guard state with a closure; every
 window mock, including secondary windows, needs that setup.
+
+The same fixture explicitly sets
+`server._direct_subsurface_children.return_value = ()`. This is the topology
+contract of a WEDT unit case: every tested window is an ordinary root with no
+active WSSO child. Leaving that attribute as an unconstrained `Mock` would let
+the composed `unmap()` / teardown methods observe invented child state or fail
+while iterating it, so it would no longer test the timer boundary. The empty
+tuple does not emulate WSSO reconciliation; WSSO's own focused module covers
+authoritative tuples, root-only delegation, repair, refusal, and composite
+acknowledgement.
 
 The model tests deliberately obtain the real `Window` class from
 `WaylandWindowServer.commit.__globals__` after the module's native import stubs
@@ -293,19 +357,26 @@ part of this case's boundary.
 
 ## Patch ownership and non-goals
 
-The production patch owns only the Wayland toplevel empty-damage
+The production patch owns only the ordinary non-composite Wayland toplevel empty-damage
 acknowledgement schedule, the model guard needed to protect normal damage, and
 the focused regression. It must retain callback liveness for a visible
 consumer, avoid synchronous compositor feedback, coalesce repeated work, and
 leave the normal `WindowSource` acknowledgement path authoritative while the
 guard is set.
 
+The case also owns the public ordinary-root scheduling, cancellation, pending,
+and atomic empty-ack methods used by adjacent adapters. It does not own the
+adapter's topology classification. WSSO may call this API for an authoritative
+root-only tuple, but it may neither duplicate the timer nor transfer composite
+root or child completion into it.
+
 It does not:
 
 - remove the pre-classification texture capture/readback;
 - change generic damage batching, encoding, or client draw acknowledgements;
-- redefine popup, subsurface, multi-`WindowSource`, unmap, or configure
-  semantics beyond the guard and flush-preserving calls described above;
+- redefine popup, WSSO composite-root, child-surface, multi-`WindowSource`,
+  unmap, or configure semantics beyond the guard and flush-preserving calls
+  described above;
 - proactively wake a filtered surface without an ordinary visibility/damage
   transition;
 - add modal protocol support; or
@@ -350,7 +421,10 @@ observation.
 ## Invariants not to simplify
 
 - Do not restore a synchronous acknowledgement in `commit()`.
-- Do not remove the model damage guard or mark it after damage fan-out.
+- Do not remove the model damage guard or mark it after ordinary explicit
+  damage fan-out. A WSSO full repair which is enqueued during reconciliation
+  must still acquire the guard before its delayed `WindowSource`
+  acknowledgement can run.
 - Do not let an empty timer drain callbacks while normal damage is pending.
 - Do not clear the guard on native unmap or cancel generic `WindowSource`
   damage as a substitute.
@@ -362,22 +436,30 @@ observation.
   time.
 - Do not extend the toplevel solution to popup or subsurface commits by name
   similarity alone.
+- Do not route a WSSO composite-root or child completion through the ordinary
+  empty-damage timer; preserve its single compositor-owned acknowledgement.
+- Do not treat an authoritative tuple as composite merely because of its type:
+  a root-only tuple must retain the WEDT schedule/cancel/guard contract.
+- Do not let a refusal or failed repair masquerade as normal damage ownership,
+  or let another root's reconciliation state suppress this root's timer.
 - Do not trust patch apply/reverse checks without running the applied stack's
   actual focused and native tests.
 
 ## Required validation
 
-Follow the current isolated-workspace and upstream/live runbooks rather than
+Follow [development and final acceptance](../../docs/runbooks/validation.md)
+and the current isolated-workspace and upstream/live runbooks rather than
 using host source or ad hoc evidence. Run `unit.wayland.window_test` first in
 tests-only mode to prove the synchronous clean-source failure, then with the
-completed standalone case. Run the standalone native `wayland` boundary, then
-repeat the focused and native boundaries through `stacks/develop` to cover the
-complete queue. Reassess quarantine as required and run all three full upstream
-unit-test legs.
+standalone case after each atomic scheduler change. Include affected upstream
+modules, the standalone native `wayland` boundary, and composed focused/native
+checks when the WSSO commit adapter or another shared interface is involved.
 
 The `live-rgb` regression must finish positive through the frozen-input,
 bounded-payload harness with its exact application event stream, input deadline,
-lifecycle, and owned cleanup evidence. Before publication, run all seven fixed
-positive live profiles required by the fork contract so this scheduler is also
-exercised alongside the other maintained rendering, keyboard, detach, fault,
-Vulkan, and OpenGL paths.
+lifecycle, and owned cleanup evidence. Run it early after the relevant
+focused/native checks, without a full-matrix prerequisite. After candidate
+freeze, fill only missing or invalidated final requirements, including current
+quarantine, all three full legs, and the seven fixed positive stack profiles
+so this scheduler is also exercised alongside the other maintained rendering,
+keyboard, detach, fault, Vulkan, and OpenGL paths.
