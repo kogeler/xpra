@@ -20,7 +20,7 @@ neighboring low-context patches: the empty-damage test class must remain
 top-level, not become part of another case's test class.
 
 The durable native fixture and its event-stream validator live in
-`fork-maintenance/infra/live`. Atomic `live-rgb` acceptance requires real
+`fork-maintenance/infra/live`. Full-stack `live-rgb` acceptance requires real
 callback pressure, bounded child input, ordered fixture exit, and owned
-cleanup. The complete stack additionally retains all seven positive profiles.
+cleanup. Every patch validation requires all nine full-stack profiles.
 Packet counters or an ad hoc timeout probe do not replace those boundaries.

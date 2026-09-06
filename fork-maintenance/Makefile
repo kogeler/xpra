@@ -12,10 +12,12 @@ LIVE_VENV := $(shell $(PYTHON) $(AUTOMATION_ROOT)/infra/live/job.py environment-
 LIVE_PYTHON := $(LIVE_VENV)/bin/python
 LIVE_JOB_BOOTSTRAP := $(PYTHON) $(AUTOMATION_ROOT)/infra/live/job.py
 LIVE_JOB := $(LIVE_PYTHON) $(AUTOMATION_ROOT)/infra/live/job.py
+LIVE_SUITE := $(LIVE_PYTHON) $(AUTOMATION_ROOT)/infra/live/suite.py
 LIVE_CONFIG := $(PYTHON) $(AUTOMATION_ROOT)/infra/live/live_config.py
 UPSTREAM_TESTS := $(AUTOMATION_ROOT)/infra/upstream-tests
 DEB_PACKAGES := $(AUTOMATION_ROOT)/infra/deb-packages
 RUFF ?= ruff
+MYPY_PYTHON ?= $(REPOSITORY_ROOT)/.artifacts/fork-maintenance/venvs/typecheck/bin/python
 
 CASE ?=
 STACK ?= $(if $(strip $(CASE)),,develop)
@@ -66,7 +68,7 @@ AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_waylan
 	infra/live/start_zed.sh \
 	infra/upstream-tests/entrypoint.sh
 
-.PHONY: help check lint contributor-tests clean artifact-boundary doctor \
+.PHONY: help check lint typecheck contributor-tests clean artifact-boundary doctor \
 	live-venv live-venv-check list repo-status repo-sync master-update develop-rebase \
 	patch-start-check isolated-start-check develop-check ci-layout-check ci-prepare ci-master-sync ci-upstream-tests ci-deb-release \
 	case-new case-recover case-name-check stack-name-check selector-check workspace-selector-check optional-selector-check \
@@ -84,11 +86,10 @@ AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_waylan
 	test-quarantine test-quarantine-cython \
 	test-quarantine-no-compat test-wayland test-libyuv \
 	test-full test-full-cython test-full-no-compat \
-	live-profile-list live-start live-status live-logs live-wait live-collect live-remove live-abort \
+	live-all live-suite-check live-profile-list live-start live-status live-logs live-wait live-collect live-remove live-abort \
 	live-rgb live-h264 live-xpra-detach live-xpra-transport-loss live-xpra-hardware \
 	live-xpra-opengl-hardware live-wayland-keyboard live-x11-clipboard \
-	live-wayland-subsurface live-x11-clipboard-policy-check \
-	live-wayland-subsurface-policy-check \
+	live-wayland-subsurface live-stack-policy-check \
 	deb-start deb-status deb-logs deb-wait deb-collect deb-remove deb-abort
 
 help:
@@ -157,8 +158,13 @@ help:
 		'make -C fork-maintenance live-profile-list' \
 		'    List tracked client network profiles; profiles.yml supplies the default' \
 		'make -C fork-maintenance live-xpra-opengl-hardware STACK=develop RUN=unique-name' \
-		'make -C fork-maintenance live-x11-clipboard CASE=x11-client-clipboard-events RUN=unique-name' \
-		'make -C fork-maintenance live-wayland-subsurface CASE=wayland-subsurface-stream-ownership RUN=unique-name' \
+		'make -C fork-maintenance live-all STACK=develop RUN=unique-prefix' \
+		'make -C fork-maintenance live-suite-check STACK=develop RUN=unique-prefix' \
+		'    Every patch validation requires all nine profiles with all patches on both endpoints' \
+		'make -C fork-maintenance typecheck WORKSPACE=complete-stack-workspace' \
+		'    Strict mypy for explicitly scoped downstream files, not the upstream project' \
+		'make -C fork-maintenance live-x11-clipboard STACK=develop RUN=unique-name' \
+		'make -C fork-maintenance live-wayland-subsurface STACK=develop RUN=unique-name' \
 		'make -C fork-maintenance live-wait RUN=unique-name' \
 		'make -C fork-maintenance live-abort RUN=unique-name' \
 		'    Run or abort a durable physical-GPU profile; outputs stay below .artifacts/' \
@@ -177,12 +183,13 @@ check: artifact-boundary ci-layout-check
 	done
 	@$(CONTRIB) case-list >/dev/null
 	@$(PYTHON) tools/test_contrib.py
+	@$(PYTHON) tools/test_typecheck.py
 	@$(PYTHON) tools/test_artifacts.py
 	@$(PYTHON) tools/test_background_job.py
 	@PYTHONPATH="$(AUTOMATION_ROOT)/tools" $(PYTHON) tools/test_container_payload.py
 	@PYTHONPATH="$(AUTOMATION_ROOT)/tools" $(PYTHON) tools/test_podman_policy.py
 	@$(MAKE) --no-print-directory -C "$(DEB_PACKAGES)" check
-	@$(PYTHON) -m unittest discover -s infra/live -p 'test_job.py'
+	@$(PYTHON) -m unittest discover -s infra/live -p 'test_*.py'
 	@$(PYTHON) -m unittest discover -s infra/upstream-tests -p 'test_*.py'
 	@command -v "$(RUFF)" >/dev/null 2>&1 || { printf 'ruff is required for check\n' >&2; exit 2; }
 	@$(RUFF) check tools infra cases
@@ -190,6 +197,10 @@ check: artifact-boundary ci-layout-check
 lint:
 	@command -v "$(RUFF)" >/dev/null 2>&1 || { printf 'ruff is required for lint\n' >&2; exit 2; }
 	@$(RUFF) check tools infra cases
+
+typecheck: workspace-name-check
+	@"$(MYPY_PYTHON)" tools/typecheck.py "$(WORKSPACE)"
+	@"$(MYPY_PYTHON)" infra/typecheck/test_contract.py "$(WORKSPACE)"
 
 contributor-tests:
 	@$(PYTHON) tools/test_contrib.py
@@ -430,7 +441,14 @@ test-quarantine-no-compat test-wayland test-libyuv test-full test-full-cython \
 test-full-no-compat:
 	@$(MAKE) --no-print-directory test-start TARGET="$(patsubst test-%,%,$@)"
 
-live-start: isolated-start-check selector-check run-name-check live-options-check
+live-stack-policy-check:
+	@test -z "$${XPRA_FORK_CASE}" && test "$${XPRA_FORK_STACK}" = develop \
+		&& test "$${XPRA_FORK_PATCH_MODE}" = patched || { \
+		printf '%s\n' 'all live tests require STACK=develop PATCH_MODE=patched and no CASE on both endpoints' >&2; \
+		exit 2; \
+	}
+
+live-start: live-stack-policy-check isolated-start-check selector-check run-name-check live-options-check
 	@set -- $(LIVE_JOB) start "$${XPRA_FORK_RUN}" \
 		--application "$${XPRA_FORK_APPLICATION}" \
 		--encoding "$${XPRA_FORK_ENCODING}" \
@@ -442,6 +460,16 @@ live-start: isolated-start-check selector-check run-name-check live-options-chec
 	if [[ -n "$${XPRA_FORK_RENDER_NODE}" ]]; then set -- "$$@" --render-node "$${XPRA_FORK_RENDER_NODE}"; fi; \
 	if [[ -n "$${XPRA_FORK_ZED_DIRECTORY}" ]]; then set -- "$$@" --zed-directory "$${XPRA_FORK_ZED_DIRECTORY}"; fi; \
 	"$$@"
+
+live-all: live-stack-policy-check isolated-start-check selector-check run-name-check live-venv-check
+	@set -- $(LIVE_SUITE) run "$${XPRA_FORK_RUN}" \
+		--network-profile "$${XPRA_FORK_NETWORK_PROFILE}"; \
+	if [[ -n "$${XPRA_FORK_RENDER_NODE}" ]]; then set -- "$$@" --render-node "$${XPRA_FORK_RENDER_NODE}"; fi; \
+	if [[ -n "$${XPRA_FORK_ZED_DIRECTORY}" ]]; then set -- "$$@" --zed-directory "$${XPRA_FORK_ZED_DIRECTORY}"; fi; \
+	"$$@"
+
+live-suite-check: live-stack-policy-check run-name-check live-venv-check
+	@$(LIVE_SUITE) check "$${XPRA_FORK_RUN}"
 
 live-status live-logs live-wait live-collect live-remove live-abort: run-name-check
 	@$(LIVE_JOB) $(patsubst live-%,%,$@) "$${XPRA_FORK_RUN}"
@@ -481,26 +509,12 @@ live-wayland-keyboard:
 		APPLICATION=keyboard LIFECYCLE=application-exit ENCODING=rgb \
 		H264_CLIENT_POLICY=strict ALPHA_SCENARIOS=default
 
-live-x11-clipboard-policy-check:
-	@test "$${XPRA_FORK_CASE}" = x11-client-clipboard-events \
-		&& test -z "$${XPRA_FORK_STACK}" || { \
-		printf '%s\n' 'live-x11-clipboard requires CASE=x11-client-clipboard-events and no STACK' >&2; \
-		exit 2; \
-	}
-
-live-x11-clipboard: live-x11-clipboard-policy-check
+live-x11-clipboard:
 	@$(MAKE) --no-print-directory live-start \
 		APPLICATION=clipboard LIFECYCLE=application-exit ENCODING=rgb \
 		H264_CLIENT_POLICY=strict ALPHA_SCENARIOS=default
 
-live-wayland-subsurface-policy-check:
-	@test "$${XPRA_FORK_CASE}" = wayland-subsurface-stream-ownership \
-		&& test -z "$${XPRA_FORK_STACK}" || { \
-		printf '%s\n' 'live-wayland-subsurface requires CASE=wayland-subsurface-stream-ownership and no STACK' >&2; \
-		exit 2; \
-	}
-
-live-wayland-subsurface: live-wayland-subsurface-policy-check
+live-wayland-subsurface:
 	@$(MAKE) --no-print-directory live-start \
 		APPLICATION=subsurface LIFECYCLE=application-exit ENCODING=rgb \
 		H264_CLIENT_POLICY=strict ALPHA_SCENARIOS=default

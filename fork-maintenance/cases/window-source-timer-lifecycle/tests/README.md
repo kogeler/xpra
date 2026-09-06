@@ -21,7 +21,7 @@ Fixtures must initialize the actual connection owners reached by the composed
 path; copying a partial set of locks or queue fields does not establish the
 connection lifecycle.
 
-There is no atomic live gate for this case. The seven complete-stack profiles
+There is no isolated live product for this case. All nine complete-stack profiles
 exercise real shutdown, detach, transport loss, rendering, and video, but do
 not replace the focused publication and callback interleavings. Video-only
 sources belong to VPC; connection-owned composite idles and watchdogs belong

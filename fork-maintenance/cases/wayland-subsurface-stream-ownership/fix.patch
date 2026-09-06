@@ -2425,10 +2425,10 @@ index 4ae7adad457736781ea9f61f65e63aac5f8ea248..ecac254e5a35666b5825b8f83ab1b6d3
          self.assertEqual(client.drain(), b"")
 diff --git a/tests/unittests/unit/server/window/subsurface_source_test.py b/tests/unittests/unit/server/window/subsurface_source_test.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..ff05168a9c189655bd7ef219f873bd999e06f716
+index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc4a03af78
 --- /dev/null
 +++ b/tests/unittests/unit/server/window/subsurface_source_test.py
-@@ -0,0 +1,3397 @@
+@@ -0,0 +1,3459 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 kogeler
@@ -2443,10 +2443,11 @@ index 0000000000000000000000000000000000000000..ff05168a9c189655bd7ef219f873bd99
 +
 +from xpra.common import SUBSURFACE_COMPOSITE_FORMATS, SUBSURFACE_COMPOSITE_MODE
 +from xpra.net.common import BACKWARDS_COMPATIBLE, Packet
-+from xpra.net.packet_type import WINDOW_CREATE, WINDOW_DESTROY, WINDOW_DRAW
++from xpra.net.packet_type import WINDOW_CREATE, WINDOW_DESTROY, WINDOW_DRAW, WINDOW_EOS, WINDOW_ICON
 +from xpra.server.source.avsync import AVSyncConnection
 +from xpra.server.source.bandwidth import BandwidthConnection
 +from xpra.server.source.client_connection import ClientConnection
++from xpra.server.source.clipboard import ClipboardConnection
 +from xpra.server.source.encoding import EncodingsConnection
 +from xpra.server.source.image_filter import NoFilter
 +from xpra.server.source.window import WindowsConnection
@@ -2461,6 +2462,10 @@ index 0000000000000000000000000000000000000000..ff05168a9c189655bd7ef219f873bd99
 +
 +class _CalculationConnection(WindowsConnection, EncodingsConnection):
 +    """Compose the real source and calculator owners without a transport."""
++
++
++class _ClipboardTransport(ClientConnection, ClipboardConnection):
++    """Use the real clipboard producer and outgoing queue on one connection."""
 +
 +
 +class SubsurfaceEncodingTest(unittest.TestCase):
@@ -3028,6 +3033,63 @@ index 0000000000000000000000000000000000000000..ff05168a9c189655bd7ef219f873bd99
 +        window.is_tray.return_value = False
 +        window.get_property_names.return_value = ()
 +        return window
++
++    def test_clipboard_producer_survives_draw_queue_filter(self) -> None:
++        connection = self.make_connection()
++        transport = _ClipboardTransport.__new__(_ClipboardTransport)
++        transport.close_event = threading.Event()
++        transport.ordinary_packets = []
++        transport.packet_queue = deque()
++        transport.statistics = SimpleNamespace(packet_qsizes=[], damage_packet_qpixels=[])
++        transport.protocol = Mock()
++        transport.filter_queued_damage_packet = connection.filter_queued_damage_packet
++        ClipboardConnection.init_state(transport)
++        packets = []
++        for selection in ("CLIPBOARD", "PRIMARY"):
++            for packet in (
++                Packet("clipboard-token", selection),
++                Packet("clipboard-contents", 1, selection, "UTF8_STRING", 8, "bytes", b"queue regression"),
++            ):
++                # This production method deliberately queues a plain tuple.
++                # Calling queue_packet with a fabricated Packet would miss the bug.
++                ClipboardConnection.compress_clipboard(transport, packet)
++                packets.append(transport.packet_queue[-1][0])
++        transport.send("ping", 123)
++        self.assertEqual(transport.next_packet()[0].get_type(), "ping")
++        for index, expected in enumerate(packets):
++            packet, synchronous, more = transport.next_packet()
++            self.assertIs(packet, expected)
++            self.assertTrue(synchronous)
++            self.assertEqual(more, index < len(packets) - 1)
++        self.assertEqual(transport.next_packet()[0].get_type(), "none")
++        self.assertFalse(transport.is_closed())
++        self.assertEqual(connection._damage_packet_owners, {})
++
++    def test_non_draw_queue_entries_keep_identity_and_batch_flags(self) -> None:
++        connection = self.make_connection()
++        for parts in ((WINDOW_EOS, 0x10), (WINDOW_ICON, 0x10, 0, 0, "default", b"")):
++            for packet in (parts, list(parts), Packet(*parts)):
++                for more in (False, True):
++                    queued = packet, 0, 0, more
++                    with self.subTest(packet_type=parts[0], container=type(packet).__name__, more=more):
++                        self.assertIs(connection.filter_queued_damage_packet(queued), queued)
++
++    def test_sequence_draws_cannot_bypass_stale_validation_or_mmap_drain(self) -> None:
++        connection = self.make_connection()
++        for coding in ("rgb32", "mmap"):
++            chunks = ((4096, 16),)
++            data = chunks if coding == "mmap" and BACKWARDS_COMPATIBLE else b""
++            parts = (WINDOW_DRAW, 0x10, 2, 3, 4, 5, coding, data, 1, 16, {"chunks": chunks})
++            for packet in (Packet(*parts), parts, list(parts)):
++                with self.subTest(coding=coding, container=type(packet).__name__):
++                    result = connection.filter_queued_damage_packet((packet, 0x10, 20, True))
++                    if coding != "mmap":
++                        self.assertIsNone(result)
++                        continue
++                    drain, wid, pixels, more = result
++                    self.assertEqual((drain.get_type(), drain.get_wid()), (WINDOW_DRAW, -1))
++                    self.assertEqual(tuple(drain[2:]), parts[2:])
++                    self.assertEqual((wid, pixels, more), (0, 0, False))
 +
 +    def test_background_calculation_retains_exact_source_until_callout_finishes(self) -> None:
 +        for phase, child in (("recalculate", False), ("recalculate", True),
@@ -10814,11 +10876,40 @@ index ee448cef7f7acd0dbd45a23ab0a23fbfacec9690..c433822bc6cf85eaf021a0def7316c68
              ws.set_speed(speed)
  
      def make_batch_config(self, wid: int, window):
+diff --git a/xpra/server/source/queued_packet.py b/xpra/server/source/queued_packet.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..53290a7359a4ff0a90cfe4bae108036038d1eb1d
+--- /dev/null
++++ b/xpra/server/source/queued_packet.py
+@@ -0,0 +1,23 @@
++# This file is part of Xpra.
++# Copyright (C) 2026 kogeler
++# Xpra is released under the terms of the GNU GPL v2, or, at your option, any
++# later version. See the file COPYING for details.
++
++from collections.abc import Sequence
++
++from xpra.net.common import Packet, PacketElement
++from xpra.net.packet_type import WINDOW_DRAW
++
++
++def queued_draw_packet(packet: Sequence[PacketElement]) -> Packet | None:
++    """Narrow the mixed outgoing queue before calling draw-specific accessors.
++
++    Clipboard, icons and EOS may be plain sequences. They are not damage and
++    must retain their original representation, ownership and batching flags.
++    Sequence-shaped draws must still undergo the caller's stale-frame checks.
++    """
++    if not packet or packet[0] != WINDOW_DRAW:
++        return None
++    if isinstance(packet, Packet):
++        return packet
++    return Packet(WINDOW_DRAW, *packet[1:])
 diff --git a/xpra/server/source/window.py b/xpra/server/source/window.py
-index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0ecd239f6 100644
+index a67b72eb2faef9fc53d218633a9ea7c979d0827b..88b5228aeb62a286a8bdb5a2b9edff066b5fe9b2 100644
 --- a/xpra/server/source/window.py
 +++ b/xpra/server/source/window.py
-@@ -5,29 +5,37 @@
+@@ -5,9 +5,11 @@
  # later version. See the file COPYING for details.
  
  import os
@@ -10830,12 +10921,11 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
  
  from xpra.net.packet_type import (
      WINDOW_RESTACK, WINDOW_RAISE, WINDOW_INITIATE_MOVERESIZE, WINDOW_DESTROY, WINDOW_RESIZED,
-     WINDOW_MOVE_RESIZE, WINDOW_METADATA, WINDOW_BELL, WINDOW_GRAB, WINDOW_UNGRAB, WINDOW_STACKING,
-+    WINDOW_DRAW,
- )
+@@ -16,18 +18,24 @@ from xpra.net.packet_type import (
  from xpra.os_util import gi_import
  from xpra.server.common import may_update_bandwidth_limits, wants_windows
  from xpra.server.source.stub import StubClientConnection, is_recording_allowed, is_sync_allowed
++from xpra.server.source.queued_packet import queued_draw_packet
 +from xpra.server.window.compress import free_image_wrapper
  from xpra.server.window.metadata import make_window_metadata
  from xpra.server.window.filters import get_window_filter
@@ -10900,7 +10990,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
          self.window_frame_sizes: dict = {}
          self.window_bell = False
          self.window_enabled = True
-@@ -114,31 +146,525 @@ class WindowsConnection(StubClientConnection):
+@@ -114,31 +146,529 @@ class WindowsConnection(StubClientConnection):
          # `sharing=combine`: the windows that fall outside this client's display area,
          # which are sent to it but not shown (see `HIDDEN_METADATA`)
          self.hidden_windows: set = set()
@@ -11232,10 +11322,14 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
 +        ring read pointer, so stale mmap draws are retargeted to the client's
 +        unknown-window drain path instead.
 +        """
-+        packet, _source_wid, _pixels, _wait_for_more = queued_packet
-+        if packet.get_type() != WINDOW_DRAW:
-+            return queued_packet
++        packet, source_wid, pixels, wait_for_more = queued_packet
 +        try:
++            draw_packet = queued_draw_packet(packet)
++            if draw_packet is None:
++                return queued_packet
++            if draw_packet is not packet:
++                packet = draw_packet
++                queued_packet = packet, source_wid, pixels, wait_for_more
 +            wire_wid = packet.get_wid()
 +            coding = packet.get_str(6)
 +            sequence = packet.get_u64(8)
@@ -11436,7 +11530,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
              ws.resume()
  
      def go_idle(self) -> None:
-@@ -146,7 +672,7 @@ class WindowsConnection(StubClientConnection):
+@@ -146,7 +676,7 @@ class WindowsConnection(StubClientConnection):
          if self.idle:
              return
          self.idle = True
@@ -11445,7 +11539,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
              window_source.go_idle()
  
      def no_idle(self) -> None:
-@@ -154,7 +680,7 @@ class WindowsConnection(StubClientConnection):
+@@ -154,7 +684,7 @@ class WindowsConnection(StubClientConnection):
          if not self.idle:
              return
          self.idle = False
@@ -11454,7 +11548,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
              window_source.no_idle()
  
      def requires_sharing(self) -> bool:
-@@ -197,6 +723,10 @@ class WindowsConnection(StubClientConnection):
+@@ -197,6 +727,10 @@ class WindowsConnection(StubClientConnection):
          # Stacking updates are harmless window-manager state. Unlike the other
          # recording and synchronization streams, they do not need a socket option.
          self.window_sync_stacking = window_record_requested or wcaps.boolget("sync-stacking")
@@ -11465,7 +11559,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
  
      def get_caps(self) -> dict[str, Any]:
          return {}
-@@ -237,32 +767,49 @@ class WindowsConnection(StubClientConnection):
+@@ -237,32 +771,49 @@ class WindowsConnection(StubClientConnection):
          pqpi = get_list_stats(pqpixels)
          if pqpixels:
              pqpi["current"] = pqpixels[-1]
@@ -11530,7 +11624,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
                  # per-window source stats:
                  winfo[wid] = ws.get_info()
                  if subs := subs_by_parent.get(wid):
-@@ -320,7 +867,118 @@ class WindowsConnection(StubClientConnection):
+@@ -320,7 +871,118 @@ class WindowsConnection(StubClientConnection):
          # (reminder: filters are shared between all sources)
          self.window_filters.append((self.uuid, window_filter))
  
@@ -11649,7 +11743,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
          if not self.hello_sent or not (self.window_enabled or self.system_tray):
              return False
          # we could also allow filtering for system tray windows?
-@@ -342,6 +1000,22 @@ class WindowsConnection(StubClientConnection):
+@@ -342,6 +1004,22 @@ class WindowsConnection(StubClientConnection):
          filterslog("can_send_window(%s)=%s", window, v)
          return v
  
@@ -11672,7 +11766,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
      ######################################################################
      # display area: with `sharing=combine`, this client only occupies a part
      # of the server's virtual display, so the coordinates we send it are
-@@ -402,6 +1076,8 @@ class WindowsConnection(StubClientConnection):
+@@ -402,6 +1080,8 @@ class WindowsConnection(StubClientConnection):
          `notify` can be disabled when the caller is about to send the metadata itself.
          Returns `True` if the window is hidden from this client.
          """
@@ -11681,7 +11775,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
          hidden = not self.is_window_visible(window, geometry)
          was_hidden = self.is_window_hidden(window)
          if hidden == was_hidden and not force:
-@@ -423,14 +1099,18 @@ class WindowsConnection(StubClientConnection):
+@@ -423,14 +1103,18 @@ class WindowsConnection(StubClientConnection):
              self.send(WINDOW_METADATA, wid, metadata)
          # a hidden window is unmapped as far as this client is concerned,
          # so we can stop sending it any pixels:
@@ -11703,7 +11797,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
                  # it may have changed a lot since we stopped sending it:
                  self.refresh(wid, window, {})
          return hidden
-@@ -439,22 +1119,25 @@ class WindowsConnection(StubClientConnection):
+@@ -439,22 +1123,25 @@ class WindowsConnection(StubClientConnection):
      # windows:
      def initiate_moveresize(self, wid: int, window, x_root: int, y_root: int,
                              direction: int, button: int, source_indication: int) -> None:
@@ -11732,7 +11826,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
              return
          if prop == "icons":
              self.send_window_icon(wid, window)
-@@ -488,16 +1171,18 @@ class WindowsConnection(StubClientConnection):
+@@ -488,16 +1175,18 @@ class WindowsConnection(StubClientConnection):
  
      def new_tray(self, wid: int, window, w: int, h: int) -> None:
          assert window.is_tray()
@@ -11754,7 +11848,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
              return
          # decide if this window belongs on this client's area before making the metadata,
          # so that `_make_metadata` can override it - no need to notify separately:
-@@ -520,7 +1205,16 @@ class WindowsConnection(StubClientConnection):
+@@ -520,7 +1209,16 @@ class WindowsConnection(StubClientConnection):
              metadata.update(v)
          log("new_window(%s, %#x, %s, %i, %i, %i, %i, %s) metadata(%s)=%s",
              packet_type, wid, window, x, y, w, h, client_properties, send_props, metadata)
@@ -11772,7 +11866,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
          if hidden and (hidden_metadata := self.get_hidden_metadata(window, True)):
              # showing a new window usually de-iconifies it,
              # so we have to ask for it to be hidden again once it exists:
-@@ -529,13 +1223,18 @@ class WindowsConnection(StubClientConnection):
+@@ -529,13 +1227,18 @@ class WindowsConnection(StubClientConnection):
              self.send_window_icon(wid, window)
  
      def send_window_icon(self, wid: int, window) -> None:
@@ -11793,7 +11887,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
          self.send(WINDOW_DESTROY, wid)
  
      def move_resize_window(self, wid: int, window, x: int, y: int, ww: int, wh: int, resize_counter: int = 0) -> None:
-@@ -543,24 +1242,48 @@ class WindowsConnection(StubClientConnection):
+@@ -543,24 +1246,48 @@ class WindowsConnection(StubClientConnection):
          The server detected that the application window has been moved and/or resized,
          we forward it if the client supports this type of event.
          """
@@ -11845,7 +11939,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
              ws.cancel_damage()
  
      def record_scroll_event(self, wid: int) -> None:
-@@ -568,20 +1291,33 @@ class WindowsConnection(StubClientConnection):
+@@ -568,20 +1295,33 @@ class WindowsConnection(StubClientConnection):
              ws.record_scroll_event()
  
      def reinit_encoders(self) -> None:
@@ -11886,7 +11980,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
              return
          if not self.window_restack:
              # older clients can only handle "raise-window"
-@@ -592,31 +1328,113 @@ class WindowsConnection(StubClientConnection):
+@@ -592,31 +1332,113 @@ class WindowsConnection(StubClientConnection):
          self.send_async(WINDOW_RESTACK, wid, detail, sibling)
  
      def raise_window(self, wid: int, window) -> None:
@@ -12010,7 +12104,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
              for x in ("always", "locked"):
                  if x in batch_props:
                      setattr(ws.batch_config, x, batch_props.boolget(x))
-@@ -627,8 +1445,899 @@ class WindowsConnection(StubClientConnection):
+@@ -627,8 +1449,899 @@ class WindowsConnection(StubClientConnection):
  
      def set_client_properties(self, wid: int, window, new_client_properties: typedict) -> None:
          assert self.window_enabled
@@ -12911,7 +13005,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
  
      def get_window_source(self, wid: int):
          return self.window_sources.get(wid)
-@@ -668,20 +2377,41 @@ class WindowsConnection(StubClientConnection):
+@@ -668,20 +2381,41 @@ class WindowsConnection(StubClientConnection):
              self.rgb_formats,
              self.default_encoding_options,
              mmap_write_area, bandwidth_limit, jitter, datagram)
@@ -12962,7 +13056,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
          batch_config = self.make_batch_config(wid, window)
          ww, wh = window.get_dimensions()
          mmap_write_area = getattr(self, "mmap_write_area", None)
-@@ -717,27 +2447,77 @@ class WindowsConnection(StubClientConnection):
+@@ -717,27 +2451,77 @@ class WindowsConnection(StubClientConnection):
              logical_width=logical_width, logical_height=logical_height,
              native_width=native_width, native_height=native_height,
          )
@@ -13049,7 +13143,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
          assert window is not None
          if options:
              damage_options = options.copy()
-@@ -746,7 +2526,9 @@ class WindowsConnection(StubClientConnection):
+@@ -746,7 +2530,9 @@ class WindowsConnection(StubClientConnection):
          if s := self.statistics:
              s.damage_last_events.append((wid, monotonic(), w * h))
          ws = self.make_window_source(wid, window)
@@ -13060,7 +13154,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..da4157a99c5ef1d841ea698d2ea27bf0
  
      def client_ack_damage(self, damage_packet_sequence: int, wid: int,
                            width: int, height: int, decode_time: int, message: str) -> None:
-@@ -759,11 +2541,36 @@ class WindowsConnection(StubClientConnection):
+@@ -759,11 +2545,36 @@ class WindowsConnection(StubClientConnection):
          if not self.window_enabled:
              log.error("Error: draw ack received for window %#x, but it is not enabled!")
              return

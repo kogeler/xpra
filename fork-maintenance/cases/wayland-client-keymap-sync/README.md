@@ -194,10 +194,10 @@ and modifier meanings already held by the source configuration. The following
 nested packet is a separate complete update, commonly hash-identical during
 initial attachment but potentially a second valid transaction at runtime.
 There is no protocol end marker, so delaying an unversioned layout packet with
-an idle callback or timer would race and break legacy/backend clients. The live
-gate intentionally uses the clean maintained client and requires the richer
-nested update to install its distinct model; negotiated one-packet behavior is
-bound by focused client/server regressions.
+an idle callback or timer would race and break legacy/backend clients. These
+compatibility paths remain bound by focused client/server regressions. The live
+gate uses the full-stack X11 client and requires one negotiated versioned
+`keyboard-config` update to install the complete map, including its distinct model.
 
 ## Presence-aware RMLVO normalization
 
@@ -702,7 +702,7 @@ with inferred modifiers, under both synchronized and unsynchronized input.
 
 The dedicated positive live scenario is
 `tests/live-wayland-keyboard.json`. Before attachment, the runner seeds the
-clean maintained client's real X11 display with the scenario's *replacement*
+full-stack client's real X11 display with the scenario's *replacement*
 map, `evdev/pc105/ge,am,us,fr`, and waits for its baseline structured
 acceptance. That baseline carries no application input and is not a third
 scenario phase. It is deliberate: the observed phase loop can then change to
@@ -716,24 +716,23 @@ AD01/X11 keycode 24 through groups zero through three, producing `q`, `a`,
 `й`, and `ض`. Without reconnecting, the second phase restores
 `evdev/pc105/ge,am,us,fr`; the same physical key produces `ქ`, `ճ`, `q`, and
 `a`. These values belong to the versioned live-scenario schema; they are not
-runner branches, production constants, or a claim that this compatibility
-probe uses the exact-version wire representation. The clean client deliberately
-advertises each map through the compatible nested `keymap-changed` form, which
-the server records as `representation=legacy`. Together the two observed maps
+runner branches or production constants. The full-stack X11 client
+advertises each map through the negotiated flat `keyboard-config` form, which
+the server must record as `representation=versioned`. Together the two observed maps
 exercise XKB's four-group maximum twice and Latin, Cyrillic, Arabic, Georgian,
 and Armenian Unicode data.
 
 For each phase the runner verifies the queried client RMLVO and requires the
-clean client's nested structured update to be received, install the expected
+patched client's versioned structured update to be received, install the expected
 hash, and be explicitly accepted in that order. The distinct valid model
-fields force the richer update to establish its own state after the preceding
-legacy layout packet. An identical-only result, silent packet, rejection, or
+fields prove that the complete negotiated update establishes the requested state.
+A legacy-only exchange, identical-only result, silent packet, rejection, or
 startup-only configuration cannot prove runtime synchronization.
 
 The driver locks each actual XKB group and sends one complete XTEST
 press/release pair for the unchanged physical key. It does not call
 `xdotool type`, paste, send Unicode, or construct Xpra packets. Every input is
-bound to the clean Xpra client's exact logged `key-action` press/release pair,
+bound to the Xpra client's exact logged `key-action` press/release pair,
 the client XKB group and symbol, the server's resolved group/keycode and device
 events, and the forwarded fixture window ID.
 
@@ -820,6 +819,6 @@ press/release observation, authoritative eight-character application sequence,
 runtime replacement, connection/process identities, information snapshot,
 fixture exit, lifecycle, and owned cleanup. After candidate freeze, fill only
 missing or invalidated final requirements, including current quarantine,
-the full matrix, and all seven fixed positive stack profiles so this keyboard
+the full matrix, and all nine fixed positive stack profiles so this keyboard
 case is also tested with the complete rendering, detach, transport-loss,
 empty-damage, Vulkan, and OpenGL stack boundaries.

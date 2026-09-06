@@ -66,8 +66,8 @@ The directive is sufficient authorization for the whole local pass:
   restarting still-valid expensive gates unless their frozen semantic inputs
   changed;
 - run all required clean controls, quarantine, focused/native and fork-control
-  checks, both real DEB builds, all three full upstream legs, every declared
-  atomic case live gate, and all seven positive complete-stack live profiles;
+  checks, both real DEB builds, all three full upstream legs, and all nine
+  positive complete-stack live profiles;
 - leave every rebase/adaptation/repair result after the initial preservation
   boundary uncommitted for operator review.
 
@@ -234,6 +234,12 @@ not forced.
 
 ## Implementation discipline
 
+Use the scoped [mypy gate](fork-maintenance/docs/runbooks/typecheck.md) for its
+explicit downstream-owned modules and their type contracts. Do not type-check
+the entire upstream project, suppress a global baseline, or repair unrelated
+upstream typing. Report the actual checked scope; static checks never replace
+native regressions or the mandatory complete live suite.
+
 Search current source, adjacent tests, and recent maintainer-authored history
 before editing. Preserve client/server subsystem boundaries, feature toggles,
 codec discovery, platform gates, and pkg-config authority. Do not add preload
@@ -391,21 +397,34 @@ Use the canonical [development and final-acceptance flow](fork-maintenance/docs/
 for new patches, existing-case review and upstream-rebase adaptation. Required
 gates define final coverage, not a sequence to repeat after every edit.
 
+Every live test MUST apply the complete current `stacks/develop` queue to BOTH
+the server and client. Case-only, partial-stack and clean-endpoint live tests
+are forbidden, including newly developed fixtures. A scenario may target one
+behavior, but its running product must contain every active patch. Atomic patch
+storage and isolated unit/negative controls do not authorize isolated live runs.
+For validation of ANY patch, run the entire nine-profile live suite through
+`make -C fork-maintenance live-all STACK=develop RUN=<fresh-prefix>`.
+A single-profile pass cannot accept a patch. `live-suite-check` verifies complete
+coverage and matching current source, queue, harness and endpoint provenance.
+This requirement also applies to unchanged-base repairs; no case manifest can
+waive it. Never report retired case-only or clean-client results as current proof.
+
 During development, freeze the embedded base, establish a non-vacuous clean
 control, and run the nearest real regression immediately after each atomic
 edit. Include affected upstream modules, case regressions and relevant
 dependent/composed tests; exercise native, compiled and compatibility modes
-according to the changed boundary. Run the relevant positive live scenario
-early. Full suites are not a prerequisite for live diagnosis or acceptance.
+according to the changed boundary. Start the complete live suite early.
+Full upstream unit suites are not a prerequisite
+for live diagnosis or acceptance.
 Stop escalation at the first unexplained failure and investigate its owner.
 
-Do not automatically run the full upstream matrix, both DEB builds or every
-live profile after an intermediate correction. Freeze a reviewed candidate
+Do not automatically run the full upstream matrix or both DEB builds after an
+intermediate correction. Freeze a reviewed candidate
 only when source, tests, fixtures/oracles and build inputs are stable; then fill
 missing or invalidated final gates. The full queue/rebase acceptance still
 requires clean controls/quarantine, focused/native and full fork-control checks,
-all three full upstream legs, both DEB builds, declared atomic live gates and
-all seven stack profiles. Reuse exact valid development evidence rather than
+all three full upstream legs, both DEB builds and all nine complete-stack live
+profiles. Reuse exact valid development evidence rather than
 rerunning it merely because the phase changed. A newly found defect returns
 its owner to the development loop before affected final jobs are rescheduled.
 
@@ -451,9 +470,9 @@ complements the Vulkan gate; neither is a substitute for the other.
 The fixed complete-stack positive live profiles remain Zed RGB, adaptive-alpha
 Zed H.264, RGB detach, RGB transport-loss fault injection, native-Wayland
 client-keymap input, multi-window Vulkan hardware, and multi-window OpenGL
-hardware. The additional `live-x11-clipboard` gate is case-only: it requires
-`CASE=x11-client-clipboard-events`, applies that selected source to both the
-X11 client and native-Wayland server endpoint, disables the unrelated client
+hardware, clipboard synchronization, and subsurface composition. The
+`live-x11-clipboard` gate uses the complete stack on the X11 client and
+native-Wayland server endpoint, disables the unrelated client
 XSettings and XI2 paths, and runs fresh `both`, `to-server`, and `off` sessions.
 Its Wayland reverse owner is armed by a private command but claims inside a real
 F8 event delivered through Xpra, then requires a compositor `owner-change`
@@ -466,10 +485,9 @@ separated from production takeovers; late nonzero takeovers remain failures.
 Retained compositor source intervals and cross-stream fixture chronology are
 reparsed during collection.
 
-The separate `live-wayland-subsurface` case-only gate requires exactly
-`CASE=wayland-subsurface-stream-ownership` and applies that source to both the
-native-Wayland server and GTK X11 client. Its schema-6 fixture keeps two parent
-windows and stable child identities, exercises scale-2 and transform-180
+The `live-wayland-subsurface` gate likewise applies the complete stack to
+both the native-Wayland server and GTK X11 client. Its schema-6 fixture keeps
+two parent windows and stable child identities, exercises scale-2 and transform-180
 buffers, stacking, move, detach, destroy, same-surface reparent, native leaf
 pointer input, and a callback-gated continuous child producer. Retained raw RGB
 packet payloads are checked against independent deterministic source pixels
@@ -500,12 +518,12 @@ diagnostics record stages and timing, never pixel payloads.
 This is fixture/observer timing, not an Xpra production throttle or one-packet-
 per-commit requirement.
 
-Neither case-only gate is an eighth complete-stack profile. The Make wrappers
-fix every acceptance dimension and require the exact reviewed selection allowed
-by their profile. The
+All nine gates belong to one mandatory complete-stack suite. The Make wrappers
+fix every acceptance dimension and require exactly `STACK=develop`,
+`PATCH_MODE=patched`, and no `CASE`. The
 orthogonal client-only `NETWORK_PROFILE` is loaded from
-`fork-maintenance/profiles.yml`; its YAML default is used for the normal seven
-gates. Static Xpra arguments come only from `fork-maintenance/live-cli.yml`.
+`fork-maintenance/profiles.yml`; its YAML default is used for the nine gates.
+Static Xpra arguments come only from `fork-maintenance/live-cli.yml`.
 Neither YAML value set may be duplicated in Python, Make, or unit-test
 assertions. A clean-source or picture-fallback diagnostic cannot publish live
 acceptance. Negative unit cases only prevent a false pass; every public live
@@ -535,13 +553,13 @@ exception is limited to an unchanged embedded source and an exact old/new applie
 containing only comments, copyright notices, or documentation, with no path,
 mode, executable data, configuration, test assertion, or runner behavior
 change. Resolve the refreshed queue, run whitespace and fork-control checks,
-and state the proof in the handoff; do not launch focused, native, full, or live
-jobs. This exception never applies after `develop-rebase`: every explicit
+and state the proof in the handoff; do not launch unchanged focused, native or
+full jobs. Patch validation still requires the complete live suite described
+above. This exception never applies after `develop-rebase`: every explicit
 upstream rebase requires the clean quarantine reassessment, all fork-control,
 tests-only clean controls or documented no-test semantic substitutes, patched
 focused/native gates, every durable package boundary on the resulting stack,
-all three full upstream legs, every production case's declared live gates with
-its atomic `CASE=<slug>` selection, and all seven positive stack live profiles,
+all three full upstream legs and all nine positive complete-stack live profiles,
 even when every retained patch applies without textual changes. Complete this
 set on the stable new-base candidate, not after each intermediate edit. Any
 uncertainty or semantic change uses the development loop and affected final
