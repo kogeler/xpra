@@ -760,7 +760,16 @@ failure and source/reset/cleanup cancellation remove both sources and close
 the FD once. No polling or background write thread is involved.
 Non-byte buffer inputs are first copied into immutable contiguous bytes, so a
 typed or strided memoryview has byte-based offsets and later mutation cannot
-change a transfer already in progress.
+change a transfer already in progress. Only `None` means an absent reply;
+buffer contents are never tested for truth before normalization. A
+zero-dimensional memoryview has no length on Python 3.12 and later, a
+multi-element NumPy array has no single truth value, and a zero-valued native
+scalar or one-element array still owns a byte which must be delivered. The
+helper likewise converts memoryviews
+by type before delivering the request-specific or legacy callback, without
+testing the buffer for truth. These are buffer-API guarantees; ordinary wire
+decoding already produces bytes and does not introduce a NumPy runtime
+dependency.
 
 Each native-source read similarly receives a unique `read_key` and records the
 local generation, source pointer, read FD, GLib watch, and callback.  Every
@@ -1026,7 +1035,9 @@ wire IDs and must reach only their own callbacks; the legacy no-callback path
 must still call `proxy.got_contents`.  Timeout followed by a duplicate reply is
 terminal once, and `client_reset` must remove every timer, empty-complete every
 detached callback once, and prevent a callback from creating re-entrant wire
-work while the drain guard is active.
+work while the drain guard is active. A zero-dimensional ctypes memoryview
+also reaches both request-specific and legacy callbacks as its exact byte;
+empty views and absent replies retain their respective bytes/`None` behavior.
 
 `unit.server.subsystem.clipboard_test` exercises the real server manager with
 controlled peers, deferred callbacks and a helper stand-in. Another peer's
@@ -1084,7 +1095,13 @@ writer, reuses the retired FD in a cleanup hook, and proves independent bytes
 on that replacement survive the callback's error path. Other real-pipe cases
 cover typed, strided and mutable memoryview payloads larger than pipe capacity.
 Those exercise FD handoff and buffer normalization directly; they do not rely
-on a fabricated Python copy of the C callback.
+on a fabricated Python copy of the C callback. A separate real-pipe matrix
+covers zero-dimensional memoryviews, zero-valued ctypes scalars, multi-element,
+single-zero and empty NumPy arrays, empty byte/view payloads and `None` through
+cached and delayed request-ID replies for both selections. Exact payload bytes,
+EOF and empty request/write/watch registries are all required. NumPy is a
+required test dependency for this representation regression, not a production
+clipboard dependency.
 
 The atomic `wayland` gate builds `clipboard.pyx` and `compositor.pyx` with the
 explicit clipboard and DMA-BUF Python dependencies required by the latter's
