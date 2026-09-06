@@ -1,0 +1,381 @@
+diff --git a/tests/unittests/unit/net/packet_handler_error_test.py b/tests/unittests/unit/net/packet_handler_error_test.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..86b1b8bc3d6b52c51f866119d2feae3b0264de9d
+--- /dev/null
++++ b/tests/unittests/unit/net/packet_handler_error_test.py
+@@ -0,0 +1,270 @@
++#!/usr/bin/env python3
++# This file is part of Xpra.
++# Copyright (C) 2026 kogeler
++# Xpra is released under the terms of the GNU GPL v2, or, at your option, any
++# later version. See the file COPYING for details.
++
++import sys
++import unittest
++from concurrent.futures import ThreadPoolExecutor
++from contextlib import ExitStack
++from threading import Barrier, Thread, get_ident
++from time import monotonic
++from types import SimpleNamespace
++from unittest.mock import Mock, patch
++
++from xpra.client.base.client import XpraClientBase
++from xpra.net import dispatch
++from xpra.net.common import Packet
++from xpra.net.dispatch import PacketDispatcher
++from xpra.os_util import gi_import
++from xpra.server.glib_server import GLibServer
++from xpra.server.subsystem.pointer import PointerManager
++from xpra.util.glib_scheduler import GLibScheduler
++
++GLib = gi_import("GLib")
++
++
++class EventClient(GLibScheduler, XpraClientBase):
++    """Real client dispatch adapter, without unrelated subsystem startup."""
++
++    def __init__(self):
++        PacketDispatcher.__init__(self)
++
++
++class PacketHandlerErrorTest(unittest.TestCase):
++
++    def setUp(self):
++        self.proto = Mock()
++        self.proto.is_closed.return_value = False
++        self.errors = []
++        self.escaped = []
++        contexts = ExitStack()
++        self.addCleanup(contexts.close)
++        # Only reporting and the limiter clock are controlled. Dispatch, the
++        # scheduled callback and GLib iteration remain real. create=True lets
++        # this same control run against upstream, which has no limiter clock.
++        self.clock = contexts.enter_context(patch.object(dispatch, "monotonic", return_value=100.0, create=True))
++        logger = Mock()
++        logger.error.side_effect = self.record_error
++        contexts.enter_context(patch.object(dispatch, "log", logger))
++        contexts.enter_context(patch.object(sys, "excepthook", side_effect=lambda *args: self.escaped.append(args)))
++        # A failed clean-source control may leave a scheduled callback behind.
++        # Drain it before restoring the reporting hooks, not in the next test.
++        self.addCleanup(self.drain)
++
++    def record_error(self, message, *args, **kwargs):
++        self.errors.append((message % args, kwargs, sys.exc_info()))
++
++    def drain(self):
++        context = GLib.MainContext.default()
++        deadline = monotonic() + 2
++        while context.pending() and monotonic() < deadline:
++            context.iteration(False)
++        self.assertFalse(context.pending(), "the bounded GLib callback queue did not drain")
++
++    def send(self, dispatcher, name="bad", authenticated=True, proto=None):
++        packet = Packet(name, 1)
++        dispatcher.dispatch_packet(proto or self.proto, packet, authenticated)
++        return packet
++
++    def test_direct_exceptions_are_contained(self):
++        for error in (ValueError, TypeError, AssertionError, RuntimeError, IndexError, KeyError, AttributeError, OSError):
++            with self.subTest(error=error):
++                dispatcher = PacketDispatcher()
++                bad = Mock(side_effect=error("broken handler"))
++                good = Mock()
++                dispatcher.add_packet_handler("bad", bad)
++                dispatcher.add_packet_handler("good", good)
++                bad_packet = self.send(dispatcher)
++                good_packet = self.send(dispatcher, "good")
++                bad.assert_called_once_with(self.proto, bad_packet)
++                good.assert_called_once_with(self.proto, good_packet)
++                self.assertIs(self.errors[-1][2][0], error)
++        self.assertEqual(len(self.errors), 8)
++        self.proto.close.assert_not_called()
++
++    def test_real_glib_server_and_client_error_burst(self):
++        for cls in (GLibServer, EventClient):
++            with self.subTest(adapter=cls.__name__):
++                dispatcher = cls()
++                calls = []
++                before = len(self.errors)
++                bad = Mock(side_effect=ValueError("invalid packet field"))
++
++                def good(*args):
++                    calls.append((args[-1][1], get_ident()))
++                    return True  # must not reschedule a successful packet
++
++                dispatcher.add_packet_handler("bad", bad, main_thread=True)
++                dispatcher.add_packet_handler("good", good, main_thread=True)
++                for i in range(256):
++                    self.send(dispatcher)
++                    if i % 64 == 0:
++                        dispatcher.dispatch_packet(self.proto, Packet("good", i), True)
++                dispatcher.dispatch_packet(self.proto, Packet("good", 256), True)
++                self.assertEqual(bad.call_count, 0, "main-thread handlers must remain deferred")
++                self.assertEqual(calls, [])
++                self.drain()
++                self.assertEqual(len(self.escaped), 0, "packet exceptions escaped to PyGObject")
++                self.assertEqual(bad.call_count, 256)
++                self.assertEqual(calls, [(i, get_ident()) for i in (0, 64, 128, 192, 256)])
++                self.assertEqual(len(self.errors) - before, 1, "one traceback per burst, not per packet")
++                self.assertTrue(self.errors[-1][1].get("exc_info"))
++                args = bad.call_args.args
++                self.assertEqual(len(args), 2 if cls is GLibServer else 1)
++                if cls is GLibServer:
++                    self.assertIs(args[0], self.proto)
++                self.assertIsInstance(args[-1], Packet)
++                self.assertEqual(tuple(args[-1]), ("bad", 1))
++        self.proto.close.assert_not_called()
++
++    def test_real_pointer_parser_rejects_negative_buttons_and_recovers(self):
++        server = GLibServer()
++        source = SimpleNamespace(uuid="test-peer", update_mouse=Mock(), user_event=Mock())
++        server.get_server_source = lambda _proto: source
++        server.set_ui_driver = Mock()
++
++        class RecordingPointer(PointerManager):
++            def process_pointer_button(self, _proto, _device_id, _wid, button, pressed, _pointer, _props):
++                received.append((button, pressed))
++
++        received = []
++        manager = RecordingPointer(server)
++        server.subsystems[manager.PREFIX] = manager
++        manager.init_packet_handlers()
++        for i in range(256):
++            server.dispatch_packet(self.proto, Packet("pointer-button", -1, i, 1, -1, True, (10, 20), {}), True)
++        for seq, pressed in ((256, True), (257, False)):
++            server.dispatch_packet(self.proto, Packet("pointer-button", -1, seq, 1, 1, pressed, (10, 20), {}), True)
++        self.assertEqual(received, [])
++        self.drain()
++        self.assertEqual(len(self.escaped), 0, "invalid u8 must stay inside the packet error boundary")
++        self.assertEqual(received, [(1, True), (1, False)])
++        self.assertEqual(len(self.errors), 1)
++        error_type, error, tb = self.errors[0][2]
++        self.assertIs(error_type, ValueError)
++        self.assertEqual(str(error), "invalid u8 value -1")
++        self.assertIsNotNone(tb)
++        self.proto.close.assert_not_called()
++
++    def test_budget_is_shared_by_routes_peers_and_exception_messages(self):
++        server = GLibServer()
++        server.add_packet_handler("bad", Mock(side_effect=ValueError("first")), main_thread=True)
++        server._default_packet_handlers["default"] = Mock(side_effect=KeyError("second"))
++        server.packet_alias["old"] = "bad"
++        for i in range(100):
++            peer = Mock()
++            peer.is_closed.return_value = False
++            self.send(server, "old", proto=peer)
++            self.send(server, "default", authenticated=False, proto=peer)
++        self.drain()
++        self.assertEqual(self.escaped, [])
++        self.assertEqual(len(self.errors), 1)
++
++    def test_budget_resumes_with_original_exception_and_suppression_summary(self):
++        dispatcher = PacketDispatcher()
++        dispatcher.add_packet_handler("bad", Mock(side_effect=ValueError("bad field")))
++        self.send(dispatcher)
++        self.clock.return_value = 104.999
++        for _ in range(5):
++            self.send(dispatcher)
++        self.assertEqual(len(self.errors), 1)
++        self.assertEqual(dispatcher.get_info().get("packet-errors"), {
++            "count": 6, "suppressed": 5, "pending": 5,
++        })
++        self.clock.return_value = 105.0
++        self.send(dispatcher)
++        self.assertEqual(len(self.errors), 2)
++        self.assertIn("5", self.errors[-1][0])
++        self.assertIn("suppressed", self.errors[-1][0])
++        self.assertTrue(self.errors[-1][1].get("exc_info"))
++        self.assertIs(self.errors[-1][2][0], ValueError)
++        self.assertEqual(dispatcher.get_info()["packet-errors"], {"count": 7, "suppressed": 5, "pending": 0})
++
++    def test_first_error_at_zero_clock_and_separate_dispatchers(self):
++        self.clock.return_value = 0.0
++        for _ in range(2):
++            dispatcher = PacketDispatcher()
++            dispatcher.add_packet_handler("bad", Mock(side_effect=ValueError("bad field")))
++            self.send(dispatcher)
++            self.send(dispatcher)
++        self.assertEqual(len(self.errors), 2)
++
++    def test_concurrent_error_reporting_does_not_multiply_budget(self):
++        dispatcher = PacketDispatcher()
++        dispatcher.add_packet_handler("bad", Mock(side_effect=RuntimeError("bad field")))
++        barrier = Barrier(8)
++
++        def burst(_index):
++            barrier.wait(timeout=2)
++            for _ in range(64):
++                self.send(dispatcher)
++
++        with ThreadPoolExecutor(max_workers=8) as workers:
++            list(workers.map(burst, range(8)))
++        self.assertEqual(len(self.errors), 1)
++        self.assertEqual(dispatcher.get_info().get("packet-errors"), {
++            "count": 512, "suppressed": 511, "pending": 511,
++        })
++
++    def test_logging_does_not_hold_counter_lock(self):
++        dispatcher = PacketDispatcher()
++        dispatcher.add_packet_handler("bad", Mock(side_effect=ValueError("bad field")))
++        reentered = False
++
++        def reentrant_log(*args, **kwargs):
++            # A log consumer may itself dispatch a packet. The shared cooldown
++            # suppresses its report without deadlocking or recursive logging.
++            nonlocal reentered
++            if not reentered:
++                reentered = True
++                self.send(dispatcher)
++            self.record_error(*args, **kwargs)
++
++        with patch.object(dispatch.log, "error", side_effect=reentrant_log):
++            worker = Thread(target=self.send, args=(dispatcher,), daemon=True)
++            worker.start()
++            worker.join(2)
++            self.assertFalse(worker.is_alive(), "logging while holding the counter lock deadlocked")
++        self.assertEqual(len(self.errors), 1)
++        self.assertEqual(dispatcher.get_info()["packet-errors"], {"count": 2, "suppressed": 1, "pending": 1})
++
++    def test_scheduling_failure_is_contained_and_counted(self):
++        server = GLibServer()
++        bad = Mock()
++        server.add_packet_handler("bad", bad, main_thread=True)
++        with patch.object(server, "idle_add", side_effect=OSError("scheduler unavailable")):
++            for _ in range(4):
++                self.send(server)
++        bad.assert_not_called()
++        self.assertEqual(len(self.errors), 1)
++        self.assertIs(self.errors[0][2][0], OSError)
++
++    def test_closed_protocol_still_delivers_default_lifecycle(self):
++        for cls in (GLibServer, EventClient):
++            with self.subTest(adapter=cls.__name__):
++                dispatcher = cls()
++                self.proto.is_closed.return_value = True
++                ordinary = Mock()
++                cleanup = Mock()
++                dispatcher.add_packet_handler("ordinary", ordinary, main_thread=True)
++                dispatcher._default_ui_packet_handlers["connection-lost"] = cleanup
++                self.send(dispatcher, "ordinary")
++                self.send(dispatcher, "connection-lost")
++                self.drain()
++                ordinary.assert_not_called()
++                cleanup.assert_called_once()
++
++    def test_control_flow_base_exceptions_are_not_swallowed(self):
++        for error in (KeyboardInterrupt, SystemExit, GeneratorExit):
++            with self.subTest(error=error):
++                dispatcher = PacketDispatcher()
++                dispatcher.add_packet_handler("bad", Mock(side_effect=error()))
++                with self.assertRaises(error):
++                    self.send(dispatcher)
++        self.assertEqual(self.errors, [])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/xpra/net/dispatch.py b/xpra/net/dispatch.py
+index 530536b47903c18af09982b5cbc46fe35b7efe12..35d366611ba72bc6fd55dc1bd1d4021d657edf5d 100644
+--- a/xpra/net/dispatch.py
++++ b/xpra/net/dispatch.py
+@@ -5,6 +5,8 @@
+ 
+ from typing import Any
+ from collections.abc import Callable
++from threading import Lock
++from time import monotonic
+ 
+ from xpra.common import noop
+ from xpra.net.common import may_log_packet, Packet, PacketHandlerType, BACKWARDS_COMPATIBLE
+@@ -13,6 +15,8 @@ from xpra.util.str_fn import repr_ellipsized
+ 
+ log = Logger("network")
+ 
++PACKET_ERROR_LOG_INTERVAL = 5
++
+ 
+ def find_packet_handler(subsystems: dict[str, Any], packet_type: str) -> tuple[Any, str, Callable, bool] | None:
+     """
+@@ -170,6 +174,13 @@ class PacketDispatcher:
+         # subsystem instances keyed by `PREFIX`: each one owns the handlers
+         # for the packet types in its own namespace
+         self.subsystems: dict[str, Any] = {}
++        # Shared by network and UI callbacks, with constant-size state even
++        # when a peer alternates packet types or exception messages.
++        self._packet_error_lock = Lock()
++        self._packet_error_count = 0
++        self._packet_errors_suppressed = 0
++        self._packet_errors_pending = 0
++        self._next_packet_error_log = 0.0
+ 
+     def get_info(self) -> dict[str, Any]:
+         routed: dict[str, Any] = {}
+@@ -183,7 +194,15 @@ class PacketDispatcher:
+         }
+         if routed:
+             handlers["subsystems"] = routed
+-        return {"packet-handlers": handlers}
++        info = {"packet-handlers": handlers}
++        with self._packet_error_lock:
++            if self._packet_error_count:
++                info["packet-errors"] = {
++                    "count": self._packet_error_count,
++                    "suppressed": self._packet_errors_suppressed,
++                    "pending": self._packet_errors_pending,
++                }
++        return info
+ 
+     def get_packet_types(self) -> list[str]:
+         """ every packet type we can handle once authenticated, flat registry and subsystems """
+@@ -238,10 +257,17 @@ class PacketDispatcher:
+ 
+         def call_handler(main: bool) -> None:
+             may_log_packet(False, packet_type, packet)
+-            try:
+-                self.call_packet_handler(main, handler, proto, packet)
+-            except (AssertionError, TypeError, ValueError, RuntimeError):
+-                log.error(f"Error processing {packet_type!r}", exc_info=True)
++
++            def guarded_handler(*args) -> None:
++                # Guard the actual invocation, not just its scheduling. The
++                # client adapter supplies (packet), the server (proto, packet).
++                # Never propagate a truthy return into a repeating UI source.
++                try:
++                    handler(*args)
++                except Exception:
++                    self._log_packet_error(packet_type)
++
++            self.call_packet_handler(main, guarded_handler, proto, packet)
+ 
+         try:
+             if authenticated and not proto.is_closed():
+@@ -268,10 +294,25 @@ class PacketDispatcher:
+                 return
+ 
+             self.handle_invalid_packet(proto, packet)
+-        except (RuntimeError, AssertionError):
+-            log.error(f"Error processing a {packet_type!r} packet")
+-            log.error(f" received from {proto}:")
+-            log.error(f" using {handler}", exc_info=True)
++        except Exception:
++            # Routing / scheduling can fail before the guarded callback runs.
++            self._log_packet_error(packet_type)
++
++    def _log_packet_error(self, packet_type: str) -> None:
++        with self._packet_error_lock:
++            self._packet_error_count += 1
++            now = monotonic()
++            if now < self._next_packet_error_log:
++                self._packet_errors_suppressed += 1
++                self._packet_errors_pending += 1
++                return
++            suppressed = self._packet_errors_pending
++            self._packet_errors_pending = 0
++            self._next_packet_error_log = now + PACKET_ERROR_LOG_INTERVAL
++        # Retain the current exception's traceback without retaining the
++        # exception or packet in limiter state, or holding a lock during I/O.
++        log.error("Error processing %r packet (%i error reports suppressed)",
++                  packet_type, suppressed, exc_info=True, backtrace=False)
+ 
+     @staticmethod
+     def call_packet_handler(main: bool, handler: PacketHandlerType, proto, packet: Packet) -> None:

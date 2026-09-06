@@ -205,6 +205,7 @@ The currently retained active cases are:
 - `wayland-empty-damage-throttle`;
 - `jph-parallel-build-objects`;
 - `debian-libva-codecs-package`;
+- `packet-handler-error-boundary`;
 - `upstream-test-quarantine` (the single test-only duty case).
 
 The quarantine case is not a production fix. It may change only the exact

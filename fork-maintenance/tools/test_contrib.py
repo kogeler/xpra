@@ -6346,6 +6346,7 @@ class ManifestTest(unittest.TestCase):
             {
                 "debian-libva-codecs-package",
                 "jph-parallel-build-objects",
+                "packet-handler-error-boundary",
                 "upstream-test-quarantine",
                 "wayland-subsurface-stream-ownership",
                 "wayland-client-keymap-sync",
@@ -6386,6 +6387,7 @@ class ManifestTest(unittest.TestCase):
                 "wayland-empty-damage-throttle",
                 "jph-parallel-build-objects",
                 "debian-libva-codecs-package",
+                "packet-handler-error-boundary",
                 "upstream-test-quarantine",
             ),
         )

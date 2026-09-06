@@ -236,7 +236,8 @@ Only these active cases are retained:
 7. `wayland-empty-damage-throttle`;
 8. `jph-parallel-build-objects`;
 9. `debian-libva-codecs-package`;
-10. `upstream-test-quarantine`.
+10. `packet-handler-error-boundary`;
+11. `upstream-test-quarantine`.
 
 ## Stack contract
 
