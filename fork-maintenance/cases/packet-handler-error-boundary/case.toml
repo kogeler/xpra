@@ -1,0 +1,39 @@
+schema = 1
+slug = "packet-handler-error-boundary"
+kind = "production"
+title = "Contain deferred packet handler errors and bound traceback logging"
+commit_subject = "Contain deferred packet handler errors and bound traceback logging"
+patch_sha256 = "1f2d24c75bc9be9baf05115f0cadf74c7c746bbefa21aef081f0b89de3c3739f"
+dependencies = []
+paths = [
+  "tests/unittests/unit/net/packet_handler_error_test.py",
+  "xpra/net/dispatch.py",
+]
+
+[tests]
+list = [
+  "unit.net.packet_handler_error_test",
+  "unit.net.dispatch_test",
+  "unit.net.protocol_test",
+  "unit.server.glib_server_test",
+  "unit.server.core_test",
+  "unit.server.subsystem.pointer_test",
+  "unit.client.hello_test",
+  "unit.client.command_test",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = [
+  "live-rgb",
+  "live-h264",
+  "live-xpra-detach",
+  "live-xpra-transport-loss",
+  "live-wayland-keyboard",
+  "live-x11-clipboard",
+  "live-wayland-subsurface",
+  "live-wayland-h264-hardware",
+  "live-wayland-opengl-h264-hardware",
+]

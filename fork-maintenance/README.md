@@ -33,7 +33,8 @@ The active patches are:
 7. `wayland-empty-damage-throttle`;
 8. `jph-parallel-build-objects`;
 9. `debian-libva-codecs-package`;
-10. `upstream-test-quarantine` (test-only duty case).
+10. `packet-handler-error-boundary`;
+11. `upstream-test-quarantine` (test-only duty case).
 
 `stacks/develop.toml` applies them in integration order. `develop` here is the
 stable queue slug, not a requirement that every consumer run from the Git branch
