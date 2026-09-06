@@ -171,6 +171,13 @@ class SourceBundleTest(unittest.TestCase):
 
 
 class CiImageTest(unittest.TestCase):
+    def test_image_installs_numpy_for_native_opengl_array_regressions(self) -> None:
+        recipe = (job.RUNNER_ROOT / "Containerfile").read_text(encoding="utf-8")
+        install = recipe.replace("\\\n", " ").split("&& apt-get -y install", 1)[1].split("&&", 1)[0]
+        packages = shlex.split(install, comments=True)
+        self.assertIn("python3-numpy", packages)
+        self.assertIn("python3-opengl", packages)
+
     def test_image_cache_lock_excludes_a_competing_cache_operation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             images = Path(raw)

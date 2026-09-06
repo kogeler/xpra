@@ -341,9 +341,20 @@ both the Ubuntu 26.04 native-Wayland server and Debian 13 GTK X11 client:
 server composition transactions and client backing semantics are one atomic
 wire contract. Input freeze, image contexts, final report, and collection must
 all preserve and verify the matching endpoint identities. The profile's fixed
-client arguments select Cairo; mapped GTK OpenGL replacement and close are
-covered separately by the case's real-Xvfb focused regression, not inferred
-from this Cairo run.
+client arguments select Cairo. Before building that runtime client, its
+Debian 13 build stage must additionally pass the case-owned
+`TestNativeTextureArrays.test_numpy` and `.test_ctypes` regressions from
+`unit.client.opengl_backing_test` with the installed client and distribution
+Python. Each named test uses a fresh process, real mapped GTK/Xvfb OpenGL,
+and its required native texture-array handler, checking ordinary RGB pixels
+and callbacks, transaction invalidation/reconfiguration, and resource deletion.
+A missing dependency, test, context or handler fails rather than skips.
+The test-only NumPy, PyOpenGL, GTK and Mesa dependencies are installed after
+Xpra compilation/native checks and are not copied into the runtime client.
+This mandatory build-time GL proof supplements the runtime Cairo oracle; it
+is not inferred from Cairo rendering or the seven stack profiles, whose clients
+remain clean embedded source. The remaining case-owned mapped OpenGL tests
+also stay in the focused/native upstream-test coverage.
 
 The dedicated C fixture creates a 420x300 primary and 360x260 secondary
 `xdg_toplevel`. Its 220x140 lower and 160x100 upper children use real ARGB

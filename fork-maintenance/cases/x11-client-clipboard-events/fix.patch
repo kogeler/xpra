@@ -374,7 +374,7 @@ index 724303e1ff1243c53b20f9679390bd49958218ad..8ec7c1822fe12b29ebb7e3ba97301030
  
  class ClipboardClientTest(ClientMixinTest):
 diff --git a/tests/unittests/unit/clipboard_core_test.py b/tests/unittests/unit/clipboard_core_test.py
-index 438eb8f24733594d85e9546e11eb7dd324e32356..d355048be5a63efd28084acd15efcb61e750599e 100644
+index 438eb8f24733594d85e9546e11eb7dd324e32356..6f9c3438d782a5745781a0e1c75a7c2cd2db32b1 100644
 --- a/tests/unittests/unit/clipboard_core_test.py
 +++ b/tests/unittests/unit/clipboard_core_test.py
 @@ -8,10 +8,13 @@ import unittest
@@ -413,7 +413,7 @@ index 438eb8f24733594d85e9546e11eb7dd324e32356..d355048be5a63efd28084acd15efcb61
  class ClipboardCoreTest(unittest.TestCase):
      def make_helper(self, backwards_compatible: bool):
          packets = []
-@@ -162,6 +179,119 @@ class ClipboardCoreTest(unittest.TestCase):
+@@ -162,6 +179,148 @@ class ClipboardCoreTest(unittest.TestCase):
          self.assertEqual(helper._clipboard_origins, {})
          self.assertEqual(proxy._clipboard_origin, "")
  
@@ -446,6 +446,35 @@ index 438eb8f24733594d85e9546e11eb7dd324e32356..d355048be5a63efd28084acd15efcb61
 +            self.assertEqual(proxy.results, [])
 +        finally:
 +            helper.cleanup()
++
++    def test_timeout_helper_routes_buffer_views_without_boolean_coercion(self):
++        import ctypes
++
++        for callback_delivery in (False, True):
++            for data, expected in (
++                (memoryview(ctypes.c_ubyte(0)), b"\0"),
++                (memoryview(b""), b""),
++                (None, None),
++            ):
++                with self.subTest(callback=callback_delivery, expected=expected):
++                    packets = []
++                    helper = TimeoutHelper(lambda *packet: packets.append(packet), **{
++                        "clipboards.local": ("CLIPBOARD",), "clipboards.remote": ("CLIPBOARD",),
++                    })
++                    proxy = helper._get_proxy("CLIPBOARD")
++                    results = []
++                    callback = (lambda *result: results.append(result)) if callback_delivery else None
++                    try:
++                        helper._send_clipboard_request_handler(proxy, "CLIPBOARD", "UTF8_STRING", callback)
++                        helper._clipboard_got_contents(packets[-1][1], "UTF8_STRING", 8, data)
++                        if callback_delivery:
++                            self.assertEqual(results, [("UTF8_STRING", 8, expected)])
++                            self.assertEqual(proxy.results, [])
++                        else:
++                            self.assertEqual(proxy.results, [("UTF8_STRING", "UTF8_STRING", 8, expected)])
++                        self.assertEqual(helper._clipboard_outstanding_requests, {})
++                    finally:
++                        helper.cleanup()
 +
 +    def test_timeout_helper_reset_drains_callbacks_without_reentry(self):
 +        packets = []
@@ -848,10 +877,10 @@ index f0cfe5338c4d4f98fa38ac4966a29dab8a11c8ab..c715956cf2b35899101aae658f87136b
      # ClipboardManager subscribes to these ServerBase lifecycle signals.
 diff --git a/tests/unittests/unit/wayland/clipboard_test.py b/tests/unittests/unit/wayland/clipboard_test.py
 new file mode 100755
-index 0000000000000000000000000000000000000000..753734b9f1ead4b0268a2a93edadbf0536ca1d16
+index 0000000000000000000000000000000000000000..551c562a3da48d8b22956b021704aa5da08c5cbe
 --- /dev/null
 +++ b/tests/unittests/unit/wayland/clipboard_test.py
-@@ -0,0 +1,825 @@
+@@ -0,0 +1,874 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 kogeler
@@ -1073,6 +1102,55 @@ index 0000000000000000000000000000000000000000..753734b9f1ead4b0268a2a93edadbf05
 +                    finally:
 +                        helper.cleanup()
 +                        os.close(rfd)
++
++    def test_native_output_accepts_buffer_shapes_and_empty_replies(self):
++        import numpy
++
++        payloads = (
++            ("scalar-view", memoryview(ctypes.c_ubyte(0)), b"\0"),
++            ("scalar-buffer", ctypes.c_ubyte(0), b"\0"),
++            ("numpy-multiple", numpy.array([0, 17, 255], dtype=numpy.uint8), b"\0\x11\xff"),
++            ("numpy-zero", numpy.array([0], dtype=numpy.uint8), b"\0"),
++            ("empty-array", numpy.array([], dtype=numpy.uint8), b""),
++            ("empty-view", memoryview(b""), b""),
++            ("empty-bytes", b"", b""),
++            ("none", None, b""),
++        )
++        for selection in ("CLIPBOARD", "PRIMARY"):
++            for cached in (False, True):
++                for name, data, expected in payloads:
++                    with self.subTest(selection=selection, cached=cached, payload=name):
++                        helper, _compositor, packets = self.make_helper()
++                        proxy = helper._get_proxy(selection)
++                        rfd, wfd = os.pipe()
++                        os.set_blocking(rfd, False)
++                        received = bytearray()
++
++                        def drain():
++                            chunk = self.read_now(rfd)
++                            if chunk:
++                                received.extend(chunk)
++                            return chunk == b""
++
++                        try:
++                            target_data = {TARGET: (TARGET, 8, data)} if cached else {}
++                            proxy.got_token((TARGET,), target_data)
++                            proxy.remote_source.send(TARGET, wfd)
++                            requests = [packet for packet in packets if packet[0] == "clipboard-request"]
++                            if cached:
++                                self.assertEqual(requests, [])
++                            else:
++                                self.assertEqual(len(requests), 1)
++                                self.assertIsNone(self.read_now(rfd), "request completed before its reply")
++                                helper._clipboard_got_contents(requests[0][1], TARGET, 8, data)
++                            self.assertTrue(spin_until(drain), "buffer output did not reach EOF")
++                            self.assertEqual(bytes(received), expected)
++                            self.assertEqual(proxy.pending_writes, {})
++                            self.assertEqual(proxy.pending_write_sources, {})
++                            self.assertEqual(helper._clipboard_outstanding_requests, {})
++                        finally:
++                            helper.cleanup()
++                            os.close(rfd)
 +
 +    def test_native_send_exception_cannot_close_reused_descriptor(self):
 +        from xpra.wayland.server import clipboard as clipboard_module
@@ -1769,7 +1847,7 @@ index 0d656f7a0bda4c6bb63ac113c64d38db23c7640d..d290b4525b08b4a326bddd576d71f86e
                      data_size = self._contents_size(dformat, data)
                      if max_size <= 0 or total_size + data_size <= max_size:
 diff --git a/xpra/clipboard/timeout.py b/xpra/clipboard/timeout.py
-index 799b8ae44bfd1240d75f5f8319b7f7d092634140..976e9571fe9ee1ff3a920a46a1c2eb8077ed733b 100644
+index 799b8ae44bfd1240d75f5f8319b7f7d092634140..db5e7fc6ccc99e23b8927e0dd8e1a9f7052b9f6d 100644
 --- a/xpra/clipboard/timeout.py
 +++ b/xpra/clipboard/timeout.py
 @@ -5,13 +5,13 @@
@@ -1851,9 +1929,12 @@ index 799b8ae44bfd1240d75f5f8319b7f7d092634140..976e9571fe9ee1ff3a920a46a1c2eb80
          except KeyError:
              log.warn("Warning: request id %i not found", request_id)
              log.warn(" already timed out or duplicate reply")
-@@ -77,14 +80,33 @@ class ClipboardTimeoutHelper(ClipboardProtocolHelperCore):
+@@ -75,16 +78,35 @@ class ClipboardTimeoutHelper(ClipboardProtocolHelperCore):
+         proxy = self._get_proxy(selection)
+         log("clipboard got contents%s: proxy=%s for selection=%s",
              (request_id, dtype, dformat, Ellipsizer(data)), proxy, selection)
-         if data and isinstance(data, memoryview):
+-        if data and isinstance(data, memoryview):
++        if isinstance(data, memoryview):
              data = bytes(data)
 -        if proxy:
 -            proxy.got_contents(target, dtype, dformat, data)
@@ -2065,7 +2146,7 @@ index 2b355ca5de64886b76e19f45c30f95fe2d7b2fdd..1d7e3a2b69acdd1bfca511bcd56034f1
          msg = f"clipboard direction set to {direction!r}"
          log(msg)
 diff --git a/xpra/wayland/server/clipboard.pyx b/xpra/wayland/server/clipboard.pyx
-index c8a541223621f3466d0f2aed0de68d34eb077ffa..2287ae95c655b268aa3110f062181c1d9480cc01 100644
+index c8a541223621f3466d0f2aed0de68d34eb077ffa..3803b267d853db718fdece54b058a3eda100673c 100644
 --- a/xpra/wayland/server/clipboard.pyx
 +++ b/xpra/wayland/server/clipboard.pyx
 @@ -9,7 +9,6 @@
@@ -2597,7 +2678,7 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..2287ae95c655b268aa3110f062181c1d
  
      def got_token(self, targets, target_data=None, claim=True, _synchronous_client=False) -> None:
          self.cancel_emit_token()
-@@ -483,49 +686,122 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
+@@ -483,49 +686,125 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
          if not claim or not self._can_receive:
              return
          if not has_contents:
@@ -2655,11 +2736,12 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..2287ae95c655b268aa3110f062181c1d
 +            ):
 +                self.finish_pending_write(write_key)
 +                return
-+            self.write_fd(write_key, data or b"")
++            self.write_fd(write_key, data)
  
 -    @staticmethod
 -    def write_fd(fd: int, data) -> None:
-+        try:
+         try:
+-            if isinstance(data, str):
 +            self.emit("send-clipboard-request", self._selection, target, got_remote_contents)
 +        except Exception:
 +            self.finish_pending_write(write_key)
@@ -2670,8 +2752,10 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..2287ae95c655b268aa3110f062181c1d
 +        if pending is None:
 +            return
 +        fd = pending[3]
-         try:
-             if isinstance(data, str):
++        try:
++            if data is None:
++                data = b""
++            elif isinstance(data, str):
                  data = data.encode("utf8")
 -            elif isinstance(data, memoryview):
 -                data = bytes(data)
@@ -2682,7 +2766,8 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..2287ae95c655b268aa3110f062181c1d
 +            elif not isinstance(data, bytes):
 +                # Byte offsets must not become element offsets for a typed
 +                # or strided view.  Own a stable snapshot while output waits.
-+                data = bytes(memoryview(data or b""))
++                # Native buffers need not have a scalar truth value or length.
++                data = bytes(memoryview(data))
 +            data = memoryview(data)
 +            os.set_blocking(fd, False)
 +        except Exception:
@@ -2745,7 +2830,7 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..2287ae95c655b268aa3110f062181c1d
  
  
  class WaylandClipboardProxy(WaylandPrimaryClipboardProxy):
-@@ -535,26 +811,51 @@ class WaylandClipboardProxy(WaylandPrimaryClipboardProxy):
+@@ -535,26 +814,51 @@ class WaylandClipboardProxy(WaylandPrimaryClipboardProxy):
          GObject.GObject.__init__(self)
          self.compositor = compositor
          self.selection_api = WaylandSelection(compositor.get_display_ptr(), compositor.get_seat_ptr())
@@ -2801,7 +2886,7 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..2287ae95c655b268aa3110f062181c1d
              return
          self.local_source_changed(source_ptr)
  
-@@ -576,14 +877,12 @@ class WaylandClipboardProxy(WaylandPrimaryClipboardProxy):
+@@ -576,14 +880,12 @@ class WaylandClipboardProxy(WaylandPrimaryClipboardProxy):
          if not claim or not self._can_receive:
              return
          if not has_contents:
@@ -2818,7 +2903,7 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..2287ae95c655b268aa3110f062181c1d
          self.remote_source = source
          self.remote_source_ptr = source.ptr()
          self.selection_api.set_source(source)
-@@ -609,6 +908,27 @@ class WaylandClipboard(ClipboardTimeoutHelper):
+@@ -609,6 +911,27 @@ class WaylandClipboard(ClipboardTimeoutHelper):
      def __repr__(self):
          return "WaylandClipboard"
  
@@ -2846,7 +2931,7 @@ index c8a541223621f3466d0f2aed0de68d34eb077ffa..2287ae95c655b268aa3110f062181c1d
      def make_proxy(self, selection):
          if selection == "CLIPBOARD" and self.compositor is not None:
              proxy = WaylandClipboardProxy(selection, self.compositor)
-@@ -617,6 +937,7 @@ class WaylandClipboard(ClipboardTimeoutHelper):
+@@ -617,6 +940,7 @@ class WaylandClipboard(ClipboardTimeoutHelper):
          else:
              raise RuntimeError(f"unsupported Wayland clipboard selection: {selection!r}")
          proxy.set_want_targets(self.proxy_want_targets(selection))

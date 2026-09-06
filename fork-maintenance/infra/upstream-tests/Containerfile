@@ -5,6 +5,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # Keep this package set aligned with Xpra's Ubuntu 26.04 unit-test job.
 # Git and ccache are runner-only additions used to snapshot and patch the
 # read-only repository efficiently.
+# NumPy exercises PyOpenGL's native array output alongside ctypes containers.
 RUN apt-get update \
     && apt-get -y install \
         binutils \
@@ -69,6 +70,7 @@ RUN apt-get update \
         python3-kerberos \
         python3-lz4 \
         python3-netifaces \
+        python3-numpy \
         python3-opengl \
         python3-paramiko \
         python3-pil \

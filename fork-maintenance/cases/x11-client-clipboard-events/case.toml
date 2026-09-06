@@ -3,7 +3,7 @@ slug = "x11-client-clipboard-events"
 kind = "production"
 title = "Restore X11 client clipboard synchronization"
 commit_subject = "Restore X11 client clipboard synchronization"
-patch_sha256 = "eb3a6aa2e082562973973434755d424a78ff5f0b70a146ff78275b0f26469a9c"
+patch_sha256 = "427d4ce34843a15bcd7775a88b0f6e0e88b66e98fe52e24acc6c9d5233c5226e"
 dependencies = []
 paths = [
   "setup.py",
