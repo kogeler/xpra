@@ -238,6 +238,13 @@ must not depend on the `wayland-initial-window-state` slug.
 
 ## Native boundaries
 
+The test image explicitly installs NumPy so PyOpenGL's array-returning path is
+available to the case-owned OpenGL regressions. Exercise both NumPy and ctypes
+texture containers with real GL allocation, ordinary painting, transaction
+invalidation and resource cleanup; Python-list mocks alone cannot establish
+that boundary. Missing NumPy is a test-environment failure, not an optional
+skip. This is a test dependency, not a new installed-Xpra runtime requirement.
+
 Use only gates declared by the case or stack:
 
 ```bash

@@ -13324,6 +13324,105 @@ class LiveFixtureBuildOrderTest(unittest.TestCase):
     def test_client_c_fixture_follows_xpra_install_and_native_checks(self) -> None:
         self.assert_fixture_boundary("client", self.build_instructions("client"))
 
+    def client_gl_regression_instruction(self) -> str:
+        instructions = self.build_instructions("client")
+        selection = sys.modules["profiles"].SUBSURFACE_CASE_SELECTION
+        matches = [
+            instruction
+            for instruction in instructions
+            if instruction.startswith(f'RUN if [ "$XPRA_SELECTION" = "{selection}" ]; then ')
+        ]
+        self.assertEqual(len(matches), 1)
+        return matches[0]
+
+    def run_client_gl_regression_instruction(
+        self, selection: str, *, test_status: int = 0,
+        install_status: int = 0, package_dir: str = "/installed/dist-packages",
+    ) -> subprocess.CompletedProcess[str]:
+        # Execute the actual recipe control flow, replacing every external
+        # operation: these tests never install packages, remove files or start GL.
+        stubs = """
+apt_get() { printf 'apt-get %s\\n' "$*"; return "$TEST_INSTALL_STATUS"; }
+alias apt-get=apt_get
+rm() { :; }
+find() { printf '%s\\n' "$TEST_PACKAGE_DIR"; }
+python3() {
+    printf 'python3 %s\\nPYTHONPATH=%s\\nXPRA_RESOURCES_DIR=%s\\n' \\
+        "$*" "$PYTHONPATH" "$XPRA_RESOURCES_DIR"
+    return "$TEST_GL_STATUS"
+}
+"""
+        environment = os.environ.copy()
+        environment.update({
+            "XPRA_SELECTION": selection,
+            "TEST_GL_STATUS": str(test_status),
+            "TEST_INSTALL_STATUS": str(install_status),
+            "TEST_PACKAGE_DIR": package_dir,
+        })
+        command = self.client_gl_regression_instruction().removeprefix("RUN ")
+        return subprocess.run(
+            ["/bin/sh", "-c", stubs + command],
+            check=False, capture_output=True, text=True, env=environment,
+        )
+
+    def test_client_gl_regressions_are_case_scoped_late_build_checks(self) -> None:
+        instructions = self.build_instructions("client")
+        instruction = self.client_gl_regression_instruction()
+        native = next(
+            i for i, value in enumerate(instructions) if value.startswith("RUN package_dir=")
+        )
+        selection_arg = instructions.index("ARG XPRA_SELECTION")
+        regression = instructions.index(instruction)
+        fixture = next(
+            i for i, value in enumerate(instructions) if value.startswith("COPY xkb_xtest_driver.c ")
+        )
+        self.assertLess(native, selection_arg)
+        self.assertLess(selection_arg, regression)
+        self.assertLess(regression, fixture)
+        for dependency in (
+            "gir1.2-gtk-3.0", "libgl1-mesa-dri", "libglu1-mesa", "libglx-mesa0",
+            "python3-gi-cairo", "python3-numpy", "python3-opengl", "python3-pil", "xvfb",
+        ):
+            self.assertIn(dependency, instruction)
+        recipe = (LIVE_DIRECTORY / "Containerfile").read_text(encoding="utf-8")
+        runtime = recipe.split("FROM docker.io/library/debian:13-slim AS client\n", 1)[1]
+        self.assertNotIn("python3-numpy", runtime)
+        self.assertNotIn("opengl_backing_test.py", runtime)
+        self.assertNotIn("--from=client-build /usr", runtime)
+
+    def test_client_gl_regressions_require_both_named_tests_and_propagate_failure(self) -> None:
+        selection = sys.modules["profiles"].SUBSURFACE_CASE_SELECTION
+        for status in (0, 23):
+            with self.subTest(status=status):
+                result = self.run_client_gl_regression_instruction(selection, test_status=status)
+                self.assertEqual(result.returncode, status, result.stderr)
+                command_line = next(
+                    line for line in result.stdout.splitlines() if line.startswith("python3 ")
+                )
+                self.assertEqual(command_line.split(), [
+                    "python3", "tests/unittests/unit/client/opengl_backing_test.py", "-v",
+                    "TestNativeTextureArrays.test_numpy", "TestNativeTextureArrays.test_ctypes",
+                ])
+                self.assertIn("PYTHONPATH=/installed/dist-packages:/src/xpra/tests/unittests\n", result.stdout)
+                self.assertIn("XPRA_RESOURCES_DIR=/opt/xpra-install/usr/local/share/xpra\n", result.stdout)
+
+    def test_client_gl_regressions_do_not_run_for_clean_or_other_clients(self) -> None:
+        for selection in (
+            "", "master", "stacks/develop", sys.modules["profiles"].CLIPBOARD_CASE_SELECTION,
+        ):
+            with self.subTest(selection=selection):
+                result = self.run_client_gl_regression_instruction(selection, test_status=23)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_client_gl_regressions_reject_failed_dependencies_or_missing_install(self) -> None:
+        selection = sys.modules["profiles"].SUBSURFACE_CASE_SELECTION
+        for arguments, expected in (({"install_status": 17}, 17), ({"package_dir": ""}, 1)):
+            with self.subTest(arguments=arguments):
+                result = self.run_client_gl_regression_instruction(selection, **arguments)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertNotIn("python3 tests/", result.stdout)
+
     def test_rejects_fixture_input_or_compilation_before_native_checks(self) -> None:
         for role, fixtures in self.FIXTURES:
             for filename, executable in fixtures:

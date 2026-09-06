@@ -352,6 +352,34 @@ RUN package_dir="$(find /opt/xpra-install/usr/local/lib -type d -name dist-packa
     && PYTHONPATH="$package_dir:/src/xpra/tests/unittests" \
        python3 tests/unittests/unit/codecs/rgb_transform_test.py
 
+# The WSSO live client renders with Cairo, so its Debian build also requires
+# the case-owned mapped OpenGL regressions. Keep these test-only dependencies
+# after Xpra installation: they must not change its optional build features or
+# become runtime package dependencies. Each named test uses a fresh process
+# and requires its real NumPy or ctypes texture handler, pixels and cleanup.
+ARG XPRA_SELECTION
+
+RUN if [ "$XPRA_SELECTION" = "cases/wayland-subsurface-stream-ownership" ]; then \
+        apt-get update \
+        && apt-get install --yes --no-install-recommends \
+            gir1.2-gtk-3.0 \
+            libgl1-mesa-dri \
+            libglu1-mesa \
+            libglx-mesa0 \
+            python3-gi-cairo \
+            python3-numpy \
+            python3-opengl \
+            python3-pil \
+            xvfb \
+        && rm -rf /var/lib/apt/lists/* \
+        && package_dir="$(find /opt/xpra-install/usr/local/lib -type d -name dist-packages -print -quit)" \
+        && test -n "$package_dir" \
+        && PYTHONPATH="$package_dir:/src/xpra/tests/unittests" \
+           XPRA_RESOURCES_DIR=/opt/xpra-install/usr/local/share/xpra \
+           python3 tests/unittests/unit/client/opengl_backing_test.py -v \
+               TestNativeTextureArrays.test_numpy TestNativeTextureArrays.test_ctypes; \
+       fi
+
 # Keep client fixture inputs downstream of the unchanged Xpra native checks.
 COPY xkb_xtest_driver.c /tmp/xpra-xkb-xtest-driver.c
 
