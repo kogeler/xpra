@@ -928,10 +928,10 @@ Keep these maintenance constraints:
   produced by an incomplete selection lifecycle.
 
 The case has no source dependency on another active downstream patch.  It is
-listed in `stacks/develop.toml` in deterministic queue order, but its case-owned
-live gate deliberately selects only `CASE=x11-client-clipboard-events` so clean
-and patched behavior stay attributable to this boundary.  Full-stack focused
-and upstream legs separately prove compatibility with the rest of the queue.
+listed in `stacks/develop.toml` in deterministic queue order. Every live test
+uses that complete queue on both endpoints. Its ownership of the clipboard
+oracle does not authorize an isolated live product or waive the other eight
+profiles. Focused unit controls may still isolate the atomic source behavior.
 
 Retirement after an upstream refresh requires behavior, not textual patch
 conflict: the clean embedded source must package the client adapter, acquire and
@@ -1127,11 +1127,12 @@ live case below.
 
 ## Durable live regression design
 
-The durable live gate is the separate RGB-based `live-x11-clipboard` profile.
-Its wrapper accepts exactly `CASE=x11-client-clipboard-events`; unlike the
-seven complete-stack profiles, it applies the selected case source and
-resolution to both the Debian 13 X11 client and Ubuntu 26.04 native-Wayland
-server.  Both minimal package builds explicitly include clipboard support.
+The RGB-based `live-x11-clipboard` profile is one of nine mandatory full-stack
+profiles. Its wrapper requires `STACK=develop` and rejects every `CASE`.
+Both the Debian 13 X11 client and Ubuntu 26.04 native-Wayland server use the
+complete queue, including the subsurface packet filter. For any patch validation
+run `live-all STACK=develop RUN=<fresh-prefix>` and require `live-suite-check`;
+isolated live products are forbidden. Both builds include clipboard support.
 The client runs with YAML-owned `xsettings=no` and
 `input-devices=noxi2`, so unrelated XSettings or XI2 initialization cannot
 mask the clipboard helper's own event-filter responsibility.
@@ -1143,11 +1144,11 @@ the owner of the affected contract rather than duplicating it in the runner:
 
 | Owner | Live responsibility |
 | --- | --- |
-| `infra/live/profiles.py` and the `live-x11-clipboard` Make wrapper | Admit only the RGB/application-exit clipboard profile and the exact `cases/x11-client-clipboard-events` selection. |
-| `infra/live/job.py` | Owns durable start/wait/status/abort/remove state, freezes inputs, validates endpoint-selection provenance, and requires the case source on both clipboard endpoints while preserving the clean client for the seven complete-stack profiles. |
+| `infra/live/profiles.py` and the `live-x11-clipboard` Make wrapper | Admit the fixed RGB/application-exit profile only with the complete `stacks/develop` selection. |
+| `infra/live/job.py` | Owns durable start/wait/status/abort/remove state, freezes inputs, validates endpoint-selection provenance, and requires the complete production queue on both endpoints for every profile. |
 | `infra/live/run.py` | Resolves and freezes the two build contexts, constructs the three policy scenarios, drives the ordered cross-peer interaction, reconstructs evidence from collected artifacts, and publishes the aggregate oracle. |
 | `profiles.yml`, `live-cli.yml`, and `infra/live/live_config.py` | Own network quality and the exact role-specific `both`, `to-server`, and `off` Xpra arguments; Python orchestration does not duplicate those values. |
-| `infra/live/Containerfile` | Builds the Ubuntu native-Wayland server and Debian X11 client packages.  Every client selection receives the ordinary GTK import preflight; only the exact clipboard case runs the additional installed-package `has_pywindow_lookup`/X11 helper preflight, because the seven complete-stack profiles intentionally retain a clean embedded-source client. |
+| `infra/live/Containerfile` | Builds the Ubuntu native-Wayland server and Debian X11 client packages.  Every full-stack client receives both the ordinary GTK import preflight and the installed-package `has_pywindow_lookup`/X11 helper preflight, plus the mapped GL regressions. |
 | `infra/live/clipboard_fixture_common.py` | Owns the fixed non-sensitive marker IDs, lengths, and digests shared by both fixtures and the oracle. |
 | `infra/live/x11_clipboard_fixture.py` | Implements the persistent GTK X11 owner, independent raw converter, and independent root XFixes monitor. |
 | `infra/live/wayland_clipboard_fixture.py` and `start_wayland_clipboard_fixture.sh` | Implement and launch the native-Wayland sink/source window, its input-serial-bound reverse claim, and its compositor-confirmed event stream. |
@@ -1281,9 +1282,8 @@ conversions, all three forward-policy outcomes, reverse policy and owner,
 stable owner XID, advancing timestamp, exact event sequence, survival through
 repeated changes, fixture cleanup, and absence of plaintext markers.  The three
 scenario reports must appear in `both`, `to-server`, `off` order and the
-aggregate report must bind each scenario name to its policy.  The case-only
-gate does not alter the existing seven complete-stack profiles or their
-clean-client semantics.
+aggregate report must bind each scenario name to its policy.  The profile is one of nine mandatory full-stack gates; all apply every patch
+to both endpoints.
 
 Acceptance requires a named `live-x11-clipboard` result in which every scenario
 and the aggregate report are positive on the required inputs. Input callbacks,
@@ -1391,8 +1391,8 @@ instruction to run full suites before every live iteration:
 | `full` | Runs the complete applied queue under the normal compatibility setting, including the legacy `clipboard-token` registration and default compiled-runtime behavior. |
 | `full-cython` | Rebuilds the modified X11 filter lease and Wayland selection/compositor `.pyx` implementations rather than trusting stale generated binaries or cached extensions, then runs the complete Cython-enabled author suite. |
 | `full-no-compat` | Sets the process-wide compatibility mode before imports and exercises the modern `clipboard-data` path without the legacy token handler. |
-| Case-only `live-x11-clipboard` | Proves the installed Debian client-only package contains and executes `xpra.x11.gtk.__init__`, both endpoints use the same atomic case, every permitted new offer and native source request is delivered without incidental input, `off` retains standard native ownership without a forwarding helper, and real X11 owner events cross to a native-Wayland compositor and back under the exact `both` / `to-server` / `off` oracle while rendering, input, stderr, process, privacy, and cleanup remain positive. |
-| Seven existing complete-stack live profiles | Guard the shared live builder/runner and the rest of the integrated queue after this case added a profile.  They are not substitutes for the case-only clipboard policy matrix. |
+| Full-stack `live-x11-clipboard` | Proves the installed Debian client-only package contains and executes `xpra.x11.gtk.__init__`, both endpoints use the complete queue, every permitted new offer and native source request is delivered without incidental input, `off` retains standard native ownership without a forwarding helper, and real X11 owner events cross to a native-Wayland compositor and back under the exact `both` / `to-server` / `off` oracle while rendering, input, stderr, process, privacy, and cleanup remain positive. |
+| Mandatory nine-profile live suite | Every patch validation runs all profiles, including clipboard and subsurface, with the full queue on both endpoints. A topical profile cannot replace complete-suite acceptance. |
 
 The client stage of the case live image is the essential package-composition
 control because it installs with client, GTK/X11, and clipboard enabled but

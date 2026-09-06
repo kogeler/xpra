@@ -66,6 +66,7 @@ HARNESS_INPUTS = (
     INFRA_ROOT / "profiles.py",
     INFRA_ROOT / "requirements.txt",
     INFRA_ROOT / "run.py",
+    INFRA_ROOT / "suite.py",
     INFRA_ROOT / "start_hardware_fixture.sh",
     INFRA_ROOT / "start_wayland_clipboard_fixture.sh",
     INFRA_ROOT / "start_wayland_keyboard_fixture.sh",
@@ -690,9 +691,12 @@ def validate_input_provenance(
     run: str,
     selection: str | None,
     harness_digest: str,
+    require_complete_stack: bool = True,
 ) -> dict[str, Any]:
     if selection is None:
         raise JobError("live acceptance provenance has no reviewed case or stack")
+    if require_complete_stack and selection != "stacks/develop":
+        raise JobError("all live tests require the complete stacks/develop queue")
     if not isinstance(provenance, dict) or provenance.get("schema") != 2:
         raise JobError("live-job input provenance has an unsupported schema")
     hash_names = (
@@ -755,13 +759,16 @@ def validate_input_provenance(
         raise JobError("live-job input provenance has the wrong harness digest")
     if provenance.get("server_selection") != (selection or "master"):
         raise JobError("live-job input provenance has the wrong server selection")
-    shared_selection_applications = {"clipboard", "subsurface"}
-    expected_client_selection = (
-        selection if application in shared_selection_applications else "master"
+    # Only cleanup may read retired clean-client / case-selected records.
+    shared_selection = (
+        require_complete_stack
+        or provenance.get("client_selection") == "stacks/develop"
+        or application in {"clipboard", "subsurface"}
     )
+    expected_client_selection = selection if shared_selection else "master"
     if provenance.get("client_selection") != expected_client_selection:
         raise JobError("live-job input provenance has the wrong client selection")
-    if application in shared_selection_applications and any(
+    if shared_selection and any(
         provenance.get(client_key) != provenance.get(server_key)
         for client_key, server_key in (
             ("client_context_archive_sha256", "server_context_archive_sha256"),
@@ -833,6 +840,7 @@ def load_record(run: str, *, require_current: bool = True) -> dict[str, Any]:
         run=run,
         selection=selection,
         harness_digest=str(record["harness_sha256"]),
+        require_complete_stack=require_current,
     )
     if require_current and not record_is_current(record):
         raise JobError("live-job runner or harness changed while the job was owned")
@@ -2118,7 +2126,7 @@ def subsurface_fixture_artifact_evidence_matches(
     scenario_root: Path,
     runner: Any,
 ) -> bool:
-    """Recompute the case-only subsurface route from its authority artifacts."""
+    """Recompute the full-stack subsurface route from its authority artifacts."""
     interaction = embedded.get("interaction")
     classification = embedded.get("classification")
     boundaries = (
@@ -2430,8 +2438,8 @@ def report_validation(
         "run_id": isinstance(invocation, dict) and invocation.get("run_id") == run,
         "render_node": isinstance(invocation, dict)
         and invocation.get("render_node") == record["render_node"],
-        "reviewed_selection": isinstance(record.get("selection"), str)
-        and bool(SELECTOR_RE.fullmatch(record["selection"])),
+        "reviewed_selection": record.get("selection") == "stacks/develop"
+        and provenance["client_selection"] == "stacks/develop",
         "selection": isinstance(invocation, dict)
         and invocation.get("selection") == record["selection"],
         "selection_provenance": isinstance(selection, dict)

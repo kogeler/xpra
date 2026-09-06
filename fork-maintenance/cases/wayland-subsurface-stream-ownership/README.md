@@ -63,7 +63,7 @@ only if it preserves:
 - pointer hit testing against the native leaf;
 - root and child frame-callback completion;
 - bounded retry, watchdog, and cleanup ownership; and
-- the case-only live oracle described below.
+- the full-stack live oracle described below.
 
 Patch metadata, path lists, and digests must be regenerated from the complete
 staged isolated workspace. They are not documentation fields to edit by hand.
@@ -1055,12 +1055,32 @@ countdown remain exact even when another window interleaves wire IDs.
 
 This is the shared ordinary-root H.264 observer's responsibility, documented
 in the [live runbook](../../docs/runbooks/live-tests.md#h264-packet-sequence-authority).
-It does not replace the case-only RGB composition ledger: that ledger still
+It does not replace the full-stack RGB composition ledger: that ledger still
 binds internal source IDs to parent wire IDs, complete transaction stages,
 epochs, premultiplied pixels, and source-routed ACKs. WIS owns frame-alpha
 selection, not either sequence allocator or ledger.
 
 ## Outgoing dequeue and mmap terminal drain
+
+The outgoing queue contains clipboard tokens/contents, icons and EOS as well
+as draw packets. `queued_draw_packet()` accepts a sequence, checks the active
+`WINDOW_DRAW` opcode before using any `Packet` accessor, and normalizes only
+draws. Non-draw tuple/list/`Packet` entries retain exact identity, ordering,
+ownership and batching flags. Tuple/list draws cannot bypass stale validation
+or mmap terminal drain. Treating the whole shared queue as `Packet` previously
+raised `AttributeError` when selecting text sent clipboard data, terminating
+the network formatter and connection.
+
+The regression calls the real `ClipboardConnection.compress_clipboard` and
+`ClientConnection.next_packet` with the real WSSO filter, for both CLIPBOARD
+and PRIMARY. It also covers tuple/list/Packet icons and EOS, and stale RGB/mmap
+draws. This mixed-subsystem route must not be replaced by a mocked queue sink.
+The full-stack clipboard live profile supplies its end-to-end counterpart.
+
+The small production `xpra/server/source/queued_packet.py` module is the initial
+strict mypy scope, documented in the [type-check runbook](../../docs/runbooks/typecheck.md).
+An actual-module negative control proves that calling `get_type()` on its
+sequence input is rejected. Other WSSO modules are not claimed to be type-checked.
 
 Control packets retain priority over pixel packets. When a pixel packet is
 dequeued, the connection revalidates it. A stale non-mmap packet is dropped,
@@ -1779,38 +1799,28 @@ renderer, or live boundary.
 
 ## Durable live gate
 
-`live-wayland-subsurface` is a case-only positive profile:
+The subsurface profile is one required member of the full production suite:
 
 ```bash
-make -C fork-maintenance live-wayland-subsurface \
-  CASE=wayland-subsurface-stream-ownership \
-  RUN=<unique-name>
+make -C fork-maintenance live-all STACK=develop RUN=<fresh-prefix>
+make -C fork-maintenance live-suite-check STACK=develop RUN=<fresh-prefix>
 ```
 
-The wrapper rejects `STACK` and every other case. It fixes:
+Its member wrapper `live-wayland-subsurface STACK=develop` fixes
+`APPLICATION=subsurface`, `LIFECYCLE=application-exit`, `ENCODING=rgb`,
+strict H.264 policy and the default alpha scenario. Every live profile applies
+ALL patches to both endpoints. Case-only, partial-stack and clean-endpoint live
+tests are forbidden; a single profile cannot accept any patch change.
 
-```text
-APPLICATION=subsurface
-LIFECYCLE=application-exit
-ENCODING=rgb
-H264_CLIENT_POLICY=strict
-ALPHA_SCENARIOS=default
-```
+The native-Wayland server owns topology and transactions; the GTK X11 client
+owns capability advertisement and rendering. The fixed live client uses Cairo.
+The mapped OpenGL NumPy/ctypes regressions run in every Debian client build and
+the remaining GL tests retain focused/native coverage.
 
-Unlike ordinary complete-stack profiles, it applies the exact selected WSSO
-source and resolution to both endpoints. The native-Wayland server owns the
-surface graph and transaction publisher; the GTK X11 client owns capability
-advertisement and transaction rendering. The fixed live arguments select the
-Cairo backing. The case's mapped real-Xvfb focused test independently owns the
-GTK OpenGL replacement/close route; a Cairo live pass cannot substitute for
-that GL boundary. A clean endpoint on either side cannot establish acceptance.
-
-The case has no patch dependency on WEDT, so this case-only live selection runs
-with WSSO's standalone immediate fallback available for an ordinary empty root;
-it cannot establish WEDT's timer implementation. The resolved complete-stack
-focused pair in the validation ladder is the authority for their shared
-schedule/cancel/mark seam. This keeps the live pixel oracle tied to one atomic
-production case without weakening the timer case's separate acceptance.
+The complete queue includes WEDT, clipboard and keymap patches. Therefore this
+live profile exercises their real integration with WSSO, including ordinary
+empty-root timer ownership. Standalone compatibility fallbacks remain unit-test
+subjects, never alternative live products.
 
 ### Fixture schema and geometry
 
@@ -2159,8 +2169,8 @@ fixture_clean_exit
 Collection reparses the retained artifacts and recomputes the report. A claimed
 boolean without its underlying exact evidence cannot pass.
 
-This gate is additional and case-only; it is not an eighth complete-stack
-profile and does not replace any of the seven normal positive live profiles.
+This gate is one of the nine mandatory complete-stack profiles; it cannot
+replace any other member of the suite.
 
 ## Invariants not to simplify
 
@@ -2256,7 +2266,7 @@ escalation at the first unexplained failure. The development boundaries are:
 7. Exercise the real compiled implementation and compatibility-disabled packet
    route when those boundaries change; Python-only tests do not substitute.
 8. Run the case-owned positive
-   `live-wayland-subsurface CASE=wayland-subsurface-stream-ownership` gate with a
+   `live-wayland-subsurface STACK=develop` gate with a
    fresh unique run identity. It must prove at least two complete transactions
    while the callback-gated producer is active, then exact completion for every
    captured transaction, independent generated commit/callback accounting,
@@ -2266,7 +2276,7 @@ escalation at the first unexplained failure. The development boundaries are:
 
 Changes to connection-wide packet ownership, sequence allocation, or saved
 packet metadata also require an early affected complete-stack H.264 hardware
-profile with both title-bound windows. The case-only RGB transaction gate
+profile with both title-bound windows. The full-stack RGB transaction gate
 cannot exercise the shared ordinary-root H.264 observers. Use the existing
 fixed wrapper with `STACK=develop` after the relevant focused/native checks;
 do not invent an atomic H.264 gate for this case or require full upstream
@@ -2275,11 +2285,9 @@ development check does not replace the case-owned RGB transaction proof.
 
 After reviewing and freezing source, fixtures and the packet/pixel oracle,
 fill missing or invalidated final requirements: current clean quarantine,
-the three full legs, every required atomic gate, and the complete-stack
-acceptance required by the enclosing task. A full-queue adaptation or upstream
-rebase requires all seven positive stack profiles and both DEB builds; a
-narrow unchanged-base repair follows the affected-boundary rules in the
-canonical validation runbook. Reuse valid development-stage named results only
+the three full legs and all nine complete-stack live profiles for any patch validation. A full-queue adaptation or upstream
+rebase requires all nine positive stack profiles and both DEB builds; a
+narrow unchanged-base repair still requires all nine live profiles. Reuse valid development-stage named results only
 with the input proof required by the validation runbook; do not repeat the whole
 set after each subsurface edit.
 

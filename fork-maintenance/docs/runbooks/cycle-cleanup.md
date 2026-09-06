@@ -119,14 +119,12 @@ The planner accepts only:
 - isolated workspaces with no unstaged or untracked candidate and whose staged
   tree is exactly represented by the current selected patch queue.
 
-Live client provenance normally names clean `master`. The case-only clipboard
-and subsurface profiles instead bind the same selected case at both endpoints:
-`cases/x11-client-clipboard-events` or
-`cases/wayland-subsurface-stream-ownership`. Cleanup requires identical client
-and server selection names, selection and resolution digests, build-context
-digests and context-archive digests for these exceptions. Arbitrary patched
-clients, mismatched endpoints and stale or unbound result schemas remain
-invalid; this does not replace the live collector's profile validation.
+Current live provenance binds the complete `stacks/develop` queue on both
+endpoints, with identical selection/resolution and context/archive digests.
+Cleanup also reads the retired clean-client and exact clipboard/subsurface
+case-selected schemas only to remove their owned artifacts safely; they cannot
+satisfy current live acceptance. Arbitrary patched clients and mismatched or
+unbound endpoints remain invalid.
 
 Git-originated relative symlinks inside an owner-bound result are fingerprinted
 as links and never followed. An absolute target or a relative target that

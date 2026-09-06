@@ -52,7 +52,7 @@ frozen base → atomic edit → affected regression/native/live → review and f
    semantics, compatibility disabled for compatibility policy, and a relevant
    real live profile for runtime behavior. A mock cannot replace the disputed
    display, codec, packet, or event route. Subject modules must fail, not skip,
-   if unavailable. Run the relevant live scenario early, after its prerequisite
+   if unavailable. Start the complete live suite early after its prerequisite
    focused/native checks; full upstream suites are **not** its prerequisite.
 5. Review/export/resolve the candidate; run whitespace, applicable lint and
    affected fork-control tests. Continue this loop until code, tests and the
@@ -60,8 +60,9 @@ frozen base → atomic edit → affected regression/native/live → review and f
    satisfy a positive gate. Stop escalation at an unexplained failure; isolate
    it rather than starting broader jobs in the hope they explain it.
 
-Do not run all three full upstream legs, both DEB builds, every atomic live
-gate, or all seven stack profiles automatically after each edit. Full builds
+Do not run all three full upstream legs or both DEB builds automatically after
+each edit. Every live validation pass runs the full nine-profile suite with all
+patches on both endpoints; stop at the first failure and diagnose before retrying. Full builds
 are useful early only when their actual build/package boundary is the subject,
 or when a narrower control cannot reproduce a demonstrated failure. Record that
 reason before launching one. Independent diagnosis and code review can continue
@@ -145,12 +146,14 @@ Fill the ledger's gaps on the reviewed stable candidate:
    checks, affected native/subsystem gates, and current clean quarantine proof.
 2. Complete offline fork-control checks and all three full Ubuntu upstream
    legs: `full`, `full-cython`, `full-no-compat`.
-3. Every declared atomic positive live gate, applicable durable package
-   boundaries, and complete-stack acceptance required by the enclosing task.
-   A full queue/rebase acceptance includes both real Ubuntu 26.04 and Debian 13
-   DEB builds and all seven positive stack live profiles. Atomic case live and
-   complete-stack live selections remain distinct; neither substitutes for the
-   other. The exact behavioral assertions stay in their case/profile contracts.
+3. All nine positive live profiles with the complete `stacks/develop` queue on
+   both endpoints, for every patch validation, including an unchanged-base fix.
+   Use `live-all STACK=develop RUN=<fresh-prefix>`; `live-suite-check` rejects
+   missing profiles, failed or stale results and mixed candidate inputs.
+   Developing or accepting case-only, partial-stack or clean-endpoint live tests
+   is forbidden. Case ownership describes the regression oracle, never a live
+   selection. Applicable durable package boundaries remain required; full
+   queue/rebase acceptance additionally requires both real DEB builds.
 4. Final queue resolution, whitespace/lint, documentation and result review;
    publication/clean-host checks only under their existing authority and
    preconditions. Do not create an unrequested commit to obtain a clean checkout.
@@ -186,12 +189,12 @@ or an assumption that a small diff is harmless.
 | Change | Required decision |
 | --- | --- |
 | Embedded source changes | Old-base results cannot accept the new base; complete the new-base final set. |
-| Production case changes | Recheck its regression and affected native/live consumers, dependent selections and composed stack. Unchanged independent case selections may retain evidence. |
+| Production case changes | Recheck its regression and affected native consumers and composed stack. All nine live results bind the entire queue: a changed patch invalidates the live suite, not merely its topical profile. |
 | Regression or oracle changes | Recheck that assertion against its subject; redo the clean control if its trigger/assertion changes. Do not reuse the old weaker assertion as proof of the new one. |
 | Production-only edit with identical clean control | Retain the clean result only with exact tests-only applied-tree, commands, mode, image and relevant environment equivalence; patch digest equality alone is not the criterion. |
 | Runner preflight guard only | Narrow runner regression and direct preflight reproduction; no full Xpra run when the downstream source, selection, entrypoint, image inputs and commands are unchanged. |
-| Live harness only | Test the affected harness behavior and real profile; do not rerun full upstream suites or DEBs when their inputs are unchanged. An image rebuild is required only if its actual input key changes. |
-| Non-semantic source/documentation refresh | Apply the strict unchanged-base, exact applied-diff exception in the contract; resolve, check whitespace and affected fork-control behavior, without functional reruns. |
+| Live harness only | Test the affected control behavior and run the complete live suite. Do not rerun upstream suites or DEBs when their inputs are unchanged. Rebuild an image only when its actual input key changes. |
+| Non-semantic source/documentation refresh | Resolve, check whitespace and fork controls. Unchanged focused/native/full checks may be reused under the strict contract. Patch validation still requires the complete nine-profile live suite. |
 | Build/ABI/toolchain/installed-module composition | Exercise the actual affected build/import boundary; image tag equality alone cannot justify reuse. |
 
 Raw provenance and semantic equivalence are distinct. If a raw digest changes,
