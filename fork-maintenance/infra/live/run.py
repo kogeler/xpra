@@ -37,7 +37,6 @@ from PIL import Image, ImageChops, ImageStat  # noqa: E402 - preserve post-boots
 from profiles import (  # noqa: E402 - preserve post-bootstrap import order
     ALPHA_SCENARIOS,
     APPLICATIONS,
-    CLIPBOARD_CASE_SELECTION,
     CLIPBOARD_POLICIES,
     DEFAULT_NETWORK_PROFILE,
     H264_ACCEPTANCE_POLICIES,
@@ -45,7 +44,7 @@ from profiles import (  # noqa: E402 - preserve post-bootstrap import order
     H264_FALLBACK_POLICIES,
     LIFECYCLES,
     NETWORK_PROFILES,
-    SUBSURFACE_CASE_SELECTION,
+    LIVE_SELECTION,
     ProfileError,
     scenario_specs,
     validate_profile,
@@ -420,6 +419,7 @@ HARNESS_INPUTS = (
     INFRA_ROOT / "profiles.py",
     INFRA_ROOT / "requirements.txt",
     INFRA_ROOT / "run.py",
+    INFRA_ROOT / "suite.py",
     INFRA_ROOT / "start_hardware_fixture.sh",
     INFRA_ROOT / "start_wayland_clipboard_fixture.sh",
     INFRA_ROOT / "start_wayland_keyboard_fixture.sh",
@@ -3384,10 +3384,10 @@ def client_selection_for_application(
     application: str,
     server_selection: PatchSelection,
 ) -> PatchSelection:
-    """Select the client source required by one live application boundary."""
-    if application in {"clipboard", "subsurface"}:
-        return server_selection
-    return resolve_patch_selection(None, "master")
+    """Use production composition on both endpoints for every application."""
+    if server_selection.kind != "stack" or server_selection.name != "stacks/develop":
+        raise LabFailure("all live tests require the complete stacks/develop queue")
+    return server_selection
 
 
 def validate_endpoint_contexts(
@@ -3398,10 +3398,7 @@ def validate_endpoint_contexts(
     """Fail closed when a live profile binds the wrong endpoint selection."""
     server = server_context.selection
     client = client_context.selection
-    if application not in {"clipboard", "subsurface"}:
-        if client.name != "master" or client.selectors or client.patches:
-            raise LabFailure("live client must use the clean embedded source")
-        return
+    client_selection_for_application(application, server)
     selection_fields = (
         "case_slugs",
         "digest",
@@ -3420,10 +3417,7 @@ def validate_endpoint_contexts(
         client_context.digest != server_context.digest
         or client_context.resolution != server_context.resolution
         or client_context.manifest != server_context.manifest
-        or (
-            client_context.archive_sha256 is not None
-            and client_context.archive_sha256 != server_context.archive_sha256
-        )
+        or client_context.archive_sha256 != server_context.archive_sha256
     ):
         raise LabFailure(f"{application} endpoint build contexts are not identical")
 
@@ -4091,7 +4085,7 @@ def freeze_owned_inputs(
     try:
         snapshot = create_source_snapshot(state_root, temporary_root=freeze_root)
         server_selection = resolve_patch_selection(selection_name, None)
-        client_selection = client_selection_for_application(
+        client_selection_for_application(
             application,
             server_selection,
         )
@@ -4106,16 +4100,7 @@ def freeze_owned_inputs(
             server_selection,
             temporary_root=freeze_root,
         )
-        client_context = (
-            server_context
-            if application in {"clipboard", "subsurface"}
-            else prepare_build_context(
-                state_root,
-                snapshot,
-                client_selection,
-                temporary_root=freeze_root,
-            )
-        )
+        client_context = server_context
         validate_endpoint_contexts(application, server_context, client_context)
         input_manifest_sha256, _zed_archive, _zed_archive_sha256 = (
             snapshot_build_inputs(
@@ -7580,8 +7565,11 @@ H264_DRAW_REGION_RE = re.compile(
     r"(?P<width>\d+),\s*(?P<height>\d+),\s*"
     r"(?P<encoding>[\w-]+),\s*(?P<payload_bytes>\d+) bytes,\s*"
     r"(?P<stride>\d+),\s*typedict\((?P<options>\{.*\})\),\s*"
-    r"\[<function WindowDraw\._do_draw\.<locals>\.record_decode_time at "
-    r"(?P<callback>0x[0-9a-fA-F]+)>"
+    r"(?P<callbacks>\[[^\n]*\])\)$"
+)
+H264_DECODE_CALLBACK_RE = re.compile(
+    r"(?:\[|,\s*)<function WindowDraw\._do_draw\.<locals>\.record_decode_time at "
+    r"(?P<callback>0x[0-9a-fA-F]+)>(?=,|\])"
 )
 H264_ACK_RE = re.compile(
     r"(?m)^.*?sending ack: \('window-ack',\s*"
@@ -8171,12 +8159,18 @@ def h264_client_packet_chain(
     draw_fields_match = False
     callback = ""
     if draw_match:
-        callback = draw_match.group("callback")
+        # The complete client stack brackets the ACK callback with backing-
+        # lifetime callbacks. Its position is not identity; require exactly one
+        # real decode callback and retain its address through paint and ACK.
+        decode_callbacks = H264_DECODE_CALLBACK_RE.findall(draw_match.group("callbacks"))
+        if len(decode_callbacks) == 1:
+            callback = decode_callbacks[0]
         draw_options = _normalise_log_value(
             _typedict_literal(draw_match.group("options"))
         )
         draw_fields_match = bool(
-            int(draw_match.group("payload_bytes")) == int(saved["payload_bytes"])
+            callback
+            and int(draw_match.group("payload_bytes")) == int(saved["payload_bytes"])
             and int(draw_match.group("width")) == int(saved["w"])
             and int(draw_match.group("height")) == int(saved["h"])
             and int(draw_match.group("x")) == int(saved["x"])
@@ -9890,7 +9884,7 @@ def parse_keyboard_client_trace(
     start: int,
     end: int,
 ) -> dict[str, Any]:
-    """Parse actual clean-client key packets from one bounded log interval."""
+    """Parse actual client key packets from one bounded log interval."""
     raw = path.read_bytes()
     if (
         not isinstance(start, int)
@@ -10338,8 +10332,8 @@ def keyboard_live_checks(
                 )
                 structured_range = structured.get("log_range")
                 structured_updates_accepted &= bool(
-                    structured.get("packet") == "keymap-changed"
-                    and structured.get("representation") == "legacy"
+                    structured.get("packet") == "keyboard-config"
+                    and structured.get("representation") == "versioned"
                     and structured.get("result") == "installed"
                     and structured.get("hash") == expected_hash
                     and structured.get("group_count")
@@ -11079,10 +11073,10 @@ def exercise_wayland_keyboard(
     baseline_rmlvo = scenario["phases"][-1]["rmlvo"]
     baseline_hash = keyboard_rmlvo_hash(baseline_rmlvo)
     baseline_patterns = (
-        r"received Wayland structured keymap packet=keymap-changed",
+        r"received Wayland structured keymap packet=keyboard-config",
         (
-            rf"accepted Wayland structured keymap packet=keymap-changed "
-            rf"representation=legacy hash={baseline_hash} "
+            rf"accepted Wayland structured keymap packet=keyboard-config "
+            rf"representation=versioned hash={baseline_hash} "
             rf"groups={len(baseline_rmlvo['layouts'])} "
             rf"owner=[A-Za-z0-9][A-Za-z0-9_.:@+-]{{0,127}} "
             r"result=(?:installed|identical)"
@@ -11106,10 +11100,10 @@ def exercise_wayland_keyboard(
         phase_log_start = container_artifact_size(server, "server.stderr")
         query = configure_client_xkb(client, rmlvo)
         structured_patterns = (
-            r"received Wayland structured keymap packet=keymap-changed",
+            r"received Wayland structured keymap packet=keyboard-config",
             (
-                rf"accepted Wayland structured keymap packet=keymap-changed "
-                rf"representation=legacy hash={rmlvo_hash} "
+                rf"accepted Wayland structured keymap packet=keyboard-config "
+                rf"representation=versioned hash={rmlvo_hash} "
                 rf"groups={len(rmlvo['layouts'])} "
                 rf"owner=[A-Za-z0-9][A-Za-z0-9_.:@+-]{{0,127}} "
                 r"result=installed"
@@ -11179,7 +11173,7 @@ def exercise_wayland_keyboard(
                 client_packet_prefix + r", False" + client_packet_suffix,
             )
             wait_for(
-                f"clean Xpra client press/release trace for input {input_index + 1}",
+                f"full-stack Xpra client press/release trace for input {input_index + 1}",
                 lambda offset=client_log_start, patterns=client_patterns: (
                     container_artifact_suffix_matches(
                         client,
@@ -19150,7 +19144,7 @@ def run_scenario(
             run_x11_clipboard_consumer(client, "one", "initial")
         if args.application == "keyboard":
             assert keyboard_scenario is not None
-            # Seed the clean client's real X11 display from scenario data
+            # Seed the full-stack client's real X11 display from scenario data
             # before attach.  Using the final phase as the baseline guarantees
             # that each later phase changes its model as well as its layouts,
             # so legacy layout-changed cannot pre-empt the structured update.
@@ -20485,22 +20479,8 @@ def main() -> int:
             alpha_scenarios=args.alpha_scenarios,
             network_profile_name=args.network_profile,
         )
-        if (
-            args.application == "clipboard"
-            and args.selection != CLIPBOARD_CASE_SELECTION
-        ):
-            raise ProfileError(
-                "clipboard live acceptance requires selection "
-                f"{CLIPBOARD_CASE_SELECTION}"
-            )
-        if (
-            args.application == "subsurface"
-            and args.selection != SUBSURFACE_CASE_SELECTION
-        ):
-            raise ProfileError(
-                "subsurface live acceptance requires selection "
-                f"{SUBSURFACE_CASE_SELECTION}"
-            )
+        if args.selection != LIVE_SELECTION:
+            raise ProfileError(f"all live tests require the complete {LIVE_SELECTION} queue")
     except ProfileError as error:
         raise LabFailure(str(error)) from error
     if args.selection is None:
@@ -20630,11 +20610,7 @@ def main() -> int:
             snapshot,
             server_selection,
         )
-        client_context = (
-            server_context
-            if args.application in {"clipboard", "subsurface"}
-            else prepare_build_context(state_root, snapshot, client_selection)
-        )
+        client_context = server_context
         validate_endpoint_contexts(
             args.application,
             server_context,

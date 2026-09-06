@@ -231,22 +231,25 @@ render-node descriptor, AMD Mesa/Radeon mapping, non-software renderer metadata,
 and changing nonuniform forwarded frames. The Vulkan and OpenGL primary gates
 are independent positive proofs.
 
-The exact complete-stack live acceptance set is Zed RGB, adaptive-alpha Zed
-H.264, RGB detach, RGB transport-loss fault injection, native-Wayland
-client-keymap input, multi-window Vulkan hardware, and multi-window OpenGL
-hardware. The separate positive `live-x11-clipboard` gate is owned only by
-`x11-client-clipboard-events`: it selects that case at both endpoints and is
-not added to the seven-profile stack set. Its native-Wayland reverse source is
-armed by a private command, claims only inside a real F8 callback delivered
-through Xpra, and must receive a compositor owner-change confirmation. The
-same root XFixes monitor covers both forward updates and that reverse boundary,
-with three production owner events for `both` and exactly two for `to-server`
-and `off`. It remains active through controlled Xpra client exit and an X11
-queue drain; only an exact shutdown-only zero-owner event may be classified
-separately. Retained compositor source intervals and cross-stream fixture
-chronology must be reparsed at collection, and a late nonzero takeover fails.
+The exact complete-stack live suite has nine profiles: Zed RGB, adaptive-alpha
+Zed H.264, RGB detach, RGB transport loss, keymap input, Vulkan hardware,
+OpenGL hardware, X11 clipboard and Wayland subsurface composition. Every live
+test MUST run the entire current `stacks/develop` on both endpoints.
+Developing or running case-only, partial-stack or clean-endpoint live tests
+is forbidden. For every patch validation run `live-all STACK=develop RUN=<prefix>`;
+`live-suite-check` must verify the complete current nine-profile result.
+Topical fixtures and case `required_gates` metadata do not waive this policy.
+
+The clipboard profile retains its private-command-armed, real-F8 reverse
+takeover and compositor confirmation; the same XFixes monitor covers the two
+forward takeovers, allowed reverse transfer, controlled client exit and event
+drain. Only a bound shutdown-only zero-owner event may be classified separately;
+late nonzero takeover fails. Subsurface composition retains its independent
+packet/pixel/ACK and continuous-producer oracle, now with WEDT and the rest of
+the queue present.
+
 Their fixed Make wrappers require the
-exact nonempty reviewed selection allowed by each profile. `profiles.yml` alone
+complete `stacks/develop` selection on both endpoints. `profiles.yml` alone
 supplies the selectable client network/quality overlay and its default;
 `live-cli.yml` alone supplies static server/client Xpra arguments. Do not
 duplicate their concrete values in Python, Make, or unit-test assertions.
@@ -388,7 +391,7 @@ never silently discard an unexported candidate to obtain an empty directory.
 
 Keep direct Xpra behavior separate from SSH or parent-product orchestration.
 The live runner owns direct-TCP detach, abrupt transport loss, RGB, adaptive
-Wayland H.264, multi-window hardware, and the case-only X11-to-native-Wayland
+Wayland H.264, multi-window hardware, and the full-stack X11-to-native-Wayland
 clipboard gate. Do not replace these with foreground one-off commands when
 deciding whether a patch is ready.
 
@@ -535,17 +538,17 @@ run the full offline `make -C fork-maintenance check` on the stable control-plan
 candidate before final acceptance, not after each documentation or two-line edit.
 
 A refresh proven by exact applied-tree comparison to change only comments,
-copyright notices, or documentation does not rerun Xpra focused, native, full,
-or live jobs. The embedded source, paths, modes, executable data, configuration, test
+copyright notices, or documentation does not rerun unchanged Xpra focused,
+native, or full jobs. Patch validation still requires the complete live suite.
+The embedded source, paths, modes, executable data, configuration, test
 assertions, and runner behavior must all be unchanged. Run resolution,
 whitespace, and fork-control checks and report the non-semantic proof. Any
-uncertainty falls back to the affected development checks and final gates. This exception is only
-for a patch/documentation refresh on an unchanged embedded source. It never
-applies after `develop-rebase`: a changed base requires every clean quarantine,
+uncertainty falls back to the affected development checks and final gates. This
+exception is only for a patch/documentation refresh on an unchanged embedded
+source. It never applies after `develop-rebase`: a changed base requires every clean quarantine,
 fork-control, tests-only clean control or documented no-test semantic
 substitute, patched focused/native gate, durable package boundary on the
-resulting stack, full-matrix leg, every production case's declared live gate
-with its atomic case selection, and all seven positive live gates with the
+resulting stack, full-matrix leg and all nine positive live gates with the
 complete stack selection even if the patch bytes did not need modification.
 That is the final new-base acceptance set, not a per-edit development sequence.
 

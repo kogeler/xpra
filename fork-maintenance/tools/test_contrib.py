@@ -3458,6 +3458,32 @@ required_gates = []
             )
         )
 
+    def test_finalized_workspace_reconstructs_forward_without_reverse_hunk_matching(self) -> None:
+        start, selected, resolution, _case = self.mocks()
+        with start, selected, resolution:
+            workspace = contrib.create_workspace(self.repo, "audit-forward-01", "cases/sample-case", "patched")
+        commands = []
+        original = contrib.run_with_index
+
+        def forward_only(repo, index, *arguments):
+            # An inverse hunk may match another identical block in composed
+            # source after later patches moved line offsets. It is not authority.
+            self.assertNotIn("--reverse", arguments)
+            commands.append(arguments)
+            return original(repo, index, *arguments)
+
+        with selected, resolution, patch.object(contrib, "run_with_index", side_effect=forward_only):
+            fingerprint = contrib.finalized_workspace_fingerprint(self.repo, workspace.name)
+        self.assertRegex(fingerprint, r"^[0-9a-f]{64}$")
+        self.assertIn(("read-tree", workspace.base_tree), commands)
+        self.assertTrue(any(args[0] == "apply" and "--cached" in args for args in commands))
+
+        # Matching path inventory alone must not accept an altered staged tree.
+        (workspace.source / "target.txt").write_text("unexported staged change\n", encoding="utf-8")
+        command("git", "add", "target.txt", cwd=workspace.source)
+        with selected, resolution, self.assertRaises(contrib.ContribError):
+            contrib.finalized_workspace_fingerprint(self.repo, workspace.name)
+
     def test_workspace_recovery_removes_exact_marker_backed_creation_partial(self) -> None:
         name = "lifecycle"
         target, partial, marker = contrib.workspace_create_paths(self.repo, name)
@@ -4569,11 +4595,11 @@ class CycleCleanupTest(unittest.TestCase):
         marker.write_text(json.dumps(payload) + "\n", encoding="utf-8")
         self.refresh_live_remove_transaction(status["run"])
 
-    def test_digest_confirmed_cleanup_accepts_shared_case_endpoints(self) -> None:
-        for index, case in enumerate(
-            ("x11-client-clipboard-events", "wayland-subsurface-stream-ownership")
+    def test_digest_confirmed_cleanup_accepts_current_stack_and_retired_case_endpoints(self) -> None:
+        for index, selection in enumerate(
+            ("stacks/develop", "cases/x11-client-clipboard-events", "cases/wayland-subsurface-stream-ownership")
         ):
-            with self.subTest(case=case):
+            with self.subTest(selection=selection):
                 cycle = f"shared-endpoints-{index}"
                 name = f"{cycle}-live-01"
                 status, log, result = self.collected_live_result(name)
@@ -4581,8 +4607,8 @@ class CycleCleanupTest(unittest.TestCase):
                     "input_provenance"
                 ]
                 changes = {
-                    "client_selection": f"cases/{case}",
-                    "server_selection": f"cases/{case}",
+                    "client_selection": selection,
+                    "server_selection": selection,
                 }
                 for field in (
                     "selection_sha256",
@@ -4613,9 +4639,9 @@ class CycleCleanupTest(unittest.TestCase):
             (clipboard, subsurface, None),
             ("cases/unreviewed-case", "cases/unreviewed-case", None),
             ("cases/unreviewed-case", clipboard, None),
-            ("stacks/develop", "stacks/develop", None),
+            ("stacks/partial", "stacks/partial", None),
         ]
-        for selection in (clipboard, subsurface):
+        for selection in (clipboard, subsurface, "stacks/develop"):
             for field in (
                 "selection_sha256",
                 "selection_resolution_sha256",

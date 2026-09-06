@@ -482,13 +482,13 @@ not enlarge this lease registry.
 
 ## Live boundary
 
-This case deliberately declares no atomic live gate. Its authoritative
+This case has no separate topical live profile. Its authoritative
 boundaries are callback-before-publication, callback-versus-close, stale
 callback identity, and exception ordering; the deterministic focused test can
 schedule those interleavings exactly, while a live desktop cannot make them
 repeatable or prove which side of attachment/publication won.
 
-The complete stack's seven positive live profiles still exercise the resulting
+The complete stack's nine positive live profiles still exercise the resulting
 lifecycle under real GLib, Xpra connections, rendering, input, application
 exit, detach, transport loss, and hardware video. In particular, detach and
 transport loss drive connection teardown, RGB drives delayed damage and icon

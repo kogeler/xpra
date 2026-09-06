@@ -86,6 +86,9 @@ SUPPORTED_GATES = frozenset(
         "full-cython",
         "full-no-compat",
         "live-rgb",
+        "live-h264",
+        "live-xpra-detach",
+        "live-xpra-transport-loss",
         "live-x11-clipboard",
         "live-wayland-keyboard",
         "live-wayland-subsurface",
@@ -4544,13 +4547,18 @@ def _finalized_workspace_fingerprint_locked(repo: Path, name: str) -> str:
             fail(f"workspace {name} has an unsafe Git index")
         shutil.copyfile(source_index, temporary_index)
         os.chmod(temporary_index, 0o600)
-        for case in reversed(applied):
-            arguments = ["apply", "--reverse", "--cached", "--whitespace=error-all"]
+        # Reverse hunks can match another identical block after overlapping
+        # cases move line offsets. Reconstruct the exact forward product, as
+        # workspace creation and production builders do, then compare trees.
+        candidate_tree = run_with_index(workspace.source, temporary_index, "write-tree")
+        run_with_index(workspace.source, temporary_index, "read-tree", workspace.base_tree)
+        for case in applied:
+            arguments = ["apply", "--cached", "--whitespace=error-all"]
             if workspace.patch_mode == "tests-only":
                 arguments.append("--include=tests/**")
             arguments.extend(("--", str(case.patch)))
             run_with_index(workspace.source, temporary_index, *arguments)
-        if run_with_index(workspace.source, temporary_index, "write-tree") != workspace.base_tree:
+        if run_with_index(workspace.source, temporary_index, "write-tree") != candidate_tree:
             fail(f"workspace {name} is not exactly represented by the finalized queue")
     finally:
         remove_workspace_fingerprint(repo, name, scratch)
@@ -5023,11 +5031,12 @@ def validate_live_status(
         )
     ):
         fail(f"collected live input provenance is inconsistent: {name}")
-    # These two case-only profiles deliberately apply the same source at both
-    # endpoints. Keep their exact bindings, rather than admitting any patched
-    # client or assuming the ordinary clean-client profile for every result.
+    # All current live profiles bind the complete queue to both endpoints.
+    # Retired case/clean-client records remain readable only for owned cleanup;
+    # they cannot satisfy the current live suite admission or acceptance.
     if provenance["client_selection"] != "master" and (
         provenance["client_selection"] not in (
+            "stacks/develop",
             "cases/x11-client-clipboard-events",
             "cases/wayland-subsurface-stream-ownership",
         )

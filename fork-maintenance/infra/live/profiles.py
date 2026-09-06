@@ -16,8 +16,7 @@ from live_config import (
 )
 
 CLIPBOARD_POLICIES = CONFIGURED_CLIPBOARD_POLICIES
-CLIPBOARD_CASE_SELECTION = "cases/x11-client-clipboard-events"
-SUBSURFACE_CASE_SELECTION = "cases/wayland-subsurface-stream-ownership"
+LIVE_SELECTION = "stacks/develop"
 APPLICATIONS = (
     "zed",
     "hardware",
@@ -43,17 +42,11 @@ STACK_LIVE_ACCEPTANCE_PROFILES = frozenset(
         ("hardware", "application-exit", "h264", "adaptive-alpha", "default"),
         ("opengl", "application-exit", "h264", "adaptive-alpha", "default"),
         ("keyboard", "application-exit", "rgb", "strict", "default"),
-    }
-)
-CASE_ONLY_LIVE_ACCEPTANCE_PROFILES = frozenset(
-    {
         ("clipboard", "application-exit", "rgb", "strict", "default"),
         ("subsurface", "application-exit", "rgb", "strict", "default"),
     }
 )
-LIVE_ACCEPTANCE_PROFILES = (
-    STACK_LIVE_ACCEPTANCE_PROFILES | CASE_ONLY_LIVE_ACCEPTANCE_PROFILES
-)
+LIVE_ACCEPTANCE_PROFILES = STACK_LIVE_ACCEPTANCE_PROFILES
 LIVE_PROFILE_REQUIRED_GATES = {
     ("zed", "application-exit", "rgb", "strict", "default"): "live-rgb",
     ("zed", "application-exit", "h264", "adaptive-alpha", "default"): "live-h264",
@@ -101,13 +94,6 @@ LIVE_PROFILE_REQUIRED_GATES = {
         "default",
     ): "live-wayland-subsurface",
 }
-STACK_ONLY_LIVE_ACCEPTANCE_PROFILES = frozenset(
-    {
-        ("zed", "application-exit", "h264", "adaptive-alpha", "default"),
-        ("gtk", "detach", "rgb", "strict", "default"),
-        ("gtk", "transport-loss", "rgb", "strict", "default"),
-    }
-)
 DEFAULT_NETWORK_PROFILE = load_network_profiles()[0]
 NETWORK_PROFILES = network_profile_names()
 
@@ -162,7 +148,7 @@ def validate_profile_selection(
     selection_kind: str,
     required_gates: tuple[str, ...],
 ) -> None:
-    """Bind every live profile to its exact case gate or to a stack."""
+    """Every live scenario exercises the complete production queue, never a case."""
     profile = (
         application,
         lifecycle,
@@ -173,33 +159,9 @@ def validate_profile_selection(
     gate = LIVE_PROFILE_REQUIRED_GATES.get(profile)
     if gate is None:
         raise ProfileError(f"unsupported live acceptance profile: {profile!r}")
-    if application == "clipboard" and (
-        selection_kind != "case" or selection != CLIPBOARD_CASE_SELECTION
-    ):
+    if selection_kind != "stack" or selection != LIVE_SELECTION:
         raise ProfileError(
-            "clipboard live acceptance requires selection "
-            f"{CLIPBOARD_CASE_SELECTION}"
-        )
-    if application == "subsurface" and (
-        selection_kind != "case" or selection != SUBSURFACE_CASE_SELECTION
-    ):
-        raise ProfileError(
-            "subsurface live acceptance requires selection "
-            f"{SUBSURFACE_CASE_SELECTION}"
-        )
-    if selection_kind == "stack":
-        if profile not in STACK_LIVE_ACCEPTANCE_PROFILES:
-            raise ProfileError(
-                f"live profile {gate} does not accept a stack selection"
-            )
-        return
-    if selection_kind != "case":
-        raise ProfileError(f"live acceptance requires a case or stack selection: {selection}")
-    if profile in STACK_ONLY_LIVE_ACCEPTANCE_PROFILES:
-        raise ProfileError(f"live profile {gate} requires a stack selection")
-    if gate not in required_gates:
-        raise ProfileError(
-            f"case selection {selection} does not declare required gate {gate}"
+            f"all live tests require the complete {LIVE_SELECTION} queue on both endpoints"
         )
 
 

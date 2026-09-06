@@ -77,10 +77,11 @@ The handoff states:
 - after every upstream rebase, the complete offline suite, production
   tests-only controls or documented no-test semantic substitutes,
   focused/native gates and both real resulting-stack package builds, all three
-  full author-test legs, every production case's declared live gates with its
-  atomic case selection, and all seven fixed positive live jobs with the
+  full author-test legs and all nine fixed positive live jobs with the
   complete stack selection actually completed on this base;
 - any required gates still outstanding;
+- for any patch validation, the complete current nine-profile live suite with
+  all patches on both endpoints, never case-only or clean-endpoint live evidence;
 - whether local commits are signed as required.
 
 Do not convert historical runs into current claims. All detailed output stays

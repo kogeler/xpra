@@ -1,9 +1,9 @@
 # Run Direct Xpra And Physical-GPU Tests
 
 Use [`validation.md`](validation.md) to schedule these fixed positive gates.
-During development, run the relevant profile after its nearest focused/native
+During development, start the full live suite after the nearest focused/native
 checks; all three full upstream suites are not a prerequisite. Final acceptance
-fills only missing or invalidated atomic/stack requirements after candidate
+requires all nine current full-stack results after candidate
 freeze. Development-stage named results may count when their exact final
 inputs and assertions remain valid; foreground diagnostics cannot.
 
@@ -23,9 +23,8 @@ inherit that lock. If creation was interrupted, the next `live-venv` validates
 
 Verify Podman and the private process-supervisor state, inspect the default
 render-node and Zed-path availability, and prove repository identity plus
-current selected patch resolution. These examples use the complete stack;
-for an early atomic run use its admitted `CASE=<slug>` in workspace creation
-instead of `STACK=develop`:
+current complete patch resolution. Always use the complete stack, including
+early live diagnosis; no case-selected live product is admitted:
 
 ```bash
 make -C fork-maintenance doctor
@@ -83,8 +82,7 @@ shell code:
 make -C fork-maintenance live-profile-list
 ```
 
-Pass any name returned above to any of the seven complete-stack wrappers or to
-either case-only wrapper:
+Pass any listed name to the full suite or to its nine member wrappers:
 
 ```bash
 make -C fork-maintenance live-h264 \
@@ -144,40 +142,49 @@ Live image builds are embedded in and owned by the live job's unique `RUN`;
 they do not use a separate `IMAGE_RUN`. A retry therefore uses a new live
 `RUN`, including any image-build work it triggers.
 
-Do not rerun a live profile solely for a proven comment, copyright, or
-documentation-only patch refresh on the same embedded source. First verify by exact
-old/new applied-tree comparison that paths, modes, executable data,
-configuration, test assertions, runner behavior, and live assertions are
-unchanged, then run only resolution, whitespace, and fork-control checks and
-record the proof. This exception cannot cross `develop-rebase`; every upstream
-rebase requires every production case's declared live gates with its atomic
-case selection and all seven fixed positive live profiles with the complete
-stack selection on the final adapted candidate. A semantic difference on an
-unchanged base requires the affected profile checks during development and
-corresponding final coverage, not every live profile after every edit.
+## Mandatory complete production suite
 
-Every named live acceptance run requires one nonempty reviewed `CASE` or
-`STACK` selection. A clean-source diagnostic is not live acceptance and must
-use the isolated/unit diagnostic paths; it cannot publish a live `PASS`.
+Every live test applies the entire current `stacks/develop` queue to BOTH
+endpoints. Developing or running isolated-case, partial-stack or clean-endpoint
+live tests is forbidden. Atomic source patches and focused unit controls remain
+useful; isolated live product configurations do not represent production.
 
-The complete-stack positive set is exactly `live-rgb`, `live-h264`,
-`live-xpra-detach`, `live-xpra-transport-loss`, `live-xpra-hardware`, and
-`live-xpra-opengl-hardware`, plus `live-wayland-keyboard`. Fail-closed unit
-fixtures prove that invalid evidence is rejected; every named live target
-itself must prove its intended Xpra behavior and finish positive. Their
-acceptance dimensions are fixed;
-`NETWORK_PROFILE` is the orthogonal client-only tuning overlay described above.
-`live-x11-clipboard` and `live-wayland-subsurface` are additional case-only
-positive gates and do not change this seven-profile stack set.
+For validation of any patch, including an unchanged-base repair, run all nine:
+
+```bash
+make -C fork-maintenance live-all STACK=develop RUN=<fresh-prefix>
+make -C fork-maintenance live-suite-check STACK=develop RUN=<fresh-prefix>
+```
+
+The controller calls the existing named `live-start`, `live-wait` (including
+collection) and `live-remove` for each member serially. Clipboard and subsurface
+run first. The run name is `<prefix>-<gate>`, where the gate is defined in
+`infra/live/profiles.py` (hardware gate names retain their `live-wayland-*`
+spelling). No workloads run in the control shell itself. If interrupted, inspect
+the current member with `live-status`/`live-logs` and complete its lifecycle;
+never launch a duplicate under an existing name. A failed member stops the
+suite; correct it before a fresh candidate/suite attempt.
+
+The exact set is `live-rgb`, `live-h264`, `live-xpra-detach`,
+`live-xpra-transport-loss`, `live-xpra-hardware`,
+`live-xpra-opengl-hardware`, `live-wayland-keyboard`,
+`live-x11-clipboard` and `live-wayland-subsurface`. Per-profile wrappers are
+member-level lifecycle interfaces, not independent patch acceptance.
+`live-suite-check` recomputes all nine retained reports, checks the current
+complete queue and harness, and rejects missing, failed, stale or mixed inputs.
+The same Zed payload is required in RGB and H.264. Review/save the summary in the
+ignored cycle handoff before cycle cleanup removes its underlying evidence.
+A changed patch invalidates the whole live suite. Unchanged exact-input evidence
+may be reread; the old clean-client/case-only architecture never qualifies.
 
 ## Client keymap synchronization with a native-Wayland server
 
-Run the keyboard case independently; do not substitute `live-rgb`, whose Zed
+Run the required keyboard profile on the full stack; do not substitute `live-rgb`, whose Zed
 scenario intentionally exercises the unrelated empty-damage case:
 
 ```bash
 make -C fork-maintenance live-wayland-keyboard \
-  CASE=wayland-client-keymap-sync RUN=wayland-keyboard-01
+  STACK=develop RUN=wayland-keyboard-01
 make -C fork-maintenance live-wait RUN=wayland-keyboard-01
 make -C fork-maintenance live-remove RUN=wayland-keyboard-01
 ```
@@ -194,18 +201,21 @@ generic manifest-declared ownership. The migration must update the runner,
 provenance checks, immutable inventories, and mutation tests before the
 stack-selected keyboard gate can remain valid without that case.
 
-The clean maintained client uses `setxkbmap` on its actual X11 display. This
-live gate exercises legacy client keymap transport; negotiated exact-wire
-transport and native-Wayland client discovery remain focused/native coverage.
+The full-stack client uses `setxkbmap` on its actual X11 display. This
+live gate requires the negotiated versioned `keyboard-config` transport;
+legacy compatibility and native-Wayland client discovery also have
+focused/native coverage.
 The bound scenario first uses model `pc104` with four ordered groups
 (`us,fr,ru,ara`), then replaces it with model `pc105` and `ge,am,us,fr`
 without reconnecting. Across both maximum-sized maps, one physical key
 exercises Latin, Cyrillic, Arabic, Georgian, and Armenian Unicode text. For
 each phase, the runner verifies the queried RMLVO values and
-requires the clean client's nested `keymap-changed` packet to receive, install,
+requires the patched client's flat `keyboard-config` packet with
+`representation=versioned` to receive, install,
 and explicitly accept the expected hash in that exact order. A preceding
-legacy `layout-changed` application or an identical-only structured result
-cannot satisfy this proof. The runner also records `xpra info`, which must expose
+legacy `layout-changed` application, nested `keymap-changed` update, or an
+identical-only structured result cannot satisfy this proof. The runner also
+records `xpra info`, which must expose
 the exact effective RMLVO, group count, and final exercised group with no
 rejected configuration; a generic application marker from `layout-changed`
 cannot satisfy this boundary.
@@ -213,7 +223,7 @@ The native driver focuses the forwarded fixture window, locks each real XKB
 group, and uses XTEST for one complete physical press/release pair. It never
 types text, pastes, constructs an Xpra packet, or sends Unicode directly.
 For every injection the report freezes and reparses a bounded `client.stdout`
-interval with exactly one clean-Xpra-client `key-action` press and release,
+interval with exactly one Xpra-client `key-action` press and release,
 matching the driver's keycode, group, keysym, name, and Unicode string, and the
 fixture's exact internal Xpra window ID. The driver's XTEST success booleans
 cannot substitute for these client observations.
@@ -231,12 +241,11 @@ observations fails closed.
 
 ## X11 client to native-Wayland clipboard synchronization
 
-Run the clipboard case through its dedicated wrapper; it accepts neither
-another case nor a stack selection:
+The clipboard member uses its fixed wrapper with the full stack; all case selections are rejected:
 
 ```bash
 make -C fork-maintenance live-x11-clipboard \
-  CASE=x11-client-clipboard-events RUN=x11-client-clipboard-events-live-01
+  STACK=develop RUN=x11-client-clipboard-events-live-01
 make -C fork-maintenance live-wait \
   RUN=x11-client-clipboard-events-live-01
 make -C fork-maintenance live-status \
@@ -250,9 +259,8 @@ make -C fork-maintenance live-status \
 ```
 
 The wrapper fixes RGB, application-exit, strict H.264 policy, and the default
-alpha scenario. Unlike the seven complete-stack profiles, this client-side
-regression builds the exact selected case source for both the Debian 13 X11
-client and Ubuntu 26.04 native-Wayland server. Input freeze and final
+alpha scenario. Like every live profile, it builds the complete queue for both
+the Debian 13 X11 client and Ubuntu 26.04 native-Wayland server. Input freeze and final
 collection require identical selection, resolution, and source context at both
 endpoints. The Ubuntu and Debian images have independently bound immutable
 image IDs and verified role labels; their IDs are not required to match.
@@ -318,12 +326,11 @@ token, a reconnect, a longer timeout, or polling cannot satisfy the gate.
 
 ## Native-Wayland subsurface stream ownership
 
-Run the subsurface case through its dedicated wrapper; it accepts neither
-another case nor a stack selection:
+The subsurface member uses its fixed wrapper with the full stack; all case selections are rejected:
 
 ```bash
 make -C fork-maintenance live-wayland-subsurface \
-  CASE=wayland-subsurface-stream-ownership \
+  STACK=develop \
   RUN=wayland-subsurface-stream-ownership-live-01
 make -C fork-maintenance live-wait \
   RUN=wayland-subsurface-stream-ownership-live-01
@@ -336,7 +343,7 @@ make -C fork-maintenance live-remove \
 ```
 
 The wrapper fixes RGB, application-exit, strict H.264 policy, and the default
-alpha scenario. The exact selected case source and resolution are applied to
+alpha scenario. The complete stack source and resolution are applied to
 both the Ubuntu 26.04 native-Wayland server and Debian 13 GTK X11 client:
 server composition transactions and client backing semantics are one atomic
 wire contract. Input freeze, image contexts, final report, and collection must
@@ -352,8 +359,7 @@ A missing dependency, test, context or handler fails rather than skips.
 The test-only NumPy, PyOpenGL, GTK and Mesa dependencies are installed after
 Xpra compilation/native checks and are not copied into the runtime client.
 This mandatory build-time GL proof supplements the runtime Cairo oracle; it
-is not inferred from Cairo rendering or the seven stack profiles, whose clients
-remain clean embedded source. The remaining case-owned mapped OpenGL tests
+is not inferred from Cairo rendering; every live client build runs these GL checks. The remaining case-owned mapped OpenGL tests
 also stay in the focused/native upstream-test coverage.
 
 The dedicated C fixture creates a 420x300 primary and 360x260 secondary
@@ -669,6 +675,14 @@ storage bucket indexes and each descending `flush` countdown remain exact.
 The codec, frame-alpha, crop/edge, hardware, and pixel requirements do not
 change when another owned window interleaves a packet.
 
+The client draw log may bracket the decode/ACK callback with backing-lifetime
+callbacks from the complete stack. Identify exactly one
+`WindowDraw._do_draw.<locals>.record_decode_time` callback anywhere in that
+list, then bind its address to the decoded NV12 paint and exact packet ACK.
+Never assume it is first, accept duplicate or missing decode callbacks, or
+replace packet identity with a generic successful paint. Retain the ordinary
+dimensions/options, payload, hardware presentation and ordering assertions.
+
 The frozen host runner computes this ordinary-root H.264 ledger from the saved
 packet metadata and payloads. It records readiness and profile-owned baseline/
 stimulus cuts in `h264-sequence-observations.json`, then rebuilds the ledger
@@ -676,13 +690,13 @@ from the final artifact inventory and checks the retained prefixes and tails.
 Named-job collection independently
 verifies the frozen source/input/harness provenance, artifact digests and report
 embedding; it does not independently replay this H.264 ledger's semantics.
-Keep that trust boundary distinct from the case-only subsurface RGB collector,
+Keep that trust boundary distinct from the full-stack subsurface RGB collector,
 which has its own semantic reconstruction. Neither a report boolean nor a
 reinterpretation of an old negative run replaces the required positive runtime
 observation.
 
 This shared observer covers ordinary-root H.264 and its picture auxiliary.
-It does not replace or weaken the separate case-only WSSO RGB transaction
+It does not replace or weaken the separate full-stack WSSO RGB transaction
 ledger, which owns internal-source/current-parent routing, transaction stages,
 epochs, raw premultiplied payloads, and exact source ACKs.
 

@@ -1,0 +1,2 @@
+# Development tool only. Never add mypy to installed Xpra dependencies.
+mypy==2.3.1

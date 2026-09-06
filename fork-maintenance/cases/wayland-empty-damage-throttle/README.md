@@ -460,6 +460,6 @@ bounded-payload harness with its exact application event stream, input deadline,
 lifecycle, and owned cleanup evidence. Run it early after the relevant
 focused/native checks, without a full-matrix prerequisite. After candidate
 freeze, fill only missing or invalidated final requirements, including current
-quarantine, all three full legs, and the seven fixed positive stack profiles
+quarantine, all three full legs, and the nine fixed positive stack profiles
 so this scheduler is also exercised alongside the other maintained rendering,
 keyboard, detach, fault, Vulkan, and OpenGL paths.
