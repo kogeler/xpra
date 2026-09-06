@@ -1008,13 +1008,13 @@ resources. Startup layout or a single H.264 packet is not acceptance.
 These profiles prove that the composed lifetime operates with real libyuv,
 libva, Mesa, and client presentation. The focused threaded module remains the
 direct proof for forced constructor, timer, exception, and sentinel
-interleavings. The case-only `live-wayland-subsurface` gate belongs to the
+interleavings. The full-stack `live-wayland-subsurface` gate belongs to the
 subsurface stream case and verifies ordered raw parent-backing composition by
 non-video child sources; it is not a substitute for either hardware profile.
 
-Before publication, the complete queue also retains all seven fixed positive
+For every patch validation, the complete queue must pass all nine fixed positive
 stack profiles. Their rendering, RGB/H.264, detach, transport-loss, input,
-hardware, lifecycle, and cleanup boundaries ensure this connection-tail change
+clipboard, subsurface, hardware, lifecycle, and cleanup boundaries ensure this connection-tail change
 does not regress unrelated live ownership.
 
 ## Invariants not to simplify
@@ -1130,7 +1130,7 @@ fill only missing or invalidated requirements:
 | `full`, `full-cython`, `full-no-compat` | The complete queue passes all maintained upstream unit-test legs. |
 | Complete-stack `live-wayland-h264-hardware` | The Vulkan/RADV primary and alpha auxiliary complete the real codec, presentation, input, exit, and cleanup contract. |
 | Complete-stack `live-wayland-opengl-h264-hardware` | The independent native OpenGL/render-node/viewport primary completes the same resource lifecycle. |
-| Other case-owned atomic live gates | Each standalone case, including subsurface ownership, retains its own positive evidence. By design those `CASE=<slug>` runs do not prove VPC composition; VPC composition is established by the resolved-stack focused/full tests and the seven complete-stack live profiles. |
+| Mandatory complete-stack live suite | Every profile, including subsurface and clipboard, contains VPC and all other active patches on both endpoints. Every patch validation requires all nine profiles; isolated live products are forbidden. |
 | Seven complete-stack positive live profiles | RGB, H.264, detach, transport loss, input, both hardware paths, application lifecycle, and owned cleanup remain green before publication. |
 
 Retain the exact clean failure and every named patched result below

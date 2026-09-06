@@ -283,11 +283,11 @@ class LiveJobTest(unittest.TestCase):
 
     def record(self, run: str) -> dict[str, object]:
         provenance = {
-            "client_context_archive_sha256": "1" * 64,
-            "client_context_sha256": "2" * 64,
-            "client_selection": "master",
-            "client_selection_resolution_sha256": "3" * 64,
-            "client_selection_sha256": "4" * 64,
+            "client_context_archive_sha256": "7" * 64,
+            "client_context_sha256": "8" * 64,
+            "client_selection": "stacks/develop",
+            "client_selection_resolution_sha256": "9" * 64,
+            "client_selection_sha256": "a" * 64,
             "harness_sha256": job.harness_sha256(),
             "input_manifest_sha256": "5" * 64,
             "input_tree_sha256": "6" * 64,
@@ -1959,7 +1959,7 @@ class LiveJobTest(unittest.TestCase):
                                 "io.xpra.fork-maintenance.role": "client-image",
                                 "io.xpra.fork-maintenance.source": provenance["source_commit"],
                             },
-                            "selection": "master",
+                            "selection": provenance["client_selection"],
                             "tag": "localhost/client:test",
                         },
                         "server": {
@@ -2127,11 +2127,11 @@ class LiveJobTest(unittest.TestCase):
         )
 
     def test_start_rejects_invalid_frozen_admission_before_main_launch(self) -> None:
-        selection_name = "cases/video-pipeline-cleanup-race"
+        selection_name = "stacks/develop"
         host_selection = live_run.PatchSelection(
             case_slugs=("video-pipeline-cleanup-race",),
             digest="a" * 64,
-            kind="case",
+            kind="stack",
             name=selection_name,
             patches=(),
             required_gates=("live-wayland-h264-hardware",),
@@ -2170,7 +2170,7 @@ class LiveJobTest(unittest.TestCase):
             (
                 "changed-gate",
                 Mock(return_value=bound),
-                "does not declare required gate live-wayland-h264-hardware",
+                "complete stacks/develop",
             ),
             (
                 "invalid-snapshot",
@@ -2335,7 +2335,7 @@ class LiveJobTest(unittest.TestCase):
             zed_directory=None,
         )
         for selection in (
-            "stacks/develop",
+            "cases/x11-client-clipboard-events",
             "cases/wayland-client-keymap-sync",
         ):
             args.selection = selection
@@ -2360,7 +2360,7 @@ class LiveJobTest(unittest.TestCase):
                 patch.object(job.background_job, "launch") as launch,
                 self.assertRaisesRegex(
                     job.JobError,
-                    "clipboard live acceptance requires selection",
+                    "complete stacks/develop",
                 ),
             ):
                 job._start_locked(args, args.run)
@@ -2405,7 +2405,7 @@ class LiveJobTest(unittest.TestCase):
                 patch.object(job.background_job, "launch") as launch,
                 self.assertRaisesRegex(
                     job.JobError,
-                    f"does not declare required gate {gate}",
+                    "complete stacks/develop",
                 ),
             ):
                 job._start_locked(args, args.run)
@@ -2812,14 +2812,17 @@ class LiveJobTest(unittest.TestCase):
             )
             self.assertFalse(job.evidence_tree_validation(payload, report))
 
-    def test_case_only_provenance_binds_selected_source_to_both_endpoints(
+    def test_all_profile_provenance_binds_selected_source_to_both_endpoints(
         self,
     ) -> None:
-        for application in ("clipboard", "subsurface"):
+        for application in ("clipboard", "subsurface", "gtk", "zed", "hardware", "opengl"):
             run = f"{application}-provenance"
             record = self.clipboard_record(run)
             record["application"] = application
             provenance = record["input_provenance"]
+            if application == "zed":
+                provenance["zed_archive_sha256"] = "e" * 64
+                provenance["zed_binary_sha256"] = "f" * 64
             self.assertIs(
                 job.validate_input_provenance(
                     provenance,
@@ -8249,32 +8252,19 @@ class LiveTransportProfileTest(unittest.TestCase):
             ("gtk", "detach", "rgb", "strict", "default"),
             ("gtk", "transport-loss", "rgb", "strict", "default"),
         }
-        expected_case_only = {
+        expected_stack.update({
             ("clipboard", "application-exit", "rgb", "strict", "default"),
             ("subsurface", "application-exit", "rgb", "strict", "default"),
-        }
+        })
         profiles_module = sys.modules["profiles"]
         self.assertEqual(
             profiles_module.STACK_LIVE_ACCEPTANCE_PROFILES,
             expected_stack,
         )
-        self.assertEqual(
-            profiles_module.CASE_ONLY_LIVE_ACCEPTANCE_PROFILES,
-            expected_case_only,
-        )
-        self.assertFalse(expected_stack & expected_case_only)
-        expected = expected_stack | expected_case_only
+        expected = expected_stack
         self.assertEqual(
             set(profiles_module.LIVE_PROFILE_REQUIRED_GATES),
             expected,
-        )
-        self.assertEqual(
-            profiles_module.STACK_ONLY_LIVE_ACCEPTANCE_PROFILES,
-            {
-                ("zed", "application-exit", "h264", "adaptive-alpha", "default"),
-                ("gtk", "detach", "rgb", "strict", "default"),
-                ("gtk", "transport-loss", "rgb", "strict", "default"),
-            },
         )
         observed = set()
         for application in live_run.APPLICATIONS:
@@ -8303,229 +8293,51 @@ class LiveTransportProfileTest(unittest.TestCase):
                                 observed.add(values)
         self.assertEqual(observed, expected)
 
-    def test_clipboard_profile_requires_its_exact_case_selection(self) -> None:
+    def test_every_live_profile_requires_the_complete_production_stack(self) -> None:
         profiles_module = sys.modules["profiles"]
-        exact = "cases/x11-client-clipboard-events"
-        self.assertEqual(profiles_module.CLIPBOARD_CASE_SELECTION, exact)
-        profiles_module.validate_profile_selection(
-            application="clipboard",
-            lifecycle="application-exit",
-            encoding="rgb",
-            h264_client_policy="strict",
-            alpha_scenarios="default",
-            selection=exact,
-            selection_kind="case",
-            required_gates=("live-x11-clipboard",),
-        )
-        for selection in (
-            "stacks/develop",
-            "cases/wayland-client-keymap-sync",
-        ):
-            with (
-                self.subTest(selection=selection),
-                self.assertRaisesRegex(
-                    live_run.ProfileError,
-                    "clipboard live acceptance requires selection",
-                ),
+        for profile in profiles_module.LIVE_ACCEPTANCE_PROFILES:
+            arguments = dict(zip((
+                "application", "lifecycle", "encoding", "h264_client_policy", "alpha_scenarios",
+            ), profile, strict=True))
+            for selection, kind in (
+                ("stacks/develop", "stack"),
+                ("stacks/develop", "case"),
+                ("stacks/partial", "stack"),
+                ("cases/x11-client-clipboard-events", "case"),
+                ("cases/wayland-subsurface-stream-ownership", "case"),
+                ("cases/wayland-client-keymap-sync", "case"),
+                ("cases/wayland-initial-window-state", "case"),
+                ("master", "legacy"),
+                ("", "legacy"),
             ):
-                profiles_module.validate_profile_selection(
-                    application="clipboard",
-                    lifecycle="application-exit",
-                    encoding="rgb",
-                    h264_client_policy="strict",
-                    alpha_scenarios="default",
-                    selection=selection,
-                    selection_kind=(
-                        "stack" if selection.startswith("stacks/") else "case"
-                    ),
-                    required_gates=("live-wayland-keyboard",),
-                )
+                with self.subTest(profile=profile, selection=selection, kind=kind):
+                    if (selection, kind) == ("stacks/develop", "stack"):
+                        profiles_module.validate_profile_selection(
+                            **arguments, selection=selection, selection_kind=kind, required_gates=(),
+                        )
+                    else:
+                        with self.assertRaisesRegex(live_run.ProfileError, "complete stacks/develop"):
+                            profiles_module.validate_profile_selection(
+                                **arguments, selection=selection, selection_kind=kind,
+                                required_gates=tuple(profiles_module.LIVE_PROFILE_REQUIRED_GATES.values()),
+                            )
 
-        profile_argv = [
-            "profiles.py",
-            "clipboard",
-            "application-exit",
-            "rgb",
-            "strict",
-            "default",
-        ]
-        with patch.object(
-            sys,
-            "argv",
-            [*profile_argv, "--selection", exact],
-        ):
-            self.assertEqual(profiles_module.main(), 0)
-        for selection in (
-            "stacks/develop",
-            "cases/wayland-client-keymap-sync",
-        ):
-            stderr = StringIO()
-            with (
-                self.subTest(cli_selection=selection),
-                patch.object(
-                    sys,
-                    "argv",
-                    [*profile_argv, "--selection", selection],
-                ),
-                patch.object(sys, "stderr", stderr),
-            ):
-                self.assertEqual(profiles_module.main(), 2)
-            self.assertIn(
-                "clipboard live acceptance requires selection",
-                stderr.getvalue(),
-            )
-
-    def test_subsurface_profile_requires_its_exact_case_selection(self) -> None:
+    def test_live_profile_cli_rejects_case_and_accepts_stack_for_every_profile(self) -> None:
         profiles_module = sys.modules["profiles"]
-        exact = "cases/wayland-subsurface-stream-ownership"
-        self.assertEqual(profiles_module.SUBSURFACE_CASE_SELECTION, exact)
-        profile = ("subsurface", "application-exit", "rgb", "strict", "default")
-        profiles_module.validate_profile_selection(
-            application=profile[0],
-            lifecycle=profile[1],
-            encoding=profile[2],
-            h264_client_policy=profile[3],
-            alpha_scenarios=profile[4],
-            selection=exact,
-            selection_kind="case",
-            required_gates=("live-wayland-subsurface",),
-        )
-        for selection in ("stacks/develop", "cases/wayland-initial-window-state"):
-            with (
-                self.subTest(selection=selection),
-                self.assertRaisesRegex(
-                    live_run.ProfileError,
-                    "subsurface live acceptance requires selection",
-                ),
+        for profile in profiles_module.LIVE_ACCEPTANCE_PROFILES:
+            for selection, expected in (
+                ("stacks/develop", 0), ("cases/x11-client-clipboard-events", 2),
+                ("cases/wayland-subsurface-stream-ownership", 2),
             ):
-                profiles_module.validate_profile_selection(
-                    application=profile[0],
-                    lifecycle=profile[1],
-                    encoding=profile[2],
-                    h264_client_policy=profile[3],
-                    alpha_scenarios=profile[4],
-                    selection=selection,
-                    selection_kind=(
-                        "stack" if selection.startswith("stacks/") else "case"
-                    ),
-                    required_gates=("live-wayland-subsurface",),
-                )
-
-    def test_case_and_stack_profiles_require_the_exact_admission_gate(self) -> None:
-        profiles_module = sys.modules["profiles"]
-
-        def validate(
-            profile: tuple[str, str, str, str, str],
-            selection: str,
-            kind: str,
-            gates: tuple[str, ...],
-        ) -> None:
-            application, lifecycle, encoding, policy, alpha = profile
-            profiles_module.validate_profile_selection(
-                application=application,
-                lifecycle=lifecycle,
-                encoding=encoding,
-                h264_client_policy=policy,
-                alpha_scenarios=alpha,
-                selection=selection,
-                selection_kind=kind,
-                required_gates=gates,
-            )
-
-        for profile in profiles_module.STACK_LIVE_ACCEPTANCE_PROFILES:
-            with self.subTest(stack_profile=profile):
-                validate(profile, "stacks/develop", "stack", ())
-        with self.assertRaisesRegex(
-            live_run.ProfileError,
-            "clipboard live acceptance requires selection",
-        ):
-            validate(
-                ("clipboard", "application-exit", "rgb", "strict", "default"),
-                "stacks/develop",
-                "stack",
-                (),
-            )
-
-        accepted_cases = (
-            (
-                ("zed", "application-exit", "rgb", "strict", "default"),
-                "cases/wayland-empty-damage-throttle",
-                "live-rgb",
-            ),
-            (
-                (
-                    "hardware",
-                    "application-exit",
-                    "h264",
-                    "adaptive-alpha",
-                    "default",
-                ),
-                "cases/wayland-initial-window-state",
-                "live-wayland-h264-hardware",
-            ),
-            (
-                (
-                    "opengl",
-                    "application-exit",
-                    "h264",
-                    "adaptive-alpha",
-                    "default",
-                ),
-                "cases/wayland-initial-window-state",
-                "live-wayland-opengl-h264-hardware",
-            ),
-            (
-                ("keyboard", "application-exit", "rgb", "strict", "default"),
-                "cases/wayland-client-keymap-sync",
-                "live-wayland-keyboard",
-            ),
-            (
-                ("clipboard", "application-exit", "rgb", "strict", "default"),
-                "cases/x11-client-clipboard-events",
-                "live-x11-clipboard",
-            ),
-            (
-                ("subsurface", "application-exit", "rgb", "strict", "default"),
-                "cases/wayland-subsurface-stream-ownership",
-                "live-wayland-subsurface",
-            ),
-        )
-        for profile, case, gate in accepted_cases:
-            with self.subTest(case=case, gate=gate):
-                validate(profile, case, "case", (gate,))
-
-        hardware = (
-            "hardware",
-            "application-exit",
-            "h264",
-            "adaptive-alpha",
-            "default",
-        )
-        with self.assertRaisesRegex(
-            live_run.ProfileError,
-            "does not declare required gate live-wayland-h264-hardware",
-        ):
-            validate(
-                hardware,
-                "cases/video-pipeline-cleanup-race",
-                "case",
-                (),
-            )
-        for profile in profiles_module.STACK_ONLY_LIVE_ACCEPTANCE_PROFILES:
-            gate = profiles_module.LIVE_PROFILE_REQUIRED_GATES[profile]
-            with (
-                self.subTest(stack_only_case_profile=profile),
-                self.assertRaisesRegex(
-                    live_run.ProfileError,
-                    f"live profile {gate} requires a stack selection",
-                ),
-            ):
-                validate(
-                    profile,
-                    "cases/wayland-initial-window-state",
-                    "case",
-                    (gate,),
-                )
+                stderr = StringIO()
+                with (
+                    self.subTest(profile=profile, selection=selection),
+                    patch.object(sys, "argv", ["profiles.py", *profile, "--selection", selection]),
+                    patch.object(sys, "stderr", stderr),
+                ):
+                    self.assertEqual(profiles_module.main(), expected)
+                if expected:
+                    self.assertIn("complete stacks/develop", stderr.getvalue())
 
     def test_public_live_clis_do_not_advertise_fallback_diagnostics(self) -> None:
         with (
@@ -8678,7 +8490,7 @@ class LiveTransportProfileTest(unittest.TestCase):
                     self.assertIn(value, recipe)
 
         self.assertIn(
-            "live-start: isolated-start-check selector-check run-name-check live-options-check",
+            "live-start: live-stack-policy-check isolated-start-check selector-check run-name-check live-options-check",
             makefile,
         )
         self.assertIn('--selection "$${XPRA_FORK_SELECTOR}"', makefile)
@@ -8687,22 +8499,15 @@ class LiveTransportProfileTest(unittest.TestCase):
         )[0]
         self.assertIn('--selection "$${XPRA_FORK_SELECTOR}"', options_check)
         self.assertNotIn("live-start: optional-selector-check", makefile)
-        clipboard_policy = makefile.split(
-            "live-x11-clipboard-policy-check:\n", 1
+        stack_policy = makefile.split(
+            "live-stack-policy-check:\n", 1
         )[1].split("\n\n", 1)[0]
         self.assertIn(
-            '"$${XPRA_FORK_CASE}" = x11-client-clipboard-events',
-            clipboard_policy,
+            'test -z "$${XPRA_FORK_CASE}"',
+            stack_policy,
         )
-        self.assertIn('test -z "$${XPRA_FORK_STACK}"', clipboard_policy)
-        subsurface_policy = makefile.split(
-            "live-wayland-subsurface-policy-check:\n", 1
-        )[1].split("\n\n", 1)[0]
-        self.assertIn(
-            '"$${XPRA_FORK_CASE}" = wayland-subsurface-stream-ownership',
-            subsurface_policy,
-        )
-        self.assertIn('test -z "$${XPRA_FORK_STACK}"', subsurface_policy)
+        self.assertIn('test "$${XPRA_FORK_STACK}" = develop', stack_policy)
+        self.assertIn('test "$${XPRA_FORK_PATCH_MODE}" = patched', stack_policy)
 
     def test_runner_and_input_freeze_reject_a_clean_server_selection(self) -> None:
         with self.assertRaisesRegex(live_run.LabFailure, "requires one non-empty"):
@@ -8728,7 +8533,7 @@ class LiveTransportProfileTest(unittest.TestCase):
 
     def test_runner_rejects_the_wrong_clipboard_selection(self) -> None:
         for selection in (
-            "stacks/develop",
+            "cases/x11-client-clipboard-events",
             "cases/wayland-client-keymap-sync",
         ):
             with (
@@ -8751,13 +8556,13 @@ class LiveTransportProfileTest(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(
                     live_run.LabFailure,
-                    "clipboard live acceptance requires selection",
+                    "complete stacks/develop",
                 ),
             ):
                 live_run.main()
 
     def test_runner_rejects_the_wrong_subsurface_selection(self) -> None:
-        for selection in ("stacks/develop", "cases/wayland-initial-window-state"):
+        for selection in ("cases/wayland-subsurface-stream-ownership", "cases/wayland-initial-window-state"):
             with (
                 self.subTest(selection=selection),
                 patch.object(
@@ -8778,13 +8583,13 @@ class LiveTransportProfileTest(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(
                     live_run.LabFailure,
-                    "subsurface live acceptance requires selection",
+                    "complete stacks/develop",
                 ),
             ):
                 live_run.main()
 
     def test_bound_runner_rejects_an_undeclared_frozen_case_gate(self) -> None:
-        selection_name = "cases/video-pipeline-cleanup-race"
+        selection_name = "stacks/develop"
         selected = live_run.PatchSelection(
             case_slugs=("video-pipeline-cleanup-race",),
             digest="a" * 64,
@@ -8825,7 +8630,7 @@ class LiveTransportProfileTest(unittest.TestCase):
                 "--h264-client-policy",
                 "adaptive-alpha",
                 "--selection",
-                selection_name,
+                "stacks/develop",
                 "--state-root",
                 str(state_root),
                 "--run-id",
@@ -8856,7 +8661,7 @@ class LiveTransportProfileTest(unittest.TestCase):
                 patch.object(live_run, "run") as podman_run,
                 self.assertRaisesRegex(
                     live_run.LabFailure,
-                    "does not declare required gate live-wayland-h264-hardware",
+                    "complete stacks/develop",
                 ),
             ):
                 live_run.main()
@@ -9752,8 +9557,8 @@ class LiveTransportProfileTest(unittest.TestCase):
                         "hash": rmlvo_hash,
                         "log_range": [phase_start, phase_end],
                         "owner": "keyboard-client-uuid",
-                        "packet": "keymap-changed",
-                        "representation": "legacy",
+                        "packet": "keyboard-config",
+                        "representation": "versioned",
                         "result": "installed",
                         "sha256": "f" * 64,
                     },
@@ -9862,6 +9667,24 @@ class LiveTransportProfileTest(unittest.TestCase):
         self.assertTrue(packet_checks["server_group_translation_exact"])
         self.assertFalse(packet_checks["application_text_authoritative"])
         self.assertFalse(all(packet_checks.values()))
+
+        for packet, representation in (
+            ("keymap-changed", "legacy"),
+            ("keymap-changed", "versioned"),
+            ("keyboard-config", "legacy"),
+        ):
+            with self.subTest(packet=packet, representation=representation):
+                compatibility_only = copy.deepcopy(evidence)
+                structured = compatibility_only["phases"][0]["structured_update"]
+                structured["packet"] = packet
+                structured["representation"] = representation
+                compatibility_checks = live_run.keyboard_live_checks(
+                    compatibility_only, scenario, digest
+                )
+                self.assertTrue(compatibility_checks["server_keymaps_applied"])
+                self.assertTrue(compatibility_checks["application_text_authoritative"])
+                self.assertFalse(compatibility_checks["structured_keymap_packet_accepted"])
+                self.assertFalse(all(compatibility_checks.values()))
 
         rejected_after_layout = copy.deepcopy(evidence)
         rejected_after_layout["phases"][0]["structured_update"]["result"] = "rejected"
@@ -10135,17 +9958,29 @@ class LiveTransportProfileTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
             log_path = directory / "server.stderr"
-            log_path.write_text(accepted_log, encoding="utf-8")
-            structured = live_run.parse_keyboard_structured_update(
-                log_path, 0, log_path.stat().st_size
-            )
-            self.assertEqual(structured["packet"], "keymap-changed")
-            self.assertEqual(structured["representation"], "legacy")
-            self.assertEqual(structured["result"], "installed")
-            application = live_run.parse_keyboard_server_application(
-                log_path, 0, log_path.stat().st_size
-            )
-            self.assertEqual(application["hash"], "a" * 64)
+            # The parser can describe legacy diagnostics, but the live acceptance
+            # oracle above requires the full stack's negotiated versioned update.
+            for packet, representation in (
+                ("keymap-changed", "legacy"),
+                ("keyboard-config", "versioned"),
+            ):
+                with self.subTest(packet=packet, representation=representation):
+                    log_path.write_text(
+                        accepted_log.replace("keymap-changed", packet).replace(
+                            "representation=legacy", f"representation={representation}"
+                        ),
+                        encoding="utf-8",
+                    )
+                    structured = live_run.parse_keyboard_structured_update(
+                        log_path, 0, log_path.stat().st_size
+                    )
+                    self.assertEqual(structured["packet"], packet)
+                    self.assertEqual(structured["representation"], representation)
+                    self.assertEqual(structured["result"], "installed")
+                    application = live_run.parse_keyboard_server_application(
+                        log_path, 0, log_path.stat().st_size
+                    )
+                    self.assertEqual(application["hash"], "a" * 64)
             silent_log = "received Wayland structured keymap packet=keymap-changed\n"
             log_path.write_text(silent_log, encoding="utf-8")
             with self.assertRaisesRegex(live_run.LabFailure, "receipt and acceptance"):
@@ -10290,12 +10125,12 @@ class LiveTransportProfileTest(unittest.TestCase):
                         "applied Wayland keyboard configuration hash="
                         + str(phase_index) * 64
                         + f" groups={groups} owner={owner}\n"
-                        "received Wayland structured keymap packet=keymap-changed\n"
+                        "received Wayland structured keymap packet=keyboard-config\n"
                         "applied Wayland keyboard configuration hash="
                         + rmlvo_hash
                         + f" groups={groups} owner={owner}\n"
-                        "accepted Wayland structured keymap packet=keymap-changed "
-                        "representation=legacy hash="
+                        "accepted Wayland structured keymap packet=keyboard-config "
+                        "representation=versioned hash="
                         + rmlvo_hash
                         + f" groups={groups} owner={owner} result=installed\n"
                     ).encode("utf-8")
@@ -11113,30 +10948,15 @@ class LiveTransportProfileTest(unittest.TestCase):
         )
         self.assertIn("test -x /usr/local/bin/xpra-empty-damage-fixture", server)
 
-    def test_client_image_scopes_clipboard_adapter_preflight_to_its_case(self) -> None:
+    def test_every_client_image_requires_the_clipboard_adapter(self) -> None:
         source = (LIVE_DIRECTORY / "Containerfile").read_text(encoding="utf-8")
-        client = source.split(
-            "FROM docker.io/library/debian:13-slim AS client\n",
-            1,
-        )[1]
-        case_selection = sys.modules["profiles"].CLIPBOARD_CASE_SELECTION
-        case_guard = f'[ "$XPRA_SELECTION" = "{case_selection}" ]'
-        conditional = client.split(f"if {case_guard}; then", 1)[1].split(
-            "       fi \\\n",
-            1,
-        )[0]
-        case_branch, clean_branch = conditional.split("       else \\\n", 1)
-        client_import = "from xpra.client.gtk3 import client_base"
-        adapter_check = "from xpra.x11.common import has_pywindow_lookup"
-        helper_import = "from xpra.x11.selection.clipboard import X11Clipboard"
-        self.assertIn("ARG XPRA_SELECTION", client)
-        self.assertIn(case_guard, client)
-        self.assertIn(client_import, case_branch)
-        self.assertIn(adapter_check, case_branch)
-        self.assertIn(helper_import, case_branch)
-        self.assertIn(client_import, clean_branch)
-        self.assertNotIn(adapter_check, clean_branch)
-        self.assertNotIn(helper_import, clean_branch)
+        client = source.split("FROM docker.io/library/debian:13-slim AS client\n", 1)[1]
+        self.assertIn('test "$XPRA_SELECTION" = stacks/develop', client)
+        self.assertIn("from xpra.client.gtk3 import client_base", client)
+        self.assertIn("from xpra.x11.common import has_pywindow_lookup", client)
+        self.assertIn("from xpra.x11.selection.clipboard import X11Clipboard", client)
+        self.assertNotIn("cases/", client)
+        self.assertNotIn("       else ", client)
 
     def test_frame_alpha_states_are_parsed_and_bound_to_exact_windows(self) -> None:
         server_log = (
@@ -13218,7 +13038,7 @@ class H264EvidenceTest(unittest.TestCase):
                     "draw_region(0, 0, 1596, 1172, h264, 100 bytes, 0, "
                     f"typedict({options}), [<function "
                     "WindowDraw._do_draw.<locals>.record_decode_time "
-                    f"at {callback}>"
+                    f"at {callback}>])"
                 ),
                 "choose_decoder([libva(YUV420P - h264)])=libva(YUV420P - h264)",
                 "paint_with_video_decoder: new libva('h264', 1064, 780, 'YUV420P')",
@@ -13248,15 +13068,26 @@ class H264EvidenceTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            (directory / "client.stdout").write_text(log + "\n", encoding="utf-8")
-            result = live_run.h264_client_packet_chain(
-                directory,
-                updates,
-                {"first_sequence": 3},
-            )
-        self.assertTrue(result["complete"])
-        self.assertEqual(result["size"], [1596, 1172])
-        self.assertEqual(result["encoded_size"], [1064, 780])
+            decode = f"<function WindowDraw._do_draw.<locals>.record_decode_time at {callback}>"
+            before = "<function ClientWindowBase.draw_region.<locals>.<lambda> at 0x1234>"
+            after = "<function ClientWindowBase.draw_region.<locals>.<lambda> at 0x5678>"
+            for callbacks, accepted in (
+                (decode, True),
+                (f"{before}, {decode}, {after}", True),
+                (f"{before}, {decode}", True),
+                (f"{decode}, {after}", True),
+                (before, False),
+                (f"{decode}, {decode}", False),
+                (f"{decode}, {decode.replace(callback, '0xabcd')}", False),
+                (decode.replace(callback, "0xabcd"), False),
+            ):
+                candidate = log.replace(f"[{decode}])", f"[{callbacks}])")
+                (directory / "client.stdout").write_text(candidate + "\n", encoding="utf-8")
+                result = live_run.h264_client_packet_chain(directory, updates, {"first_sequence": 3})
+                with self.subTest(callbacks=callbacks):
+                    self.assertEqual(result["complete"], accepted)
+                    self.assertEqual(result["size"], [1596, 1172])
+                    self.assertEqual(result["encoded_size"], [1064, 780])
 
 
 class LiveFixtureBuildOrderTest(unittest.TestCase):
@@ -13326,11 +13157,11 @@ class LiveFixtureBuildOrderTest(unittest.TestCase):
 
     def client_gl_regression_instruction(self) -> str:
         instructions = self.build_instructions("client")
-        selection = sys.modules["profiles"].SUBSURFACE_CASE_SELECTION
+        selection = sys.modules["profiles"].LIVE_SELECTION
         matches = [
             instruction
             for instruction in instructions
-            if instruction.startswith(f'RUN if [ "$XPRA_SELECTION" = "{selection}" ]; then ')
+            if instruction.startswith(f'RUN test "$XPRA_SELECTION" = {selection} ')
         ]
         self.assertEqual(len(matches), 1)
         return matches[0]
@@ -13365,7 +13196,7 @@ python3() {
             check=False, capture_output=True, text=True, env=environment,
         )
 
-    def test_client_gl_regressions_are_case_scoped_late_build_checks(self) -> None:
+    def test_client_gl_regressions_are_mandatory_late_build_checks(self) -> None:
         instructions = self.build_instructions("client")
         instruction = self.client_gl_regression_instruction()
         native = next(
@@ -13391,7 +13222,7 @@ python3() {
         self.assertNotIn("--from=client-build /usr", runtime)
 
     def test_client_gl_regressions_require_both_named_tests_and_propagate_failure(self) -> None:
-        selection = sys.modules["profiles"].SUBSURFACE_CASE_SELECTION
+        selection = sys.modules["profiles"].LIVE_SELECTION
         for status in (0, 23):
             with self.subTest(status=status):
                 result = self.run_client_gl_regression_instruction(selection, test_status=status)
@@ -13406,17 +13237,18 @@ python3() {
                 self.assertIn("PYTHONPATH=/installed/dist-packages:/src/xpra/tests/unittests\n", result.stdout)
                 self.assertIn("XPRA_RESOURCES_DIR=/opt/xpra-install/usr/local/share/xpra\n", result.stdout)
 
-    def test_client_gl_regressions_do_not_run_for_clean_or_other_clients(self) -> None:
+    def test_client_gl_regressions_reject_clean_or_case_clients(self) -> None:
         for selection in (
-            "", "master", "stacks/develop", sys.modules["profiles"].CLIPBOARD_CASE_SELECTION,
+            "", "master", "stacks/partial", "cases/x11-client-clipboard-events",
+            "cases/wayland-subsurface-stream-ownership",
         ):
             with self.subTest(selection=selection):
                 result = self.run_client_gl_regression_instruction(selection, test_status=23)
-                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, "")
 
     def test_client_gl_regressions_reject_failed_dependencies_or_missing_install(self) -> None:
-        selection = sys.modules["profiles"].SUBSURFACE_CASE_SELECTION
+        selection = sys.modules["profiles"].LIVE_SELECTION
         for arguments, expected in (({"install_status": 17}, 17), ({"package_dir": ""}, 1)):
             with self.subTest(arguments=arguments):
                 result = self.run_client_gl_regression_instruction(selection, **arguments)

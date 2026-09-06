@@ -3,7 +3,7 @@ slug = "wayland-subsurface-stream-ownership"
 kind = "production"
 title = "Compose native Wayland surface trees atomically"
 commit_subject = "Compose native Wayland surface trees atomically"
-patch_sha256 = "28fc57bc6c33d842e483dfa10e4b17cf7b01ee7c32ea18f8ad4694a19cb8ba5d"
+patch_sha256 = "793eb49aa40fd83e5de51a1d7c62d3b062d60c5a9f82a1891acb531df429615b"
 dependencies = []
 paths = [
   "tests/unittests/unit/client/cairo_backing_test.py",
@@ -34,6 +34,7 @@ paths = [
   "xpra/server/source/bandwidth.py",
   "xpra/server/source/client_connection.py",
   "xpra/server/source/encoding.py",
+  "xpra/server/source/queued_packet.py",
   "xpra/server/source/window.py",
   "xpra/server/subsystem/display.py",
   "xpra/server/subsystem/window.py",

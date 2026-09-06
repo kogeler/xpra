@@ -177,15 +177,12 @@ bidirectional reserved identity: no other slug may use that kind, and that slug
 may never be reclassified as production, including during a path-transition
 admission.
 
-The manifest schema retains the `[evidence]` table name for runner
-compatibility. `required_gates` is the sole live-profile admission authority
-for a case selection, but remains only a declarative validation list: admission
-does not prove that a gate ran or passed and does not authorize tracking or
-publishing reports or results. Every gate in that list must be self-contained
-under the exact `CASE=<slug>` selection. A boundary which needs production
-behavior or diagnostics owned by another active patch is declared by the
-complete stack and documented in the case README instead; an empty case list
-does not waive that stack-owned boundary.
+The manifest schema retains `[evidence].required_gates` as declarative
+behavioral ownership metadata. It never admits a case-selected live run and
+never waives the mandatory nine-profile complete-stack suite for any patch.
+Shared boundaries may be described by multiple cases without duplicating live
+runs: every scenario uses all active patches on both endpoints. Declaration
+alone is not evidence that a gate passed and does not authorize tracked results.
 
 Every patch must satisfy all of these conditions:
 
@@ -491,10 +488,9 @@ exact valid new-base controls instead of repeating them at each numbered phase.
    case-specific semantic inspection; adapt or retire any case whose behavior
    upstream replaced or narrowed, without requesting non-primary scope;
 9. run every patched focused and native gate, all three complete upstream test
-   legs (`full`, `full-cython`, and `full-no-compat`), every production case's
-   declared `required_gates` with its atomic `CASE=<slug>` selection, every
+   legs (`full`, `full-cython`, and `full-no-compat`), every
    case-specific durable package boundary including both real Ubuntu 26.04 and
-   Debian 13 builds against the complete resulting stack, and all seven fixed
+   Debian 13 builds against the complete resulting stack, and all nine fixed
    positive stack live profiles, even if the patches applied without textual
    changes;
 10. reproduce any newly failing author test on this exact clean master before
@@ -651,28 +647,21 @@ must not copy concrete profile names, arguments, or values into assertions.
 Both YAML files and the loader are part of the frozen harness digest. The main
 owner and final report bind the selected network-profile name.
 
-The seven complete-stack profiles bind an admitted server selection to the
-server and the clean embedded source to the client. Their case-versus-stack
-admission is defined in the validation contract below; three profiles are
-stack-only rather than available to every case. The case-only
-`live-x11-clipboard` profile instead requires
-`CASE=x11-client-clipboard-events` and binds that exact selected source and
-resolution to both endpoints; its client-side production boundary cannot be
-tested with the ordinary clean-client image. The frozen input and final report
-must prove these endpoint identities rather than infer them from image tags.
-The separate case-only `live-wayland-subsurface` profile requires
-`CASE=wayland-subsurface-stream-ownership` and binds that selected source and
-resolution to both endpoints. The native-Wayland server owns the surface graph,
-stream transactions, and acknowledgement routes; the GTK X11 client owns the
-corresponding premultiplied source-over backing contract. Neither half can be
-accepted through a clean endpoint. The final client-image preflight still
-requires every selection to import the ordinary GTK client, while the exact
-clipboard case additionally requires its patch-owned X11 GTK adapter symbol
-and helper importability.
+All nine live profiles require the complete current `stacks/develop` queue
+on BOTH endpoints. Case-only, partial-stack and clean-client/server live tests
+are prohibited, including new tests. Atomic case ownership identifies source
+and regression responsibility, never a live selection. The frozen input and
+final report bind matching selection, resolution, source context and archive
+digests; tags alone are insufficient. Different distribution/role image IDs
+remain independently verified and need not match each other.
+
+Every Debian client build runs the installed GTK/X11 clipboard-adapter preflight
+and the mapped NumPy/ctypes OpenGL regressions, irrespective of the fixture.
+Their test-only dependencies stay after Xpra compilation and out of runtime.
 
 Every positive live wrapper accepts `NETWORK_PROFILE=<name>`. Omitting it uses
 the `default_profile` declared only in `profiles.yml`. The normal required
-seven-gate acceptance ladder runs once with that default. Other tracked
+nine-gate acceptance ladder runs once with that default. Other tracked
 network profiles exercise the same positive gates on operator request; they do
 not create additional mandatory gates or weaken any rendering, codec,
 lifecycle, or cleanup assertion.
@@ -970,9 +959,9 @@ when the build/package boundary itself is being diagnosed, not by habit.
 Final acceptance freezes reviewed code, tests, queue composition, fixture/oracle
 and build inputs, then fills only missing or invalidated requirements:
 clean/focused/native controls, current clean quarantine reassessment, complete
-fork-control tests, `full`, `full-cython`, `full-no-compat`, and required atomic
-and complete-stack live/package gates. Full queue/rebase acceptance includes
-both real DEB builds and all seven stack live profiles. Evidence from development
+fork-control tests, `full`, `full-cython`, `full-no-compat`, and all nine live
+profiles with the complete stack on both endpoints for every patch validation.
+Full queue/rebase acceptance additionally includes both real DEB builds. Evidence from development
 may satisfy an unchanged final requirement; its phase or age alone is not
 invalidation. Do not alter immutable reports to claim new provenance.
 
@@ -1011,8 +1000,10 @@ comments, copyright notices, or documentation. Paths, modes, executable data,
 configuration, test assertions, source selection/application, build commands,
 runner behavior, and live assertions must remain unchanged. Refresh derived
 digests, resolve the current queue, run whitespace checks and the affected
-fork-control tests, and describe the proof at handoff. Do not spend container,
-native, full-matrix, or live resources on that refresh. If any condition is
+fork-control tests, and describe the proof at handoff. Do not repeat unchanged
+focused, native, or full-matrix checks on that refresh. The complete nine-profile
+live suite remains mandatory whenever accepting a patch, including such a
+refresh. If any condition is
 uncertain, the exception does not apply: use the affected development checks
 and corresponding final gates. A
 `develop-rebase` necessarily changes the embedded source and therefore never
@@ -1020,9 +1011,8 @@ qualifies: its acceptance always includes the complete fork-control suite,
 clean quarantine reassessment, tests-only controls for production cases which
 own retained tests, documented semantic inspection for those which do not,
 patched focused and native gates, every case-specific durable package boundary
-against the complete resulting stack, all three author-test legs, every
-production case's declared live gates with its atomic case selection, and all
-seven fixed positive live profiles with the complete stack selection. These
+against the complete resulting stack, all three author-test legs, and
+all nine fixed positive live profiles with the complete stack selection. These
 are requirements on the stable new-base candidate, not after each adaptation.
 
 Ordinary acceptance is green. Investigate a failure outside selected paths with
@@ -1049,28 +1039,26 @@ or execution path requires the affected development checks and corresponding
 final gates, not automatic execution of the entire ladder after every edit.
 
 The live runner keeps direct Xpra boundaries distinct from SSH orchestration.
-Its exact complete-stack positive set is Zed RGB, adaptive-alpha Zed H.264,
-RGB detach, RGB direct-TCP transport-loss fault injection, native-Wayland
-client-keymap input, multi-window Vulkan/input hardware H.264, and multi-window
-native-Wayland OpenGL/input hardware H.264. Each fixed Make wrapper binds every
-profile dimension and every named job requires the exact nonempty reviewed
-selection allowed by that profile. Foreground, clean-source, and
-picture-fallback probes are diagnostic and cannot publish acceptance. A
-positive fault-injection profile first proves rendering and input, then proves
-the intended disconnect and survival behavior.
+The mandatory positive suite is Zed RGB, adaptive-alpha Zed H.264, RGB detach,
+RGB transport loss, native-Wayland keymap input, Vulkan H.264, OpenGL H.264,
+X11 clipboard and Wayland subsurface composition. Every patch validation runs
+all nine through `live-all STACK=develop RUN=<fresh-prefix>`. A single profile,
+case gate declaration or previous partial suite cannot accept an alteration.
+Each profile uses its own named supervised job; the suite runs them serially,
+collects and removes each completed runtime before the next, and stops at the
+first failure. Retained reports and exact removal transactions remain available
+to `live-suite-check`, which revalidates all nine profiles against the current
+source, complete queue and harness, common context/hardware/network inputs, and
+unchanged Zed payload for the two Zed profiles. Missing, failed, stale, mixed
+or tampered members fail closed. Foreground control-shell interruption leaves
+only the currently running child under its existing named lifecycle, never an
+unowned workload.
 
-Live-profile admission is derived from the complete fixed profile tuple, not
-from the application name alone. A `cases/<slug>` selection is accepted only
-when that tuple's exact gate is present in the case's
-`[evidence].required_gates`; gate-like entries in `[tests].list` confer no live
-authority. Adaptive-alpha Zed H.264, detach, and transport-loss remain
-stack-only. A stack accepts exactly the seven complete-stack profiles and
-never either case-only profile. The supervisor rejects a stable incompatible
-selection before publishing input-freeze ownership, then semantically replays
-the selection kind, digest, cases, patches, and evidence-only gates from the
-content-verified frozen `validated-manifests` snapshot before launching the
-frozen runner. The runner repeats admission from that frozen provenance and
-does not consult mutable host manifests after freeze.
+Admission uses the complete fixed profile tuple and exactly `stacks/develop`
+with kind `stack`. No `CASE`, alternate stack or clean source is admitted, even
+if its manifest names all live gates. The supervisor rejects invalid selection
+before input-freeze publication; the frozen runner replays the content-verified
+selection snapshots and verifies identical complete queues on both endpoints.
 
 Selection kind and evidence-only gates are also explicit endpoint provenance
 inside each build-context manifest. Changing either value intentionally changes
@@ -1089,13 +1077,14 @@ mutable installation cache or permission to reuse a mismatched image. Verify
 new layout behavior in a named live run; claim measured cache savings only
 after observing the corresponding fixture-only rebuild.
 
-The additional positive `live-x11-clipboard` gate is case-only and is not an
-eighth complete-stack profile. Its wrapper requires exactly
-`CASE=x11-client-clipboard-events` with no stack selection and fixes
-`APPLICATION=clipboard`, `LIFECYCLE=application-exit`, `ENCODING=rgb`, strict
-H.264 policy, and the default alpha scenario. The selected case source and
-resolution must be identical at the native-Wayland server and X11 client
-endpoints. The client command uses the YAML-owned `xsettings=no` and
+The positive `live-x11-clipboard` gate is one of the nine full-stack profiles.
+It requires `STACK=develop`, no `CASE`, and fixes `APPLICATION=clipboard`,
+`LIFECYCLE=application-exit`, `ENCODING=rgb`, strict H.264 policy and the default
+alpha scenario. The complete queue is identical on the native-Wayland server
+and X11 client, so clipboard packets traverse the subsurface patch's shared
+outgoing queue filter.
+
+The client command uses the YAML-owned `xsettings=no` and
 `input-devices=noxi2` settings so an unrelated subsystem cannot lend the
 clipboard helper a global X11 event-filter lease.
 
@@ -1163,18 +1152,13 @@ arbitrary operator clipboard contents. Rendering, input, lifecycle, and owned
 cleanup remain positive acceptance boundaries rather than substitutes for the
 clipboard assertions.
 
-The additional positive `live-wayland-subsurface` gate is likewise case-only
-and is not an eighth complete-stack profile. Its wrapper requires exactly
-`CASE=wayland-subsurface-stream-ownership` with no stack selection and fixes
-`APPLICATION=subsurface`, `LIFECYCLE=application-exit`, `ENCODING=rgb`, strict
-H.264 policy, and the default alpha scenario. The selected case source,
-resolution, and source build-context digest must match on the Ubuntu 26.04
-native-Wayland server and Debian 13 GTK X11 client. Each distribution/role has
-its own independently bound immutable image ID and verified ownership labels;
-the two endpoint image IDs need not be equal. The live
-profile's fixed client arguments select Cairo. The case must additionally run
-its mapped real-Xvfb OpenGL regression so backing replacement and close cannot
-strand a deferred GL draw or its acknowledgement.
+The positive `live-wayland-subsurface` gate is another required full-stack
+profile, using `STACK=develop` and no `CASE`. It fixes `APPLICATION=subsurface`,
+`LIFECYCLE=application-exit`, `ENCODING=rgb`, strict H.264 policy and the default
+alpha scenario. The Ubuntu native-Wayland server and Debian GTK X11 client
+bind the same complete source/queue/resolution/context, with independently
+verified distribution image IDs. The fixed client arguments select Cairo;
+the mapped real-Xvfb OpenGL regressions remain separately mandatory.
 
 The native fixture creates two live fixed-size `xdg_toplevel` parents and two
 real ARGB `wl_subsurface` siblings. The heterogeneous root buffers and every
@@ -1346,19 +1330,20 @@ and artifact digests cannot substitute a different or missing authority file.
 
 The `live-wayland-keyboard` profile is the standalone client-driven keymap
 boundary. Its case-owned, versioned scenario and digest are frozen with the
-normal immutable inputs. The clean maintained client configures its real X11
+normal immutable inputs. The full-stack client configures its real X11
 display with each declared structured RMLVO map, locks every declared group,
 and sends complete press/release pairs for one unchanged physical key through
 XTEST. A native-Wayland GTK entry running on the patched server receives no
 expected values and publishes only its actual ordered key events and UTF-8
 buffer. The bound case fixture exercises XKB's four-group maximum twice across
 Latin, Cyrillic, Arabic, Georgian, and Armenian data, then applies a distinct
-replacement on the same connection. Acceptance requires the clean client's
-nested `keymap-changed` packet to be received, to install the expected hash,
+replacement on the same connection. Acceptance requires the patched client's
+flat `keyboard-config` packet with `representation=versioned` to be received,
+to install the expected hash,
 and to be explicitly accepted after normalization in that exact order; a
-preceding `layout-changed` application, an identical-only or silent packet, or
-any rejected-configuration status cannot pass. Each injection also binds a
-bounded clean-client log interval containing exactly the real `key-action`
+preceding `layout-changed` application, nested legacy update, an identical-only
+or silent packet, or any rejected-configuration status cannot pass. Each
+injection also binds a bounded patched-client log interval containing exactly the real `key-action`
 press and release sent by Xpra, including its keycode, group, keysym, name,
 Unicode string, and the exact internal Xpra ID of the forwarded fixture window;
 successful XTEST calls alone are not client observation. The
@@ -1403,7 +1388,7 @@ the complete retained ledger, the unchanged prefix, and all applicable client
 draw, ACK, and terminal checks. A claim of exact final allocator value or zero
 ACK owners requires its own fresh quiescent observation, never the initial
 namespace snapshot. This common ordinary-root H.264 ledger does not replace
-the case-only RGB subsurface transaction/pixel/ACK oracle.
+the full-stack RGB subsurface transaction/pixel/ACK oracle.
 
 The two named multi-window hardware-H.264 gates are the fixed application-exit
 profiles `APPLICATION=hardware` and `APPLICATION=opengl`, both with
@@ -1601,13 +1586,11 @@ transactions are also blockers until their explicit recovery target succeeds.
 Retained valid lock files are not cleanup targets. Plan and execution take the
 retained upstream-test lifecycle, upstream image-cache, live lifecycle, DEB
 terminal, workspace lifecycle, and case-update locks in that fixed order.
-The live result schema permits a patched client only for the existing
-clipboard and subsurface case-only selections, with exactly the same case,
-selection/resolution digests and build-context/archive digests at both ends.
-All other live profiles retain the clean-client boundary. Cycle cleanup
-validates those endpoint bindings as well as the current status and removal
-transaction; it must not reject valid case-only results by assuming every
-client is `master`, or admit arbitrary patched-client selections.
+Current live results require the complete stack and matching endpoint selection,
+resolution and context/archive digests. Cycle cleanup additionally understands
+retired case-only and clean-client records solely to remove their exact owned
+runtime/results safely. Historical readability is not current acceptance.
+
 Before its first deletion,
 execution publishes `cycle-cleanups/<CYCLE>.remove.json`, binding the exact plan
 and confirmation digest plus each directory target's device, inode, and

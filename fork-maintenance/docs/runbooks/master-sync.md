@@ -114,8 +114,7 @@ the queue applies unchanged: offline fork checks, clean quarantine reassessment,
 tests-only controls for cases which own retained tests, case-specific no-test
 semantic inspection, durable package boundaries against the resulting stack,
 including both real Ubuntu 26.04 and Debian 13 builds, patched focused/native
-gates, all three full author-test legs, every production case's declared live
-gates with its atomic case selection, and all seven fixed positive live
+gates, all three full author-test legs and all nine fixed positive live
 profiles with the complete stack selection. Do not execute that complete set
 after each intermediate case adaptation; retain input-verified development
 results and fill final gaps. If the operator does not choose
