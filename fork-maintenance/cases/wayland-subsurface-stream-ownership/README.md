@@ -1263,6 +1263,15 @@ identity swap is the irreversible publication point. Later presentation or
 accounting errors are logged but do not report the committed draw as failed.
 Discard restores the visible offscreen target and releases private state.
 
+Texture names retain the native container returned by PyOpenGL: both NumPy
+arrays and ctypes arrays are supported, without requiring NumPy at runtime.
+Emptiness is tested by length, never by the container's scalar truth value.
+This applies to ordinary RGB invalidation as well as composite abort,
+reconfiguration, and close. With a usable GL context, cleanup submits every
+detached texture exactly once and passes the complete detached VAO count,
+including the spinner VAO, to `glDeleteVertexArrays`; a repeated close cannot
+delete either generation again.
+
 For direct presentation, including an unscaled single-buffered context, the
 final stage queues the complete transaction presentation union rather than its
 own layer rectangle. Partial framebuffer blits interpret `(x, y, width,
@@ -1751,6 +1760,19 @@ mmap consumption, reported and silent paint faults, Cairo and GL
 pre-commit/post-commit errors, format alpha semantics, final-only redraw,
 idle-before-close, pre-realize close for both GTK GL backends, backing identity
 replacement, and exception-complete GL teardown.
+
+`TestSubsurfaceTransactionFbos.test_texture_container_truth_is_never_used`
+uses empty and nonempty sequences whose boolean conversion raises, without a
+NumPy dependency. It checks target restoration and exactly-once texture, FBO,
+and both-VAO deletion. `TestNativeTextureArrays.test_numpy` and `test_ctypes`
+each start an independent Python/GTK/Xvfb process with the actual PyOpenGL
+output handler selected before allocation; the ctypes process makes NumPy
+unavailable. They assert the untouched `glGenTextures` result's concrete type,
+ordinary nonuniform RGB pixels and successful draw callback, unchanged visible
+pixels through transaction abort/reconfiguration, and native object deletion
+before context destruction. Missing NumPy or a mapped GL context is a failure,
+not a skipped subject test. NumPy is a test-image dependency, not an installed
+Xpra dependency. Cairo live rendering cannot cover this representation axis.
 
 A mock-only test of a helper method cannot replace the native topology,
 renderer, or live boundary.
@@ -2253,9 +2275,12 @@ development check does not replace the case-owned RGB transaction proof.
 
 After reviewing and freezing source, fixtures and the packet/pixel oracle,
 fill missing or invalidated final requirements: current clean quarantine,
-the three full legs, every required atomic gate, and all seven positive
-complete-stack profiles. Reuse valid development-stage named results only with
-the input proof required by the validation runbook; do not repeat the whole
+the three full legs, every required atomic gate, and the complete-stack
+acceptance required by the enclosing task. A full-queue adaptation or upstream
+rebase requires all seven positive stack profiles and both DEB builds; a
+narrow unchanged-base repair follows the affected-boundary rules in the
+canonical validation runbook. Reuse valid development-stage named results only
+with the input proof required by the validation runbook; do not repeat the whole
 set after each subsurface edit.
 
 Clean and patched comparisons must use the same frozen source, test image,

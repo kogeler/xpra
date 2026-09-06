@@ -846,7 +846,7 @@ index 3d41b65a33e26cbe4ae012f5d8b99b7d7c9c8e81..ce3da596b4c3ebcb9e44c115b50177d9
                  client.cleanup()
  
 diff --git a/tests/unittests/unit/client/opengl_backing_test.py b/tests/unittests/unit/client/opengl_backing_test.py
-index 1d3c21d79c2b757631eb549ad1815873018d1157..9542ae16000e8ca5dad5c0bee8e24d8eaccb7e87 100755
+index 1d3c21d79c2b757631eb549ad1815873018d1157..5f7272d778090833ee9910c1761b3df216bce9b9 100755
 --- a/tests/unittests/unit/client/opengl_backing_test.py
 +++ b/tests/unittests/unit/client/opengl_backing_test.py
 @@ -12,6 +12,31 @@ from unittest.mock import MagicMock, patch
@@ -944,7 +944,7 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..9542ae16000e8ca5dad5c0bee8e24d8e
  class TestInitFormats(unittest.TestCase):
      """Test init_formats() logic at various bit depths."""
  
-@@ -317,6 +398,115 @@ class TestSwapFbos(unittest.TestCase):
+@@ -317,6 +398,151 @@ class TestSwapFbos(unittest.TestCase):
          assert b.textures[TEX_TMP_FBO] == 20
  
  
@@ -961,6 +961,42 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..9542ae16000e8ca5dad5c0bee8e24d8e
 +        backing.textures[TEX_FBO] = 10
 +        backing.textures[TEX_TMP_FBO] = 20
 +        return backing
++
++    def test_texture_container_truth_is_never_used(self):
++        class TextureNames(list):
++            def __bool__(self):
++                raise ValueError("texture names have no scalar truth value")
++
++        context = object()
++        for names in ((), (11, 12, 13)):
++            with self.subTest(names=names):
++                backing = self.make_backing()
++                textures = TextureNames(names)
++                backing.textures = textures
++                backing.vao, backing.spinner_vao = 21, 22
++                with (
++                    patch.object(backing, "draw_to_offscreen") as restore,
++                    patch("xpra.opengl.backing.glBindVertexArray"),
++                    patch("xpra.opengl.backing.glUseProgram"),
++                    patch("xpra.opengl.backing.glDeleteVertexArrays") as delete_vaos,
++                    patch("xpra.opengl.backing.glDeleteFramebuffers") as delete_fbos,
++                    patch("xpra.opengl.backing.glDeleteTextures") as delete_textures,
++                ):
++                    backing.invalidate_subsurface_transaction(context)
++                    backing.subsurface_backing_reconfigured(context)
++                    self.assertEqual(restore.call_count, 2 if names else 0)
++                    backing.close_gl(context)
++                    backing.close_gl(context)
++                    delete_vaos.assert_called_once_with(2, [21, 22])
++                    delete_fbos.assert_called_once_with(2, (1, 2))
++                    if names:
++                        delete_textures.assert_called_once()
++                        self.assertIs(delete_textures.call_args.args[0], textures)
++                    else:
++                        delete_textures.assert_not_called()
++                self.assertEqual(backing.textures, [])
++                self.assertIsNone(backing.vao)
++                self.assertIsNone(backing.spinner_vao)
 +
 +    def test_private_fbo_is_published_only_after_final_stage(self):
 +        from OpenGL.GL import GL_SCISSOR_TEST
@@ -1060,7 +1096,7 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..9542ae16000e8ca5dad5c0bee8e24d8e
  class TestFailShader(unittest.TestCase):
      """fail_shader() raises RuntimeError; glDeleteShader is skipped if shader not registered."""
  
-@@ -376,6 +566,36 @@ class TestPresentFboLogic(unittest.TestCase):
+@@ -376,6 +602,36 @@ class TestPresentFboLogic(unittest.TestCase):
          b.present_fbo(ctx, 50, 0, 50, 50)
          assert len(b.pending_fbo_paint) == 2
  
@@ -1097,7 +1133,7 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..9542ae16000e8ca5dad5c0bee8e24d8e
      def test_flush_nonzero_does_not_call_managed(self):
          """With flush>0 and PAINT_FLUSH enabled, managed_present_fbo is deferred."""
          from unittest.mock import patch
-@@ -451,6 +671,208 @@ class TestOverlayTextureLogic(unittest.TestCase):
+@@ -451,6 +707,208 @@ class TestOverlayTextureLogic(unittest.TestCase):
          assert blend_function.call_args_list[-1].args == old_function
          combine_texture.assert_called_once_with("overlay", 2, 3, 4, 5, {"rgba": 1}, {})
  
@@ -1306,7 +1342,57 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..9542ae16000e8ca5dad5c0bee8e24d8e
  
  class TestPaintBoxEarlyReturn(unittest.TestCase):
      """paint_box() with line_width=0 returns immediately with no GL calls."""
-@@ -503,17 +925,51 @@ class TestGLInit(unittest.TestCase):
+@@ -473,6 +931,49 @@ class TestPaintBoxEarlyReturn(unittest.TestCase):
+ # On macOS / Windows a display is assumed to already be present.
+ # ---------------------------------------------------------------------------
+ 
++class TestNativeTextureArrays(unittest.TestCase):
++    """Each PyOpenGL output handler owns a fresh Python/GTK/GL process."""
++
++    def check_handler(self, handler):
++        from subprocess import run
++        import xpra
++        env = os.environ.copy()
++        env["PYOPENGL_USE_ACCELERATE"] = "0"
++        env["XPRA_TEST_GL_ARRAY_HANDLER"] = handler
++        bootstrap = """
++import os
++import runpy
++import sys
++import xpra
++
++expected_xpra = sys.argv[2]
++actual_xpra = os.path.realpath(xpra.__file__)
++if actual_xpra != expected_xpra:
++    raise AssertionError(f"child imported {actual_xpra}, expected installed Xpra {expected_xpra}")
++
++handler = os.environ["XPRA_TEST_GL_ARRAY_HANDLER"]
++if handler == "ctypesarrays":
++    # Exercise real no-NumPy allocation, not converted or fabricated names.
++    sys.modules["numpy"] = None
++from OpenGL.arrays.arraydatatype import ArrayDatatype
++ArrayDatatype.getRegistry().registerReturn(handler)
++sys.argv = [sys.argv[1], "TestGLInit.check_native_texture_array_lifecycle", "-v"]
++runpy.run_path(sys.argv[0], run_name="__main__")
++"""
++        result = run(
++            [sys.executable, "-c", bootstrap, os.path.abspath(__file__), os.path.realpath(xpra.__file__)],
++            cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
++            env=env, capture_output=True, text=True, timeout=90, check=False,
++        )
++        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
++
++    def test_numpy(self):
++        self.check_handler("numpy")
++
++    def test_ctypes(self):
++        self.check_handler("ctypesarrays")
++
++
+ class TestGLInit(unittest.TestCase):
+ 
+     xvfb = None
+@@ -503,17 +1004,51 @@ class TestGLInit(unittest.TestCase):
  
      @classmethod
      def tearDownClass(cls):
@@ -1369,10 +1455,143 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..9542ae16000e8ca5dad5c0bee8e24d8e
  
      def _make_gl_backing(self, window_alpha=False, pixel_depth=0):
          from xpra.os_util import gi_import
-@@ -545,6 +1001,59 @@ class TestGLInit(unittest.TestCase):
+@@ -545,6 +1080,192 @@ class TestGLInit(unittest.TestCase):
              backing.close()
              win.destroy()
  
++    def check_native_texture_array_lifecycle(self):
++        """Actual generated texture arrays survive RGB, abort and exact cleanup."""
++        from ctypes import Array
++        from OpenGL.GL import (
++            glBindFramebuffer, glBindTexture, glBindVertexArray,
++            glDeleteTextures, glDeleteVertexArrays, glGenTextures, glGenVertexArrays,
++            glGetIntegerv, glIsTexture, glIsVertexArray, glReadBuffer, glReadPixels,
++            GL_READ_FRAMEBUFFER, GL_DRAW_FRAMEBUFFER_BINDING, GL_COLOR_ATTACHMENT0,
++            GL_TEXTURE_RECTANGLE, GL_RGBA, GL_UNSIGNED_BYTE,
++        )
++        from xpra.opengl.backing import N_TEXTURES
++        from xpra.util.objects import typedict
++
++        generated = []
++
++        def generate_textures(count):
++            names = glGenTextures(count)
++            generated.append((count, names))
++            return names
++
++        with patch("xpra.opengl.backing.glGenTextures", side_effect=generate_textures):
++            backing, win = self._make_gl_backing(window_alpha=False, pixel_depth=24)
++            backing.size = backing.render_size = (3, 1)
++            backing.paint_screen = False
++            try:
++                ctx = backing.gl_context()
++                self.assertIsNotNone(ctx, "no mapped OpenGL context for texture-array regression")
++                with ctx:
++                    backing.gl_init(ctx)
++                self.assertEqual(len(generated), 1)
++                self.assertEqual(generated[0][0], N_TEXTURES)
++                self.assertIs(backing.textures, generated[0][1])
++                handler = os.environ["XPRA_TEST_GL_ARRAY_HANDLER"]
++                if handler == "numpy":
++                    from numpy import ndarray
++                    self.assertIsInstance(backing.textures, ndarray)
++                else:
++                    self.assertEqual(handler, "ctypesarrays")
++                    self.assertIsNone(sys.modules.get("numpy"))
++                    self.assertIsInstance(backing.textures, Array)
++                self.assertEqual(len(backing.textures), N_TEXTURES)
++                texture_names = tuple(int(name) for name in backing.textures)
++                self.assertEqual(len(set(texture_names)), N_TEXTURES)
++
++                def read_pixels():
++                    glBindFramebuffer(GL_READ_FRAMEBUFFER, backing.offscreen_fbo)
++                    glReadBuffer(GL_COLOR_ATTACHMENT0)
++                    return bytes(glReadPixels(0, 0, 3, 1, GL_RGBA, GL_UNSIGNED_BYTE))
++
++                def paint(pixels, options):
++                    results = []
++                    backing.do_paint_rgb(
++                        ctx, "rgb", "RGBX", pixels,
++                        0, 0, 3, 1, 3, 1, 12, options,
++                        [lambda success, message="": results.append((success, message))],
++                    )
++                    self.assertEqual(len(results), 1)
++                    self.assertIs(results[0][0], True, results)
++                    self.assertEqual(results[0][1], "")
++
++                pixels = bytes((30, 60, 90, 0, 120, 90, 60, 255, 90, 30, 120, 1))
++                expected = bytes((30, 60, 90, 255, 120, 90, 60, 255, 90, 30, 120, 255))
++                with ctx:
++                    # Instantiate every generated name so a false glIsTexture
++                    # after close proves deletion, not a never-created object.
++                    for name in texture_names:
++                        glBindTexture(GL_TEXTURE_RECTANGLE, name)
++                    glBindTexture(GL_TEXTURE_RECTANGLE, 0)
++                    self.assertTrue(all(glIsTexture(name) for name in texture_names))
++                    paint(pixels, typedict())
++                    self.assertEqual(read_pixels(), expected)
++                    visible_fbo = backing.offscreen_fbo
++                    for transaction_id, abort in (
++                        (1, backing.invalidate_subsurface_transaction),
++                        (2, backing.subsurface_backing_reconfigured),
++                    ):
++                        paint(bytes((200, 100, 50, 0)) * 3, _composite_options(
++                            transaction_id, 0, 2, reset=(0, 0, 3, 1),
++                        ))
++                        self.assertIsNotNone(backing._subsurface_transaction)
++                        self.assertEqual(read_pixels(), expected)
++                        abort(ctx)
++                        self.assertIsNone(backing._subsurface_transaction)
++                        self.assertEqual(backing.offscreen_fbo, visible_fbo)
++                        self.assertEqual(int(glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING)), visible_fbo)
++                        self.assertEqual(read_pixels(), expected)
++                    paint(pixels, typedict())
++                    self.assertEqual(read_pixels(), expected)
++
++                    # Both independent VAOs must reach the native delete call;
++                    # a count of one leaks the spinner even with valid arrays.
++                    backing.spinner_vao = glGenVertexArrays(1)
++                    glBindVertexArray(backing.spinner_vao)
++                    glBindVertexArray(0)
++                    vao_names = (int(backing.vao), int(backing.spinner_vao))
++                    self.assertEqual(len(set(vao_names)), 2)
++                    self.assertTrue(all(glIsVertexArray(name) for name in vao_names))
++
++                deleted_textures = []
++                deleted_vaos = []
++
++                def delete_textures(names):
++                    glDeleteTextures(names)
++                    deleted_textures.append((
++                        tuple(int(name) for name in names),
++                        tuple(bool(glIsTexture(name)) for name in names),
++                    ))
++
++                def delete_vaos(count, names):
++                    glDeleteVertexArrays(count, names)
++                    deleted_vaos.append((
++                        count, tuple(int(name) for name in names),
++                        tuple(bool(glIsVertexArray(name)) for name in names),
++                    ))
++
++                with (
++                    patch("xpra.opengl.backing.glDeleteTextures", side_effect=delete_textures),
++                    patch("xpra.opengl.backing.glDeleteVertexArrays", side_effect=delete_vaos),
++                ):
++                    backing.close()
++                    backing.close()
++                self.assertEqual(deleted_textures, [(texture_names, (False,) * N_TEXTURES)])
++                self.assertEqual(deleted_vaos, [(2, vao_names, (False, False))])
++                self.assertEqual(backing.textures, [])
++                self.assertIsNone(backing._backing)
++                self.assertIsNone(backing.vao)
++                self.assertIsNone(backing.spinner_vao)
++            finally:
++                try:
++                    backing.close()
++                finally:
++                    win.destroy()
++
 +    def test_close_before_paint_idle_completes_callback(self):
 +        """A paint queued for the GTK idle loop is completed after its backing closes."""
 +        from xpra.os_util import gi_import
@@ -1429,7 +1648,7 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..9542ae16000e8ca5dad5c0bee8e24d8e
      def test_init_textures(self):
          """init_textures() creates textures and fbos."""
          backing, win = self._make_gl_backing()
-@@ -625,6 +1134,283 @@ class TestGLInit(unittest.TestCase):
+@@ -625,6 +1346,283 @@ class TestGLInit(unittest.TestCase):
              backing.close()
              win.destroy()
  
@@ -9452,7 +9671,7 @@ index bcf2e8ec17f8180724f8c6149ae23a1915f2c25f..d28931bce055a50ee5233200130a7a19
  def noop(*_args, **_kwargs) -> None:
      """ do nothing """
 diff --git a/xpra/opengl/backing.py b/xpra/opengl/backing.py
-index 527273775a7b1e9c094ad59c19960d66a7974f23..dc5f490466de49e314bcac18af95cd0f7e9a0e2d 100644
+index 527273775a7b1e9c094ad59c19960d66a7974f23..73c271b25d5f8d7c84465dbfb3024cc7f201474d 100644
 --- a/xpra/opengl/backing.py
 +++ b/xpra/opengl/backing.py
 @@ -58,15 +58,17 @@ from xpra.util.str_fn import repr_ellipsized, hexstr, csv
@@ -9759,10 +9978,10 @@ index 527273775a7b1e9c094ad59c19960d66a7974f23..dc5f490466de49e314bcac18af95cd0f
 +                        log.error(f"Error deleting {name!r} shader")
 +                        log.error(f" {gle}")
 +                if vaos:
-+                    glDeleteVertexArrays(1, vaos)
++                    glDeleteVertexArrays(len(vaos), vaos)
 +                if fbos:
 +                    glDeleteFramebuffers(len(fbos), fbos)
-+                if textures:
++                if len(textures) > 0:
 +                    glDeleteTextures(textures)
 +            except Exception as e:
 +                log(f"{self}.close()", exc_info=True)
@@ -9808,7 +10027,7 @@ index 527273775a7b1e9c094ad59c19960d66a7974f23..dc5f490466de49e314bcac18af95cd0f
 +                glEnable(GL_SCISSOR_TEST)
 +
 +    def _discard_subsurface_staging(self, context) -> None:
-+        if not context or self.offscreen_fbo is None or not self.textures:
++        if not context or self.offscreen_fbo is None or len(self.textures) == 0:
 +            return
 +        try:
 +            self.draw_to_offscreen()
