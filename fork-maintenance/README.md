@@ -88,8 +88,8 @@ Use [development and final acceptance](docs/runbooks/validation.md). After each
 atomic edit, run its nearest real regression, affected upstream/case/dependency
 modules, and relevant native, compiled, compatibility, or live checks. Review
 and freeze code, tests, queue and oracle before filling final evidence gaps;
-do not repeat the full matrix, both DEB builds, or every live gate after each
-edit. A valid named development result can satisfy an unchanged final
+do not repeat the full upstream matrix or both DEB builds after each edit.
+Every live validation uses the entire nine-profile suite. A valid named development result can satisfy an unchanged final
 requirement, with original provenance retained.
 
 Stay on `develop` and verify that only fork-control files are dirty:
@@ -211,10 +211,11 @@ make -C fork-maintenance stack-unapply STACK=develop
 
 ## Durable tests
 
-The examples below are named execution interfaces, not an instruction to run
-all profiles during each development iteration. Select the relevant boundary
-early; the full upstream matrix is not a live prerequisite. Final coverage and
-input-verified reuse follow [validation](docs/runbooks/validation.md).
+The examples below are named execution interfaces. Select the relevant focused
+unit boundary early; the full upstream matrix is not a live prerequisite.
+Every live validation runs the complete nine-profile suite with all patches on
+both endpoints. Final coverage and input-verified reuse follow
+[validation](docs/runbooks/validation.md).
 
 Every job name is unique, including retries:
 
@@ -232,24 +233,31 @@ make -C fork-maintenance live-xpra-opengl-hardware \
 make -C fork-maintenance live-wait RUN=develop-opengl-hardware-01
 
 make -C fork-maintenance live-wayland-keyboard \
-  CASE=wayland-client-keymap-sync RUN=develop-wayland-keyboard-01
+  STACK=develop RUN=develop-wayland-keyboard-01
 make -C fork-maintenance live-wait RUN=develop-wayland-keyboard-01
 
 make -C fork-maintenance live-wayland-subsurface \
-  CASE=wayland-subsurface-stream-ownership RUN=wayland-subsurface-live-01
+  STACK=develop RUN=wayland-subsurface-live-01
 make -C fork-maintenance live-wait RUN=wayland-subsurface-live-01
 ```
 
-The seven complete-stack live wrappers are positive acceptance gates: Zed RGB,
-adaptive-alpha Zed H.264, RGB detach, RGB transport-loss fault injection, and
-the standalone native-Wayland client-keymap regression plus the separate
-multi-window Vulkan and native-Wayland OpenGL hardware-H.264 profiles. They fix
-every acceptance dimension. A case selection is admitted only when its
-evidence-only `required_gates` list names the exact profile gate; the Zed H.264,
-detach, and transport-loss profiles remain stack-only. Stack selections accept
-exactly these seven profiles, while `live-x11-clipboard` and
-`live-wayland-subsurface` remain restricted to their exact cases. The latter
-applies its selected patch to both endpoints. Its two-parent, two-sibling
+Every live test runs the complete `stacks/develop` on BOTH endpoints.
+Case-only, partial-stack and clean-endpoint live tests are forbidden.
+For every patch validation, use:
+
+```bash
+make -C fork-maintenance live-all STACK=develop RUN=<fresh-prefix>
+make -C fork-maintenance live-suite-check STACK=develop RUN=<fresh-prefix>
+```
+
+The nine required profiles are Zed RGB, adaptive-alpha Zed H.264, RGB detach,
+RGB transport loss, native-Wayland keymap, Vulkan hardware, OpenGL hardware,
+X11 clipboard and Wayland subsurface composition. The preceding per-profile
+commands are member lifecycle examples, not standalone acceptance of a patch.
+Every client build also runs the installed clipboard adapter and mapped GL
+regressions. The subsurface profile retains its exact independent oracle.
+
+Its two-parent, two-sibling
 native fixture binds repeated updates, move-without-attach, overlapping stack
 order, callback-gated continuous commits, destroy and detach repair, and
 same-surface reparenting to globally unique parent-wire draws and
@@ -347,7 +355,7 @@ the documented no-test semantic inspection for those which do not, patched
 focused and native gates, every case-specific durable package boundary against
 the complete resulting stack including both real Ubuntu 26.04 and Debian 13
 builds, all three complete upstream workflow legs, every production case's
-declared live gates with its atomic `CASE=<slug>` selection, and all seven fixed
+all nine fixed
 positive stack live profiles. A new upstream-suite failure enters the single
 quarantine only after the exact module reproduces on the clean rebased source
 in the same mode. Reassess changed quarantine inputs, stabilize the candidate,

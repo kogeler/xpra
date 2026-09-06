@@ -54,7 +54,7 @@ patch in its current surrounding source, gives each case an explicit
 keep/adapt/retire conclusion, reassesses the quarantine duty, resolves the
 complete queue, and passes every available tests-only control, focused/native
 test, both real distribution package builds, all three full upstream legs,
-every declared atomic case live gate, and all seven stack live profiles. The
+all nine complete-stack live profiles. The
 primary case is reviewed first and receives the most detailed written mapping;
 every other case still receives the same correctness and retirement decision.
 
@@ -850,7 +850,7 @@ mandatory.
 
 Complete CI-layout repair before source builds and quarantine reassessment
 before applying the duty case. Run their individual resolution and available
-case-only gates as soon as they are meaningful, but keep every repair
+the complete live suite as soon as its prerequisites are meaningful, but keep every repair
 uncommitted. Independent case work continues through
 the isolated applicable/reconstruction flows without touching the host source
 or index. Once all cases resolve and the candidate is reviewed and frozen,
@@ -1288,11 +1288,10 @@ leg and follow the already-authorized queue-wide quarantine procedure in
 
 ### Live preflight
 
-Before the first case-declared or stack live gate, create and verify the
-hash-locked analysis environment, inspect the host boundary, and prove that the
-selected case or stack can be materialized in an isolated workspace. The
-example below selects the complete queue; for an early atomic live run, use
-that wrapper's admitted `CASE=<slug>` instead of `STACK=develop`:
+Before the full live suite, create and verify the hash-locked analysis
+environment, inspect the host boundary and materialize the complete stack in an
+isolated workspace. All nine scenarios apply that full queue to both endpoints;
+`CASE`, partial queues and clean endpoints are forbidden.
 
 ```bash
 make -C fork-maintenance live-venv
@@ -1308,202 +1307,37 @@ make -C fork-maintenance workspace-remove \
 Do not start a live wrapper if this preflight fails. `doctor` reports optional
 hardware and input-path availability, but a selected live gate which requires
 one of those paths still fails closed when it is unavailable. Reuse this
-verified environment for all case-declared gates and the seven stack profiles;
+verified environment for all nine complete-stack profiles;
 do not recreate it between otherwise unchanged runs.
 
-### Case-declared real boundaries
+### Case-owned real boundaries, complete-stack execution
 
-Enumerate every retained or adapted production case and ensure every live gate
-in its `required_gates` has a valid result with that exact `CASE=<case>`
-selection. Run a relevant gate during development after its focused/native
-prerequisites, without waiting for the full upstream matrix. Final acceptance
-fills only the remaining input-verified gaps. If two cases
-declare the same gate, run it once for each case: the atomic selections prove
-different patch boundaries. A case with an empty list contributes no live run
-here. After retirement, omit that retired case's patched run only when its
-behavior has another durable acceptance route. A gate also present in the
-stack-wide seven-profile matrix uses that stack result as the replacement
-proof, subject to the keyboard scenario-ownership boundary above. A case-only
-wrapper whose selection guard names the retired case must be migrated or
-retired atomically, and the upstream replacement must receive another
-supported durable proof; the boundary cannot silently disappear. Current
-manifest-to-Make mappings are:
+Case manifests identify behavioral owners of live assertions, not isolated
+product selections. Every current profile executes with the complete queue on
+both endpoints, including clipboard, subsurface, keyboard and hardware tests.
+A new or retired case must update its regression ownership without creating a
+single-patch live path or dropping the profile from global coverage.
 
-A case may declare a gate only when its exact `CASE=<case>` selection can
-satisfy the fixed positive profile without another active patch. A real
-boundary which necessarily consumes behavior or diagnostics owned by another
-case belongs to the complete stack instead: leave that case's
-`required_gates` empty, name the stack-owned boundary in its README, and retain
-the gate in `stacks/develop.toml`. Do not run the impossible atomic selection,
-add a case-name branch to the runner, or weaken the profile after it fails.
-The current `video-pipeline-cleanup-race` case is the concrete example: its
-cleanup regression is standalone, but both hardware profiles consume dynamic
-frame-alpha evidence owned by `wayland-initial-window-state`, so those live
-boundaries remain mandatory only in the complete-stack matrix below.
-
-| Manifest gate | Make wrapper |
-| --- | --- |
-| `live-rgb` | `live-rgb` |
-| `live-wayland-keyboard` | `live-wayland-keyboard` |
-| `live-x11-clipboard` | `live-x11-clipboard` |
-| `live-wayland-subsurface` | `live-wayland-subsurface` |
-| `live-wayland-h264-hardware` | `live-xpra-hardware` |
-| `live-wayland-opengl-h264-hardware` | `live-xpra-opengl-hardware` |
-
-For every enumerated case/gate pair, substitute the wrapper from the table and
-use a run name containing both the case and gate so duplicate gate declarations
-cannot overwrite or masquerade as one another:
+Use the full suite for any patch validation:
 
 ```bash
-make -C fork-maintenance <live-wrapper> \
-  CASE=<case> RUN=<cycle>-<case>-<manifest-gate>-01
-make -C fork-maintenance live-wait \
-  RUN=<cycle>-<case>-<manifest-gate>-01
-make -C fork-maintenance live-status \
-  RUN=<cycle>-<case>-<manifest-gate>-01
-make -C fork-maintenance live-logs \
-  RUN=<cycle>-<case>-<manifest-gate>-01
-make -C fork-maintenance live-remove \
-  RUN=<cycle>-<case>-<manifest-gate>-01
-make -C fork-maintenance live-status \
-  RUN=<cycle>-<case>-<manifest-gate>-01
+make -C fork-maintenance live-all STACK=develop RUN=<cycle>-live-01
+make -C fork-maintenance live-suite-check STACK=develop RUN=<cycle>-live-01
 ```
 
-Inspect the complete report/log before removal. The post-remove status must use
-the retained removal transaction and report `phase=removed`; `live-logs`
-remains available through that validated transaction. An empty
-`required_gates` list does not erase a package or subsystem boundary stated by
-the case README.
+The suite orders clipboard/subsurface first, runs every profile through its
+named start/wait/remove lifecycle and validates all nine retained reports.
+A failure stops escalation. Diagnose, correct and use new run names; do not
+combine results from different source/queue/harness candidates.
 
-Run both real package builds and their independent package/import validation
-for every autonomous refresh, regardless of whether the Debian-packaging case
-is retained, adapted, or retired. They are an unconditional post-rebase
-final boundary, not a focused unit-test substitute or an automatic step after
-each case edit. Reuse an already valid result only under
-[`validation.md`](validation.md); the commands below fill missing results:
+### All nine positive live profiles
 
-```bash
-make -C fork-maintenance deb-start \
-  STACK=develop DISTRO=ubuntu-26.04 RUN=<cycle>-packages-ubuntu-01
-make -C fork-maintenance deb-wait RUN=<cycle>-packages-ubuntu-01
-make -C fork-maintenance deb-status RUN=<cycle>-packages-ubuntu-01
-make -C fork-maintenance deb-logs RUN=<cycle>-packages-ubuntu-01
-make -C fork-maintenance deb-remove RUN=<cycle>-packages-ubuntu-01
-make -C fork-maintenance deb-status RUN=<cycle>-packages-ubuntu-01
-
-make -C fork-maintenance deb-start \
-  STACK=develop DISTRO=debian-13 RUN=<cycle>-packages-debian-01
-make -C fork-maintenance deb-wait RUN=<cycle>-packages-debian-01
-make -C fork-maintenance deb-status RUN=<cycle>-packages-debian-01
-make -C fork-maintenance deb-logs RUN=<cycle>-packages-debian-01
-make -C fork-maintenance deb-remove RUN=<cycle>-packages-debian-01
-make -C fork-maintenance deb-status RUN=<cycle>-packages-debian-01
-```
-
-The package runner always applies the complete current stack. With the package
-case retained, it proves the patched result. With that case removed from the
-candidate stack, the same two builds are the durable package-boundary proof for
-the proposed upstream replacement. The ordinary codec unit test is not a
-substitute in either branch.
-
-An older retained selection snapshot may use manifest vocabulary which the
-current resolver no longer accepts. The package start must still validate that
-historical cache's private metadata and exact tree, but it must semantically
-replay and reuse only a cache whose selection digest equals the current stack.
-Do not delete or edit an old cache to bypass this guard. If discovery of an
-unrelated historical cache blocks before `<RUN>.prelaunch.json` exists, repair
-the cache-inventory compatibility boundary and its lifecycle tests, verify that
-the failed name owns no RUN artifacts, and restart the package gate once with a
-fresh RUN name.
-
-### All seven positive live profiles
-
-Using the already verified live preflight above, run all seven wrappers
-sequentially with `STACK=develop` and the YAML-declared default
-`NETWORK_PROFILE`, omitting only requirements already covered by input-verified
-results on the final candidate. Do not replace them with CI, clean diagnostics,
-or fallback classifiers:
-
-```bash
-make -C fork-maintenance live-rgb \
-  STACK=develop RUN=<cycle>-live-rgb-01
-make -C fork-maintenance live-wait RUN=<cycle>-live-rgb-01
-make -C fork-maintenance live-status RUN=<cycle>-live-rgb-01
-make -C fork-maintenance live-logs RUN=<cycle>-live-rgb-01
-make -C fork-maintenance live-remove RUN=<cycle>-live-rgb-01
-make -C fork-maintenance live-status RUN=<cycle>-live-rgb-01
-
-make -C fork-maintenance live-h264 \
-  STACK=develop RUN=<cycle>-live-h264-01
-make -C fork-maintenance live-wait RUN=<cycle>-live-h264-01
-make -C fork-maintenance live-status RUN=<cycle>-live-h264-01
-make -C fork-maintenance live-logs RUN=<cycle>-live-h264-01
-make -C fork-maintenance live-remove RUN=<cycle>-live-h264-01
-make -C fork-maintenance live-status RUN=<cycle>-live-h264-01
-
-make -C fork-maintenance live-xpra-detach \
-  STACK=develop RUN=<cycle>-live-detach-01
-make -C fork-maintenance live-wait RUN=<cycle>-live-detach-01
-make -C fork-maintenance live-status RUN=<cycle>-live-detach-01
-make -C fork-maintenance live-logs RUN=<cycle>-live-detach-01
-make -C fork-maintenance live-remove RUN=<cycle>-live-detach-01
-make -C fork-maintenance live-status RUN=<cycle>-live-detach-01
-
-make -C fork-maintenance live-xpra-transport-loss \
-  STACK=develop RUN=<cycle>-live-transport-loss-01
-make -C fork-maintenance live-wait \
-  RUN=<cycle>-live-transport-loss-01
-make -C fork-maintenance live-status \
-  RUN=<cycle>-live-transport-loss-01
-make -C fork-maintenance live-logs \
-  RUN=<cycle>-live-transport-loss-01
-make -C fork-maintenance live-remove \
-  RUN=<cycle>-live-transport-loss-01
-make -C fork-maintenance live-status \
-  RUN=<cycle>-live-transport-loss-01
-
-make -C fork-maintenance live-wayland-keyboard \
-  STACK=develop RUN=<cycle>-live-wayland-keyboard-01
-make -C fork-maintenance live-wait \
-  RUN=<cycle>-live-wayland-keyboard-01
-make -C fork-maintenance live-status \
-  RUN=<cycle>-live-wayland-keyboard-01
-make -C fork-maintenance live-logs \
-  RUN=<cycle>-live-wayland-keyboard-01
-make -C fork-maintenance live-remove \
-  RUN=<cycle>-live-wayland-keyboard-01
-make -C fork-maintenance live-status \
-  RUN=<cycle>-live-wayland-keyboard-01
-
-make -C fork-maintenance live-xpra-hardware \
-  STACK=develop RUN=<cycle>-live-hardware-01
-make -C fork-maintenance live-wait RUN=<cycle>-live-hardware-01
-make -C fork-maintenance live-status RUN=<cycle>-live-hardware-01
-make -C fork-maintenance live-logs RUN=<cycle>-live-hardware-01
-make -C fork-maintenance live-remove RUN=<cycle>-live-hardware-01
-make -C fork-maintenance live-status RUN=<cycle>-live-hardware-01
-
-make -C fork-maintenance live-xpra-opengl-hardware \
-  STACK=develop RUN=<cycle>-live-opengl-hardware-01
-make -C fork-maintenance live-wait \
-  RUN=<cycle>-live-opengl-hardware-01
-make -C fork-maintenance live-status \
-  RUN=<cycle>-live-opengl-hardware-01
-make -C fork-maintenance live-logs \
-  RUN=<cycle>-live-opengl-hardware-01
-make -C fork-maintenance live-remove \
-  RUN=<cycle>-live-opengl-hardware-01
-make -C fork-maintenance live-status \
-  RUN=<cycle>-live-opengl-hardware-01
-```
-
-Every live result must be a positive application/transport/hardware result with
-its exact lifecycle and cleanup evidence. Missing hardware, application input,
-or a valid environment leaves the refresh incomplete; it is not converted to a
-skip. Never signal an owned job or call destructive Podman commands directly;
-use only `test-*`, `live-*`, `test-image-*`, and `deb-*` lifecycle targets.
-Each post-remove `live-status` shown above must report `phase=removed` before
-proceeding to the next profile.
+The `live-all` command above is the mandatory nine-profile matrix. Do not
+repeat it as a separate case-selected ladder or count a subset as full coverage.
+Every member must have positive application, transport, hardware, lifecycle and
+owned-cleanup evidence. Missing hardware, application input or environment
+leaves the refresh incomplete, never skipped. Use only the named `live-*`
+lifecycle commands for recovery; no direct destructive Podman commands.
 
 For detach and transport loss, review the three identical fixture-owned
 application identity snapshots (capture, post-disconnect, and pre-termination),
@@ -1558,7 +1392,7 @@ The handoff must state:
   documented no-test evidence, and keep/adapt/retire conclusion, with the
   primary case recorded in greatest detail;
 - quarantine reassessment and any assignment changes;
-- focused/native, package, full-leg, every atomic case-live, and seven stack-live
+- focused/native, package, full-leg, all nine complete-stack live
   run identities/results;
 - any incomplete gate or missing authority;
 - the exact final staged, unstaged, and untracked status and why

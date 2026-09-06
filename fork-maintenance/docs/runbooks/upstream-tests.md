@@ -129,7 +129,10 @@ are comments, copyright notices, or documentation, with identical paths,
 modes, executable data, configuration, test assertions, source
 selection/application, build commands, and runner behavior. Refresh derived
 digests, resolve the selection, run whitespace and fork-control checks, and
-report the proof instead. Any uncertainty or semantic difference requires the
+report the proof instead. This exception concerns the unchanged unit-test
+inputs only: accepting any patch still requires the complete nine-profile live
+suite with all patches at both endpoints. Any uncertainty or semantic difference
+requires the
 affected development checks and final coverage. This exception never spans an
 upstream rebase. After adaptation and candidate freeze following
 `develop-rebase`, complete the clean quarantine reassessment, tests-only controls

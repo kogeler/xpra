@@ -227,8 +227,10 @@ unchanged and an exact old/new applied-tree comparison contains only comments,
 copyright notices, or documentation—with identical paths, modes, executable
 data, configuration, test assertions, and runner behavior—this is a
 non-semantic refresh. Resolve the queue and run whitespace plus fork-control
-checks, but do not rerun focused, native, full, or live jobs. Record that proof
-in the handoff. A changed embedded source never qualifies: an upstream rebase
+checks, but do not rerun unchanged focused, native, or full unit-test jobs.
+The complete nine-profile live suite is still mandatory for patch acceptance.
+Record the equivalence proof in the handoff. A changed embedded source never
+qualifies: an upstream rebase
 requires complete final acceptance on that new base after adaptation. Other
 semantic changes or uncertainty use the affected development checks, followed
 by the corresponding final requirements.
@@ -244,7 +246,8 @@ make -C fork-maintenance test-wait RUN=wayland-master-regression-01
 ```
 
 Then run the case or stack with `PATCH_MODE=patched`. Every live acceptance run
-also names a nonempty reviewed case or stack; clean-source comparison remains
+requires the complete `stacks/develop` queue on both endpoints and belongs to
+the mandatory nine-profile suite; clean-source comparison remains
 an isolated/unit diagnostic and cannot publish a live `PASS`. All runners use
 generated source copies and never package the host worktree.
 
