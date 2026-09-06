@@ -11,6 +11,7 @@ series = [
   "wayland-empty-damage-throttle",
   "jph-parallel-build-objects",
   "debian-libva-codecs-package",
+  "packet-handler-error-boundary",
   "upstream-test-quarantine",
 ]
 
