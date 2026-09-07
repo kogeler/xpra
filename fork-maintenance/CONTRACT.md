@@ -237,7 +237,9 @@ Only these active cases are retained:
 8. `jph-parallel-build-objects`;
 9. `debian-libva-codecs-package`;
 10. `packet-handler-error-boundary`;
-11. `upstream-test-quarantine`.
+11. `wayland-pointer-scroll-normalization`;
+12. `gtk-client-scroll-deduplication`;
+13. `upstream-test-quarantine`.
 
 ## Stack contract
 
@@ -1459,6 +1461,19 @@ alpha-bearing RGB32 to alpha state; WebP is alpha-capable but is not itself
 proof of an alpha frame. Every H.264 stream is bound to complete VA contexts,
 and the owned stable-geometry stimulus must meet the same temporal, per-frame,
 and aggregate pixel-dominance thresholds.
+
+The two multi-window hardware profiles and GTK detach/transport-loss profiles
+also own complete-stack scroll acceptance. Sway-to-Xwayland axis input must
+produce exactly one remote scroll step per stimulus, including the first.
+Either a smooth packet or a discrete press/release pair may represent a step;
+forwarding both is a failure, even when both move in the same direction.
+XTEST discrete input must retain one press/release pair. The oracle does not
+require a downstream GTK filter or change upstream XI2 selection policy.
+Both require exact direction/distance at the native Wayland sink, actual remote
+GTK cumulative displacement and visible client feedback. Retained title-bound
+window identity, complete log tails through workload exit, raw fixture events
+and RGB captures are independently reparsed during collection. This extends
+existing profiles; it does not authorize case-only live tests or a reduced suite.
 
 ## Runtime storage contract
 
