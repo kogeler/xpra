@@ -6347,6 +6347,8 @@ class ManifestTest(unittest.TestCase):
                 "debian-libva-codecs-package",
                 "jph-parallel-build-objects",
                 "packet-handler-error-boundary",
+                "wayland-pointer-scroll-normalization",
+                "gtk-client-scroll-deduplication",
                 "upstream-test-quarantine",
                 "wayland-subsurface-stream-ownership",
                 "wayland-client-keymap-sync",
@@ -6388,6 +6390,8 @@ class ManifestTest(unittest.TestCase):
                 "jph-parallel-build-objects",
                 "debian-libva-codecs-package",
                 "packet-handler-error-boundary",
+                "wayland-pointer-scroll-normalization",
+                "gtk-client-scroll-deduplication",
                 "upstream-test-quarantine",
             ),
         )

@@ -1,0 +1,27 @@
+schema = 1
+slug = "wayland-pointer-scroll-normalization"
+kind = "production"
+title = "Normalize pointer wheel direction and distance for native Wayland"
+commit_subject = "Normalize pointer wheel direction and distance for native Wayland"
+patch_sha256 = "3d09a9b1d9adb10bd35910b61f824fade02cf5ce51e78fc7d5335f6e0153fb5b"
+dependencies = []
+paths = [
+  "tests/unittests/unit/wayland/pointer_scroll_client.c",
+  "tests/unittests/unit/wayland/pointer_scroll_test.py",
+  "xpra/wayland/server/pointer.pyx",
+]
+
+[tests]
+list = [
+  "unit.wayland.pointer_scroll_test",
+  "unit.server.subsystem.pointer_test",
+  "unit.client.subsystem.pointer_test",
+  "unit.pointer_loopback_test",
+  "wayland",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = ["live-rgb", "live-h264"]
