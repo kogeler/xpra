@@ -85,6 +85,7 @@ negotiation, generic compression, and the video selector:
 | `xpra/wayland/server/subsystem/window.py` | Creates Wayland models, publishes current format and image, orders popup damage, and performs the map-time refresh. |
 | `xpra/wayland/server/models/window.py` | Owns toplevel/popup properties; `pixel-format` is internal encoding state and `has-alpha` remains public capability. |
 | `xpra/wayland/server/models/subsurface_window.py` | Stores the current child image and its internal format before the child source is damaged; WSSO extends this model with retained normalized snapshots and a content generation. |
+| `xpra/server/window/metadata.py` | Serializes the internal current format for server information requests without adding a client window property. |
 | `xpra/server/source/window.py` | Creates one source per client/window and carries map properties to the source. |
 | `xpra/client/gui/window/backing.py` | Derives backing-specific `encoding.full_csc_modes`, possibly omitting values equal to connection defaults. |
 | `xpra/server/window/compress.py` | Owns stable transparency policy, opaque-region state, mmap precedence, damage batching, image extraction, and the later encode-side `pixel_format`. |
@@ -219,6 +220,16 @@ Both Wayland model classes declare `pixel-format` as an internal property. It
 is readable by the server-side source but is excluded from client window
 metadata. Models initialize it to the empty string, then update it from the
 new `ImageWrapper` whenever an image is published.
+
+Internal properties also pass through `WindowServer.get_window_info()` for
+`xpra info` and connected-client information requests. The shared metadata
+serializer therefore recognizes `pixel-format`, with the empty string as its
+default. It reports the actual GObject property, including future format
+names, and retains the ordinary `skip_defaults` and `XPRA_SKIP_METADATA`
+behavior. The property stays outside the public and dynamic model property
+lists, so frame changes do not become client window metadata. Without this
+serializer entry, every information request logs `unhandled property name:
+pixel-format` and omits the field even when the current buffer format is valid.
 
 Frame-policy state has conservative class defaults and becomes per-instance on
 first use. `damage()` performs a one-shot internal-property probe. If the model
@@ -496,12 +507,14 @@ cases are composed with it.
 - `xpra/wayland/server/models/window.py`;
 - `xpra/wayland/server/models/subsurface_window.py`;
 - `xpra/wayland/server/subsystem/window.py`;
+- `xpra/server/window/metadata.py`;
 - `xpra/server/window/video_compress.py`;
-- `tests/unittests/unit/wayland/window_test.py`; and
-- new downstream test
-  `tests/unittests/unit/server/window/initial_damage_test.py`.
+- `tests/unittests/unit/server/window/make_metadata_test.py`;
+- `tests/unittests/unit/wayland/window_test.py`;
+- new downstream test `tests/unittests/unit/server/window/initial_damage_test.py`; and
+- new downstream test `tests/unittests/unit/wayland/window_metadata_test.py`.
 
-The new test file carries the required `Copyright (C) 2026 kogeler` notice.
+Both new test files carry the required `Copyright (C) 2026 kogeler` notice.
 The patch has no downstream dependency and must remain selectable against the
 clean embedded source. In the complete stack, WSSO overlaps both Wayland model
 paths and the Wayland window subsystem while VPC overlaps
@@ -572,6 +585,7 @@ The production patch owns:
 
 - internal current-format properties on Wayland toplevel/popup and subsurface
   models;
+- current-format serialization in server information replies;
 - format-before-image publication and popup image-before-damage ordering;
 - one lazily acquired model-format signal owned by each applicable video
   source;
@@ -602,6 +616,19 @@ It does not:
   source.
 
 ## Regression design
+
+`unit.server.window.make_metadata_test` exercises the shared serializer with
+all four current formats, an unknown future format, empty/unset state,
+default omission and explicit metadata suppression. Its format-value
+assertions fail on clean source because the serializer drops this property.
+
+`unit.wayland.window_metadata_test` uses real GObject toplevel and subsurface
+models and the real `WindowServer.get_window_info()` method. It changes their
+current format, requires the exact value and unchanged size/alpha capability
+in each information reply, and rejects the metadata-error logging path. It
+also verifies that the format remains internal and absent from the public and
+dynamic client property lists. This module imports no native-extension stubs;
+the existing publication tests retain their separate controlled native seam.
 
 `unit.server.window.initial_damage_test` builds a controlled
 `WindowVideoSource` method surface without constructing real codecs. The tests
@@ -655,7 +682,7 @@ transaction regressions.
 
 The clean tests-only selection must fail non-vacuously at these behavior
 assertions on the frozen source. The patched standalone selection must pass
-both modules, and the same modules must pass through the complete stack after
+all four focused modules, and those modules must pass through the complete stack after
 the adjacent subsurface, timer, empty-damage, and video-cleanup cases compose.
 
 The native `wayland` target compiles/imports the adjacent Cython boundary and
@@ -719,8 +746,8 @@ picture proof still use their original IDs. WIS owns neither sequence
 allocation nor the separate WSSO raw RGB composition ledger.
 
 Startup layout, an isolated H.264 packet, a format log, or a fallback picture
-diagnostic is not acceptance. Both profiles run first with the atomic case
-selection and later with the complete stack. The separate
+diagnostic is not acceptance. Both profiles run only with the complete stack
+on both endpoints as members of the mandatory nine-profile live suite. The separate
 `live-wayland-subsurface` profile belongs to the subsurface stream case and is
 not a substitute for either frame-aware hardware profile.
 
@@ -787,15 +814,15 @@ After candidate freeze, fill only missing or invalidated requirements:
 | Validation | Required proof |
 | --- | --- |
 | Clean tests-only focused run | The new selector/publication tests reach the frozen source and fail for the absent behavior, not import or fixture errors. |
-| Patched standalone focused run | The complete `initial_damage_test` and `wayland.window_test` modules pass on the atomic case. |
+| Patched standalone focused run | All four declared focused modules pass on the atomic case, including metadata serialization and real-model information requests. |
 | Patched standalone `wayland` run | The current native Wayland extensions compile/import and the complete subsystem boundary passes. |
 | Complete-stack focused and `wayland` runs | Adjacent cases preserve frame, map, publication, selector, and resize behavior after composition. |
 | Patch, stack, whitespace, lint, and fork-control checks | Patch digest/path authority and repository integration are exact. |
 | Clean quarantine reassessment | Every assigned upstream failure is reproduced independently before patched full results are interpreted. |
 | `full`, `full-cython`, `full-no-compat` | The complete queue passes all maintained upstream unit-test legs. |
-| Atomic and stack `live-wayland-h264-hardware` | Real Vulkan opaque-frame H.264 and alpha auxiliary behavior both satisfy the fixed profile. |
-| Atomic and stack `live-wayland-opengl-h264-hardware` | The independent native OpenGL/render-node/viewport path satisfies the same frame policy. |
-| Seven complete-stack positive live profiles | Rendering, detach, transport loss, input, hardware video, lifecycle, and owned cleanup remain intact before publication. |
+| Complete-stack `live-wayland-h264-hardware` | Real Vulkan opaque-frame H.264 and alpha auxiliary behavior both satisfy the fixed profile. |
+| Complete-stack `live-wayland-opengl-h264-hardware` | The independent native OpenGL/render-node/viewport path satisfies the same frame policy. |
+| All nine complete-stack positive live profiles | `live-all STACK=develop` and `live-suite-check` prove rendering, detach, transport loss, input, clipboard, subsurface composition, hardware video, lifecycle, and owned cleanup on the current queue. |
 
 Retain the exact clean failure and every named patched result below
 `.artifacts/fork-maintenance/`. Stop at the first unexplained failure. Any
