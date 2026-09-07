@@ -7,6 +7,7 @@ import argparse
 import ast
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -83,6 +84,8 @@ INTERACTION_KEY_MARKER = "/tmp/xpra-hardware-keyboard-escape"
 INTERACTION_READY_MARKER = "/tmp/xpra-hardware-interaction-ready"
 INTERACTION_IDENTITY_ARTIFACT = "interaction.identity.json"
 INTERACTION_FIXTURE_SCRIPT = "/opt/xpra-fork-maintenance/interaction_fixture.py"
+INTERACTION_SCROLL_ARTIFACT = "interaction.scroll.jsonl"
+INTERACTION_SCROLL_BUTTONS = (5, 5, 4, 4, 7, 6)
 EMPTY_DAMAGE_PARENT_TITLE = "Xpra Empty Damage Parent"
 EMPTY_DAMAGE_CHILD_TITLE = "Xpra Empty Damage Child"
 EMPTY_DAMAGE_READY_MARKER = "/tmp/xpra-empty-damage-fixture-ready"
@@ -430,6 +433,8 @@ HARNESS_INPUTS = (
     INFRA_ROOT / "x11_clipboard_fixture.py",
     INFRA_ROOT / "subsurface_fixture.c",
     INFRA_ROOT / "xkb_xtest_driver.c",
+    INFRA_ROOT / "virtual_pointer_device.c",
+    INFRA_ROOT / "wlr-virtual-pointer-v1.xml",
     INFRA_ROOT / "xwd_to_png.py",
     SELECTION_TOOL,
     BACKGROUND_SUPERVISOR,
@@ -454,6 +459,8 @@ BUILD_CONTEXT_INPUTS = (
     INFRA_ROOT / "x11_clipboard_fixture.py",
     INFRA_ROOT / "subsurface_fixture.c",
     INFRA_ROOT / "xkb_xtest_driver.c",
+    INFRA_ROOT / "virtual_pointer_device.c",
+    INFRA_ROOT / "wlr-virtual-pointer-v1.xml",
     PAYLOAD_HELPER,
 )
 CONTAINER_PAYLOAD = "/opt/xpra-fork-maintenance/container_payload.py"
@@ -604,7 +611,7 @@ SERVER_ARTIFACT_PATTERNS = (
     re.compile(r"zed\..+"),
     re.compile(r"vkcube\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"opengl\.(?:exit|pid|stderr|stdout)"),
-    re.compile(r"interaction\.(?:exit|identity\.json|stderr|stdout)"),
+    re.compile(r"interaction\.(?:exit|identity\.json|scroll\.jsonl|stderr|stdout)"),
     re.compile(r"keyboard-fixture\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"clipboard-fixture\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"empty-damage\.(?:exit|pid|stderr|stdout)"),
@@ -613,7 +620,7 @@ SERVER_ARTIFACT_PATTERNS = (
 CLIENT_ARTIFACT_PATTERNS = (
     re.compile(r"client(?:\..+|-va.*)"),
     re.compile(r"transport-proxy\..+"),
-    re.compile(r"sway(?:\..+|-child\.env)"),
+    re.compile(r"sway(?:\..+|-child\.env|-pointer\.(?:stdout|stderr))"),
     re.compile(r"xwayland-xdpyinfo\.txt"),
     re.compile(r"(?:xvfb|openbox|picom)\..+"),
     re.compile(r"clipboard-(?:consumer-[a-z0-9-]+|monitor|owner)\.(?:exit|pid|stderr|stdout)"),
@@ -11396,6 +11403,249 @@ def finalize_wayland_keyboard_evidence(
     return interaction
 
 
+def parse_interaction_scroll_events(text: str) -> list[dict[str, Any]]:
+    if len(text.encode("utf-8")) > 16 * 1024 or (text and not text.endswith("\n")):
+        raise LabFailure("scroll fixture stream is oversized or incomplete")
+    events = []
+    position = [0.0, 0.0]
+    previous_time = 0
+    for line in text.splitlines():
+        try:
+            event = json.loads(line, object_pairs_hook=_json_object_without_duplicates)
+        except (ValueError, TypeError) as error:
+            raise LabFailure("scroll fixture event is not JSON") from error
+        if (
+            type(event) is not dict
+            or set(event) != {"schema", "seq", "monotonic_ns", "delta", "position"}
+            or type(event["schema"]) is not int or event["schema"] != 1
+            or type(event["seq"]) is not int or event["seq"] != len(events)
+            or type(event["monotonic_ns"]) is not int or event["monotonic_ns"] <= previous_time
+            or len(events) >= 64
+        ):
+            raise LabFailure("scroll fixture event identity is invalid")
+        for key in ("delta", "position"):
+            values = event[key]
+            if type(values) is not list or len(values) != 2 or any(
+                type(value) not in (int, float) or abs(value) > 1_000_000
+                or not math.isfinite(value) for value in values
+            ):
+                raise LabFailure("scroll fixture coordinates are invalid")
+        if event["delta"] == [0, 0]:
+            raise LabFailure("scroll fixture recorded an empty event")
+        position = [value + delta for value, delta in zip(position, event["delta"])]
+        if event["position"] != position:
+            raise LabFailure("scroll fixture cumulative displacement is inconsistent")
+        previous_time = event["monotonic_ns"]
+        events.append(event)
+    return events
+
+
+def interaction_scroll_checks(evidence: Any) -> dict[str, bool]:
+    expected_deltas = [[0, 1.5], [0, 1.5], [0, -1.5], [0, -1.5], [1.5, 0], [-1.5, 0]]
+    if type(evidence) is not dict:
+        evidence = {}
+    driver = evidence.get("driver")
+    expected_axes = [[0, 15.0, 120], [0, 15.0, 120], [0, -15.0, -120],
+                     [0, -15.0, -120], [1, 15.0, 120], [1, -15.0, -120]]
+    events = evidence.get("events")
+    hashes = evidence.get("pixel_hashes")
+    try:
+        valid_events = type(events) is list and parse_interaction_scroll_events(
+            "".join(json.dumps(event, allow_nan=False) + "\n" for event in events)
+        ) == events
+    except (LabFailure, ValueError, TypeError, OverflowError):
+        valid_events = False
+
+    def exact(actual: Any, expected: Any) -> bool:
+        # JSON type equality: bool must not stand in for a button or delta.
+        try:
+            return json.dumps(actual, allow_nan=False) == json.dumps(expected, allow_nan=False)
+        except (ValueError, TypeError, OverflowError):
+            return False
+
+    # One stimulus may use either wire representation, never both. In
+    # particular, initializing an X11 scroll valuator may leave only a discrete
+    # event for the first step. Do not require a particular client filter or
+    # allow a second same-direction operation to disappear from the accounting.
+    packets = evidence.get("packets")
+    valid_packets = type(packets) is list
+    offset = 0
+    if valid_packets:
+        for button, distance in zip(INTERACTION_SCROLL_BUTTONS, (-1000, -1000, 1000, 1000, 1000, -1000)):
+            if driver == "sway-axis" and exact(packets[offset:offset + 1], [["wheel", button, distance]]):
+                offset += 1
+            elif exact(packets[offset:offset + 2], [["button", button, True], ["button", button, False]]):
+                offset += 2
+            else:
+                valid_packets = False
+                break
+        valid_packets = valid_packets and offset == len(packets)
+
+    return {
+        "scroll_driver_exact": type(driver) is str and driver in {"sway-axis", "x11-discrete"},
+        "scroll_client_packets_exact": valid_packets,
+        "scroll_native_axis_exact": exact(evidence.get("axes"), expected_axes),
+        "scroll_stimuli_exact": exact(
+            evidence.get("stimuli"),
+            [[index, button] for index, button in enumerate(INTERACTION_SCROLL_BUTTONS, 1)]
+            if driver == "sway-axis" else [],
+        ),
+        "scroll_application_displacement_exact": (
+            valid_events and len(events) == 6
+            and [event.get("delta") for event in events] == expected_deltas
+        ),
+        "scroll_visible_response": (
+            type(hashes) is list and len(hashes) == 7
+            and all(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes)
+            and all(left != right for left, right in pairwise(hashes))
+        ),
+    }
+
+
+def interaction_scroll_evidence(directory: Path, record: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild the complete scroll stream after both workloads have exited."""
+    if type(record) is not dict:
+        raise LabFailure("scroll input record is missing")
+    keys = ("driver", "wid", "client_log_start", "server_log_start")
+    if not all(key in record for key in keys) or any(
+        type(record[key]) is not int or record[key] < (1 if key == "wid" else 0)
+        for key in keys[1:]
+    ):
+        raise LabFailure("scroll input identity is invalid")
+    evidence = {key: record[key] for key in keys}
+    if type(record["driver"]) is not str or record["driver"] not in {"sway-axis", "x11-discrete"}:
+        raise LabFailure("scroll input driver is invalid")
+    info_name = "server-info-interaction.txt" if record["driver"] == "sway-axis" else "server-info.txt"
+    info = directory / info_name
+    ensure_private_regular_file(info)
+    if record["wid"] != server_xpra_window_id(info, (INTERACTION_READY_TITLE,)):
+        raise LabFailure("scroll input does not target the title-bound fixture")
+    stream = directory / INTERACTION_SCROLL_ARTIFACT
+    ensure_private_regular_file(stream)
+    if stream.stat().st_size > 16 * 1024:
+        raise LabFailure("scroll fixture stream is oversized")
+    evidence["events"] = parse_interaction_scroll_events(stream.read_text(encoding="utf-8"))
+    logs = {}
+    for role, filename in (("client", "client.stdout"), ("server", "server.stderr")):
+        path = directory / filename
+        ensure_private_regular_file(path)
+        offset = record[f"{role}_log_start"]
+        size = path.stat().st_size
+        if offset > size or size - offset > FRAME_LOG_SCAN_BYTES:
+            raise LabFailure("scroll log interval is invalid or oversized")
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            logs[role] = handle.read().decode("utf-8", errors="strict")
+    packets = []
+    for line in logs["client"].splitlines():
+        match = re.search(r"(?:button packet: |send_wheel_delta\(\.\.\) )(\[.*\])$", line)
+        if not match:
+            continue
+        try:
+            packet = ast.literal_eval(match.group(1))
+        except (ValueError, SyntaxError) as error:
+            raise LabFailure("scroll packet log is malformed") from error
+        if type(packet) is not list or not packet:
+            raise LabFailure("scroll packet log is malformed")
+        if packet[0] in ("wheel-motion", "pointer-wheel"):
+            if len(packet) != 8 or any(type(packet[index]) is not int for index in (1, 2, 3)):
+                raise LabFailure("scroll wheel packet fields are malformed")
+            if packet[1] != record["wid"]:
+                raise LabFailure("scroll wheel packet targets another window")
+            packets.append(["wheel", packet[2], packet[3]])
+        elif packet[0] == "pointer-button":
+            if len(packet) != 8 or type(packet[4]) is not int or type(packet[5]) is not bool:
+                raise LabFailure("scroll button packet fields are malformed")
+            if packet[4] in (4, 5, 6, 7):
+                if type(packet[3]) is not int or packet[3] != record["wid"]:
+                    raise LabFailure("scroll button packet targets another window")
+                packets.append(["button", packet[4], packet[5]])
+        else:
+            raise LabFailure("unexpected pointer packet in scroll interval")
+    evidence["packets"] = packets
+    evidence["axes"] = [[int(axis), float(distance), int(discrete)] for axis, distance, discrete in re.findall(
+        r"do_wheel_motion\(\d+, (\d+), (-?[\d.]+), (-?\d+)\)", logs["server"]
+    )]
+    evidence["stimuli"] = []
+    if record["driver"] == "sway-axis":
+        path = directory / "sway-pointer.stdout"
+        ensure_private_regular_file(path)
+        if path.stat().st_size > 1024:
+            raise LabFailure("virtual pointer stimulus stream is oversized")
+        text = path.read_text(encoding="utf-8")
+        if not text.endswith("\n"):
+            raise LabFailure("virtual pointer stimulus stream is incomplete")
+        error_path = directory / "sway-pointer.stderr"
+        ensure_private_regular_file(error_path)
+        if error_path.stat().st_size:
+            raise LabFailure("virtual pointer device reported an error")
+        lines = text.splitlines()
+        if not lines or lines[0] != "pointer-capability-ready" or any(
+            re.fullmatch(r"wheel [1-6] [4-7]", line) is None for line in lines[1:]
+        ):
+            raise LabFailure("virtual pointer stimulus stream is malformed")
+        evidence["stimuli"] = [list(map(int, line.split()[1:])) for line in lines[1:]]
+    pixel_hashes = []
+    for name in ("interaction-after", *(f"interaction-scroll-{index}" for index in range(1, 7))):
+        path = directory / f"{name}.rgb.png"
+        ensure_private_regular_file(path)
+        with Image.open(path) as image:
+            pixel_hashes.append(hashlib.sha256(image.convert("RGB").tobytes()).hexdigest())
+    evidence["pixel_hashes"] = pixel_hashes
+    evidence["checks"] = interaction_scroll_checks(evidence)
+    return evidence
+
+
+def exercise_interaction_scroll(
+    server: str, client: str, window_id: str, wid: int, directory: Path,
+    geometry: dict[str, int], sway_socket: str | None,
+) -> dict[str, Any]:
+    record = {
+        "driver": "sway-axis" if sway_socket else "x11-discrete", "wid": wid,
+        "client_log_start": container_artifact_size(client, "client.stdout"),
+        "server_log_start": container_artifact_size(server, "server.stderr"),
+    }
+    if sway_socket:
+        sway_base = ["env", "XDG_RUNTIME_DIR=/tmp/client-runtime", "swaymsg", "-s", sway_socket]
+        podman_exec(client, [*sway_base, "seat", "seat0", "cursor", "set",
+                            str(geometry["x"] + geometry["width"] // 2),
+                            str(geometry["y"] + geometry["height"] // 2)])
+    previous = (directory / "interaction-after.rgb.png").read_bytes()
+    for index, button in enumerate(INTERACTION_SCROLL_BUTTONS, 1):
+        if sway_socket:
+            # The persistent virtual device emits a protocol wheel step through
+            # Sway. Do not use `swaymsg cursor press`: Sway 1.10.1 sends value120=1.
+            podman_exec(client, ["python3", "-c", (
+                "import socket, sys\n"
+                "with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as control:\n"
+                "    control.sendto(sys.argv[1].encode('ascii'), '/tmp/xpra-virtual-pointer-control')\n"
+            ), f"{index} {button}"])
+        else:
+            podman_exec(client, ["env", f"DISPLAY={CLIENT_DISPLAY}", "xdotool", "click", str(button)])
+
+        def received() -> bool:
+            _offset, text = read_container_log_deltas(
+                server, {INTERACTION_SCROLL_ARTIFACT: 0},
+                markers={INTERACTION_SCROLL_ARTIFACT: ('"schema"',)},
+            )[INTERACTION_SCROLL_ARTIFACT]
+            events = parse_interaction_scroll_events(text)
+            if len(events) > index:
+                raise LabFailure(f"scroll step {index}: {len(events)} application events after {index} stimuli")
+            return len(events) == index
+
+        wait_for(f"remote scroll step {index}", received, timeout=5)
+
+        def changed() -> bool:
+            name = f"interaction-scroll-{index}"
+            capture_xwd(client, directory, f"{name}.xwd", window_id=window_id, announce=False)
+            convert_xwd(directory, name)
+            return (directory / f"{name}.rgb.png").read_bytes() != previous
+
+        wait_for(f"visible scroll step {index}", changed, timeout=5)
+        previous = (directory / f"interaction-scroll-{index}.rgb.png").read_bytes()
+    return record
+
+
 def exercise_interaction_fixture(
     server: str,
     client: str,
@@ -11403,6 +11653,8 @@ def exercise_interaction_fixture(
     directory: Path,
     *,
     close_with_keyboard: bool,
+    xpra_wid: int,
+    sway_socket: str | None,
 ) -> dict[str, Any]:
     """Forward pointer and optional keyboard input through the real Xpra client."""
     geometry = window_geometry(client, window_id)
@@ -11466,6 +11718,7 @@ def exercise_interaction_fixture(
 
     wait_for("visible GTK pointer response", pointer_changed_frame)
     assert after is not None
+    scroll = exercise_interaction_scroll(server, client, window_id, xpra_wid, directory, geometry, sway_socket)
     keyboard = False
     if close_with_keyboard:
         podman_exec(
@@ -11500,6 +11753,7 @@ def exercise_interaction_fixture(
         "keyboard_escape_received": keyboard,
         "pointer_changed_pixels": True,
         "pointer_marker_present": True,
+        "scroll": scroll,
         "before": before,
         "after": after,
     }
@@ -17883,6 +18137,28 @@ def saved_source_alpha_evidence(
     }
 
 
+def capture_black_sway_background(
+    container: str, directory: Path, wayland_display: str, sway_base: list[str],
+) -> dict[str, Any]:
+    background: dict[str, Any] = {}
+
+    def ready() -> bool:
+        nonlocal background
+        background = capture_grim(container, directory, "root-before", wayland_display)
+        return (background["image"]["quantized_rgb_colors"] == 1
+                and background["image"]["dominant_rgb"] == [0, 0, 0])
+
+    # Headless Sway's new virtual device also creates a software cursor. Hide
+    # it only for this pre-Xpra capture: Sway hiding also clears pointer focus.
+    podman_exec(container, [*sway_base, "seat", "seat0", "hide_cursor", "100"])
+    try:
+        podman_exec(container, [*sway_base, "seat", "seat0", "cursor", "set", "100", "100"])
+        wait_for("controlled black Sway background", ready, timeout=5)
+    finally:
+        podman_exec(container, [*sway_base, "seat", "seat0", "hide_cursor", "0"])
+    return background
+
+
 def start_sway_desktop(
     container: str,
     directory: Path,
@@ -17952,6 +18228,17 @@ def start_sway_desktop(
         container,
         [*sway_base, "output", "HEADLESS-1", "bg", "#000000", "solid_color"],
     )
+    # Headless Sway has no pointer capability. Plug in one persistent virtual
+    # device before Xwayland/client startup; XTEST alone does not establish a
+    # Wayland pointer, so cursor axis commands would otherwise go nowhere.
+    podman_exec(container, [
+        *sway_base, "exec",
+        "exec /usr/local/bin/xpra-virtual-pointer-device "
+        ">/artifacts/sway-pointer.stdout 2>/artifacts/sway-pointer.stderr",
+    ])
+    wait_for("Sway pointer capability", lambda: container_artifact_contains(
+        container, "sway-pointer.stdout", "pointer-capability-ready",
+    ))
     podman_exec(
         container,
         [
@@ -18036,17 +18323,9 @@ def start_sway_desktop(
         "sway_socket": sway_socket,
         "wayland_display": wayland_display,
     }
-    evidence["background_capture"] = capture_grim(
-        container,
-        directory,
-        "root-before",
-        wayland_display,
+    evidence["background_capture"] = capture_black_sway_background(
+        container, directory, wayland_display, sway_base,
     )
-    background = evidence["background_capture"]
-    if background["image"]["quantized_rgb_colors"] != 1 or background["image"][
-        "dominant_rgb"
-    ] != [0, 0, 0]:
-        raise LabFailure("the controlled black Sway background was not established")
     evidence["background_expected_rgb"] = [0, 0, 0]
     (directory / "compositor.json").write_text(
         json.dumps(evidence, indent=2, sort_keys=True) + "\n",
@@ -18751,6 +19030,7 @@ def classify_boundaries(
         interaction_checks = {
             "pointer_marker_present": bool(interaction.get("pointer_marker_present")),
             "pointer_changed_pixels": bool(interaction.get("pointer_changed_pixels")),
+            **interaction_scroll_checks(interaction.get("scroll")),
         }
         if args.application in MULTIWINDOW_HARDWARE_APPLICATIONS:
             interaction_checks.update(interaction_alpha_content_checks(interaction))
@@ -19613,6 +19893,8 @@ def run_scenario(
                 interaction_window[0],
                 directory,
                 close_with_keyboard=False,
+                xpra_wid=interaction_xpra_wid,
+                sway_socket=compositor.get("sway_socket"),
             )
             if hardware_h264_interval is None:
                 raise LabFailure("hardware H.264 phase baseline is unavailable")
@@ -19656,6 +19938,8 @@ def run_scenario(
                 window_id,
                 directory,
                 close_with_keyboard=args.lifecycle == "application-exit",
+                xpra_wid=xpra_wid,
+                sway_socket=compositor.get("sway_socket"),
             )
         elif args.application == "keyboard":
             assert keyboard_scenario is not None
@@ -19967,6 +20251,8 @@ def run_scenario(
         collected_containers.add(server)
         pull_all_container_artifacts(client, directory, "client")
         collected_containers.add(client)
+        if args.application in MULTIWINDOW_HARDWARE_APPLICATIONS | {"gtk"}:
+            interaction["scroll"] = interaction_scroll_evidence(directory, interaction["scroll"])
         if args.application == "keyboard":
             assert keyboard_scenario is not None
             assert keyboard_scenario_sha256 is not None

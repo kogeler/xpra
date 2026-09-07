@@ -206,6 +206,8 @@ The currently retained active cases are:
 - `jph-parallel-build-objects`;
 - `debian-libva-codecs-package`;
 - `packet-handler-error-boundary`;
+- `wayland-pointer-scroll-normalization`;
+- `gtk-client-scroll-deduplication`;
 - `upstream-test-quarantine` (the single test-only duty case).
 
 The quarantine case is not a production fix. It may change only the exact
@@ -471,8 +473,16 @@ complements the Vulkan gate; neither is a substitute for the other.
 The fixed complete-stack positive live profiles remain Zed RGB, adaptive-alpha
 Zed H.264, RGB detach, RGB transport-loss fault injection, native-Wayland
 client-keymap input, multi-window Vulkan hardware, and multi-window OpenGL
-hardware, clipboard synchronization, and subsurface composition. The
-`live-x11-clipboard` gate uses the complete stack on the X11 client and
+hardware, clipboard synchronization, and subsurface composition.
+The two hardware profiles and GTK detach/transport-loss profiles also require
+real client scroll input, exact packet/native-axis accounting, remote GTK
+displacement and visible feedback. Hardware uses Sway-to-Xwayland smooth input
+without prescribing a client filtering implementation; GTK lifecycle profiles
+use genuine XTEST discrete input. Each stimulus must yield exactly one remote
+scroll step, including the first; forwarding both representations is a failure.
+Collection reparses the complete post-input log tails and
+fixture stream, so late duplicates cannot be hidden by an earlier screenshot.
+The `live-x11-clipboard` gate uses the complete stack on the X11 client and
 native-Wayland server endpoint, disables the unrelated client
 XSettings and XI2 paths, and runs fresh `both`, `to-server`, and `off` sessions.
 Its Wayland reverse owner is armed by a private command but claims inside a real

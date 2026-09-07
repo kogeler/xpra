@@ -65,12 +65,13 @@ server:
 client:
   base:
     - "--minimal"
+    - "--mousewheel=on"
     - "--compressors=none"
     - "--reconnect=no"
     - "--bandwidth-detection=no"
   diagnostics:
     - "-d"
-    - "draw,paint,cairo,window,gtk,alpha,libva,keyboard"
+    - "draw,paint,cairo,window,gtk,alpha,libva,keyboard,pointer"
   # Keep unrelated XSettings and XI2 filter leases out of the clipboard gate.
   clipboard:
     both:

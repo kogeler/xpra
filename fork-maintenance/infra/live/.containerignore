@@ -19,3 +19,5 @@
 !wayland_clipboard_fixture.py
 !x11_clipboard_fixture.py
 !xkb_xtest_driver.c
+!virtual_pointer_device.c
+!wlr-virtual-pointer-v1.xml
