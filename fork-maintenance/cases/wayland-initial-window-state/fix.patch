@@ -662,6 +662,83 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +
 +if __name__ == "__main__":
 +    unittest.main()
+diff --git a/tests/unittests/unit/server/window/make_metadata_test.py b/tests/unittests/unit/server/window/make_metadata_test.py
+index 1cf16be428949d220871a757cc968823cec12088..5d6a44218eab91f654b0622085fd9bbff2bfddde 100755
+--- a/tests/unittests/unit/server/window/make_metadata_test.py
++++ b/tests/unittests/unit/server/window/make_metadata_test.py
+@@ -12,2 +12,3 @@ import os
+ import unittest
++from unittest.mock import patch
+ 
+@@ -88,2 +89,22 @@ class TestMakeWindowMetadata(unittest.TestCase):
+ 
++    def test_pixel_format(self):
++        for pixel_format in ("BGRX", "BGRA", "RGBX", "RGBA", "future-format"):
++            for skip_defaults in (False, True):
++                with self.subTest(pixel_format=pixel_format, skip_defaults=skip_defaults):
++                    w = _Window(**{"pixel-format": pixel_format})
++                    result = make_window_metadata(w, "pixel-format", skip_defaults=skip_defaults)
++                    self.assertEqual(result, {"pixel-format": pixel_format})
++
++    def test_pixel_format_defaults(self):
++        for pixel_format in ("", None):
++            with self.subTest(pixel_format=pixel_format):
++                w = _Window(**{"pixel-format": pixel_format})
++                self.assertEqual(make_window_metadata(w, "pixel-format"), {"pixel-format": pixel_format})
++                self.assertEqual(make_window_metadata(w, "pixel-format", skip_defaults=True), {})
++
++    def test_skip_pixel_format(self):
++        w = _Window(**{"pixel-format": "BGRA"})
++        with patch("xpra.server.window.metadata.SKIP_METADATA", ["pixel-format"]):
++            self.assertEqual(make_window_metadata(w, "pixel-format"), {})
++
+     def test_legacy_content_type_is_compatibility_only(self):
+diff --git a/tests/unittests/unit/wayland/window_metadata_test.py b/tests/unittests/unit/wayland/window_metadata_test.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..18109a9033c76675ec60ba58cbd762c61e40ca97
+--- /dev/null
++++ b/tests/unittests/unit/wayland/window_metadata_test.py
+@@ -0,0 +1,40 @@
++#!/usr/bin/env python3
++# This file is part of Xpra.
++# Copyright (C) 2026 kogeler
++# Xpra is released under the terms of the GNU GPL v2, or, at your option, any
++# later version. See the file COPYING for details.
++
++import unittest
++from unittest.mock import patch
++
++from xpra.server.subsystem.window import WindowServer
++from xpra.wayland.server.models.window import Window
++from xpra.wayland.server.models.subsurface_window import SubsurfaceWindow
++
++
++class WaylandWindowMetadataTest(unittest.TestCase):
++
++    def test_pixel_format_is_internal_but_available_in_window_info(self):
++        server = WindowServer()
++        windows = (
++            Window({"geometry": (0, 0, 64, 32), "has-alpha": True}),
++            SubsurfaceWindow(64, 32),
++        )
++        for window in windows:
++            with self.subTest(model=type(window).__name__):
++                self.assertIn("pixel-format", window.get_internal_property_names())
++                self.assertNotIn("pixel-format", window.get_property_names())
++                self.assertNotIn("pixel-format", window.get_dynamic_property_names())
++                for pixel_format in ("", "BGRX", "BGRA", "RGBX", "RGBA", ""):
++                    with self.subTest(pixel_format=pixel_format):
++                        window._updateprop("pixel-format", pixel_format)
++                        with patch("xpra.server.window.metadata.get_util_logger") as get_logger:
++                            info = server.get_window_info(window)
++                        self.assertEqual(info.get("pixel-format"), pixel_format)
++                        self.assertEqual(info["size"], (64, 32))
++                        self.assertTrue(info["has-alpha"])
++                        get_logger.assert_not_called()
++
++
++if __name__ == "__main__":
++    unittest.main()
 diff --git a/tests/unittests/unit/wayland/window_test.py b/tests/unittests/unit/wayland/window_test.py
 index e047159aaf7649f342161a02c27840115be82ebd..d81bf2c582b2548b163eb3604cdbeac361f25915 100644
 --- a/tests/unittests/unit/wayland/window_test.py
@@ -840,6 +917,15 @@ index e047159aaf7649f342161a02c27840115be82ebd..d81bf2c582b2548b163eb3604cdbeac3
 +        subsource.damage.assert_called_once_with(0, 0, 100, 80, {})
 +
      def test_mapped_damage_refreshes_without_immediate_acknowledgement(self):
+diff --git a/xpra/server/window/metadata.py b/xpra/server/window/metadata.py
+index e6c44e68435606bbc849af4c93f163d888725147..70de653c02632495ab59e518555a8ecb7444207c 100644
+--- a/xpra/server/window/metadata.py
++++ b/xpra/server/window/metadata.py
+@@ -43,2 +43,4 @@ DEFAULT_VALUES: dict[str, int | str | bool | tuple | dict] = {
+     "depth": 24,
++    # internal current-frame state exposed by xpra info:
++    "pixel-format": "",
+     # the colourspace this window's pixels are in:
 diff --git a/xpra/server/window/video_compress.py b/xpra/server/window/video_compress.py
 index 8c70c4ecaf4ac1e6f34577b2a973b943aef6b8ab..49c870c572c89fbcca063bad3368cc416fb04b41 100644
 --- a/xpra/server/window/video_compress.py
