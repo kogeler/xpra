@@ -77,6 +77,8 @@ HARNESS_INPUTS = (
     INFRA_ROOT / "x11_clipboard_fixture.py",
     INFRA_ROOT / "subsurface_fixture.c",
     INFRA_ROOT / "xkb_xtest_driver.c",
+    INFRA_ROOT / "virtual_pointer_device.c",
+    INFRA_ROOT / "wlr-virtual-pointer-v1.xml",
     INFRA_ROOT / "xwd_to_png.py",
     SELECTION_TOOL,
     BACKGROUND_SUPERVISOR,
@@ -2169,6 +2171,29 @@ def subsurface_fixture_artifact_evidence_matches(
     )
 
 
+def scroll_fixture_artifact_evidence_matches(
+    embedded: dict[str, Any], scenario_root: Path, runner, application: str,
+) -> bool:
+    interaction = embedded.get("interaction")
+    scroll = interaction.get("scroll") if isinstance(interaction, dict) else None
+    if application not in {"hardware", "opengl", "gtk"}:
+        return False
+    driver = "x11-discrete" if application == "gtk" else "sway-axis"
+    try:
+        reconstructed = runner.interaction_scroll_evidence(scenario_root, scroll)
+    except (OSError, ValueError, TypeError, IndexError, runner.LabFailure):
+        return False
+    classification = embedded.get("classification")
+    boundaries = classification.get("boundaries") if isinstance(classification, dict) else None
+    classified = boundaries.get("interaction") if isinstance(boundaries, dict) else None
+    return bool(
+        reconstructed == scroll and scroll.get("driver") == driver
+        and all(reconstructed["checks"].values())
+        and isinstance(classified, dict)
+        and all(classified.get(key) is value for key, value in reconstructed["checks"].items())
+    )
+
+
 def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
     runner = live_runner_module()
     root = report.parent
@@ -2300,6 +2325,10 @@ def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
             scenario_root,
             runner,
             clipboard_policies[scenario_index],
+        ):
+            return False
+        if payload.get("application") in {"hardware", "opengl", "gtk"} and not (
+            scroll_fixture_artifact_evidence_matches(embedded, scenario_root, runner, payload["application"])
         ):
             return False
         if (

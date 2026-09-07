@@ -12,6 +12,8 @@ series = [
   "jph-parallel-build-objects",
   "debian-libva-codecs-package",
   "packet-handler-error-boundary",
+  "wayland-pointer-scroll-normalization",
+  "gtk-client-scroll-deduplication",
   "upstream-test-quarantine",
 ]
 

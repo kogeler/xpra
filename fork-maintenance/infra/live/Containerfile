@@ -388,6 +388,16 @@ RUN install -d /opt/xpra-install/usr/local/bin \
         $(pkg-config --cflags --libs x11 xtst) \
         -o /opt/xpra-install/usr/local/bin/xpra-xkb-xtest-driver
 
+COPY virtual_pointer_device.c /tmp/xpra-virtual-pointer-device.c
+COPY wlr-virtual-pointer-v1.xml /tmp/wlr-virtual-pointer-v1.xml
+
+RUN wayland-scanner client-header /tmp/wlr-virtual-pointer-v1.xml /tmp/wlr-virtual-pointer-client-protocol.h \
+    && wayland-scanner private-code /tmp/wlr-virtual-pointer-v1.xml /tmp/wlr-virtual-pointer-protocol.c \
+    && cc -std=c11 -O2 -Wall -Wextra -Werror \
+        /tmp/xpra-virtual-pointer-device.c /tmp/wlr-virtual-pointer-protocol.c \
+        $(pkg-config --cflags --libs wayland-client) \
+        -o /opt/xpra-install/usr/local/bin/xpra-virtual-pointer-device
+
 
 FROM docker.io/library/debian:13-slim AS client
 
@@ -472,7 +482,8 @@ RUN test -d /usr/local/share/xpra/css \
     && XPRA_RESOURCES_DIR=/usr/local/share/xpra \
             xvfb-run --auto-servernum python3 -c \
             'from xpra.client.gtk3 import client_base; from xpra.x11.common import has_pywindow_lookup; from xpra.x11.gtk import bindings, display_source; from xpra.x11.selection.clipboard import X11Clipboard; assert has_pywindow_lookup()' \
-    && test -x /usr/local/bin/xpra-xkb-xtest-driver
+    && test -x /usr/local/bin/xpra-xkb-xtest-driver \
+    && test -x /usr/local/bin/xpra-virtual-pointer-device
 
 RUN useradd --create-home --uid 1001 --shell /bin/bash lab \
     && install -d -o lab -g lab -m 0700 /artifacts /run/user/1001

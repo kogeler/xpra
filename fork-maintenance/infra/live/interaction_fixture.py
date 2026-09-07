@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from time import monotonic_ns
 
 import gi
 
@@ -20,6 +21,7 @@ CLICK_MARKER = Path("/tmp/xpra-hardware-pointer-clicked")
 KEY_MARKER = Path("/tmp/xpra-hardware-keyboard-escape")
 READY_MARKER = Path("/tmp/xpra-hardware-interaction-ready")
 IDENTITY_ARTIFACT = Path("/artifacts/interaction.identity.json")
+SCROLL_ARTIFACT = Path("/artifacts/interaction.scroll.jsonl")
 
 
 def process_identity() -> dict[str, object]:
@@ -72,6 +74,10 @@ def publish_process_identity() -> None:
 
 def main() -> int:
     publish_process_identity()
+    scroll_stream = SCROLL_ARTIFACT.open("x", encoding="utf-8", buffering=1)
+    scroll_position = [0.0, 0.0]
+    scroll_count = 0
+    failed = False
     for marker in (CLICK_MARKER, KEY_MARKER, READY_MARKER):
         marker.unlink(missing_ok=True)
     window = Gtk.Window(title=READY_TITLE)
@@ -114,6 +120,32 @@ def main() -> int:
         Gtk.main_quit()
         return True
 
+    def scrolled(_button: Gtk.Button, event: Gdk.EventScroll) -> bool:
+        nonlocal scroll_count, failed
+        # Observe the actual smooth axis delivered by the native Wayland
+        # toolkit, not its additional discrete emulation. No expected sequence
+        # or expected displacement is supplied to this fixture.
+        if event.direction != Gdk.ScrollDirection.SMOOTH:
+            return True
+        dx, dy = event.delta_x, event.delta_y
+        if dx == dy == 0:
+            return True
+        if scroll_count >= 64:
+            failed = True
+            Gtk.main_quit()
+            return True
+        scroll_position[0] += dx
+        scroll_position[1] += dy
+        scroll_stream.write(json.dumps({
+            "schema": 1, "seq": scroll_count, "monotonic_ns": monotonic_ns(),
+            "delta": [dx, dy], "position": scroll_position,
+        }) + "\n")
+        scroll_count += 1
+        button.set_label(f"SCROLL {scroll_position[0]:+.1f} / {scroll_position[1]:+.1f}")
+        return True
+
+    button.add_events(Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.SMOOTH_SCROLL_MASK)
+    button.connect("scroll-event", scrolled)
     button.connect("clicked", clicked)
     window.connect("key-press-event", key_pressed)
     window.add(button)
@@ -125,7 +157,8 @@ def main() -> int:
 
     GLib.idle_add(publish_ready)
     Gtk.main()
-    return 0
+    scroll_stream.close()
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

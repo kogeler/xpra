@@ -747,6 +747,36 @@ exact-live application activity, its hardware PID/argv, lifecycle capture, and
 server identity/PID fields, even if all report and artifact digests are
 internally refreshed.
 
+The GTK detach/transport-loss and both multi-window hardware profiles also
+exercise a fixed six-step scroll sequence: down twice, up twice, right, left.
+The hardware clients use a Sway virtual pointer through real Xwayland;
+the RGB GTK clients use XTEST discrete wheel clicks. Headless Sway retains one
+test-only virtual pointer from before Xwayland startup until owned container
+cleanup; otherwise its seat has no pointer capability. The device helper
+receives six bounded, ordered private commands and emits ordinary protocol
+wheel steps, retaining the stimulus ledger in `sway-pointer.stdout`. Do not use
+Sway 1.10.1's cursor-button emulation, which sends value-120 of 1 rather than 120.
+Only for the pre-Xpra baseline, the test compositor hides its idle cursor after
+100 ms; bounded capture readiness still requires a completely black frame.
+The runner restores `hide_cursor 0` before Xpra startup, since Sway hiding also
+clears pointer focus. It must not alter focus during the scroll workload.
+Never inject Xpra packets or expected application values. Axis tests require
+exactly six remote scroll operations, including the first step. Each may use
+one smooth packet or one discrete press/release pair, but never both. Discrete
+tests require six press/release pairs. No downstream GTK filter or override of
+upstream XI2 selection is required by the oracle. Both require matching native
+Wayland axis/value-120 values and the exact cumulative displacement recorded
+by the ordinary remote GTK fixture in `interaction.scroll.jsonl`.
+
+The oracle binds the target to the retained server title inventory, reparses
+both log suffixes from the pre-input boundary through workload exit, and
+checks all six visible client responses from retained RGB captures. Late extra
+input, wrong directions, scale, targets, inconsistent
+fixture counters and unchanged pixels fail. Collection independently rebuilds
+the evidence from the raw artifacts; report booleans are not an authority.
+This is part of the same mandatory nine-profile complete-stack suite, not an
+isolated scroll product or a tenth gate.
+
 Run both fixed multi-window hardware acceptance profiles with adaptive alpha:
 
 ```bash

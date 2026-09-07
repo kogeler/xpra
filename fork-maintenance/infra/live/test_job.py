@@ -1884,6 +1884,12 @@ class LiveJobTest(unittest.TestCase):
                 "mode": "application-exit",
                 "server_exited_after_application": True,
             }
+        interaction: dict[str, object] = {}
+        if application in {"gtk", "hardware", "opengl"}:
+            from test_scroll import artifacts as scroll_artifacts
+            driver = "x11-discrete" if application == "gtk" else "sway-axis"
+            scroll_record = scroll_artifacts(scenario_root, driver)
+            interaction["scroll"] = live_run.interaction_scroll_evidence(scenario_root, scroll_record)
         artifact_sha256 = {
             path.relative_to(scenario_root).as_posix(): job.sha256_file(path)
             for path in scenario_root.iterdir()
@@ -1907,12 +1913,14 @@ class LiveJobTest(unittest.TestCase):
                     "lifecycle": live_run.lifecycle_boundary_checks(
                         lifecycle_profile,
                         lifecycle,
-                    )
+                    ),
+                    "interaction": interaction.get("scroll", {}).get("checks", {}),
                 }
             },
             "cleanup": {"passed": True},
             "encoding": "rgb",
             "hardware": hardware,
+            "interaction": interaction,
             "h264_client_policy": "strict",
             "lifecycle": lifecycle,
             "lifecycle_profile": lifecycle_profile,
@@ -13099,7 +13107,8 @@ class LiveFixtureBuildOrderTest(unittest.TestCase):
                 ("subsurface_fixture.c", "xpra-subsurface-fixture"),
             ),
         ),
-        ("client", (("xkb_xtest_driver.c", "xpra-xkb-xtest-driver"),)),
+        ("client", (("xkb_xtest_driver.c", "xpra-xkb-xtest-driver"),
+                    ("virtual_pointer_device.c", "xpra-virtual-pointer-device"))),
     )
 
     def build_instructions(self, role: str) -> list[str]:
