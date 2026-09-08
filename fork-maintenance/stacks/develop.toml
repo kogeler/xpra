@@ -8,6 +8,7 @@ series = [
   "wayland-initial-window-state",
   "wayland-client-keymap-sync",
   "x11-client-clipboard-events",
+  "wayland-clipboard-token-coalescing",
   "wayland-empty-damage-throttle",
   "jph-parallel-build-objects",
   "debian-libva-codecs-package",

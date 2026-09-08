@@ -324,6 +324,19 @@ ordinary rendering/pixel, input, application-exit, container/network, and
 owned-cleanup checks still apply. A local conversion alone, an empty initial
 token, a reconnect, a longer timeout, or polling cannot satisfy the gate.
 
+Forward pastes now cross the real GTK text-buffer path: Ctrl+V, context-menu
+Paste, then Ctrl+V. Only `off` uses the asynchronous no-offer conversion
+control. The fixture then selects and shrinks its one 29-character line with
+real keyboard input. An owner-change-driven X11 PRIMARY consumer requests
+TARGETS and text, never taking ownership or polling. Under `both`, the final
+one-character selection must arrive after the last native key; denied reverse
+policies must retain their local content. `native-paste-input.jsonl` and
+`native-primary-consumer.jsonl` retain only bounded event metadata and content
+digests. Collection recomputes the stimulus, final-value and request-drain
+oracles, and checks both complete stdout/stderr streams of both peers for
+clipboard rate warnings and timeouts. Missing records or late failures cannot
+be accepted merely because the earlier paste succeeded.
+
 ## Native-Wayland subsurface stream ownership
 
 The subsurface member uses its fixed wrapper with the full stack; all case selections are rejected:
