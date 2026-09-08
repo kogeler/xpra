@@ -1,0 +1,30 @@
+schema = 1
+slug = "wayland-clipboard-token-coalescing"
+kind = "production"
+title = "Coalesce native Wayland clipboard owner changes"
+commit_subject = "Coalesce native Wayland clipboard owner changes"
+patch_sha256 = "7cbb079f95c32ba0b141eb23446a65fde9ff167ecba02480a4631254e0e25c98"
+dependencies = []
+paths = [
+  "tests/unittests/unit/clipboard_core_test.py",
+  "tests/unittests/unit/wayland/clipboard_token_test.py",
+  "xpra/clipboard/core.py",
+  "xpra/clipboard/proxy.py",
+  "xpra/wayland/server/clipboard.pyx",
+  "xpra/wayland/server/clipboard_token.py",
+]
+
+[tests]
+list = [
+  "unit.wayland.clipboard_token_test",
+  "unit.clipboard_core_test",
+  "unit.client.subsystem.clipboard_test",
+  "unit.server.subsystem.clipboard_test",
+  "wayland",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = ["live-x11-clipboard"]

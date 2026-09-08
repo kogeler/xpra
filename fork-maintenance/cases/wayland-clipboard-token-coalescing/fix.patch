@@ -1,0 +1,383 @@
+diff --git a/tests/unittests/unit/clipboard_core_test.py b/tests/unittests/unit/clipboard_core_test.py
+index 438eb8f24733594d85e9546e11eb7dd324e32356..e125bf748d86484ba33a04a0b3fbe86e369cc235 100644
+--- a/tests/unittests/unit/clipboard_core_test.py
++++ b/tests/unittests/unit/clipboard_core_test.py
+@@ -24,6 +24,9 @@ class ClipboardProxy:
+         self._clipboard_origin = ""
+         self.tokens = []
+ 
++    def cancel_emit_token(self) -> None:
++        pass
++
+     @staticmethod
+     def is_enabled() -> bool:
+         return True
+@@ -158,7 +161,9 @@ class ClipboardCoreTest(unittest.TestCase):
+         helper, proxy, _packets = self.make_helper(False)
+         helper.remember_clipboard_origin("CLIPBOARD", "origin")
+         proxy._clipboard_origin = "origin"
+-        helper.client_reset()
++        with patch.object(proxy, "cancel_emit_token") as cancel:
++            helper.client_reset()
++            cancel.assert_called_once_with()
+         self.assertEqual(helper._clipboard_origins, {})
+         self.assertEqual(proxy._clipboard_origin, "")
+ 
+diff --git a/tests/unittests/unit/wayland/clipboard_token_test.py b/tests/unittests/unit/wayland/clipboard_token_test.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2e25cbb29f370981431f88f3b92a51604196a0ee
+--- /dev/null
++++ b/tests/unittests/unit/wayland/clipboard_token_test.py
+@@ -0,0 +1,204 @@
++#!/usr/bin/env python3
++# This file is part of Xpra.
++# Copyright (C) 2026 kogeler
++# Xpra is released under the terms of the GNU GPL v2, or, at your option, any
++# later version. See the file COPYING for details.
++
++import os
++import unittest
++from time import monotonic, sleep
++from unittest.mock import patch
++
++from xpra.os_util import gi_import
++
++GLib = gi_import("GLib")
++SELECTIONS = ("CLIPBOARD", "PRIMARY")
++
++
++def spin_until(predicate, timeout=2) -> bool:
++    context = GLib.MainContext.default()
++    deadline = monotonic() + timeout
++    while monotonic() < deadline:
++        while context.pending() and monotonic() < deadline:
++            context.iteration(False)
++        if predicate():
++            return True
++        sleep(0.005)
++    return predicate()
++
++
++class Compositor:
++    def connect(self, _name, callback):
++        return callback
++
++    def disconnect(self, _name, _callback):
++        pass
++
++    def get_display_ptr(self):
++        return 0
++
++    def get_seat_ptr(self):
++        return 0
++
++
++class SelectionAPI:
++    def __init__(self):
++        self.reads = []
++        self.eager = False
++
++    def source_targets(self, source_ptr):
++        return ("UTF8_STRING",) if self.eager else (f"application/x-test-{source_ptr}",)
++
++    def send_source(self, source_ptr, target, fd):
++        self.reads.append((source_ptr, target))
++        os.write(fd, f"selection-{source_ptr}".encode())
++
++    def clear(self):
++        pass
++
++    def set_source(self, _source):
++        pass
++
++
++class ClipboardTokenTest(unittest.TestCase):
++    def make_helper(self):
++        # Missing native extensions are an environment failure, never a skip.
++        from xpra.wayland.server.clipboard import WaylandClipboard
++
++        helper = WaylandClipboard(
++            lambda *_packet: None, compositor=Compositor(),
++            **{"can-send": True, "can-receive": True},
++        )
++        helper.enable_selections(SELECTIONS)
++        events = {selection: [] for selection in SELECTIONS}
++        for selection, proxy in helper._clipboard_proxies.items():
++            proxy.selection_api = SelectionAPI()
++            proxy.set_want_targets(True)
++            proxy.connect("send-clipboard-token", lambda _proxy, token, out: out.append(token), events[selection])
++        self.addCleanup(helper.cleanup)
++        return helper, events
++
++    @staticmethod
++    def change(proxy, source_ptr):
++        if proxy._selection == "CLIPBOARD":
++            proxy.selection_changed(source_ptr)
++        else:
++            proxy.primary_selection_changed(source_ptr)
++
++    def test_burst_coalesces_and_delivers_latest_source(self):
++        helper, events = self.make_helper()
++        for proxy in helper._clipboard_proxies.values():
++            for source_ptr in range(1, 101):
++                self.change(proxy, 0)
++                self.change(proxy, source_ptr)
++        # A native owner burst must not become a wire packet per keystroke.
++        self.assertEqual([len(events[x]) for x in SELECTIONS], [1, 1])
++        self.assertTrue(spin_until(lambda: all(len(events[x]) == 2 for x in SELECTIONS)))
++        for selection, proxy in helper._clipboard_proxies.items():
++            self.assertEqual(events[selection][-1]["targets"], ("application/x-test-100",))
++            self.assertEqual(proxy._emit_token_timer, 0)
++            self.assertEqual(proxy._sent_token_events, 2)
++
++    def test_continuous_changes_make_bounded_progress(self):
++        helper, events = self.make_helper()
++        for source_ptr in range(1, 31):
++            for proxy in helper._clipboard_proxies.values():
++                self.change(proxy, 0)
++                self.change(proxy, source_ptr)
++            end = monotonic() + 0.025
++            spin_until(lambda: monotonic() >= end, timeout=0.1)
++        for selection in SELECTIONS:
++            self.assertGreaterEqual(len(events[selection]), 3)
++            self.assertLessEqual(len(events[selection]), 6)
++        self.assertTrue(spin_until(lambda: all(
++            events[x][-1]["targets"] == ("application/x-test-30",) for x in SELECTIONS
++        )))
++
++    def test_cancellation_and_stale_callback_ownership(self):
++        for selection in SELECTIONS:
++            for revoke in ("disable", "direction", "peer", "remote", "cleanup"):
++                with self.subTest(selection=selection, revoke=revoke):
++                    helper, events = self.make_helper()
++                    proxy = helper._clipboard_proxies[selection]
++                    callbacks = []
++
++                    def schedule(_delay, callback):
++                        callbacks.append(callback)
++                        return len(callbacks)
++
++                    with patch.object(GLib, "timeout_add", schedule), patch.object(GLib, "source_remove"):
++                        self.change(proxy, 1)
++                        self.change(proxy, 2)
++                        self.assertEqual(len(callbacks), 1)
++                        if revoke == "disable":
++                            proxy.set_enabled(False)
++                        elif revoke == "direction":
++                            proxy.set_direction(False, True)
++                        elif revoke == "peer":
++                            helper.client_reset()
++                        elif revoke == "remote":
++                            proxy.got_token((), claim=False)
++                        else:
++                            proxy.cleanup()
++                        self.assertEqual(proxy._emit_token_timer, 0)
++                        self.assertFalse(callbacks[0]())
++                        self.assertEqual(len(events[selection]), 1)
++                        if revoke != "cleanup":
++                            proxy.set_enabled(True)
++                            proxy.set_direction(True, True)
++                            self.change(proxy, 3)
++                            self.assertEqual(len(events[selection]), 2)
++                            self.change(proxy, 4)
++                            self.assertEqual(proxy._emit_token_timer, 2)
++                            self.assertFalse(callbacks[0]())
++                            self.assertEqual(proxy._emit_token_timer, 2)
++                            self.assertFalse(callbacks[1]())
++                            self.assertEqual(len(events[selection]), 3)
++
++    def test_receive_revocation_does_not_cancel_outbound_token(self):
++        helper, events = self.make_helper()
++        for proxy in helper._clipboard_proxies.values():
++            self.change(proxy, 1)
++            self.change(proxy, 2)
++            timer = proxy._emit_token_timer
++            self.assertNotEqual(timer, 0)
++            proxy.set_direction(True, False)
++            self.assertEqual(proxy._emit_token_timer, timer)
++        self.assertTrue(spin_until(lambda: all(len(events[x]) == 2 for x in SELECTIONS)))
++
++    def test_empty_or_unresolved_replacement_is_not_advertised(self):
++        for selection in SELECTIONS:
++            for replacement in (0, 3):
++                with self.subTest(selection=selection, replacement=replacement):
++                    helper, events = self.make_helper()
++                    proxy = helper._clipboard_proxies[selection]
++                    self.change(proxy, 1)
++                    self.change(proxy, 2)
++                    self.assertNotEqual(proxy._emit_token_timer, 0)
++                    # A new source may still be waiting for its origin pipe;
++                    # only do_owner_changed marks it ready to advertise.
++                    proxy.local_source_ptr = replacement
++                    self.assertTrue(spin_until(lambda: proxy._emit_token_timer == 0))
++                    self.assertEqual(len(events[selection]), 1)
++                    self.change(proxy, 4)
++                    self.assertTrue(spin_until(lambda: len(events[selection]) == 2))
++                    self.assertEqual(events[selection][-1]["targets"], ("application/x-test-4",))
++
++    def test_eager_read_uses_latest_source_when_timer_fires(self):
++        helper, events = self.make_helper()
++        for proxy in helper._clipboard_proxies.values():
++            self.change(proxy, 1)
++            proxy.selection_api.eager = True
++            proxy.set_greedy_client(True)
++            self.change(proxy, 2)
++            self.change(proxy, 3)
++            self.assertEqual(proxy.selection_api.reads, [])
++        self.assertTrue(spin_until(lambda: all(len(events[x]) == 2 for x in SELECTIONS)))
++        for selection, proxy in helper._clipboard_proxies.items():
++            self.assertEqual(proxy.selection_api.reads, [(3, "UTF8_STRING")])
++            self.assertEqual(events[selection][-1]["data"]["UTF8_STRING"],
++                             ("UTF8_STRING", 8, b"selection-3"))
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/xpra/clipboard/core.py b/xpra/clipboard/core.py
+index bb16f71c238fcab5a2b4e4cfbd36ad5eea5d60c9..8129fd4189ae4f2542748f59fdc119c8d9a79b61 100644
+--- a/xpra/clipboard/core.py
++++ b/xpra/clipboard/core.py
+@@ -222,6 +222,7 @@ class ClipboardProtocolHelperCore(SubsystemPacketHandlers):
+         """Reset state associated with the disconnected clipboard peer."""
+         self._clipboard_origins.clear()
+         for proxy in self._clipboard_proxies.values():
++            proxy.cancel_emit_token()
+             proxy._clipboard_origin = ""
+ 
+     def set_direction(self, can_send: bool, can_receive: bool,
+diff --git a/xpra/clipboard/proxy.py b/xpra/clipboard/proxy.py
+index 0d656f7a0bda4c6bb63ac113c64d38db23c7640d..bbfb9edb20f857f7c49ae08baa3d267b2279e2a3 100644
+--- a/xpra/clipboard/proxy.py
++++ b/xpra/clipboard/proxy.py
+@@ -96,6 +96,7 @@ class ClipboardProxyCore:
+         self._block_owner_change: int = 0
+         self._last_emit_token: float = 0
+         self._emit_token_timer: int = 0
++        self._emit_token_backoff: int = 0
+         # counters for info:
+         self._selection_request_events: int = 0
+         self._selection_get_events: int = 0
+@@ -110,6 +111,8 @@ class ClipboardProxyCore:
+     def set_direction(self, can_send: bool, can_receive: bool) -> None:
+         self._can_send = can_send
+         self._can_receive = can_receive
++        if not can_send:
++            self.cancel_emit_token()
+ 
+     def set_want_targets(self, want_targets) -> None:
+         self._want_targets = want_targets
+@@ -145,6 +148,8 @@ class ClipboardProxyCore:
+     def set_enabled(self, enabled: bool) -> None:
+         log("%s.set_enabled(%s)", self, enabled)
+         self._enabled = enabled
++        if not enabled:
++            self.cancel_emit_token()
+ 
+     def set_greedy_client(self, greedy: bool) -> None:
+         log("%s.set_greedy_client(%s)", self, greedy)
+@@ -211,6 +216,8 @@ class ClipboardProxyCore:
+         pass
+ 
+     def cancel_emit_token(self) -> None:
++        self._last_emit_token = 0
++        self._emit_token_backoff = 0
+         if ett := self._emit_token_timer:
+             self._emit_token_timer = 0
+             GLib.source_remove(ett)
+diff --git a/xpra/wayland/server/clipboard.pyx b/xpra/wayland/server/clipboard.pyx
+index c8a541223621f3466d0f2aed0de68d34eb077ffa..d288192e96a9b51a6fb33baa52049e2b6524e438 100644
+--- a/xpra/wayland/server/clipboard.pyx
++++ b/xpra/wayland/server/clipboard.pyx
+@@ -23,6 +23,7 @@ from xpra.os_util import gi_import
+ from xpra.util.gobject import n_arg_signal, one_arg_signal
+ from xpra.util.str_fn import Ellipsizer, bytestostr
+ from xpra.log import Logger
++from xpra.wayland.server.clipboard_token import defer_owner_change
+ 
+ from xpra.wayland.server.wlroots cimport (
+     wl_array_add,
+@@ -402,6 +403,8 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
+     def do_owner_changed(self) -> None:
+         if not self._enabled:
+             return
++        if defer_owner_change(self):
++            return
+         self.schedule_emit_token()
+ 
+     def schedule_emit_token(self, min_delay=0) -> None:
+diff --git a/xpra/wayland/server/clipboard_token.py b/xpra/wayland/server/clipboard_token.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e107cd61550a21661eaf1fc1bea58a57b4478fee
+--- /dev/null
++++ b/xpra/wayland/server/clipboard_token.py
+@@ -0,0 +1,70 @@
++# This file is part of Xpra.
++# Copyright (C) 2026 kogeler
++# Xpra is released under the terms of the GNU GPL v2, or, at your option, any
++# later version. See the file COPYING for details.
++
++"""Back off native owner notifications without losing the last selection."""
++
++from time import monotonic
++
++from xpra.os_util import gi_import
++from xpra.util.env import envint
++
++GLib = gi_import("GLib")
++
++# Match the X11 producer; the connection's packet flood limit stays unchanged.
++TOKEN_BACKOFF_RESET = envint("XPRA_CLIPBOARD_TOKEN_BACKOFF_RESET", 1000)
++TOKEN_BACKOFF_DELAY = envint("XPRA_CLIPBOARD_TOKEN_BACKOFF_DELAY", 20)
++TOKEN_BACKOFF_MAX = envint("XPRA_CLIPBOARD_TOKEN_BACKOFF_MAX", 1000)
++
++
++def source_key(proxy) -> tuple:
++    return proxy.local_source_ptr, getattr(proxy, "local_generation", None)
++
++
++def defer_owner_change(proxy) -> bool:
++    """Return true if this notification is suppressed or owned by a timer.
++
++    This runs only after the native source's origin has been resolved. Updating
++    that ready-source key does not restart an existing timer: continuous native
++    changes must make progress, not debounce indefinitely.
++    """
++    if not proxy._enabled or not proxy._can_send:
++        return True
++    proxy._emit_token_source = source_key(proxy)
++    if proxy._emit_token_timer:
++        return True
++    elapsed = int((monotonic() - proxy._last_emit_token) * 1000)
++    if elapsed >= TOKEN_BACKOFF_RESET:
++        proxy._emit_token_backoff = 0
++
++    def record_emission() -> None:
++        proxy._last_emit_token = monotonic()
++        proxy._sent_token_events += 1
++        scale = (2 if proxy._want_targets else 1) * (2 if proxy._greedy_client else 1)
++        proxy._emit_token_backoff = min(
++            TOKEN_BACKOFF_MAX,
++            proxy._emit_token_backoff * 2 or TOKEN_BACKOFF_DELAY * scale,
++        )
++
++    delay = proxy._emit_token_backoff
++    if delay <= 0:
++        record_emission()
++        return False
++
++    def emit_latest() -> bool:
++        # A removed callback must not clear a newer timer or reach a new peer.
++        if proxy._emit_token_timer != timer:
++            return False
++        proxy._emit_token_timer = 0
++        if (not proxy._enabled or not proxy._can_send
++                or proxy.local_source_ptr in (0, proxy.remote_source_ptr)
++                or source_key(proxy) != proxy._emit_token_source):
++            return False
++        record_emission()
++        proxy.schedule_emit_token()
++        return False
++
++    timer = GLib.timeout_add(delay, emit_latest)
++    proxy._emit_token_timer = timer
++    return True

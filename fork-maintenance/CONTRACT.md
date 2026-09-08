@@ -233,13 +233,14 @@ Only these active cases are retained:
 4. `wayland-initial-window-state`;
 5. `wayland-client-keymap-sync`;
 6. `x11-client-clipboard-events`;
-7. `wayland-empty-damage-throttle`;
-8. `jph-parallel-build-objects`;
-9. `debian-libva-codecs-package`;
-10. `packet-handler-error-boundary`;
-11. `wayland-pointer-scroll-normalization`;
-12. `gtk-client-scroll-deduplication`;
-13. `upstream-test-quarantine`.
+7. `wayland-clipboard-token-coalescing`;
+8. `wayland-empty-damage-throttle`;
+9. `jph-parallel-build-objects`;
+10. `debian-libva-codecs-package`;
+11. `packet-handler-error-boundary`;
+12. `wayland-pointer-scroll-normalization`;
+13. `gtk-client-scroll-deduplication`;
+14. `upstream-test-quarantine`.
 
 ## Stack contract
 
@@ -1112,6 +1113,19 @@ owner transition whose XID matches the raw reverse consumer for `both`, and
 exactly the original two same-XID transitions for `to-server` and `off`.
 A fixed sleep, an unconfirmed owner call, or a monitor stopped before reverse
 is not valid policy evidence.
+
+The three allowed forward pastes use the native GTK text-buffer path, with
+real XTEST Ctrl+V, context-menu Paste and Ctrl+V input in that order. The `off`
+session retains an asynchronous no-offer conversion control. After the third
+paste, real Home, Shift+End and 28 Shift+Left stimuli change PRIMARY on the same
+29-character line. An event-driven X11 consumer requests TARGETS and text for
+each owner notification without claiming the selection or polling it. The
+final one-character value must reach X11 under `both`, after the last native
+key; the original local value must remain under `to-server` and `off`.
+Collection reparses bounded native input and consumer records, requires all
+requests to complete, and rejects rate-limit warnings and clipboard timeouts
+in both stdout and stderr of both Xpra peers, including the final log tails.
+Paint-only CSS hides fixture text without changing GTK conversion behavior.
 
 The clipboard monitor also covers the controlled Xpra client shutdown and
 drains its queued X11 events after that client has exited. Any permitted

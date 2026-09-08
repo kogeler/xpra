@@ -650,6 +650,51 @@ class LiveJobTest(unittest.TestCase):
             stdout_records[f"clipboard-consumer-{name}.stdout"][0]["monotonic_ns"] = (
                 1_000_000_000 + value * 1_000_000
             )
+        native_records = []
+        primary_records = []
+
+        def native_event(records, at_us, event, **values):
+            records.append(clipboard_event(len(records), event,
+                                           monotonic_ns=1_000_000_000 + at_us * 1_000, **values))
+
+        for index, (at_ms, marker) in enumerate(((6, "one"), (16, "two"), (26, "one")), 1):
+            if forward:
+                if index == 2:
+                    native_event(native_records, at_ms * 1000 + 100, "menu-populated", sensitive_items=1)
+                native_event(native_records, at_ms * 1000 + 200, "key-input",
+                             keyval=112 if index == 2 else 118, modifiers=4)
+            native_event(native_records, at_ms * 1000 + 800,
+                         "gtk-paste-done" if forward else "gtk-read-done",
+                         request_id=index, **summary(marker, matches=forward))
+        if forward:
+            native_event(native_records, 27200, "selection-armed")
+            for index in range(29):
+                native_event(native_records, 27300 + index * 40,
+                             "clipboard-owner-change", selection="PRIMARY")
+            native_event(native_records, 29000, "selection-finished", key_events=59,
+                         characters=29, selection=[0, 1], last_key_ns=1_028_600_000)
+        for index, (at_us, marker) in enumerate(((1200, "one"), (12200, "two"), (22200, "one")), 1):
+            native_event(primary_records, at_us, "targets-request", request_id=index)
+            native_event(primary_records, at_us + 100, "targets-result", request_id=index, count=5)
+            length, digest = live_run.clipboard_fixture_common.content_digest(
+                live_run.clipboard_fixture_common.marker_bytes(marker)
+            )
+            native_event(primary_records, at_us + 200, "text-result", request_id=index,
+                         observed_length=length, observed_sha256=digest)
+        if policy == "both":
+            native_event(primary_records, 28700, "targets-request", request_id=4)
+            native_event(primary_records, 28800, "targets-result", request_id=4, count=5)
+            length, digest = live_run.clipboard_fixture_common.content_digest(
+                live_run.clipboard_fixture_common.marker_bytes("one")[:1]
+            )
+            native_event(primary_records, 28900, "text-result", request_id=4,
+                         observed_length=length, observed_sha256=digest)
+        native_event(primary_records, 50500, "consumer-stopped", pending_targets=[], pending_text=[])
+        stdout_records["native-paste-input.jsonl"] = native_records
+        stdout_records["native-primary-consumer.jsonl"] = primary_records
+        for name in ("server.stdout", "client.stdout", "client.stderr"):
+            (root / name).write_text("", encoding="utf-8")
+            (root / name).chmod(0o600)
         phase_records = []
         log_parts = []
         end = 0
@@ -2995,6 +3040,44 @@ class LiveJobTest(unittest.TestCase):
                         clipboard_jsonl(changed),
                         "clipboard-test.stdout",
                     )
+
+    def test_clipboard_burst_oracle_rejects_late_peer_warnings(self) -> None:
+        for name in ("server.stdout", "server.stderr", "client.stdout", "client.stderr"):
+            for warning in ("Warning: more than 30 clipboard requests per second!",
+                            "Warning: remote clipboard request timed out"):
+                with self.subTest(name=name, warning=warning), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary) / "artifacts"
+                    interaction = self.make_clipboard_fixture_artifacts(root, "both")
+                    with (root / name).open("a", encoding="utf-8") as stream:
+                        stream.write("after client exit\n" + warning + "\n")
+                    checks = live_run.clipboard_interaction_checks(interaction, root)
+                    self.assertFalse(checks["no_clipboard_rate_or_timeout"])
+                    self.assertFalse(live_run.clipboard_artifact_evidence_matches(interaction, root))
+
+    def test_clipboard_burst_oracle_requires_stimulus_final_value_and_drain(self) -> None:
+        for mutation in ("final-value", "missing-result", "pending-request", "no-stimulus", "no-native-paste"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "artifacts"
+                interaction = self.make_clipboard_fixture_artifacts(root, "both")
+                native = mutation in {"no-stimulus", "no-native-paste"}
+                path = root / ("native-paste-input.jsonl" if native else "native-primary-consumer.jsonl")
+                records = live_run.read_clipboard_records(path)
+                if mutation == "final-value":
+                    records[-2]["observed_sha256"] = "0" * 64
+                elif mutation == "missing-result":
+                    records.pop(-2)
+                elif mutation == "pending-request":
+                    records[-1]["pending_targets"] = [5]
+                elif mutation == "no-stimulus":
+                    records[-1]["key_events"] = 0
+                else:
+                    next(record for record in records if record["event"] == "gtk-paste-done")["event"] = "gtk-read-done"
+                for index, record in enumerate(records):
+                    record["sequence"] = index
+                path.write_text(clipboard_jsonl(records), encoding="utf-8")
+                checks = live_run.clipboard_interaction_checks(interaction, root)
+                self.assertFalse(all(checks.values()))
+                self.assertFalse(live_run.clipboard_artifact_evidence_matches(interaction, root))
 
     def test_clipboard_artifact_helpers_accept_exact_policy_matrix(self) -> None:
         for policy in live_run.CLIPBOARD_POLICIES:
@@ -8039,14 +8122,18 @@ class LiveTransportProfileTest(unittest.TestCase):
 
     def test_clipboard_fixture_confirmation_owns_one_pending_callback(self) -> None:
         """Execute the fixture callbacks: arming alone cannot confirm ownership."""
-        gdk = Mock(SELECTION_CLIPBOARD=1, KEY_F8=65477, KEY_Escape=65307)
+        gdk = Mock(SELECTION_CLIPBOARD=1, SELECTION_PRIMARY=2, KEY_F8=65477, KEY_Escape=65307)
         gdk.Display.get_default.return_value.get_name.return_value = "wayland-0"
         gtk = Mock(STYLE_PROVIDER_PRIORITY_APPLICATION=1)
         glib = Mock(SOURCE_REMOVE=False, SOURCE_CONTINUE=True)
         window_signals: dict[str, Callable] = {}
         clipboard_signals: dict[str, Callable] = {}
+        text_signals: dict[str, Callable] = {}
         gtk.Window.return_value.connect.side_effect = window_signals.__setitem__
+        gtk.TextView.return_value.connect.side_effect = text_signals.__setitem__
         clipboard = gtk.Clipboard.get.return_value
+        primary = Mock()
+        gtk.Clipboard.get.side_effect = lambda selection: clipboard if selection == 1 else primary
         clipboard.connect.side_effect = clipboard_signals.__setitem__
         pending: list[tuple[Callable, tuple]] = []
 
@@ -8068,6 +8155,11 @@ class LiveTransportProfileTest(unittest.TestCase):
             specification.loader.exec_module(fixture)
 
         def exercise() -> None:
+            menu = Mock()
+            menu.get_children.return_value = []
+            text_signals["populate-popup"](gtk.TextView.return_value, menu)
+            menu.connect.assert_called_once_with("key-press-event", text_signals["key-press-event"])
+            self.assertFalse(menu.connect.call_args.args[1](menu, SimpleNamespace(keyval=112, state=0)))
             poll = glib.timeout_add.call_args.args[1]
             changed = clipboard_signals["owner-change"]
             pressed = window_signals["key-press-event"]
@@ -8109,13 +8201,37 @@ class LiveTransportProfileTest(unittest.TestCase):
             redirect_stdout(output),
             tempfile.TemporaryDirectory() as temporary,
         ):
-            self.assertEqual(fixture.run(Path(temporary) / "command"), 0)
+            self.assertEqual(fixture.run(Path(temporary) / "command", Path(temporary) / "diagnostic"), 0)
+            native_records = live_run.read_clipboard_records(Path(temporary) / "diagnostic")
+            self.assertTrue(any(record.get("event") == "key-input" and record.get("keyval") == 112
+                                for record in native_records))
         records = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(
             [record["event"] for record in records],
             ["owner-armed", "owner-input", "owner-set", "owner-confirmed",
              "owner-armed", "owner-input", "owner-set", "closed"],
         )
+
+    def test_native_clipboard_paste_waits_for_arm_and_toolkit_completion(self) -> None:
+        for menu in (False, True):
+            with (
+                self.subTest(menu=menu),
+                patch.object(live_run, "write_clipboard_command") as publish,
+                patch.object(live_run, "wait_for_clipboard_event_count") as wait,
+                patch.object(live_run, "podman_exec") as execute,
+            ):
+                actions = Mock()
+                actions.attach_mock(publish, "publish")
+                actions.attach_mock(wait, "wait")
+                actions.attach_mock(execute, "input")
+                live_run.request_wayland_clipboard_paste("server", "two", 2, "client", "123", menu=menu)
+                self.assertEqual(actions.mock_calls[0].args[2], "paste:two")
+                self.assertEqual(actions.mock_calls[1].args[2:4], ("paste-requested", 2))
+                self.assertEqual(execute.call_args_list[0].args[1][-1], "shift+F10" if menu else "ctrl+v")
+                if menu:
+                    self.assertEqual(wait.call_args_list[1].args[2:4], ("menu-populated", 1))
+                    self.assertEqual(execute.call_args_list[1].args[1][-1], "p")
+                self.assertEqual(actions.mock_calls[-1].args[2:4], ("paste-result", 2))
 
     def test_clipboard_monitor_drains_late_events_after_stop(self) -> None:
         specification = importlib.util.spec_from_file_location(
