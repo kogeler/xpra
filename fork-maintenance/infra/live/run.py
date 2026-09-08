@@ -369,6 +369,10 @@ CLIPBOARD_LIVE_CHECK_NAMES = (
     "event_sequence_exact",
     "compositor_source_transitions_exact",
     "cross_peer_order_exact",
+    "native_paste_input",
+    "primary_burst_final_value",
+    "clipboard_requests_completed",
+    "no_clipboard_rate_or_timeout",
     "fixture_processes_clean",
     "no_plaintext_marker_artifacts",
 )
@@ -614,6 +618,7 @@ SERVER_ARTIFACT_PATTERNS = (
     re.compile(r"interaction\.(?:exit|identity\.json|scroll\.jsonl|stderr|stdout)"),
     re.compile(r"keyboard-fixture\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"clipboard-fixture\.(?:exit|pid|stderr|stdout)"),
+    re.compile(r"native-paste-input\.jsonl"),
     re.compile(r"empty-damage\.(?:exit|pid|stderr|stdout)"),
     re.compile(r"subsurface-fixture\.(?:exit|pid|stderr|stdout)"),
 )
@@ -624,6 +629,7 @@ CLIENT_ARTIFACT_PATTERNS = (
     re.compile(r"xwayland-xdpyinfo\.txt"),
     re.compile(r"(?:xvfb|openbox|picom)\..+"),
     re.compile(r"clipboard-(?:consumer-[a-z0-9-]+|monitor|owner)\.(?:exit|pid|stderr|stdout)"),
+    re.compile(r"native-primary-consumer\.jsonl"),
     re.compile(r"(?:root|window|interaction)-.+"),
     re.compile(r"empty-damage-.+"),
     re.compile(r"subsurface-client-.+"),
@@ -1440,7 +1446,8 @@ def write_clipboard_command(container: str, path: str, command: str) -> None:
         },
         WAYLAND_CLIPBOARD_COMMAND: {
             "quit",
-            *(f"{operation}:{marker_id}" for operation in ("own", "paste") for marker_id in marker_ids),
+            "select", "select-end",
+            *(f"{operation}:{marker_id}" for operation in ("own", "paste", "read") for marker_id in marker_ids),
         },
     }
     if command not in allowed_by_path.get(path, set()):
@@ -1753,6 +1760,145 @@ def clipboard_cross_peer_checks(interaction: dict[str, Any]) -> tuple[bool, bool
         return False, False
 
 
+def clipboard_primary_final_record(record: dict[str, Any], last_key_ns: int) -> bool:
+    length, digest = clipboard_fixture_common.content_digest(
+        clipboard_fixture_common.marker_bytes("one")[:1]
+    )
+    return bool(
+        record.get("event") == "text-result"
+        and record.get("observed_length") == length
+        and record.get("observed_sha256") == digest
+        and type(record.get("monotonic_ns")) is int
+        and last_key_ns <= record["monotonic_ns"] <= last_key_ns + 2_500_000_000
+    )
+
+
+def clipboard_native_checks(directory: Path, policy: str,
+                            wayland_records: list[dict[str, Any]]) -> dict[str, bool]:
+    """Reparse the native stimulus, consumer completions and entire peer logs."""
+    checks = dict.fromkeys(("native_paste_input", "primary_burst_final_value",
+                            "clipboard_requests_completed", "no_clipboard_rate_or_timeout"), False)
+    try:
+        logs = []
+        for name in ("server.stdout", "server.stderr", "client.stdout", "client.stderr"):
+            path = directory / name
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > FRAME_LOG_SCAN_BYTES:
+                return checks
+            logs.append(path.read_text(encoding="utf-8", errors="strict"))
+        checks["no_clipboard_rate_or_timeout"] = not any(re.search(
+            r"more than [0-9]+ clipboard requests per second|clipboard[^\r\n]*timed out",
+            log, re.IGNORECASE,
+        ) for log in logs)
+        native = read_clipboard_records(directory / "native-paste-input.jsonl")
+        consumer = read_clipboard_records(directory / "native-primary-consumer.jsonl")
+        allowed = {"clipboard-owner-change", "key-input", "menu-populated", "gtk-paste-done",
+                   "gtk-read-done", "selection-armed", "selection-finished"}
+        if any(record["event"] not in allowed for record in native):
+            return checks
+        forward = policy in {"both", "to-server"}
+        completions = [record for record in native if record["event"] in {"gtk-paste-done", "gtk-read-done"}]
+        requests = [record for record in wayland_records if record.get("event") == "paste-requested"]
+        results = [record for record in wayland_records if record.get("event") == "paste-result"]
+        paste_valid = len(completions) == len(requests) == len(results) == 3
+        for index, (done, request, result) in enumerate(zip(completions, requests, results, strict=False)):
+            marker_id = ("one", "two", "one")[index]
+            paste_valid = paste_valid and bool(
+                done["event"] == ("gtk-paste-done" if forward else "gtk-read-done")
+                and done.get("request_id") == request.get("request_id") == index + 1
+                and request["monotonic_ns"] < done["monotonic_ns"] < result["monotonic_ns"]
+                and _clipboard_marker_valid(done, marker_id, matches=forward, require_absent=not forward)
+            )
+            if forward:
+                key = 112 if index == 1 else 118  # GTK menu Paste / Ctrl+V
+                paste_valid = paste_valid and any(
+                    event["event"] == "key-input" and event.get("keyval") == key
+                    and (index == 1 or event.get("modifiers", 0) & 4)
+                    and request["monotonic_ns"] < event["monotonic_ns"] < done["monotonic_ns"]
+                    for event in native
+                )
+        menus = [record for record in native if record["event"] == "menu-populated"]
+        paste_valid = paste_valid and bool(
+            len(menus) == (1 if forward else 0)
+            and (not forward or (
+                menus[0].get("sensitive_items", 0) > 0
+                and requests[1]["monotonic_ns"] < menus[0]["monotonic_ns"] < completions[1]["monotonic_ns"]
+            ))
+        )
+        checks["native_paste_input"] = paste_valid
+        pending: dict[int, dict[str, Any]] = {}
+        text_pending: set[int] = set()
+        text_results = []
+        completed = 0
+        for record in consumer[:-1]:
+            request_id = record.get("request_id")
+            if type(request_id) is not int or request_id <= 0:
+                return checks
+            event = record["event"]
+            if event == "targets-request":
+                if request_id != len(pending) + 1:
+                    return checks
+                pending[request_id] = record
+            elif event == "targets-result":
+                request = pending.get(request_id)
+                if request is None or "result" in request:
+                    return checks
+                count = record.get("count")
+                if (type(count) is not int or not 0 <= count <= 256
+                        or not 0 < record["monotonic_ns"] - request["monotonic_ns"] < 2_500_000_000):
+                    return checks
+                request["result"] = record
+                completed += 1
+                if count:
+                    text_pending.add(request_id)
+            elif event == "text-result":
+                if request_id not in text_pending:
+                    return checks
+                if not 0 < record["monotonic_ns"] - pending[request_id]["monotonic_ns"] < 2_500_000_000:
+                    return checks
+                text_pending.remove(request_id)
+                text_results.append(record)
+            else:
+                return checks
+        checks["clipboard_requests_completed"] = bool(
+            completed == len(pending) > 0 and not text_pending
+            and consumer[-1]["event"] == "consumer-stopped"
+            and consumer[-1].get("pending_targets") == [] and consumer[-1].get("pending_text") == []
+        )
+        arms = [record for record in native if record["event"] == "selection-armed"]
+        ends = [record for record in native if record["event"] == "selection-finished"]
+        stimulus = not forward and not arms and not ends
+        if forward and len(arms) == len(ends) == 1:
+            end = ends[0]
+            last_key_ns = end.get("last_key_ns")
+            stimulus = bool(
+                end.get("characters") == 29 and end.get("selection") == [0, 1]
+                and end.get("key_events") == 59 and type(last_key_ns) is int
+                and results[2]["monotonic_ns"] < arms[0]["monotonic_ns"] < last_key_ns <= end["monotonic_ns"]
+                and last_key_ns - arms[0]["monotonic_ns"] < 2_000_000_000
+                and sum(record["event"] == "clipboard-owner-change" and record.get("selection") == "PRIMARY"
+                        and arms[0]["monotonic_ns"] < record["monotonic_ns"] < end["monotonic_ns"]
+                        for record in native) >= 29
+            )
+        if policy == "both":
+            checks["primary_burst_final_value"] = stimulus and any(
+                clipboard_primary_final_record(record, ends[0]["last_key_ns"]) for record in text_results
+            )
+        else:
+            allowed_values = {clipboard_fixture_common.content_digest(clipboard_fixture_common.marker_bytes(marker))
+                              for marker in ("one", "two")}
+            nonempty = [record for record in text_results if record.get("observed_length")]
+            checks["primary_burst_final_value"] = bool(
+                stimulus and nonempty
+                and all((record.get("observed_length"), record.get("observed_sha256")) in allowed_values
+                        for record in nonempty)
+                and (nonempty[-1].get("observed_length"), nonempty[-1].get("observed_sha256"))
+                == clipboard_fixture_common.content_digest(clipboard_fixture_common.marker_bytes("one"))
+            )
+    except (LabFailure, OSError, UnicodeError, KeyError, IndexError, TypeError, ValueError):
+        return checks
+    return checks
+
+
 def clipboard_interaction_checks(
     interaction: dict[str, Any],
     directory: Path,
@@ -2045,6 +2191,7 @@ def clipboard_interaction_checks(
         "fixture_processes_clean": _clipboard_fixture_processes_clean(directory),
         "no_plaintext_marker_artifacts": _clipboard_artifacts_hide_markers(directory),
     }
+    checks.update(clipboard_native_checks(directory, str(policy), wayland_records))
     return {name: bool(checks[name]) for name in CLIPBOARD_LIVE_CHECK_NAMES}
 
 
@@ -8514,12 +8661,38 @@ def request_wayland_clipboard_paste(
     server: str,
     marker_id: str,
     count: int,
+    client: str,
+    window_id: str,
+    *,
+    menu: bool = False,
+    native: bool = True,
 ) -> None:
     write_clipboard_command(
         server,
         WAYLAND_CLIPBOARD_COMMAND,
-        f"paste:{marker_id}",
+        f"{'paste' if native else 'read'}:{marker_id}",
     )
+    if not native:
+        wait_for_clipboard_event_count(
+            server, "clipboard-fixture.stdout", "paste-result", count,
+            f"disabled clipboard conversion {count}",
+        )
+        return
+    wait_for_clipboard_event_count(
+        server, "clipboard-fixture.stdout", "paste-requested", count,
+        f"native GTK paste arm {count}",
+    )
+    command = ["env", f"DISPLAY={CLIENT_DISPLAY}", "xdotool", "windowactivate",
+               "--sync", window_id, "key"]
+    if menu:
+        podman_exec(client, [*command, "shift+F10"])
+        wait_for_clipboard_event_count(
+            server, "native-paste-input.jsonl", "menu-populated", 1,
+            "native GTK context menu",
+        )
+        podman_exec(client, [*command, "p"])
+    else:
+        podman_exec(client, [*command, "ctrl+v"])
     wait_for_clipboard_event_count(
         server,
         "clipboard-fixture.stdout",
@@ -8583,7 +8756,7 @@ def exercise_x11_clipboard(
         "native-Wayland clipboard fixture",
     )
     source_barrier("initial")
-    request_wayland_clipboard_paste(server, "one", 1)
+    request_wayland_clipboard_paste(server, "one", 1, client, window_id, native=policy != "off")
 
     client_before_changes = container_process_identity(client, client_pid)
     if client_before_changes is None:
@@ -8596,7 +8769,7 @@ def exercise_x11_clipboard(
         "first same-owner XFixes update",
     )
     run_x11_clipboard_consumer(client, "two", "updated")
-    request_wayland_clipboard_paste(server, "two", 2)
+    request_wayland_clipboard_paste(server, "two", 2, client, window_id, menu=policy != "off", native=policy != "off")
 
     update_x11_clipboard_owner(client, "one", 2)
     source_barrier("repeat")
@@ -8605,7 +8778,24 @@ def exercise_x11_clipboard(
         "second same-owner XFixes update",
     )
     run_x11_clipboard_consumer(client, "one", "repeat")
-    request_wayland_clipboard_paste(server, "one", 3)
+    request_wayland_clipboard_paste(server, "one", 3, client, window_id, native=policy != "off")
+    if policy != "off":
+        write_clipboard_command(server, WAYLAND_CLIPBOARD_COMMAND, "select")
+        wait_for_clipboard_event_count(server, "native-paste-input.jsonl", "selection-armed", 1,
+                                       "native GTK selection arm")
+        podman_exec(client, ["env", f"DISPLAY={CLIENT_DISPLAY}", "xdotool", "windowactivate", "--sync",
+                             window_id, "key", "Home", "shift+End", *("shift+Left" for _ in range(28))])
+        write_clipboard_command(server, WAYLAND_CLIPBOARD_COMMAND, "select-end")
+        records = wait_for_clipboard_event_count(server, "native-paste-input.jsonl", "selection-finished", 1,
+                                                "native GTK selection completion")
+        completed = next(record for record in records if record["event"] == "selection-finished")
+        if completed.get("characters") != 29 or completed.get("selection") != [0, 1]:
+            raise LabFailure("native GTK selection did not reach its exact character boundary")
+        if policy == "both":
+            wait_for("final native PRIMARY value on X11", lambda: any(
+                clipboard_primary_final_record(record, completed["last_key_ns"])
+                for record in read_container_clipboard_records(client, "native-primary-consumer.jsonl")
+            ))
     client_after_changes = require_process_identity(
         client,
         client_before_changes,

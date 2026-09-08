@@ -202,6 +202,7 @@ The currently retained active cases are:
 - `wayland-initial-window-state`;
 - `wayland-client-keymap-sync`;
 - `x11-client-clipboard-events`;
+- `wayland-clipboard-token-coalescing`;
 - `wayland-empty-damage-throttle`;
 - `jph-parallel-build-objects`;
 - `debian-libva-codecs-package`;
@@ -495,6 +496,11 @@ after client exit. Only an exact shutdown-only zero-owner notification may be
 separated from production takeovers; late nonzero takeovers remain failures.
 Retained compositor source intervals and cross-stream fixture chronology are
 reparsed during collection.
+The same gate exercises real Ctrl+V/context-menu GTK paste and a rapid PRIMARY
+selection burst on one line. Its event-driven X11 consumer must receive the
+final selected value with `both` while reverse-denied policies retain local
+contents. Complete peer stdout/stderr tails must contain no clipboard flood
+warning or request timeout; all native consumer requests must be drained.
 
 The `live-wayland-subsurface` gate likewise applies the complete stack to
 both the native-Wayland server and GTK X11 client. Its schema-6 fixture keeps

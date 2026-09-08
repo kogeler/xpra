@@ -6357,6 +6357,7 @@ class ManifestTest(unittest.TestCase):
                 "video-pipeline-cleanup-race",
                 "window-source-timer-lifecycle",
                 "x11-client-clipboard-events",
+                "wayland-clipboard-token-coalescing",
             },
         )
         quarantine = cases["upstream-test-quarantine"]
@@ -6386,6 +6387,7 @@ class ManifestTest(unittest.TestCase):
                 "wayland-initial-window-state",
                 "wayland-client-keymap-sync",
                 "x11-client-clipboard-events",
+                "wayland-clipboard-token-coalescing",
                 "wayland-empty-damage-throttle",
                 "jph-parallel-build-objects",
                 "debian-libva-codecs-package",
@@ -6403,6 +6405,10 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(cases["jph-parallel-build-objects"].required_gates, ())
         self.assertEqual(
             cases["x11-client-clipboard-events"].required_gates,
+            ("live-x11-clipboard",),
+        )
+        self.assertEqual(
+            cases["wayland-clipboard-token-coalescing"].required_gates,
             ("live-x11-clipboard",),
         )
         self.assertEqual(
