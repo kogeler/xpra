@@ -15,7 +15,7 @@ from ctypes import POINTER, Structure, Union, byref, c_char_p, c_int, c_long, c_
 from pathlib import Path
 from typing import Final
 
-from clipboard_fixture_common import marker_ids, marker_summary, marker_text
+from clipboard_fixture_common import content_digest, marker_ids, marker_summary, marker_text
 
 PROPERTY_CHANGE_MASK: Final = 1 << 22
 PROPERTY_NOTIFY: Final = 28
@@ -287,6 +287,50 @@ def run_owner(marker_id: str, command_file: Path) -> int:
         "status": 0,
         "stopping": False,
     }
+    primary_stream = Path("/artifacts/native-primary-consumer.jsonl").open("x", encoding="utf-8")
+    primary_sequence = 0
+    primary_request_id = 0
+    pending_targets: set[int] = set()
+    pending_text: set[int] = set()
+
+    def primary_evidence(event: str, **values: object) -> None:
+        nonlocal primary_sequence
+        if state["stopping"]:
+            return
+        if primary_sequence >= 128:
+            raise RuntimeError("native PRIMARY consumer event bound exceeded")
+        print(json.dumps({"schema": 1, "sequence": primary_sequence, "event": event,
+                          "monotonic_ns": time.monotonic_ns(), **values}, sort_keys=True),
+              file=primary_stream, flush=True)
+        primary_sequence += 1
+
+    def primary_owner_changed(_clipboard: Gtk.Clipboard, _event: Gdk.EventOwnerChange) -> None:
+        nonlocal primary_request_id
+        if state["stopping"]:
+            return
+        primary_request_id += 1
+        request_id = primary_request_id
+        pending_targets.add(request_id)
+        primary_evidence("targets-request", request_id=request_id)
+
+        def targets_received(_clipboard: Gtk.Clipboard, atoms, _unused=None) -> None:
+            pending_targets.remove(request_id)
+            primary_evidence("targets-result", request_id=request_id, count=len(atoms or ()))
+            if not atoms or state["stopping"]:
+                return
+            pending_text.add(request_id)
+
+            def text_received(_clipboard: Gtk.Clipboard, text: str | None) -> None:
+                pending_text.remove(request_id)
+                length, digest = content_digest(text or "")
+                primary_evidence("text-result", request_id=request_id,
+                                 observed_length=length, observed_sha256=digest)
+
+            primary.request_text(text_received)
+
+        primary.request_targets(targets_received)
+
+    primary.connect("owner-change", primary_owner_changed)
 
     def set_marker(requested_marker_id: str) -> tuple[int, int]:
         value = marker_text(requested_marker_id)
@@ -298,6 +342,8 @@ def run_owner(marker_id: str, command_file: Path) -> int:
     def stop(status: int = 0) -> None:
         if state["stopping"]:
             return
+        primary_evidence("consumer-stopped", pending_targets=sorted(pending_targets),
+                         pending_text=sorted(pending_text))
         state["stopping"] = True
         state["status"] = max(int(state["status"]), status)
         emitter.emit(
@@ -371,6 +417,7 @@ def run_owner(marker_id: str, command_file: Path) -> int:
     GLib.idle_add(ready)
     GLib.timeout_add(25, poll_command)
     Gtk.main()
+    primary_stream.close()
     return int(state["status"])
 
 
