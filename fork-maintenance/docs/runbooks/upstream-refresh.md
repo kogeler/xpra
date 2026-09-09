@@ -100,7 +100,14 @@ required inputs.
 Replace placeholders such as `<case>` and `<cycle>` in every example; never
 pass the angle brackets literally.
 
-Read completely before changing anything. Fork-owned guides, contracts,
+Read the applicable material completely at its phase. Before cleanup or ref
+changes, read items 1, 2, 3 (stack and manifests), 5, 7 and 8, plus the
+validation flow. Read every case README, complete patch, surrounding code,
+callers, tests, overlaps and maintainer history in items 3, 4 and 6 against the
+new source after applicability inspection and before changing that case or
+starting runtime validation. Do not perform the same full semantic review on
+the old source merely to permit the rebase; read old candidate code only as
+needed to preserve or dispose of existing work. Fork-owned guides, contracts,
 runbooks, and manifests alone define this process; inherited source documents,
 workflows, and history supply technical context, never workflow authority:
 
@@ -454,8 +461,8 @@ listing need not expose labels. From those inspections and the complete
 image/volume listings, select every object which has any
 `io.xpra.fork-maintenance.*` or `io.xpra.lab.*` label; whose name has a known
 maintenance prefix such as `xpra-fork-maintenance-live-` or `xpra-deb-`; or
-whose name/ID occurs in a current record, retained removal transaction, or the
-reviewed namespace-migration plan. Inspect each selected image or volume too.
+whose name/ID occurs in a current record or retained removal transaction.
+Inspect each selected image or volume too.
 Every selected runtime object must map one-to-one to the exact identity and
 complete maintenance label set in one canonical, validated current owner,
 prelaunch, abort, or removal authority found above. Use the matching lifecycle
@@ -466,17 +473,44 @@ object is an orphan and stops the refresh—do not call `podman rm` or
 complete container and network listings to contain no maintenance runtime
 object.
 
-Maintenance-labelled images and the upstream ccache volume are reusable
-caches rather than active runtime. Inspect and retain current-namespace cache
-objects, and let the owning image/cache checks validate their exact complete
-labels and immutable identity when they are next selected; a malformed or
-unattributed maintenance cache stops the refresh. Do not delete a cache merely
-because its source label predates the rebase during this inventory phase: the
-current-source image preflight below is the authority for whether it can be
-used. That preflight may classify an otherwise exact old-source image for
-explicit locked removal and rebuild. Apply the stricter exact absence/foreign-
-image exception below to every legacy-labelled image or volume selected from
-the unfiltered listings.
+### Disposable image caches
+
+Image caches are reproducible build output, not unexported source or runtime
+owners. The refresh itself authorizes removal of obsolete, retired-namespace,
+or unverifiable **maintenance/test image caches** without another operator
+question. Do not turn uncertainty about an old cache's freshness into a
+blocker: discard it and rebuild from the current frozen inputs if a later gate
+needs it. A still-valid current-namespace cache may be retained; its owning
+preflight must verify it again before use. Rebuilds start only after the
+whole-queue manual-review exit gate.
+
+Prefer the owning public cache-removal target when it supports that exact
+image. For an unused historical/legacy test image outside those targets, the
+agent may use this narrow direct removal boundary:
+
+- identify the maintenance/test purpose from inspected labels, tags, a
+  current record, or the operator's explicit target; a familiar substring
+  alone does not authorize deleting another project's images;
+- record its complete immutable image ID, tags and relevant labels; inspect
+  all containers, including stopped ones, and all current owner/prelaunch/
+  transaction records to prove none still needs it;
+- under the already-established exclusive maintenance coordination, repeat
+  the identity/reference check immediately before removal; run
+  `podman image rm --no-prune <full-immutable-id>` for that one image only,
+  without `--force`, `--all`, `--ignore`, tag-only deletion or broad pruning;
+- require `podman image exists <full-immutable-id>` to return the documented
+  absent status, then repeat the complete inventory and record the removal.
+  If Podman reports a container or child-image dependency, inspect that exact
+  dependency and route it through its owning lifecycle; never force-delete it.
+
+This exception removes an unused image only, never a container, network,
+volume, running job, owner record, source tree, or result. Stop for genuinely
+unresolved active ownership or irreplaceable data, not for a missing old image
+migration report. A retired image has no special permanent retention exemption
+because an earlier migration called it foreign; an explicitly selected obsolete
+test image is disposable by the same bounded rule. Do not invent replacement
+owner/migration records or resurrect retired tooling. The ccache volume and
+other persistent data remain outside automatic image-cache disposal.
 
 Derive each candidate identifier only from its canonical path shape: for DEB
 and image-build `owner.json`, the run name is the validated parent directory,
@@ -537,44 +571,38 @@ pass:
   require every record-bound candidate path to be absent;
 - no retired owner, prelaunch, payload, runtime, completion, freeze, abort, or
   partial exists anywhere in the active ownership roots printed above;
-- `namespace-migration/` itself is a non-symlink current-uid `0700` directory
-  containing exactly the two non-symlink, current-uid, single-link `0600`
-  Strategy-A files below, with no partial or extra entry, and they have the
-  tracked historical SHA-256 identities:
+- every runtime identity and path bound by the retained transaction is absent
+  according to fresh filesystem and complete Podman inspection; verify each
+  recorded immutable container/image identity by its read-only existence
+  interface when that identity is present in the transaction;
+- no retired maintenance container, network or volume remains. Route unused
+  retired image caches through the disposable-image boundary above, then
+  require no remaining `io.xpra.lab.*` image labels in the final inventory.
 
-```bash
-test "$(sha256sum \
-  .artifacts/fork-maintenance/namespace-migration/strategy-a-remove.json \
-  | cut -d' ' -f1)" = \
-  8f182545ba206260feeaa407289cd16c21d59e90c5764dc2a44b1717f97ff2b1
-test "$(sha256sum \
-  .artifacts/fork-maintenance/namespace-migration/strategy-a-remove.complete.json \
-  | cut -d' ' -f1)" = \
-  4ac27239fd46d57fd2a103f27968913778745192a89e2d9e90d0440ef0596045
-```
+Compare current JSON structures and actual runtime absence, not
+presentation-only text or a historical migration summary. Missing completed
+migration plans are not a refresh dependency: they may legitimately have been
+discarded by artifact housekeeping. Neither restore them nor require their
+historical image-ID list when the current complete inventory and each extant
+transaction provide the applicable identities. Retained legacy logs remain
+diagnostic context, never current acceptance. If no legacy transaction exists,
+there is no legacy-evidence validation gate to manufacture.
 
-- the plan and completion both bind confirmation
-  `162f862f94028f63a36ff536d140e1bf0af919b485921902bba23807f86f984f`;
-  the completion binds the actual transaction digest, its 66 unique removed
-  image IDs exactly equal the plan's owned image IDs with counts 17 DEB, 40
-  live, and 9 upstream-test, and its removed volume is exactly the plan's
-  `xpra-lab-upstream-ccache`;
-- a fresh read-only Podman inventory finds none of those 66 IDs, no retired
-  maintenance-owned container, network, volume, name, or `io.xpra.lab.*`
-  label, and no old ccache volume. The plan's foreign image may be absent; if
-  present, it is the sole allowed old-label result and must have exact ID
-  `463f2603e257a7dd29c5fb5c03295902a8189a673002a2ea38117756417569b7`,
-  recorded tag, and filtered retired labels. In addition to the unfiltered
-  listing, call read-only `podman image exists <immutable-id>` for each of the
-  66 exact plan IDs and require its documented absent result; a display listing
-  alone is not absence proof;
+### Empty unowned directory remnants
 
-Compare the JSON structures and live Podman inspection, not display-formatted
-text. Any other retired owner, location, kind, field set, digest, runtime
-record, or Podman identity is unresolved and stops the refresh. This exception
-does not treat old logs as current acceptance; the exact completed cutover plus
-the fresh absence audit proves only that their retired runtime cannot still be
-active.
+A directory-only remnant below the exact workspace root, with no workspace
+metadata, lifecycle/recovery marker, files or symlinks, contains no candidate
+to recover. Under exclusive maintenance coordination, verify the complete
+bounded tree and its parents without following links, require current-uid
+directories and no owner/transaction reference, and record exact paths and
+device/inode identities. With the validated workspace and case-update
+lifecycle locks held in that order, recheck those identities and remove only
+the explicit empty directories deepest-first using non-recursive `rmdir`.
+Never use `rm -r`, fabricate an owner, chmod an unexplained tree, or delete a
+file in this exception. A new/nonempty entry makes `rmdir` fail safely and
+returns that exact target to inspection. The refresh authorizes this cleanup
+without another question; named or marker-backed workspaces still use their
+public lifecycle.
 
 Inspect a finalized workspace with `workspace-status`; resolve only
 marker-backed workspace state with `workspace-recover`. Resolve case
@@ -585,17 +613,28 @@ upstream foreground/bundle partial or a DEB source, selection, or validation
 partial, use only the exact recovery route in the owning upstream/live/DEB
 runbook; if no unambiguous public route applies, stop. Use a matching collect,
 remove, or abort interface only after its owning runbook authorizes that
-transition. Never delete a marker, workspace, process, or container by hand.
+transition. The image-cache and empty-remnant boundaries above are the only
+narrow direct cleanup exceptions; never delete a marker, owned workspace,
+process, or container by hand.
 If an identifier is ambiguous or belongs to another unfinished work cycle,
 stop for operator review.
 
 Do not carry a finalized workspace across the rebase: its metadata is bound to
 the old host `HEAD`. Inspect it with both `workspace-status` and the exact
 staged candidate from `workspace-diff`; the read-only commands explicitly
-support `host_identity=stale`. Prove that the candidate contains no unexported
-work before using `workspace-remove`, or stop if it belongs to another
-unfinished cycle. Mutating stage/update operations remain forbidden for stale
-identity. After resolving any marker-backed state, repeat the inventory and
+support `host_identity=stale`. Review staged and unstaged differences, preserve
+any useful unexported work, and use `workspace-remove` for proven superseded
+or abandoned candidates. An existing verified preservation archive may retain
+an old prototype and its exact index/working changes; record useful unresolved
+review questions for the new-base pass instead of keeping its obsolete source
+copy active. Do not demand byte identity with today's queue or rerun old tests
+to dispose of an older reviewed version: those are different gates from this
+explicit per-workspace removal. Compare identical candidate content once,
+record the disposition for every workspace, and do not spend the refresh on
+revalidating historical implementations. Active work belonging to another
+unfinished cycle remains protected. Mutating stage/update operations remain
+forbidden for stale identity. After resolving any marker-backed state, repeat
+the inventory and
 require no unresolved printed runtime, transaction, partial, owner, prelaunch,
 staging, or workspace entry to remain. Retained removal transactions count as
 resolved only after their applicable current validation route above has

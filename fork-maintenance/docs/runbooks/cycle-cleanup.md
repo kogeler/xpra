@@ -182,7 +182,13 @@ These are shared caches, not cycle-owned results. The current upstream-test
 image has its own explicit, label-verified removal target. Persistent ccache
 has no ordinary automatic removal target. Removing ccache, live caches, or
 virtual environments is an owner-reviewed disk-maintenance action, not part of
-patch finalization.
+patch finalization. An explicit upstream-refresh invocation separately
+preauthorizes disposal of unused obsolete maintenance/test image caches under
+its [exact image procedure](upstream-refresh.md#disposable-image-caches),
+without repeated operator questions. No persistent volume or unrelated project
+image is included. Missing old migration records do not block current inventory
+and exact cache disposal. The [empty-remnant exception](upstream-refresh.md#empty-unowned-directory-remnants)
+also belongs to refresh preflight, not to this cycle planner.
 
 The owned `cycle-cleanups/` directory is retained as transaction
 infrastructure. A successful cleanup leaves it empty; a marker or exact hidden

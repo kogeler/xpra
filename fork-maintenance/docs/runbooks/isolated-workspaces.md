@@ -268,6 +268,14 @@ the hidden removal staging and removes that owner last. Reinvoke
 transaction. The maintained case patch and every host source file remain
 untouched.
 
+An explicit upstream refresh also owns the narrow
+[empty unowned remnant procedure](upstream-refresh.md#empty-unowned-directory-remnants).
+It requires a directory-only tree with no files, symlinks, metadata or owner,
+checks exact identities under the workspace/case-update locks, and uses only
+non-recursive rmdir. It does not recover an owned workspace or permit deleting
+an unreviewed candidate. Superseded nonempty candidates still go through
+workspace-status/diff, preservation and the normal workspace-remove target.
+
 When several workspaces and named runs belong to one completed cycle, prefer
 the two-phase `cycle-clean-plan` / `cycle-clean` flow in
 [`cycle-cleanup.md`](cycle-cleanup.md). Unlike direct workspace removal, its
