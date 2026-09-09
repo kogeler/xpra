@@ -142,14 +142,20 @@ cycle. The single entry point for the complete **Autonomous Upstream Refresh
 and Full Queue Adaptation** procedure is this agent directive:
 
 ```text
-Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+Execute autonomous-upstream-refresh against the current fork master.
 ```
 
-It is not a shell command or Make target. `PRIMARY_CASE` affects only review
-order and detail. The invoked runbook derives a unique cycle name, semantically
-reassesses every active production case plus the quarantine, repairs in-scope
-workflow defects as it encounters them, and uses the development loop before
-freezing the candidate for complete final acceptance. The exhaustive procedure is
+It is not a shell command or Make target. Every case receives equally deep
+manual correctness and necessity review. The older optional
+`PRIMARY_CASE=<slug>` spelling affects only an explicitly requested starting
+order, never depth or scope. After checking applicability on the new source,
+the runbook requires a complete manual review, reasoned keep/adapt/retire
+decisions, implementation and re-review of all initial changes and regression
+migrations before any runtime tests, quarantine, live profiles or real builds.
+Tests challenge those conclusions, not replace analysis of uncovered paths.
+The runbook derives a unique cycle name, repairs in-scope workflow defects,
+then uses the post-review development loop before freezing the candidate for
+complete final acceptance. The exhaustive procedure is
 [`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md).
 
 Before the first `repo-sync`, that runbook reviews every staged, unstaged, and
@@ -337,8 +343,9 @@ a live main owner is gone, `live-status` reports `phase=removing` or
 `phase=removed` only after validating that exact transaction and its retained
 evidence; `live-logs` likewise returns only the digest-bound final log.
 
-After every explicitly selected upstream rebase, reassess the duty quarantine
-against its new clean source before running the patched matrix:
+After every explicitly selected upstream rebase, first pass the runbook's
+whole-queue manual-review exit gate. Then reassess the duty quarantine against
+its new clean source before using the duty patch in runtime validation:
 
 ```bash
 make -C fork-maintenance test-start \

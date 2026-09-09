@@ -9,12 +9,13 @@ one reviewed preservation commit before fetch/rebase when non-ignored
 pre-existing work must be retained. Its agent directive is:
 
 ```text
-Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+Execute autonomous-upstream-refresh against the current fork master.
 ```
 
-It is not a shell command, and `PRIMARY_CASE` does not narrow the full-queue
-scope. Agents and automation may otherwise prepare and audit local state, but
-never execute remote mutations.
+It is not a shell command. Every case requires equally deep manual review;
+the older optional `PRIMARY_CASE=<slug>` spelling affects only starting order,
+never depth or scope. Agents and automation may otherwise prepare and audit
+local state, but never execute remote mutations.
 
 Do not publish an applied patch worktree. Clean `develop` contains the patch
 queue representation and automation only.
@@ -71,8 +72,11 @@ The handoff states:
 - exact `master` and `develop` commits;
 - exact embedded source commit;
 - ordered active cases and their current resolution;
-- a current-source keep/adapt/retire conclusion for every pre-refresh
-  production case, with the primary case documented in greatest detail;
+- the whole-queue manual-review exit record before the first runtime test;
+- an equally detailed current-code correctness/necessity analysis and
+  keep/adapt/retire conclusion for every pre-refresh production case,
+  including uncovered risks, implemented changes and migrated test ownership;
+- how subsequent runtime results confirmed or reopened those conclusions;
 - all three clean quarantine reassessment results on this source when required;
 - after every upstream rebase, the complete offline suite, production
   tests-only controls or documented no-test semantic substitutes,
