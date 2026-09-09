@@ -41,11 +41,10 @@ only under the exact-input/equivalence rules in the canonical validation flow.
 
 To make an agent rebase `develop` onto the current verified fork `master`,
 reassess and adapt the entire active patch queue, and execute the complete
-acceptance cycle, give it this exact directive with any active production case
-as the review priority:
+acceptance cycle, give it this exact directive; no priority case is required:
 
 ```text
-Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+Execute autonomous-upstream-refresh against the current fork master.
 ```
 
 This is an agent directive, not a shell command or Make target. It invokes the
@@ -58,9 +57,12 @@ The directive is sufficient authorization for the whole local pass:
   again; create no empty commit;
 - verify fork/canonical master equality, fast-forward local `master`, and rebase
   `develop` without merging;
-- read every active patch in its current surrounding source and make a
-  keep/adapt/retire decision for every production case, plus reassess the
-  quarantine; `PRIMARY_CASE` changes only review order and detail, never scope;
+- after recording every patch's applicability, deeply review every active
+  patch against the new source with equal priority and depth, including
+  callers, ownership, failure paths, queue interactions and test blind spots;
+- record code-supported correctness and necessity conclusions for every
+  production case, review the quarantine, implement and re-review all initial
+  keep/adapt/retire changes and regression migrations before any runtime test;
 - repair any discovered case, control, test, package/live harness, contract,
   documentation, or runbook defect in the same uninterrupted pass, without
   restarting still-valid expensive gates unless their frozen semantic inputs
@@ -72,7 +74,9 @@ The directive is sufficient authorization for the whole local pass:
   boundary uncommitted for operator review.
 
 The agent derives a unique cycle identifier; the operator need not provide one
-or separately expand scope for another active case. This directive never
+or separately expand scope for another active case. The older optional
+`PRIMARY_CASE=<slug>` spelling requests only a starting order, never a deeper
+review for one case or a shallower review for another. This directive never
 authorizes `gh repo sync`, a push or force-push, hosted package publication,
 workflow dispatch, default-branch mutation, or any other remote write. A live
 master mismatch requiring remote synchronization returns only that external
@@ -215,10 +219,12 @@ The currently retained active cases are:
 - `upstream-test-quarantine` (the single test-only duty case).
 
 The quarantine case is not a production fix. It may change only the exact
-upstream unit-test modules listed in its `[quarantine]` manifest union. Before
-applying it after every fork-master rebase, run all three clean `quarantine*`
-gates. Each gate must confirm its exact assigned failure subset and that every
-other listed module is green in that leg. Remove or narrow a stale gate
+upstream unit-test modules listed in its `[quarantine]` manifest union. After
+the whole-queue manual-review exit gate for every fork-master rebase, run all
+three clean `quarantine*` gates before using the duty patch in runtime
+validation. Isolated application for manual inspection/export does not certify
+an assignment. Each gate must confirm its exact assigned failure subset and
+that every other listed module is green in that leg. Remove or narrow a stale gate
 assignment and refresh the one quarantine patch; a module which is deliberately
 assigned only to another failing leg is not stale merely because it is green
 here. Never carry quarantine forward merely because its patch still applies.
@@ -403,6 +409,16 @@ no-replace link; the common helper has no named generic fallback.
 Use the canonical [development and final-acceptance flow](fork-maintenance/docs/runbooks/validation.md)
 for new patches, existing-case review and upstream-rebase adaptation. Required
 gates define final coverage, not a sequence to repeat after every edit.
+
+An explicit upstream refresh first completes the runbook's mandatory manual
+review of the whole queue after applicability checks. Record each case's
+correctness and continued necessity from current code, implement all initial
+adaptations/removals and preserve their regression ownership, then re-review
+the resulting queue before any Xpra, quarantine, native/compiled, live or real
+package run. Offline fork-control/safety and static checks remain allowed.
+Only after that recorded manual-review exit gate does the development testing
+loop below begin. Tests challenge the conclusions; they never substitute for
+the agent's analysis of paths and interleavings which tests do not cover.
 
 Every live test MUST apply the complete current `stacks/develop` queue to BOTH
 the server and client. Case-only, partial-stack and clean-endpoint live tests

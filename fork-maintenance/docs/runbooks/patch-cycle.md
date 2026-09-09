@@ -44,11 +44,12 @@ ladder and all nine complete-stack live profiles are owned by
 [`upstream-refresh.md`](upstream-refresh.md). Its single agent entry point is:
 
 ```text
-Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+Execute autonomous-upstream-refresh against the current fork master.
 ```
 
-That line is an agent directive, not a shell command. `PRIMARY_CASE` changes
-review order and detail only; it never narrows the full-queue scope.
+That line is an agent directive, not a shell command. Every case receives
+equally deep manual review; the older optional `PRIMARY_CASE=<slug>` spelling
+affects only starting order, never depth or scope.
 That canonical runbook first creates one reviewed preservation commit when
 non-ignored work exists; its invocation authorizes that commit without another
 confirmation. It creates no empty commit for a clean checkout and no later
@@ -230,8 +231,15 @@ make -C fork-maintenance patch-start-check
 make -C fork-maintenance stack-check STACK=develop
 ```
 
-Before applying the duty quarantine or accepting any patched full run, execute
-all three clean `quarantine*` gates from
+The `stack-check` summary is not a manual review: record every individual
+`patch-check` result even when another case fails. Before any runtime test,
+deeply review all cases against the new source with equal priority and depth,
+record correctness/necessity conclusions, implement and re-review all initial
+adaptations/removals and regression migrations, and pass the canonical
+manual-review exit gate. Tests never replace reasoning about uncovered paths.
+
+After that gate and before using the duty quarantine in runtime validation,
+execute all three clean `quarantine*` gates from
 [`test-quarantine.md`](test-quarantine.md). Remove an assignment that is green
 in its gate, and remove the module and patch path only when no failing gate
 still assigns it; forward applicability alone is never evidence that a
@@ -257,8 +265,10 @@ creation intentionally stop at resolver failure. Reconstruct its complete
 candidate in the provenance-bound isolated `PATCH_MODE=reconstruct` mode from
 `upstream-refresh.md`; never edit or stage host Xpra source, use rejects or
 fuzz, export only conflict hunks, or create an intermediate cleanliness commit.
-Run focused checks after each case, then the stack gates. If no tracked content
-changed, finish with:
+Complete all initial manual-review changes before any focused checks; after
+the review exit gate use nearest regressions for runtime-driven corrections
+and complete the required stack gates. If no tracked content changed, finish
+with:
 
 ```bash
 make -C fork-maintenance develop-check
