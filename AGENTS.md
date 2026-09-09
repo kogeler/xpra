@@ -57,12 +57,15 @@ The directive is sufficient authorization for the whole local pass:
   again; create no empty commit;
 - verify fork/canonical master equality, fast-forward local `master`, and rebase
   `develop` without merging;
-- after recording every patch's applicability, deeply review every active
-  patch against the new source with equal priority and depth, including
-  callers, ownership, failure paths, queue interactions and test blind spots;
-- record code-supported correctness and necessity conclusions for every
-  production case, review the quarantine, implement and re-review all initial
-  keep/adapt/retire changes and regression migrations before any runtime test;
+- after recording every patch's applicability, deeply review one case at a
+  time against the new source with equal priority and depth, including callers,
+  ownership, failure paths, queue interactions and test blind spots;
+- immediately implement and export each case's code-supported keep/adapt/retire
+  decision and necessary cross-case repairs, re-review and checkpoint them
+  before taking the next case; persist findings and exact next actions during
+  work rather than accumulating a whole-queue read-only review;
+- review the quarantine, finish regression migrations and review the resulting
+  composition before any runtime test;
 - repair any discovered case, control, test, package/live harness, contract,
   documentation, or runbook defect in the same uninterrupted pass, without
   restarting still-valid expensive gates unless their frozen semantic inputs
@@ -410,12 +413,15 @@ Use the canonical [development and final-acceptance flow](fork-maintenance/docs/
 for new patches, existing-case review and upstream-rebase adaptation. Required
 gates define final coverage, not a sequence to repeat after every edit.
 
-An explicit upstream refresh first completes the runbook's mandatory manual
-review of the whole queue after applicability checks. Record each case's
-correctness and continued necessity from current code, implement all initial
-adaptations/removals and preserve their regression ownership, then re-review
-the resulting queue before any Xpra, quarantine, native/compiled, live or real
-package run. Offline fork-control/safety and static checks remain allowed.
+An explicit upstream refresh first completes an incremental manual
+review-and-implementation pass after applicability checks. Review one case,
+immediately implement/export its justified changes and necessary cross-case
+repairs, re-review, and save an input-bound checkpoint before taking the next
+case. Persist findings and exact resume actions while working; do not defer
+implementation until the whole queue has been reviewed. Preserve regression
+ownership, then review the resulting composition before any Xpra, quarantine,
+native/compiled, live or real package run. Offline fork-control/safety and
+static checks remain allowed.
 Only after that recorded manual-review exit gate does the development testing
 loop below begin. Tests challenge the conclusions; they never substitute for
 the agent's analysis of paths and interleavings which tests do not cover.

@@ -83,8 +83,12 @@ This is an agent directive, not a Make target. Its complete queue-wide
 procedure is
 [`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md).
 Every active case receives equally deep manual correctness and necessity
-review after applicability checks. The older optional `PRIMARY_CASE=<slug>`
-spelling affects only starting order, never review depth or scope. All initial
+review after applicability checks. Review one case, immediately implement and
+export its justified changes (including necessary cross-case repairs), then
+re-review and checkpoint before the next case. Persist findings and concrete
+resume actions during work; do not accumulate a whole-queue read-only review
+before implementing. The older optional `PRIMARY_CASE=<slug>` spelling affects
+only starting order, never review depth or scope. All initial
 review-driven adaptations, removals and regression migrations must be complete
 and re-reviewed before any runtime validation, including clean controls and
 quarantine. The control plane, both package builds, and complete test/live
@@ -183,7 +187,9 @@ For an explicit upstream refresh, the mandatory whole-queue manual-review exit
 gate in [upstream refresh](docs/runbooks/upstream-refresh.md) precedes this
 testing loop. Applicability and green tests cannot establish correctness or
 continued necessity. Analyze uncovered paths, implement the review decisions,
-and re-review affected consumers before runtime validation starts. Narrow
+and re-review affected consumers within each case iteration, saving the
+published candidate and a checkpoint before moving on. The final composed
+review closes these incremental records before runtime validation starts. Narrow
 offline fork-control checks may run while review is still in progress.
 
 Follow [the canonical validation flow](docs/runbooks/validation.md). Develop,

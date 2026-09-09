@@ -35,9 +35,10 @@ prove uniqueness; do not ask the operator to name one.
 This refresh has a mandatory code-review phase before runtime validation:
 
 ```text
-new embedded source → every patch's applicability → deep manual queue review
-  → reasoned keep/adapt/retire decisions → implement and re-review all changes
-  → manual-review exit gate → clean controls and affected runtime tests
+new embedded source → every patch's applicability
+  → [review one case → decide → implement/export → re-review → checkpoint]
+  → next case (including necessary cross-case repairs in the same iteration)
+  → composed review and manual-review exit → clean controls and runtime tests
   → candidate freeze → remaining final acceptance
 ```
 
@@ -48,6 +49,10 @@ regression-ownership migrations before starting any new Xpra test, quarantine
 run, native/compiled regression, live profile, or real package build. Initial
 applicability checks, static inspection, whitespace/lint and offline
 fork-control/safety checks are not runtime validation and remain allowed.
+Review and implement incrementally, one atomic case at a time. Do not accumulate
+a whole-queue read-only review before making the already justified changes.
+Persist findings while the relevant code is in context, then export the
+complete atomic candidate and record its checkpoint before moving on.
 
 After that gate, use nearest regressions, affected upstream/case modules,
 relevant native/compiled checks, and the early complete live suite. Only after
@@ -69,10 +74,12 @@ must not dispatch the hosted sync workflow, run `gh repo sync`, push or
 force-push a ref, or change the default branch. A remote mismatch returns the
 workflow to the operator; it is not repaired locally.
 
-Moving the embedded source invalidates every previous functional result. The agent therefore reads and semantically reassesses every active patch in
-its current surrounding source, gives every production case an explicit
-keep/adapt/retire conclusion, reviews the quarantine duty, implements the
-conclusions, and resolves the complete resulting queue before runtime tests.
+Moving the embedded source invalidates every previous functional result. The
+agent therefore reads and semantically reassesses each active patch in its
+current surrounding source, gives it an explicit keep/adapt/retire conclusion,
+implements and saves that conclusion before taking the next case, and reviews
+the quarantine duty in the same incremental pass. It resolves and reviews the
+complete resulting queue before runtime tests.
 It then confirms or revisits those conclusions through every available
 tests-only control, the clean quarantine reassessment, focused/native tests,
 both real distribution package builds, all three full upstream legs, and all
@@ -822,6 +829,10 @@ and CI-boundary reading above. Enumerate the recorded pre-refresh queue and
 account for every case after any proposed retirement or ownership migration.
 Review all cases to the same depth, including unchanged patches and exact
 `already-present` cases. Never let a failed first case hide the rest.
+Use the per-case loop below in operational stack order; equal depth does not
+mean reviewing every case before implementing the first. Existing recorded
+reviews from this cycle are inputs to the next implementation, not a reason to
+finish an outstanding read-only sweep first.
 
 Read each complete patch and manifest against the actual new embedded source,
 not just the old/new diff, conflict hunks, case README, or test assertions.
@@ -864,7 +875,7 @@ assignment. Record the candidate disposition and the exact clean reassessment
 plan. Actual failing-leg assignments still require the later three clean
 gates; neither a code-reading hypothesis nor old logs can certify them.
 
-### Record decisions before executing tests
+### Decide and implement the current case
 
 Conclude the review of every production case with one of:
 
@@ -890,22 +901,87 @@ If a fundamental ownership or correctness question cannot be established from
 the available source, record the exact unresolved question; the review gate
 does not pass by changing it to "let the tests decide".
 
-### Implement and re-review the conclusions
+After reaching a code-supported conclusion for this case, implement it now
+through the appropriate applicable, reconstruction, or retirement flow below.
+Do not defer known production or regression corrections until other unrelated
+cases have been reviewed. Update regressions, manifests, documentation,
+dependencies and gate ownership with their owning atomic candidate. A `keep`
+decision with no required changes records the unchanged digest; it needs no
+artificial edit or export. A retirement includes its durable coverage migration
+before the old owner is removed.
 
-Complete the whole queue's initial review before implementing its
-review-driven production changes. Then apply the appropriate applicable,
-reconstruction, or retirement flow below in operational stack order. Export
-one atomic candidate at a time; update regressions, manifests, documentation,
-dependencies and gate ownership together. Do not start a real test between
-these initial case adaptations.
+When correctness requires another case's interface or overlapping hunk to
+change, inspect and repair those consumers in this iteration. Record a bounded
+linked set of cases and the shared invariant; export each case separately
+through its own supported workspace. Never export a composed stack as one
+patch, silently change another case's ownership, or expand this dependency
+review into a read-only sweep of the remaining queue. A linked case still
+needs the same full reasoning before its own review is complete. Inspect
+partial composition as soon as the relevant selections resolve; unrelated
+divergent patches do not require postponing these edits or pretending that the
+whole stack already resolves.
 
-Re-read each final candidate in the new source and composed queue, including
-the consumers affected by another case's changes. Resolve every finding or
-record a supported reason it requires no change. Update the ledger with each
-old/new digest, implemented decision, and remaining runtime risk. Material
-changes reopen the affected reviews; an earlier review of different code does
-not close them. All review-driven code changes and removals must be complete
-before the manual-review exit gate.
+Re-read the exported candidate in its current surrounding code and recheck
+the affected consumers. Resolve each finding or record a code-supported reason
+it requires no change. Run applicable static/offline checks, update the
+checkpoint below, and only then take the next case. Do not start a runtime test
+between these initial case iterations. Material changes reopen exactly the
+affected completed reviews; an earlier review of different code does not close
+them. All initial decisions, cross-case repairs and regression migrations must
+be implemented and re-reviewed before the whole-queue exit gate.
+
+### Persist progress and resume without a new review sweep
+
+Keep the cycle index and per-case working notes under
+`.artifacts/fork-maintenance/retained/current/`, never in tracked evidence
+archives. Write down a material finding, its code references and intended repair
+when discovered, before switching to another subsystem or a large source read.
+Do not rely on conversation history, an eventual summary, or memory at the end
+of a long review. Save an in-progress checkpoint before an interruption or
+context handoff, even when the atomic candidate is not ready for export.
+
+The compact cycle index must identify:
+
+- the embedded source and current host commit, active case or bounded linked
+  set, and the exact next action/path/symbol;
+- each case's status: `pending`, `reviewing`, `implementing`,
+  `reviewed-exported`, `reviewed-unchanged`, or `retired-migrated`; a written
+  adaptation plan alone is still `implementing`, never completed review;
+- the per-case note path, supported workspace identity/mode, old and currently
+  published patch digests, and whether staged/unexported edits remain;
+- code-supported decisions, addressed/open findings, cross-case consumers
+  which must be revisited, and the exact planned controls still pending;
+- completed static/offline checks and, after the exit gate, exact runtime
+  evidence identities and invalidations. Keep plans distinct from results.
+
+Before leaving a completed case, export its complete atomic change through
+`workspace-stage`/`workspace-update` and verify status/diff; a workspace-only
+edit is not a saved queue adaptation. Record the resulting digest and metadata
+changes in the checkpoint. Remove the exact workspace through its lifecycle
+when no longer needed. Do not export a known incomplete/broken fragment just
+to obtain a checkpoint: retain and identify its supported workspace, pending
+findings and precise next action instead. Checkpoints do not authorize Git
+commits, hand-edited patch bytes/digests, or bypassing transaction recovery.
+
+On resumption, read this compact index and the active case's notes first.
+Verify the recorded source, published case identities and workspace status;
+use the documented recovery targets for an interrupted transaction. Re-read
+the specific source needed for the next edit and any changed consumers.
+Preserve completed reviews whose inputs and assumptions still match; reopen
+only affected ones. Continue implementing a previously recorded justified
+decision before reviewing unrelated remaining cases. Do not repeat fetch,
+rebase, cleanup, a full reading sweep, or valid expensive gates merely because
+context was compacted or the operator said to continue.
+
+### Close the incremental pass
+
+Once every case has a completed checkpoint, review the resulting composition
+and the recorded cross-case interface changes. This is an integration review
+of the accumulated candidates and their still-open risks, not a second full
+read-only review campaign. Repair and checkpoint any newly affected cases,
+resolve the entire stack, and record the exit gate below. Only then start
+general runtime validation; failures return their owning cases to the same
+review/edit/checkpoint loop and the affected regression tests.
 
 ## Refresh an applicable patch
 
@@ -1078,6 +1154,9 @@ The gate passes only when:
 - every pre-refresh production case has the full current-code map, equal-depth
   correctness/necessity analysis, and implemented `keep`, `adapt` or `retire`
   conclusion; the quarantine has its manual assessment and clean-gate plan;
+- the incremental checkpoints bind the published candidates (or unchanged
+  digests and completed migrations); no review-driven adaptation exists only
+  as notes or unexported workspace edits;
 - all review findings have dispositions, required changes/removals and durable
   regression migrations are complete, and no review is deferred to test output;
 - every retained/adapted patch has been re-read in its final surrounding code;
@@ -1088,7 +1167,9 @@ The gate passes only when:
   controls and replacement gates for retired cases are recorded.
 
 This is the agent's documented reasoning checkpoint, not an existing Make
-target or an automated correctness certificate. There must be a review record
+target or an automated correctness certificate. It closes the accumulated
+per-case review-and-implementation records; it does not require a separate
+whole-queue review before implementation. There must be a review record
 for the whole queue before any runtime run identity is launched; a resolver
 summary or green checks cannot stand in for it. Do not require impossible
 exhaustive test coverage, and do not equate untested branches with safe code.
