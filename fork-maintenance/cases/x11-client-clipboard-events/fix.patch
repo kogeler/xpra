@@ -3222,19 +3222,10 @@ index 5b6df2ec42d0da7100e9468bd21e7108f36e5fad..c948411c802c74686d5669e0277140aa
  
      ############################################################################
 diff --git a/xpra/x11/selection/proxy.py b/xpra/x11/selection/proxy.py
-index 4680b52b3d51e4138968b053d8c0f890eb7b0205..8f26c9eea697b459c75cb8e3789ecde2490d8867 100644
+index 4680b52b3d51e4138968b053d8c0f890eb7b0205..a707fbac0a8bf1ee8e6f640baa73fed386e92b89 100644
 --- a/xpra/x11/selection/proxy.py
 +++ b/xpra/x11/selection/proxy.py
-@@ -128,22 +128,27 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
- 
-     def cleanup(self) -> None:
-         log("%s.cleanup()", self)
-+        super().cleanup()
-+        self.cancel_incr_data_timer()
-+        self.reset_incr_data()
-         # give up selection:
-         # (disabled because this crashes GTK3 on exit)
-         # if self.owned:
+@@ -134,16 +134,21 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
          #    self.owned = False
          #    with xswallow:
          #        X11Window.XSetSelectionOwner(0, self._selection)
@@ -3248,6 +3239,9 @@ index 4680b52b3d51e4138968b053d8c0f890eb7b0205..8f26c9eea697b459c75cb8e3789ecde2
 -        self.local_requests = {}
 -        for target in lr:
 -            self.got_local_contents(target)
++        super().cleanup()
++        self.cancel_incr_data_timer()
++        self.reset_incr_data()
 +        # send empty replies to pending local X11 requestors,
 +        # and cancel our outstanding local conversion timers:
 +        try:

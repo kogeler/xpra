@@ -6358,6 +6358,9 @@ class ManifestTest(unittest.TestCase):
                 "window-source-timer-lifecycle",
                 "x11-client-clipboard-events",
                 "wayland-clipboard-token-coalescing",
+                "wayland-display-name-signal",
+                "client-codec-startup-order",
+                "x11-selection-refusal",
             },
         )
         quarantine = cases["upstream-test-quarantine"]
@@ -6394,6 +6397,9 @@ class ManifestTest(unittest.TestCase):
                 "packet-handler-error-boundary",
                 "wayland-pointer-scroll-normalization",
                 "gtk-client-scroll-deduplication",
+                "wayland-display-name-signal",
+                "client-codec-startup-order",
+                "x11-selection-refusal",
                 "upstream-test-quarantine",
             ),
         )

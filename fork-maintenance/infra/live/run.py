@@ -418,6 +418,9 @@ LEGACY_SOURCE_VARIANT_SELECTORS = {"master": ()}
 HARNESS_INPUTS = (
     INFRA_ROOT / ".containerignore",
     INFRA_ROOT / "Containerfile",
+    INFRA_ROOT / "build_libva_trace.py",
+    INFRA_ROOT / "libva_trace.patch",
+    INFRA_ROOT / "libva_trace_test.c",
     INFRA_ROOT / "clipboard_fixture_common.py",
     INFRA_ROOT / "empty_damage_fixture.c",
     INFRA_ROOT / "interaction_fixture.py",
@@ -450,6 +453,9 @@ HARNESS_INPUTS = (
 BUILD_CONTEXT_INPUTS = (
     INFRA_ROOT / ".containerignore",
     INFRA_ROOT / "Containerfile",
+    INFRA_ROOT / "build_libva_trace.py",
+    INFRA_ROOT / "libva_trace.patch",
+    INFRA_ROOT / "libva_trace_test.c",
     INFRA_ROOT / "clipboard_fixture_common.py",
     INFRA_ROOT / "empty_damage_fixture.c",
     INFRA_ROOT / "interaction_fixture.py",
