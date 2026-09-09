@@ -209,9 +209,10 @@ Every patch must satisfy all of these conditions:
 There is exactly one active test-quarantine case. It is an explicit temporary
 exception, never a production fix or a place for unrelated test repair. Each
 entry requires a current embedded-clean-source failure in the frozen matrix.
-After every explicitly selected upstream rebase, each clean quarantine gate
-runs the complete `modules` union but gives `--skip-fail` only to its exact
-gate-specific subset. It passes only when the subset is the exact ordered
+After every explicitly selected upstream rebase and the whole-queue manual
+review exit gate, each clean quarantine gate runs the complete `modules` union
+but gives `--skip-fail` only to its exact gate-specific subset. It passes only
+when the subset is the exact ordered
 ignored-failure set, every other union module succeeds, no module fails
 unignored, and none is skipped. A passing expected-failure module makes that
 gate assignment stale; a failing complement module makes the leg mapping
@@ -456,19 +457,31 @@ Only when the operator decides to move `develop` to the current fork-master
 source boundary, invoke the canonical process with this agent directive:
 
 ```text
-Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+Execute autonomous-upstream-refresh against the current fork master.
 ```
 
 This is not a Make target. The directive itself chooses the base, authorizes
 the complete local queue-wide process below, and requires the exhaustive
 procedure in
 [`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md).
-`PRIMARY_CASE` controls only review order and reporting depth; it cannot narrow
-the active-case, quarantine, repair, package, test, or live scope. The agent
-derives one unique cycle identifier rather than requesting another input:
+No priority case is required: every case has equally high correctness,
+necessity and reporting requirements. The older optional `PRIMARY_CASE=<slug>`
+spelling affects only an explicitly requested starting order, never depth or
+scope. The agent derives one unique cycle identifier rather than requesting
+another input.
 
-The sequence below states the refresh's complete obligations. Within adaptation,
-use the development loop and early relevant live checks from
+The sequence below states the refresh's complete obligations. Its initial
+manual-review phase is strictly before runtime validation: record every
+applicability result, deeply inspect every patch in the new code, conclude
+keep/adapt/retire from that reasoning, implement and re-review all initial
+changes, and record the whole-queue review exit gate. Inspect current callers,
+ownership, failure/lifecycle/compatibility paths, cross-case interactions and
+test blind spots; tests cannot replace this analysis or cover every case.
+Initial source inspection, static checks and offline fork-control/safety tests
+remain allowed. No new Xpra, quarantine, native/compiled, live or real package
+run, nor upstream-test image preparation, starts before that gate.
+
+After the gate, use the development loop and early complete live suite from
 [`validation.md`](docs/runbooks/validation.md); schedule full matrix/package
 and remaining live acceptance only after a reviewed candidate freeze. Reuse
 exact valid new-base controls instead of repeating them at each numbered phase.
@@ -484,16 +497,20 @@ exact valid new-base controls instead of repeating them at each numbered phase.
 4. switch to `develop` and run `develop-rebase`;
 5. resolve and stage every conflict, then use `git rebase --continue` until the
    rebase completes; abort and stop if correct resolution is not possible;
-6. run `patch-start-check`; read every active patch in its current surrounding
-   source; and give every production case a supported keep/adapt/retire
-   decision, resolving the complete active stack against new master;
+6. run `patch-start-check` and inventory every individual `patch-check`
+   outcome; perform the mandatory deep manual review of all cases, including
+   unchanged/exactly present patches and the quarantine; record code-supported
+   correctness/necessity decisions, implement all initial adaptations,
+   removals and regression-ownership migrations, re-review the composed code,
+   resolve the resulting stack and record the manual-review exit gate;
 7. run every clean quarantine gate and remove or narrow entries that no longer
    fail on this exact master;
 8. run the complete offline fork-control suite and a tests-only clean control
    for every production case which owns retained test paths; when a case owns no
    test path, record that the control is unavailable and perform the
-   case-specific semantic inspection; adapt or retire any case whose behavior
-   upstream replaced or narrowed, without requesting non-primary scope;
+   case-specific semantic inspection; compare results with the prior manual
+   conclusions and reopen affected reviews before further runtime validation
+   when evidence contradicts them, without requesting scope for another case;
 9. run every patched focused and native gate, all three complete upstream test
    legs (`full`, `full-cython`, and `full-no-compat`), every
    case-specific durable package boundary including both real Ubuntu 26.04 and
@@ -511,10 +528,12 @@ exact valid new-base controls instead of repeating them at each numbered phase.
 
 If the pass reveals an error or omission in a case, the control plane, a test,
 package/live harness, contract, documentation, or this runbook, that repair is
-already in scope. Make and narrowly test it in the same uninterrupted pass and
-leave it uncommitted with the other results. Maintain exact input/result
-identity so an already valid expensive gate is repeated only when its frozen
-source, patch/selection, image, entrypoint, command/assertion, scenario, runner,
+already in scope. Repair and re-review it in the same uninterrupted pass, using
+offline fork-control checks during review and runtime tests only after the
+review exit gate, and leave it uncommitted with the other results. Maintain
+exact input/result identity so an already valid expensive gate is repeated
+only when its frozen source, patch/selection, image, entrypoint,
+command/assertion, scenario, runner,
 or acceptance semantics changed. Editing explanatory text alone does not
 restart the ladder; uncertainty invalidates the affected result.
 
@@ -541,10 +560,15 @@ or executable/test semantics change. A digest-only patch refresh on an
 unchanged embedded source may reuse prior functional results solely under the
 non-semantic validation exception below. Moving the embedded source by rebase
 always invalidates prior functional acceptance. Do not delete an active patch
-merely because nearby upstream code looks equivalent. Review the exact
-production path and run the retained tests-only regression first. Once a patch
-is proven exactly present or fully replaced, remove it and update the stack in
-one reviewed change; do not create a tracked history archive.
+merely because nearby upstream code looks equivalent. Review its complete
+behavior and every invariant against the actual current production paths.
+During a refresh, implement a justified uncommitted retirement before runtime
+validation, migrating all still-required regressions and gate inputs to durable
+ownership first. Provide supported provenance-bound clean and resulting-stack
+checks if the deleted case was their only selector; do not retain a redundant
+production fix as a test container or silently discard coverage. Acceptance
+requires those checks after the whole-queue manual-review exit gate. Remove
+the case and update its stack/references together; create no history archive.
 
 ## Source and runner provenance
 
@@ -965,6 +989,14 @@ Validation has two phases governed by
 [`docs/runbooks/validation.md`](docs/runbooks/validation.md): development and
 final acceptance, separated by a reviewed candidate freeze. Gate declarations
 are final coverage obligations, not commands to repeat after every edit.
+
+An explicit upstream refresh has the mandatory whole-queue manual-review
+phase described above before this development testing loop. Complete its
+code-supported decisions, initial repairs/removals, regression migrations and
+final code re-review first; later runtime results confirm or reopen those
+conclusions, never supply the missing manual analysis. Reopen affected reviews
+and update the gate after a material candidate change or contradictory result;
+unchanged case reviews and exact independent evidence remain reusable.
 
 Development establishes a non-vacuous embedded-clean-source control, runs the
 nearest real regression after each atomic change, and selects affected existing

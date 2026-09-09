@@ -77,16 +77,25 @@ forms; an extra field or any other missing field fails closed.
 
 ## Mandatory reassessment after an explicit upstream refresh
 
-After every operator-selected upstream rebase and before applying the
-quarantine patch to the new base, run all three gates against clean production
-and clean tests. Merely observing that a master ref advanced does not trigger a
-rebase or block testing the existing `develop` queue.
+After every operator-selected upstream rebase, first complete the whole-queue
+manual-review exit gate in [upstream refresh](upstream-refresh.md). This
+includes reading the duty patch, each disabled test and its current production
+subject, and recording the rationale and clean verification plan for every
+per-leg assignment. Do not use quarantine runs to bypass review of other
+patches or infer empirical failures from code reading alone.
+
+Then, before using the quarantine patch in runtime validation on the new base,
+run all three gates against clean production and clean tests. Isolated
+application during manual review or export does not certify an assignment.
+Merely observing that a master ref advanced does not trigger a rebase or block
+testing the existing `develop` queue.
 
 Follow [`validation.md`](validation.md): reassess once for the actual source,
 image/environment, module union, and per-leg expectations, reusing current
-collected proof while those inputs remain unchanged. Do not block independent
-production-case development or repeat clean quarantine for an unrelated
-production-only edit. Any changed input requires its affected gate proof before
+collected proof while those inputs remain unchanged. After the review gate,
+do not block independent reviewed production-case tests on unrelated quarantine
+results or repeat clean quarantine for an unrelated production-only edit.
+Any changed input requires its affected gate proof before
 the quarantined stack can be accepted.
 
 ```bash
