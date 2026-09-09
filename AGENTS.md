@@ -209,6 +209,9 @@ The currently retained active cases are:
 - `packet-handler-error-boundary`;
 - `wayland-pointer-scroll-normalization`;
 - `gtk-client-scroll-deduplication`;
+- `wayland-display-name-signal`;
+- `client-codec-startup-order`;
+- `x11-selection-refusal`;
 - `upstream-test-quarantine` (the single test-only duty case).
 
 The quarantine case is not a production fix. It may change only the exact
@@ -410,6 +413,11 @@ For validation of ANY patch, run the entire nine-profile live suite through
 `make -C fork-maintenance live-all STACK=develop RUN=<fresh-prefix>`.
 A single-profile pass cannot accept a patch. `live-suite-check` verifies complete
 coverage and matching current source, queue, harness and endpoint provenance.
+It also checks the complete report-bound stdout/stderr of both peers in every
+scenario for undeclared Wayland display-name signals, codec startup waits,
+clipboard rate warnings and selection timeouts, including PRIMARY/SECONDARY.
+The suite checks each collected member before starting the next profile; a
+successful paste or rendering result cannot hide one of these warnings.
 This requirement also applies to unchanged-base repairs; no case manifest can
 waive it. Never report retired case-only or clean-client results as current proof.
 

@@ -1,5 +1,8 @@
 *
 !Containerfile
+!build_libva_trace.py
+!libva_trace.patch
+!libva_trace_test.c
 !clipboard_fixture_common.py
 !container_payload.py
 !empty_damage_fixture.c

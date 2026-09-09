@@ -1,0 +1,25 @@
+schema = 1
+slug = "wayland-display-name-signal"
+kind = "production"
+title = "Declare the native Wayland display-name signal"
+commit_subject = "Declare the native Wayland display-name signal"
+patch_sha256 = "ee05487b99ee38bafe88badc5ae4a89162f340d56d486909b28751087fdf4410"
+dependencies = []
+paths = [
+  "tests/unittests/unit/wayland/manager_signal_test.py",
+  "xpra/wayland/server/subsystem/manager.py",
+]
+
+[tests]
+list = [
+  "unit.wayland.manager_signal_test",
+  "unit.util.signal_emitter_test",
+  "unit.server.subsystem.stub_mixin_test",
+  "wayland",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = ["live-rgb"]

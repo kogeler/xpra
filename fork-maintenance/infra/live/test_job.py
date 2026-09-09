@@ -13280,6 +13280,39 @@ class LiveFixtureBuildOrderTest(unittest.TestCase):
     def test_client_c_fixture_follows_xpra_install_and_native_checks(self) -> None:
         self.assert_fixture_boundary("client", self.build_instructions("client"))
 
+    def test_trace_repair_inputs_bound_to_context_and_both_harnesses(self) -> None:
+        allowed = (LIVE_DIRECTORY / ".containerignore").read_text(encoding="utf-8").splitlines()
+        for name in ("build_libva_trace.py", "libva_trace.patch", "libva_trace_test.c"):
+            self.assertIn(f"!{name}", allowed)
+            for inventory in (live_run.BUILD_CONTEXT_INPUTS, live_run.HARNESS_INPUTS, job.HARNESS_INPUTS):
+                with self.subTest(name=name):
+                    self.assertIn(LIVE_DIRECTORY / name, inventory)
+
+    def test_trace_repair_is_late_distribution_build_with_verified_runtime_handoff(self) -> None:
+        recipe = (LIVE_DIRECTORY / "Containerfile").read_text(encoding="utf-8")
+        for role, _fixtures in self.FIXTURES:
+            instructions = self.build_instructions(role)
+            native = next(i for i, text in enumerate(instructions) if text.startswith("RUN package_dir="))
+            copied = next(i for i, text in enumerate(instructions) if text.startswith("COPY build_libva_trace.py "))
+            compiled = next(i for i, text in enumerate(instructions) if "build_libva_trace.py build" in text)
+            with self.subTest(role=role):
+                self.assertLess(native, copied)
+                self.assertLess(copied, compiled)
+                self.assertIn("meson ninja-build dpkg-dev", instructions[compiled])
+                runtime = re.search(rf"(?ms)^FROM [^\n]+ AS {role}\n(.*?)(?=^FROM |\Z)", recipe)
+                self.assertIsNotNone(runtime)
+                assert runtime is not None
+                self.assertIn(f"COPY --from={role}-build /opt/libva-trace-install/ /", runtime[1])
+                self.assertIn("python3 /opt/xpra-fork-maintenance/build_libva_trace.py verify", runtime[1])
+                self.assertNotIn("meson", runtime[1])
+                if role == "client":
+                    for dependency in ("libx11-xcb-dev", "libxcb-dri3-dev"):
+                        self.assertIn(dependency, instructions[compiled])
+                        self.assertNotIn(dependency, runtime[1])
+        helper = (LIVE_DIRECTORY / "build_libva_trace.py").read_text(encoding="utf-8")
+        self.assertIn('f"libva={identity[\'source_version\']}"', helper)
+        self.assertNotIn("LD_PRELOAD", helper)
+
     def client_gl_regression_instruction(self) -> str:
         instructions = self.build_instructions("client")
         selection = sys.modules["profiles"].LIVE_SELECTION

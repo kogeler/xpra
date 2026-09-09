@@ -162,6 +162,14 @@ RUN install -d /opt/xpra-install/usr/local/bin \
         $(pkg-config --libs wayland-client) \
         -o /opt/xpra-install/usr/local/bin/xpra-subsurface-fixture
 
+# Test-only trace writer repair, after the unchanged Xpra build/native checks.
+# Each distribution supplies the exact installed libva source, not a new codec.
+COPY build_libva_trace.py libva_trace.patch libva_trace_test.c /tmp/xpra-libva-trace/
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends meson ninja-build dpkg-dev \
+    && python3 /tmp/xpra-libva-trace/build_libva_trace.py build
+
 
 FROM docker.io/library/ubuntu:26.04 AS server
 
@@ -223,6 +231,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=server-build /opt/xpra-install/ /
+COPY --from=server-build /opt/libva-trace-install/ /
 COPY clipboard_fixture_common.py /opt/xpra-fork-maintenance/clipboard_fixture_common.py
 COPY interaction_fixture.py /opt/xpra-fork-maintenance/interaction_fixture.py
 COPY wayland_clipboard_fixture.py /opt/xpra-fork-maintenance/wayland_clipboard_fixture.py
@@ -235,6 +244,7 @@ COPY start_wayland_subsurface_fixture.sh /opt/xpra-fork-maintenance/start_waylan
 COPY start_zed.sh /opt/xpra-fork-maintenance/start_zed.sh
 
 RUN test -d /usr/local/share/xpra/css \
+    && python3 /opt/xpra-fork-maintenance/build_libva_trace.py verify \
     && chmod 0644 /opt/xpra-fork-maintenance/clipboard_fixture_common.py \
     && chmod 0644 /opt/xpra-fork-maintenance/interaction_fixture.py \
     && chmod 0644 /opt/xpra-fork-maintenance/wayland_clipboard_fixture.py \
@@ -398,6 +408,14 @@ RUN wayland-scanner client-header /tmp/wlr-virtual-pointer-v1.xml /tmp/wlr-virtu
         $(pkg-config --cflags --libs wayland-client) \
         -o /opt/xpra-install/usr/local/bin/xpra-virtual-pointer-device
 
+# Apply the same diagnostic boundary to Debian's own exact libva source.
+COPY build_libva_trace.py libva_trace.patch libva_trace_test.c /tmp/xpra-libva-trace/
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends meson ninja-build dpkg-dev \
+        libx11-xcb-dev libxcb-dri3-dev \
+    && python3 /tmp/xpra-libva-trace/build_libva_trace.py build
+
 
 FROM docker.io/library/debian:13-slim AS client
 
@@ -466,11 +484,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=client-build /opt/xpra-install/ /
+COPY --from=client-build /opt/libva-trace-install/ /
 COPY clipboard_fixture_common.py /opt/xpra-fork-maintenance/clipboard_fixture_common.py
 COPY container_payload.py /opt/xpra-fork-maintenance/container_payload.py
 COPY x11_clipboard_fixture.py /opt/xpra-fork-maintenance/x11_clipboard_fixture.py
 
 RUN test -d /usr/local/share/xpra/css \
+    && python3 /opt/xpra-fork-maintenance/build_libva_trace.py verify \
     && chmod 0644 /opt/xpra-fork-maintenance/clipboard_fixture_common.py \
     && chmod 0755 /opt/xpra-fork-maintenance/container_payload.py \
     && chmod 0644 /opt/xpra-fork-maintenance/x11_clipboard_fixture.py \
