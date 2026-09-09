@@ -32,15 +32,19 @@ frozen base → atomic edit → affected regression/native/live → review and f
 An explicit upstream refresh adds a mandatory phase before the development
 testing loop above; see [the complete runbook](upstream-refresh.md). After
 recording every patch's applicability against the new embedded source, the
-agent deeply reviews the whole queue with equal priority and depth. For each
-case, reason from current code about correctness and continued necessity,
-including callers, ownership, error/lifecycle/compatibility paths, interactions
+agent reviews and implements one case at a time with equal priority and depth.
+For each case, reason from current code about correctness and continued
+necessity, including callers, ownership, error/lifecycle/compatibility paths, interactions
 with other patches, and behavior not covered by tests.
 
-Record code-supported keep/adapt/retire conclusions, implement all initial
-review-driven changes/removals and durable regression migrations, and re-review
-the resulting composed code. Record the runbook's manual-review exit gate
-before any new Xpra test, clean/quarantine control, native/compiled regression,
+Immediately implement/export the current case's code-supported keep/adapt/retire
+decision and necessary cross-case repairs, including durable regression
+migrations. Re-review and save its input-bound checkpoint before taking the
+next case. Persist findings and exact resume actions while working; do not
+accumulate a whole-queue read-only review before implementing known corrections.
+After completing these iterations, review the resulting composed code and
+record the runbook's manual-review exit gate before any new Xpra test,
+clean/quarantine control, native/compiled regression,
 live profile or real DEB build; upstream-test image preparation waits too.
 Applicability, static and offline fork-control/safety checks remain allowed.
 This is a reasoning checkpoint, not a Make target or a green-test certificate.

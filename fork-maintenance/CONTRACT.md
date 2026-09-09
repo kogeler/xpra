@@ -477,10 +477,14 @@ another input.
 
 The sequence below states the refresh's complete obligations. Its initial
 manual-review phase is strictly before runtime validation: record every
-applicability result, deeply inspect every patch in the new code, conclude
-keep/adapt/retire from that reasoning, implement and re-review all initial
-changes, and record the whole-queue review exit gate. Inspect current callers,
-ownership, failure/lifecycle/compatibility paths, cross-case interactions and
+applicability result, then deeply inspect one patch in the new code, conclude
+keep/adapt/retire, immediately implement/export and re-review its changes and
+necessary cross-case repairs, and checkpoint before taking the next case.
+Persist findings, exact identities and resume actions while working; a plan or
+unexported edit is not a completed adaptation. Do not defer implementation
+until every case has been reviewed. Finish the incremental pass, review the
+resulting composition and record the whole-queue review exit gate. Inspect
+current callers, ownership, failure/lifecycle/compatibility paths, cross-case interactions and
 test blind spots; tests cannot replace this analysis or cover every case.
 Initial source inspection, static checks and offline fork-control/safety tests
 remain allowed. No new Xpra, quarantine, native/compiled, live or real package
@@ -503,11 +507,12 @@ exact valid new-base controls instead of repeating them at each numbered phase.
 5. resolve and stage every conflict, then use `git rebase --continue` until the
    rebase completes; abort and stop if correct resolution is not possible;
 6. run `patch-start-check` and inventory every individual `patch-check`
-   outcome; perform the mandatory deep manual review of all cases, including
-   unchanged/exactly present patches and the quarantine; record code-supported
-   correctness/necessity decisions, implement all initial adaptations,
-   removals and regression-ownership migrations, re-review the composed code,
-   resolve the resulting stack and record the manual-review exit gate;
+   outcome; perform the incremental deep review/decision/implementation/export/
+   re-review/checkpoint loop for every case, including unchanged/exactly present
+   patches and the quarantine, repairing necessary cross-case changes within
+   the owning iteration; finish all initial adaptations, removals and regression
+   migrations, review the composed code, resolve the resulting stack and record
+   the manual-review exit gate;
 7. run every clean quarantine gate and remove or narrow entries that no longer
    fail on this exact master;
 8. run the complete offline fork-control suite and a tests-only clean control
