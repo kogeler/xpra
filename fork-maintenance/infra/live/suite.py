@@ -5,14 +5,84 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import job
 from profiles import DEFAULT_NETWORK_PROFILE, LIVE_PROFILE_REQUIRED_GATES, LIVE_SELECTION
+
+
+PEER_LOGS = ("server.stdout", "server.stderr", "client.stdout", "client.stderr")
+PEER_WARNING_PATTERNS = {
+    "wayland-display-name": re.compile(
+        rb"['\"]?display-name['\"]? is not a declared signal of WaylandManager", re.IGNORECASE,
+    ),
+    "codec-startup-timeout": re.compile(
+        rb"timed out waiting for the decode thread to load the codecs", re.IGNORECASE,
+    ),
+    "clipboard-rate-or-timeout": re.compile(
+        rb"more than [0-9]+ clipboard requests per second|"
+        rb"(?:clipboard|(?:PRIMARY|SECONDARY) selection request)[^\r\n]*timed out", re.IGNORECASE,
+    ),
+}
+
+
+def check_peer_logs(run: str, report_digest: str) -> None:
+    """Reject warning regressions in complete, report-bound logs of every peer."""
+    report = job.result_path(run)
+    job.ensure_private_directory(report.parent)
+    job.ensure_private_regular(report)
+    raw = report.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != report_digest:
+        raise job.JobError(f"live suite report changed before peer-log validation: {run}")
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise job.JobError(f"invalid peer-log report: {run}")
+    scenarios = payload.get("scenarios")
+    if not isinstance(scenarios, list) or not scenarios:
+        raise job.JobError(f"live suite peer logs have no scenarios: {run}")
+    limit = job.live_runner_module().FRAME_LOG_SCAN_BYTES
+    seen = set()
+    for scenario in scenarios:
+        if not isinstance(scenario, dict):
+            raise job.JobError(f"invalid peer-log scenario: {run}")
+        name = scenario.get("name")
+        if not isinstance(name, str) or not job.NAME_RE.fullmatch(name) or name in seen:
+            raise job.JobError(f"invalid peer-log scenario name: {run}")
+        seen.add(name)
+        directory = report.parent / name
+        job.ensure_private_directory(directory)
+        digests = scenario.get("artifact_sha256")
+        if not isinstance(digests, dict):
+            raise job.JobError(f"live suite peer logs have no artifact digests: {run}/{name}")
+        for filename in PEER_LOGS:
+            path = directory / filename
+            job.ensure_private_regular(path)
+            with path.open("rb") as stream:
+                content = stream.read(limit + 1)
+            if len(content) > limit or hashlib.sha256(content).hexdigest() != digests.get(filename):
+                raise job.JobError(f"live suite peer log is oversized or changed: {run}/{name}/{filename}")
+            for label, pattern in PEER_WARNING_PATTERNS.items():
+                if pattern.search(content):
+                    # Never include a clipboard-bearing log line in diagnostics.
+                    raise job.JobError(f"live suite warning {label}: {run}/{name}/{filename}")
+
+
+def validate_member(run: str, record: dict[str, object]) -> str:
+    job.verify_collected(run, record)
+    status = job.load_private_json(job.status_path(run))
+    if status.get("result") != "success":
+        raise job.JobError(f"live suite member did not pass: {run}")
+    result, digest, checks = job.report_validation(run, record, inspect_current_images=False)
+    if result != "passed" or not checks or not all(checks.values()):
+        raise job.JobError(f"live suite member evidence no longer validates: {run}")
+    check_peer_logs(run, digest)
+    return digest
 
 
 def members(prefix: str) -> list[tuple[str, tuple[str, str, str, str, str]]]:
@@ -61,13 +131,7 @@ def check(prefix: str) -> dict[str, object]:
         ))
         if observed != profile:
             raise job.JobError(f"wrong live suite profile: {run}")
-        job.verify_collected(run, record)
-        status = job.load_private_json(job.status_path(run))
-        if status.get("result") != "success":
-            raise job.JobError(f"live suite member did not pass: {run}")
-        result, digest, checks = job.report_validation(run, record, inspect_current_images=False)
-        if result != "passed" or not checks or not all(checks.values()):
-            raise job.JobError(f"live suite member evidence no longer validates: {run}")
+        digest = validate_member(run, record)
         provenance = record["input_provenance"]
         identity = (
             provenance["source_commit"], provenance["server_selection_sha256"],
@@ -135,6 +199,9 @@ def run_all(args: argparse.Namespace) -> int:
             if result.returncode:
                 print(f"live suite stopped at {run}; inspect its named logs before retrying", file=sys.stderr)
                 return result.returncode
+        # A rendering/paste pass cannot conceal a late startup or conversion
+        # warning. Stop before launching another physical profile.
+        validate_member(run, retained_record(run))
     print(json.dumps(check(args.run), indent=2, sort_keys=True))
     return 0
 

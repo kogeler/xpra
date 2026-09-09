@@ -1,0 +1,25 @@
+schema = 1
+slug = "x11-selection-refusal"
+kind = "production"
+title = "Complete refused X11 clipboard conversions without a timeout"
+commit_subject = "Complete refused X11 clipboard conversions without a timeout"
+patch_sha256 = "4fe3eb606666e40885b14e647ea27b614c9724a57aa9d622b24b61a329627497"
+dependencies = []
+paths = [
+  "tests/unittests/unit/x11/selection_refusal_test.py",
+  "xpra/x11/bindings/events.pyx",
+  "xpra/x11/selection/proxy.py",
+]
+
+[tests]
+list = [
+  "unit.x11.selection_refusal_test",
+  "unit.clipboard_core_test",
+  "unit.client.subsystem.clipboard_test",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = ["live-x11-clipboard"]

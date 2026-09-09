@@ -1,0 +1,670 @@
+diff --git a/tests/unittests/unit/x11/selection_refusal_test.py b/tests/unittests/unit/x11/selection_refusal_test.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..38afe3b5c922b1dbbcad0f7368ca344bac22d701
+--- /dev/null
++++ b/tests/unittests/unit/x11/selection_refusal_test.py
+@@ -0,0 +1,394 @@
++#!/usr/bin/env python3
++# This file is part of Xpra.
++# Copyright (C) 2026 kogeler
++# Xpra is released under the terms of the GNU GPL v2, or, at your option, any
++# later version. See the file COPYING for details.
++
++"""Real X11 conversion replies through the compiled parser and GDK filter."""
++
++import ctypes as C
++import time
++import unittest
++from unittest.mock import patch
++
++from xpra.os_util import gi_import
++from unit.process_test_util import DisplayContext
++
++GLib = gi_import("GLib")
++DISPLAY = C.c_void_p
++XID = C.c_ulong
++
++
++class SelectionRequest(C.Structure):
++    _fields_ = [
++        ("type", C.c_int), ("serial", C.c_ulong), ("send_event", C.c_int),
++        ("display", DISPLAY), ("owner", XID), ("requestor", XID),
++        ("selection", XID), ("target", XID), ("property", XID), ("time", XID),
++    ]
++
++
++class SelectionNotify(C.Structure):
++    _fields_ = [
++        ("type", C.c_int), ("serial", C.c_ulong), ("send_event", C.c_int),
++        ("display", DISPLAY), ("requestor", XID), ("selection", XID),
++        ("target", XID), ("property", XID), ("time", XID),
++    ]
++
++
++class PropertyNotify(C.Structure):
++    _fields_ = [
++        ("type", C.c_int), ("serial", C.c_ulong), ("send_event", C.c_int),
++        ("display", DISPLAY), ("window", XID), ("atom", XID),
++        ("time", XID), ("state", C.c_int),
++    ]
++
++
++class XEvent(C.Union):
++    _fields_ = [
++        ("type", C.c_int), ("request", SelectionRequest),
++        ("selection", SelectionNotify), ("property", PropertyNotify),
++        ("pad", C.c_long * 24),
++    ]
++
++
++class XErrorEvent(C.Structure):
++    _fields_ = [
++        ("type", C.c_int), ("display", DISPLAY), ("resource", XID),
++        ("serial", C.c_ulong), ("code", C.c_ubyte),
++        ("request", C.c_ubyte), ("minor", C.c_ubyte),
++    ]
++
++
++def spin_until(predicate, timeout=1.0):
++    context = GLib.MainContext.default()
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        while context.pending():
++            context.iteration(False)
++        if predicate():
++            return True
++        time.sleep(0.001)
++    return bool(predicate())
++
++
++class Owner:
++    """Independent Xlib connection: no Xpra parser or reply helper on this side."""
++
++    def __init__(self):
++        self.lib = C.CDLL("libX11.so.6")
++        declarations = {
++            "XOpenDisplay": ([C.c_char_p], DISPLAY),
++            "XCloseDisplay": ([DISPLAY], C.c_int),
++            "XDefaultRootWindow": ([DISPLAY], XID),
++            "XCreateSimpleWindow": ([DISPLAY, XID, C.c_int, C.c_int, C.c_uint,
++                                      C.c_uint, C.c_uint, XID, XID], XID),
++            "XDestroyWindow": ([DISPLAY, XID], C.c_int),
++            "XInternAtom": ([DISPLAY, C.c_char_p, C.c_int], XID),
++            "XSetSelectionOwner": ([DISPLAY, XID, XID, XID], C.c_int),
++            "XGetSelectionOwner": ([DISPLAY, XID], XID),
++            "XChangeProperty": ([DISPLAY, XID, XID, XID, C.c_int, C.c_int,
++                                  C.c_void_p, C.c_int], C.c_int),
++            "XSelectInput": ([DISPLAY, XID, C.c_long], C.c_int),
++            "XSendEvent": ([DISPLAY, XID, C.c_int, C.c_long, C.POINTER(XEvent)], C.c_int),
++            "XPending": ([DISPLAY], C.c_int),
++            "XNextEvent": ([DISPLAY, C.POINTER(XEvent)], C.c_int),
++            "XConnectionNumber": ([DISPLAY], C.c_int),
++            "XFlush": ([DISPLAY], C.c_int),
++            "XSync": ([DISPLAY, C.c_int], C.c_int),
++            "XSetErrorHandler": ([C.c_void_p], C.c_void_p),
++        }
++        for name, (args, result) in declarations.items():
++            function = getattr(self.lib, name)
++            function.argtypes, function.restype = args, result
++        self.display = self.lib.XOpenDisplay(None)
++        assert self.display
++        self.root = self.lib.XDefaultRootWindow(self.display)
++        self.window = self.lib.XCreateSimpleWindow(self.display, self.root, 0, 0, 1, 1, 0, 0, 0)
++        self.requests = []
++        self.errors = []
++        self.incr = {}
++        self.mode = "hold"
++        self.data = b"one clipboard line"
++        self.error_handler = C.CFUNCTYPE(C.c_int, DISPLAY, C.POINTER(XErrorEvent))(self.xerror)
++        self.previous_handler = self.lib.XSetErrorHandler(self.error_handler)
++        self.watch = GLib.io_add_watch(self.lib.XConnectionNumber(self.display), GLib.PRIORITY_DEFAULT,
++                                       GLib.IO_IN, self.events)
++        for selection in ("CLIPBOARD", "PRIMARY"):
++            self.claim(selection, self.window)
++
++    def xerror(self, _display, event):
++        self.errors.append((event.contents.code, event.contents.resource))
++        return 0
++
++    def atom(self, name):
++        return self.lib.XInternAtom(self.display, name.encode("ascii"), False)
++
++    def claim(self, selection, window):
++        atom = self.atom(selection)
++        self.lib.XSetSelectionOwner(self.display, atom, window, 0)
++        assert self.lib.XGetSelectionOwner(self.display, atom) == window
++
++    def events(self, *_args):
++        while self.lib.XPending(self.display):
++            event = XEvent()
++            self.lib.XNextEvent(self.display, C.byref(event))
++            if event.type == 30:
++                request = SelectionRequest.from_buffer_copy(event)
++                self.requests.append(request)
++                if self.mode == "refuse":
++                    self.notify(request)
++                elif self.mode == "success":
++                    self.success(request)
++                elif self.mode == "incr":
++                    self.incremental(request)
++            elif event.type == 28 and event.property.state == 1:
++                key = (event.property.window, event.property.atom)
++                if key in self.incr:
++                    request, chunks = self.incr[key]
++                    chunk = chunks.pop(0)
++                    self.write(request, request.target, 8, chunk, len(chunk))
++                    if not chunks:
++                        del self.incr[key]
++        return True
++
++    def write(self, request, dtype, dformat, data, count):
++        self.lib.XChangeProperty(self.display, request.requestor, request.property,
++                                 dtype, dformat, 0, data, count)
++        self.lib.XFlush(self.display)
++
++    def notify(self, request, **overrides):
++        event = XEvent()
++        event.selection.type = 31
++        event.selection.display = self.display
++        for name in ("requestor", "selection", "target", "time"):
++            setattr(event.selection, name, overrides.get(name, getattr(request, name)))
++        event.selection.property = overrides.get("property", 0)
++        assert self.lib.XSendEvent(self.display, event.selection.requestor, False, 0, C.byref(event))
++        self.lib.XFlush(self.display)
++
++    def success(self, request):
++        if request.target == self.atom("TARGETS"):
++            values = (XID * 2)(self.atom("UTF8_STRING"), self.atom("text/plain;charset=utf-8"))
++            self.write(request, self.atom("ATOM"), 32, values, 2)
++        else:
++            self.write(request, request.target, 8, self.data, len(self.data))
++        self.notify(request, property=request.property)
++
++    def incremental(self, request):
++        self.lib.XSelectInput(self.display, request.requestor, 1 << 22)
++        size = (XID * 1)(len(self.data))
++        self.incr[(request.requestor, request.property)] = (request, [self.data[:5], self.data[5:], b""])
++        self.write(request, self.atom("INCR"), 32, size, 1)
++        self.notify(request, property=request.property)
++
++    def close(self):
++        GLib.source_remove(self.watch)
++        self.lib.XDestroyWindow(self.display, self.window)
++        self.lib.XSync(self.display, False)
++        self.lib.XSetErrorHandler(self.previous_handler)
++        self.lib.XCloseDisplay(self.display)
++
++
++class SelectionRefusalTest(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.display = DisplayContext()
++        cls.display.__enter__()
++        from xpra.x11.gtk import bindings
++        cls.bindings = bindings
++        assert bindings.init_x11_filter()
++
++    @classmethod
++    def tearDownClass(cls):
++        cls.bindings.cleanup_x11_filter()
++        cls.display.__exit__(None, None, None)
++
++    def setUp(self):
++        from xpra.x11.selection import proxy
++        from xpra.x11.selection.clipboard import X11Clipboard
++        self.module = proxy
++        self.owner = Owner()
++        # The real helper owns the legacy PropertyNotify route too. Without
++        # it a clean positive control would fail for an unrelated missing
++        # receiver, obscuring the actual SelectionNotify refusal boundary.
++        self.helper = X11Clipboard(lambda *_packet: None, **{
++            "can-send": True, "can-receive": False,
++            "clipboards.local": ("CLIPBOARD", "PRIMARY"),
++            "clipboards.remote": ("CLIPBOARD", "PRIMARY"),
++        })
++        self.xid = self.helper.event_window_xid
++        self.proxies = {name: self.helper._get_proxy(name) for name in ("CLIPBOARD", "PRIMARY")}
++        self.helper.enable_selections(tuple(self.proxies))
++        self.logging = patch.object(proxy, "log", wraps=proxy.log)
++        self.logger = self.logging.start()
++
++    def tearDown(self):
++        self.helper.cleanup()
++        for proxy in self.proxies.values():
++            proxy.cancel_incr_data_timer()
++            proxy.reset_incr_data()
++        spin_until(lambda: False, 0.12)
++        self.owner.close()
++        self.logging.stop()
++        self.assertFalse(self.owner.errors)
++
++    def request(self, selection="CLIPBOARD", target="UTF8_STRING"):
++        result = []
++        self.proxies[selection].get_contents(target, lambda *args: result.append(args))
++        return result
++
++    def wait(self, predicate):
++        self.assertTrue(spin_until(predicate), "native X11 transaction did not finish")
++
++    def assert_drained(self):
++        from xpra.x11.dispatch import event_receivers_map
++        for proxy in self.proxies.values():
++            self.assertFalse(proxy.local_requests)
++        for request in self.owner.requests:
++            if request.requestor != self.xid:
++                self.assertNotIn(request.requestor, event_receivers_map)
++
++    def test_refused_aliases_and_targets_complete_without_timeout(self):
++        self.owner.mode = "refuse"
++        for selection in self.proxies:
++            for target in ("text/plain;charset=utf-8", "text/plain;charset=UTF-8", "TARGETS"):
++                with self.subTest(selection=selection, target=target):
++                    result = self.request(selection, target)
++                    self.wait(lambda: bool(result))
++                    self.assertEqual(result, [("ATOM", 32, b"")] if target == "TARGETS" else [("", 0, b"")])
++                    self.logger.warn.assert_not_called()
++        self.assertEqual(len(self.owner.requests), 6)
++        self.assert_drained()
++
++    def test_no_owner_is_a_server_refusal(self):
++        for selection in self.proxies:
++            self.owner.claim(selection, 0)
++            result = self.request(selection)
++            self.wait(lambda: bool(result))
++            self.assertEqual(result, [("", 0, b"")])
++        self.assertFalse(self.owner.requests)
++        self.logger.warn.assert_not_called()
++        self.assert_drained()
++
++    def test_positive_targets_text_and_incremental_transfer(self):
++        for selection in self.proxies:
++            for mode, target in (("success", "TARGETS"), ("success", "UTF8_STRING"), ("incr", "TEXT")):
++                with self.subTest(selection=selection, mode=mode):
++                    self.owner.mode = mode
++                    result = self.request(selection, target)
++                    self.wait(lambda: bool(result))
++                    self.assertEqual(len(result), 1)
++                    if target == "TARGETS":
++                        from xpra.x11.selection.common import xatoms_to_strings
++                        self.assertEqual(result[0][:2], ("ATOM", 32))
++                        self.assertEqual(xatoms_to_strings(result[0][2]), ("UTF8_STRING", "text/plain;charset=utf-8"))
++                    else:
++                        self.assertEqual(bytes(result[0][2]), self.owner.data)
++        self.assertFalse(self.owner.incr)
++        self.logger.warn.assert_not_called()
++        self.assert_drained()
++
++    def test_identical_conversions_have_independent_negative_and_positive_replies(self):
++        first = self.request()
++        second = self.request()
++        self.wait(lambda: len(self.owner.requests) == 2)
++        old, new = self.owner.requests
++        self.owner.notify(old)
++        self.wait(lambda: bool(first))
++        self.assertEqual(first, [("", 0, b"")])
++        self.assertFalse(second)
++        self.owner.success(new)
++        self.wait(lambda: bool(second))
++        self.assertEqual(bytes(second[0][2]), self.owner.data)
++        self.logger.warn.assert_not_called()
++        self.assert_drained()
++
++    def test_duplicate_refusal_cannot_replace_an_accepted_incremental_reply(self):
++        result = self.request()
++        self.wait(lambda: bool(self.owner.requests))
++        request = self.owner.requests[0]
++        self.owner.incremental(request)
++        self.owner.notify(request)
++        self.wait(lambda: bool(result))
++        self.assertEqual(len(result), 1)
++        self.assertEqual(bytes(result[0][2]), self.owner.data)
++        self.assertFalse(self.owner.incr)
++        self.logger.warn.assert_not_called()
++        self.assert_drained()
++
++    def test_deadline_setup_failure_retires_the_new_requestor(self):
++        from xpra.x11.dispatch import event_receivers_map
++        from xpra.x11.error import xsync
++        bindings = self.module.X11Window
++        with xsync:
++            before = tuple(bindings.get_children(bindings.get_root_xid()))
++        receivers = dict(event_receivers_map)
++        with (
++            patch.object(GLib, "timeout_add", side_effect=RuntimeError("injected deadline failure")),
++            self.assertRaisesRegex(RuntimeError, "injected deadline failure"),
++        ):
++            self.request()
++        with xsync:
++            self.assertEqual(tuple(bindings.get_children(bindings.get_root_xid())), before)
++        self.assertEqual(event_receivers_map, receivers)
++        self.assertFalse(self.proxies["CLIPBOARD"].local_requests)
++        self.logger.warn.assert_not_called()
++
++    def test_mismatched_reply_does_not_cancel_request(self):
++        result = self.request()
++        self.wait(lambda: bool(self.owner.requests))
++        request = self.owner.requests[0]
++        self.owner.notify(request, selection=self.owner.atom("PRIMARY"))
++        self.owner.notify(request, target=self.owner.atom("TEXT"))
++        self.owner.notify(request, time=123)
++        self.owner.notify(request, property=self.owner.atom("unrelated-property"))
++        self.owner.notify(request, requestor=self.xid)
++        spin_until(lambda: False, 0.02)
++        self.assertFalse(result)
++        self.owner.success(request)
++        self.wait(lambda: bool(result))
++        self.assertEqual(bytes(result[0][2]), self.owner.data)
++        self.logger.warn.assert_not_called()
++
++    def test_silent_owner_times_out_and_late_refusal_cannot_cancel_retry(self):
++        started = time.monotonic()
++        old_result = self.request()
++        self.wait(lambda: bool(old_result))
++        self.assertGreaterEqual(time.monotonic() - started, self.module.CONVERT_TIMEOUT / 1000 * 0.9)
++        self.assertEqual(self.logger.warn.call_count, 2)
++        self.logger.warn.reset_mock()
++        new_result = self.request()
++        self.wait(lambda: len(self.owner.requests) == 2)
++        old, new = self.owner.requests
++        self.owner.notify(old)
++        self.owner.lib.XSync(self.owner.display, False)
++        self.assertEqual(self.owner.errors, [(3, old.requestor)])
++        self.owner.errors.clear()
++        spin_until(lambda: False, 0.02)
++        self.assertFalse(new_result)
++        self.owner.success(new)
++        self.wait(lambda: bool(new_result))
++        self.assertEqual(bytes(new_result[0][2]), self.owner.data)
++        self.logger.warn.assert_not_called()
++        self.assert_drained()
++
++    def test_cleanup_retires_pending_requestors_and_deadlines(self):
++        from xpra.x11.dispatch import event_receivers_map
++        result = self.request()
++        self.wait(lambda: bool(self.owner.requests))
++        proxy = self.proxies["CLIPBOARD"]
++        timers = [timer for pending in proxy.local_requests.values() for timer, _callback in pending.values()]
++        proxy.cleanup()
++        proxy.cleanup()
++        context = GLib.MainContext.default()
++        self.assertTrue(all(context.find_source_by_id(timer) is None for timer in timers))
++        self.assertFalse(proxy.local_requests)
++        if self.owner.requests[0].requestor != self.xid:
++            self.assertNotIn(self.owner.requests[0].requestor, event_receivers_map)
++        spin_until(lambda: False, 0.12)
++        self.assertFalse(result)
++        self.logger.warn.assert_not_called()
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/xpra/x11/bindings/events.pyx b/xpra/x11/bindings/events.pyx
+index 6c09274567e47a82344768df87e21b140dbb1ec2..de9da56e9c6b0981495653bf8d570b2d364c7d58 100644
+--- a/xpra/x11/bindings/events.pyx
++++ b/xpra/x11/bindings/events.pyx
+@@ -66,6 +66,7 @@ cdef void init_x11_events():
+         ConfigureRequest    : ("", "x11-child-configure-request-event"),
+         SelectionRequest    : ("x11-selection-request", ""),
+         SelectionClear      : ("x11-selection-clear", ""),
++        SelectionNotify     : ("x11-selection-notify", ""),
+         FocusIn             : ("x11-focus-in-event", ""),
+         FocusOut            : ("x11-focus-out-event", ""),
+         ClientMessage       : ("x11-client-message-event", ""),
+@@ -278,6 +279,7 @@ cdef dict parse_SelectionClear(Display *d, XEvent *e):
+ cdef dict parse_SelectionNotify(Display *d, XEvent *e):
+     cdef XSelectionEvent * selection_e = <XSelectionEvent*> e
+     return {
++        "window": selection_e.requestor,
+         "requestor": selection_e.requestor,
+         "selection": atom_str(d, selection_e.selection),
+         "target": atom_str(d, selection_e.target),
+@@ -455,7 +457,7 @@ cdef object parse_xevent(Display *d, XEvent *e):
+     cdef int etype = e.type
+     global x_event_type_names, x_event_signals
+     cdef str event_type = x_event_type_names.get(etype, "") or str(etype)
+-    if e.xany.send_event and etype not in (ClientMessage, UnmapNotify):
++    if e.xany.send_event and etype not in (ClientMessage, UnmapNotify, SelectionNotify):
+         log("parse_xevent ignoring %s send_event", event_type)
+         return None
+ 
+diff --git a/xpra/x11/selection/proxy.py b/xpra/x11/selection/proxy.py
+index 4680b52b3d51e4138968b053d8c0f890eb7b0205..0ae73ff9b05c115c73e41dbab29177598304c7f3 100644
+--- a/xpra/x11/selection/proxy.py
++++ b/xpra/x11/selection/proxy.py
+@@ -20,7 +20,8 @@ from xpra.x11.selection.common import xatoms_to_strings, strings_to_xatoms
+ from xpra.x11.bindings.core import constants
+ from xpra.x11.bindings.window import PropertyError, X11WindowBindings
+ from xpra.x11.common import X11Event
+-from xpra.x11.error import xsync, XError
++from xpra.x11.dispatch import add_event_receiver, remove_event_receiver
++from xpra.x11.error import xsync, xlog, XError
+ from xpra.x11.info import get_wininfo
+ from xpra.log import Logger
+ 
+@@ -91,6 +92,7 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
+         "x11-client-message-event": one_arg_signal,
+         "x11-selection-request": one_arg_signal,
+         "x11-selection-clear": one_arg_signal,
++        "x11-selection-notify": one_arg_signal,
+         "x11-property-notify-event": one_arg_signal,
+         "x11-xfixes-selection-notify-event": one_arg_signal,
+         #
+@@ -107,6 +109,10 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
+         self.remote_requests: dict[str, list[tuple[int, str, str, float]]] = {}
+         self.local_requests: dict[str, dict[int, tuple[int, ClipboardCallback]]] = {}
+         self.local_request_counter: int = 0
++        self._requestor_windows: dict[int, tuple[str, int, Any]] = {}
++        self._requestor_xids: dict[int, int] = {}
++        self._requestor_notified: set[int] = set()
++        self._requestors_closed: bool = False
+         self.targets: Sequence[str] = ()
+         self.target_data: dict[str, tuple[str, int, Any]] = {}
+         self._targets_owner: int = 0
+@@ -128,6 +134,7 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
+ 
+     def cleanup(self) -> None:
+         log("%s.cleanup()", self)
++        self.cancel_conversion_requests()
+         # give up selection:
+         # (disabled because this crashes GTK3 on exit)
+         # if self.owned:
+@@ -504,6 +511,9 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
+     def get_contents(self, target: str, got_contents: ClipboardCallback) -> None:
+         log("get_contents(%s, %s) owned=%s, have-token=%s",
+             target, got_contents, self.owned, self._have_token)
++        if self._requestors_closed:
++            got_contents("", 0, b"")
++            return
+         with xsync:
+             owner = X11Window.XGetSelectionOwner(self._selection)
+         self.owned = owner == self.xid
+@@ -528,10 +538,93 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
+                 return
+             request_id = self.local_request_counter
+             self.local_request_counter += 1
+-            timer = GLib.timeout_add(CONVERT_TIMEOUT, self.timeout_get_contents, target, request_id)
+-            self.local_requests.setdefault(target, {})[request_id] = (timer, got_contents)
+-            log("requesting local XConvertSelection from %s as '%s' into '%s'", get_wininfo(owner), target, prop)
+-            X11Window.ConvertSelection(self._selection, target, prop, self.xid, time=CurrentTime)
++            requestor = self.create_requestor(target, request_id)
++            try:
++                timer = GLib.timeout_add(CONVERT_TIMEOUT, self.timeout_get_contents, target, request_id)
++                self.local_requests.setdefault(target, {})[request_id] = (timer, got_contents)
++                log("requesting local XConvertSelection from %s as '%s' into '%s'", get_wininfo(owner), target, prop)
++                X11Window.ConvertSelection(self._selection, target, prop, requestor, time=CurrentTime)
++            except Exception:
++                self.complete_refused_request(target, request_id)
++                raise
++
++    def create_requestor(self, target: str, request_id: int) -> int:
++        # A refused conversion has no property: a private requestor also binds
++        # identical targets and CurrentTime requests across retries/timeouts.
++        xid = X11Window.CreateWindow(
++            X11Window.get_root_xid(), -1, -1,
++            event_mask=constants["PropertyChangeMask"] | StructureNotifyMask,
++            inputoutput=constants["InputOnly"],
++        )
++        try:
++            from xpra.x11.common import get_pywindow
++            window = get_pywindow(xid)
++            if window is None:
++                raise RuntimeError("failed to register the clipboard requestor window")
++            add_event_receiver(xid, self)
++            self._requestor_windows[xid] = (target, request_id, window)
++            self._requestor_xids[request_id] = xid
++        except Exception:
++            remove_event_receiver(xid, self)
++            with xlog:
++                X11Window.DestroyWindow(xid)
++            raise
++        return xid
++
++    def close_requestor(self, request_id: int) -> None:
++        if xid := self._requestor_xids.pop(request_id, 0):
++            remove_event_receiver(xid, self)
++            self._requestor_notified.discard(xid)
++            with xlog:
++                X11Window.DestroyWindow(xid)
++            self._requestor_windows.pop(xid, None)
++
++    def cancel_conversion_requests(self) -> None:
++        self._requestors_closed = True
++        for target, request_id, _window in tuple(self._requestor_windows.values()):
++            self.close_requestor(request_id)
++            pending = self.local_requests.get(target, {})
++            if request := pending.pop(request_id, None):
++                GLib.source_remove(request[0])
++            if not pending:
++                self.local_requests.pop(target, None)
++
++    def do_x11_selection_notify(self, event: X11Event) -> None:
++        request = self._requestor_windows.get(event.requestor)
++        if not request or event.window != event.requestor or event.selection != self._selection:
++            return
++        if event.requestor in self._requestor_notified:
++            return
++        target, request_id, _window = request
++        if event.target != target or event.time != CurrentTime:
++            return
++        if not event.property:
++            log("local selection conversion refused: %s, %s, request %i", self._selection, target, request_id)
++            self.complete_refused_request(target, request_id)
++        elif event.property == f"{self._selection}-{target}":
++            # PropertyNotify can precede this acknowledgement. Do not retire
++            # its requestor before the owner has finished sending the reply.
++            self._requestor_notified.add(event.requestor)
++            self.read_property(event.requestor, event.property)
++
++    def complete_refused_request(self, target: str, request_id: int) -> None:
++        pending = self.local_requests.get(target, {})
++        request = pending.pop(request_id, None)
++        if not pending:
++            self.local_requests.pop(target, None)
++        self.close_requestor(request_id)
++        if request:
++            timer, got_contents = request
++            GLib.source_remove(timer)
++            if target == "TARGETS":
++                got_contents("ATOM", 32, b"")
++            else:
++                got_contents("", 0, b"")
++
++    def do_x11_property_notify_event(self, event: X11Event) -> None:
++        request = self._requestor_windows.get(event.window)
++        if request and event.window in self._requestor_notified and event.atom == f"{self._selection}-{request[0]}":
++            self.do_property_notify(event)
+ 
+     def timeout_get_contents(self, target: str, request_id: int) -> None:
+         try:
+@@ -544,6 +637,7 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
+         except KeyError:
+             return
+         GLib.source_remove(timer)
++        self.close_requestor(request_id)
+         log.warn("Warning: %s selection request for '%s' timed out", self._selection, target)
+         log.warn(" request %i", request_id)
+         if target == "TARGETS":
+@@ -553,17 +647,20 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
+ 
+     def do_property_notify(self, event) -> None:
+         log("do_property_notify(%s)", event)
++        self.read_property(event.window, event.atom)
++
++    def read_property(self, xid: int, atom: str) -> None:
+         if not self._enabled:
+             return
+         # ie: atom="PRIMARY-TARGETS", atom="PRIMARY-STRING"
+-        parts = event.atom.split("-", 1)
++        parts = atom.split("-", 1)
+         assert len(parts) == 2
+         # selection = parts[0]        # ie: PRIMARY
+         target = parts[1]  # ie: VALUE
+         try:
+             with xsync:
+-                dtype, dformat = X11Window.GetWindowPropertyType(self.xid, event.atom, True)
+-                data = X11Window.XGetWindowProperty(self.xid, event.atom, dtype, buffer_size=MAX_DATA_SIZE, incr=True)
++                dtype, dformat = X11Window.GetWindowPropertyType(xid, atom, True)
++                data = X11Window.XGetWindowProperty(xid, atom, dtype, buffer_size=MAX_DATA_SIZE, incr=True)
+                 # all the code below deals with INCRemental transfers:
+                 if dtype == "INCR" and not self.incr_data_size:
+                     # start of an incremental transfer, extract the size
+@@ -573,7 +670,7 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
+                     self.incr_data_type = ""
+                     log("incremental clipboard data of size %s", self.incr_data_size)
+                     self.reschedule_incr_data_timer()
+-                    X11Window.XDeleteProperty(self.xid, event.atom)
++                    X11Window.XDeleteProperty(xid, atom)
+                     return
+                 if self.incr_data_size > 0:
+                     # incremental is now in progress:
+@@ -589,26 +686,44 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
+                         log("got incremental data: %i bytes", len(data))
+                         self.incr_data_chunks.append(data)
+                         self.reschedule_incr_data_timer()
+-                        X11Window.XDeleteProperty(self.xid, event.atom)
++                        X11Window.XDeleteProperty(xid, atom)
+                         return
+                     self.cancel_incr_data_timer()
+                     data = b"".join(self.incr_data_chunks)
+                     log("got incremental data termination, total size=%i bytes", len(data))
+                     self.reset_incr_data()
+-                    self.got_local_contents(target, dtype, dformat, data)
++                    self.got_requestor_contents(xid, target, dtype, dformat, data)
+                     return
+         except PropertyError:
+-            log("do_property_notify() property '%s' is gone?", event.atom, exc_info=True)
++            log("do_property_notify() property '%s' is gone?", atom, exc_info=True)
+             return
+-        log("%s=%s (%s : %s)", event.atom, Ellipsizer(data), dtype, dformat)
++        log("%s=%s (%s : %s)", atom, Ellipsizer(data), dtype, dformat)
+         if target == "TARGETS":
+             self.targets = xatoms_to_strings(data or b"")
+-        self.got_local_contents(target, dtype, dformat, data)
++        self.got_requestor_contents(xid, target, dtype, dformat, data)
++
++    def got_requestor_contents(self, xid: int, target: str, dtype: str, dformat: int, data) -> None:
++        request = self._requestor_windows.get(xid)
++        if not request:
++            if xid == self.xid:
++                self.got_local_contents(target, dtype, dformat, data)
++            return
++        _target, request_id, _window = request
++        pending = self.local_requests.get(target, {})
++        response = pending.pop(request_id, None)
++        if not pending:
++            self.local_requests.pop(target, None)
++        self.close_requestor(request_id)
++        if response:
++            timer, got_contents = response
++            GLib.source_remove(timer)
++            got_contents(dtype, dformat, filter_data(dtype, dformat, data))
+ 
+     def got_local_contents(self, target: str, dtype="", dformat: int = 8, data=b"") -> None:
+         data = filter_data(dtype, dformat, data)
+         target_requests = self.local_requests.pop(target, {})
+-        for timer, got_contents in target_requests.values():
++        for request_id, (timer, got_contents) in target_requests.items():
++            self.close_requestor(request_id)
+             if log.is_debug_enabled():
+                 log("got_local_contents: calling %s%s",
+                     got_contents, (dtype, dformat, Ellipsizer(data)))

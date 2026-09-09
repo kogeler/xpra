@@ -1,1 +1,2 @@
 cases/**/fix.patch -whitespace
+infra/live/libva_trace.patch -whitespace

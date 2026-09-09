@@ -240,7 +240,10 @@ Only these active cases are retained:
 11. `packet-handler-error-boundary`;
 12. `wayland-pointer-scroll-normalization`;
 13. `gtk-client-scroll-deduplication`;
-14. `upstream-test-quarantine`.
+14. `wayland-display-name-signal`;
+15. `client-codec-startup-order`;
+16. `x11-selection-refusal`;
+17. `upstream-test-quarantine`.
 
 ## Stack contract
 
@@ -663,6 +666,17 @@ Every Debian client build runs the installed GTK/X11 clipboard-adapter preflight
 and the mapped NumPy/ctypes OpenGL regressions, irrespective of the fixture.
 Their test-only dependencies stay after Xpra compilation and out of runtime.
 
+Both live images additionally rebuild their installed distribution libva's exact
+source version with a diagnostic-only change to `va/va_trace.c`: each new display
+opens a unique private trace file atomically, while reopening its own file still
+appends. Seconds plus thread ID alone collide and truncate earlier contexts.
+The native clean control must reproduce that overwrite and the patched control
+must preserve both files, append semantics, foreign-thread refusal and failed-open
+cleanup. Only the rebuilt core library and its version/digest record cross to
+runtime; the runtime checks its package version, ABI filename, loader path and
+library digest. Inputs belong to both frozen harness/context inventories. No
+driver, Xpra source, release package or all-stream VA-context assertion changes.
+
 Every positive live wrapper accepts `NETWORK_PROFILE=<name>`. Omitting it uses
 the `default_profile` declared only in `profiles.yml`. The normal required
 nine-gate acceptance ladder runs once with that default. Other tracked
@@ -1057,6 +1071,15 @@ unchanged Zed payload for the two Zed profiles. Missing, failed, stale, mixed
 or tampered members fail closed. Foreground control-shell interruption leaves
 only the currently running child under its existing named lifecycle, never an
 unowned workload.
+
+After each collected/removed member and again during `live-suite-check`, the
+controller checks complete report-bound stdout/stderr for both peers in every
+scenario. Missing, changed, symlinked or oversized logs fail closed. Undeclared
+Wayland `display-name`, decode-codec startup timeouts, clipboard rate warnings
+and CLIPBOARD/PRIMARY/SECONDARY selection timeouts stop the suite. Only the file
+and warning category appear in failure diagnostics, never clipboard-bearing
+log contents. This check supplements all existing application, pixel, input,
+transport and lifecycle oracles.
 
 Admission uses the complete fixed profile tuple and exactly `stacks/develop`
 with kind `stack`. No `CASE`, alternate stack or clean source is admitted, even

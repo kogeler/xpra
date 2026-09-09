@@ -352,6 +352,12 @@ proved that the associated property write and routed `PropertyNotify` complete
 both `TARGETS` and `UTF8_STRING` conversions.  The parser policy is therefore
 not the first failing boundary in this case and is deliberately unchanged.
 
+The complete queue additionally carries `x11-selection-refusal`, which owns
+negative core SelectionNotify completion and private conversion requestors.
+That independent protocol fix does not replace this case's filter lease,
+XFixes ownership, client packaging or Wayland publication controls. This
+section describes this atomic case on its own embedded-source boundary.
+
 Do not infer a conversion failure from the 100 ms timeout alone.  The clean
 failure timed out because neither XFixes nor property events entered Xpra's
 dispatcher; an independent consumer on the same display completed promptly.
