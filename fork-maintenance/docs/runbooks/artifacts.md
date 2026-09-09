@@ -356,7 +356,10 @@ orphan therefore remains owned but is not signalable. A current completed job
 must be collected, and a collected job must use its remove target. All lifecycle
 mutations go through these Make targets; do not signal processes or call
 destructive Podman commands directly. If a lifecycle transition is missing,
-add and test its exact-owned Make target before acting.
+add and test its exact-owned Make target before acting. The explicit
+[upstream-refresh runbook](upstream-refresh.md#disposable-image-caches) has a
+separate narrow procedure for unreferenced obsolete test images outside those
+named-job lifecycles; it is not permission to remove a job or persistent data.
 
 A detached upstream test also has an inspectable prelaunch owner before
 `podman create`. `test-abort` refuses it while the recorded starter is active;
@@ -433,7 +436,15 @@ fails closed for operator review.
 
 `test-image-cache-remove` is a separate explicit operation for the exact
 label-verified current cache. Persistent ccache has no ordinary automatic
-deletion target.
+deletion target. During an explicitly authorized upstream refresh, obsolete or
+unverifiable maintenance/test images are discarded under that runbook's exact
+identity/reference checks without asking again, and rebuilt only if needed by
+the reviewed current candidate. Missing historical migration reports do not
+block this disposal or justify keeping an obsolete test image indefinitely.
+The same runbook defines the only direct directory-cleanup exception: a proven
+[empty unowned remnant](upstream-refresh.md#empty-unowned-directory-remnants),
+removed non-recursively under the lifecycle locks. These exceptions do not
+change the artifact planner's protection of owned or nonempty workspaces.
 
 After the complete patch cycle is finalized, remove its retained results and
 isolated workspaces through the digest-confirmed cycle flow:
