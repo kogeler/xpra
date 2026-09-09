@@ -397,6 +397,11 @@ an incomplete update preparation, completes an already published update
 transaction, or finishes its removal phase. Workspace recovery preserves a
 valid completed create and finishes only its exact marker-backed create,
 remove, or fingerprint transition. Unowned or ambiguous state fails closed.
+The explicit upstream-refresh runbook separately permits an exact directory-only
+remnant with no files, links, metadata, owner or recovery marker to be removed
+by non-recursive rmdir under the workspace/case-update locks after fresh
+current-uid, path and device/inode checks. This is not workspace recovery and
+never manufactures or bypasses a lifecycle owner.
 
 Final cleanup of a complete work cycle uses a common lowercase prefix for all
 of its `RUN`, `IMAGE_RUN`, and `WORKSPACE` identities. `cycle-clean-plan`
@@ -1695,7 +1700,17 @@ owned group-writable input files are fingerprinted; other-writable or
 hard-linked files remain forbidden. Content-verified frozen source bundles and
 archives, immutable DEB selection snapshots, input-keyed build contexts and
 images, ccache, and virtual environments are reusable state and remain outside
-ordinary cycle cleanup. Any upstream bundle partial, live input-freeze staging,
+ordinary cycle cleanup. An explicit upstream refresh additionally authorizes
+bounded disposal of obsolete/unverifiable maintenance test images, including
+retired-namespace images, without repeated operator approval. Prefer a matching
+public cache target; otherwise prove the exact immutable image is unreferenced
+by containers and current lifecycle records, then use non-forced, no-prune
+single-ID image removal and verify absence. Rebuild required images from frozen
+current inputs only after the manual-review exit gate. Deleted historical
+migration reports are not current cache authority or a refresh prerequisite.
+This exception never covers persistent volumes, unrelated project images,
+named jobs, source, result or owner records. Any upstream bundle partial,
+live input-freeze staging,
 freeze prelaunch/abort transaction, foreground upstream payload, matching local
 DEB output-validation scratch, DEB abort transaction, or DEB source/selection
 partial marker or directory blocks cleanup until its exact lifecycle or snapshot
