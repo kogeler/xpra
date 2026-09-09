@@ -76,15 +76,19 @@ The single agent entry point for the canonical **Autonomous Upstream Refresh
 and Full Queue Adaptation** procedure is:
 
 ```text
-Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+Execute autonomous-upstream-refresh against the current fork master.
 ```
 
 This is an agent directive, not a Make target. Its complete queue-wide
 procedure is
 [`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md).
-`PRIMARY_CASE` selects only the first and most detailed semantic review; every
-active production case, the quarantine, control plane, both package builds,
-and the complete test/live ladder remain in scope. The runbook derives its own
+Every active case receives equally deep manual correctness and necessity
+review after applicability checks. The older optional `PRIMARY_CASE=<slug>`
+spelling affects only starting order, never review depth or scope. All initial
+review-driven adaptations, removals and regression migrations must be complete
+and re-reviewed before any runtime validation, including clean controls and
+quarantine. The control plane, both package builds, and complete test/live
+ladder remain in scope after that gate. The runbook derives its own
 unique cycle identifier and self-corrects any in-scope procedural or harness
 defect without restarting expensive evidence whose frozen semantic inputs are
 unchanged.
@@ -152,8 +156,10 @@ Host `stack-apply` and `stack-unapply` remain a clean-checkout fallback only.
 All known upstream-only test failures belong in
 `upstream-test-quarantine`, never in a production case. A quarantine addition
 requires a clean-source reproduction in every affected matrix leg. After each
-explicitly selected upstream rebase, run the three clean `quarantine*` gates
-before applying that case. Every gate runs the complete ordered module union:
+explicitly selected upstream rebase, complete the whole-queue manual-review
+exit gate, then run the three clean `quarantine*` gates before using that case
+in runtime validation. Isolated inspection/export is not quarantine
+acceptance. Every gate runs the complete ordered module union:
 its exact gate-specific assignment must be the ignored-failure set, while the
 complement must pass without skips. A newly green assigned module makes that
 leg assignment stale; remove the module and its patch path only after it has no
@@ -162,12 +168,23 @@ before the patched full matrix is accepted.
 
 When upstream absorbs a patch exactly, the resolver reports
 `already-present`. Removing it from the active queue still requires a current
-code review and the case's relevant tests on the embedded clean source. Since run output is
-local-only, record the conclusion in the external refresh handoff; a later
+code review of all its invariants and durable replacement regression ownership.
+During a refresh, implement the uncommitted retirement candidate in the manual
+review phase, then confirm it with equivalent clean-source and resulting-stack
+checks after the whole-queue review gate; never lose the only useful test when
+deleting its old case owner. Since run output is local-only, record the
+conclusion in the external refresh handoff; a later
 operator-created commit may summarize it, but no tracked evidence archive is
 created.
 
 ## Development and final acceptance
+
+For an explicit upstream refresh, the mandatory whole-queue manual-review exit
+gate in [upstream refresh](docs/runbooks/upstream-refresh.md) precedes this
+testing loop. Applicability and green tests cannot establish correctness or
+continued necessity. Analyze uncovered paths, implement the review decisions,
+and re-review affected consumers before runtime validation starts. Narrow
+offline fork-control checks may run while review is still in progress.
 
 Follow [the canonical validation flow](docs/runbooks/validation.md). Develop,
 review and adapt cases with the nearest real regression after each atomic edit,

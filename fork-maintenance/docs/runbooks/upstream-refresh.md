@@ -2,11 +2,10 @@
 
 ## Single agent entry point
 
-Give an agent this exact directive, replacing the placeholder with any active
-production-case slug:
+Give an agent this exact directive; no priority case is required:
 
 ```text
-Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+Execute autonomous-upstream-refresh against the current fork master.
 ```
 
 `autonomous-upstream-refresh` is an agent workflow name, not a shell command or
@@ -18,23 +17,45 @@ validation and uncommitted handoff. Do not ask the operator to repeat the base
 choice, provide a `CYCLE`, expand scope for another active case, or separately
 confirm the one preservation commit.
 
-`PRIMARY_CASE` controls review order and depth only. It does not limit patch,
-quarantine, control-plane, package, or validation scope. The agent derives one
-never-reused lowercase `CYCLE` prefix from the current UTC date/time and a
-recognizable primary-slug fragment, verifies that no runtime or workspace
-identity already uses it, and records it before the first lifecycle operation.
-Use enough time precision or append a numeric suffix to prove uniqueness; do
-not ask the operator to name one.
+Every case receives equally high review priority, depth, and evidence
+requirements. Use stack order for operational dependencies, not to rank the
+importance of defects. The older `PRIMARY_CASE=<slug>` spelling remains an
+optional explicit request to start with that active production case; it never
+reduces another case's review or reporting depth. Do not invent a priority or
+ask the operator to choose one.
+
+The agent derives one never-reused lowercase `CYCLE` prefix from the current
+UTC date/time and a recognizable queue-refresh fragment, verifies that no
+runtime or workspace identity already uses it, and records it before the first
+lifecycle operation. Use enough time precision or append a numeric suffix to
+prove uniqueness; do not ask the operator to name one.
 
 ## Purpose
 
-Use the development, candidate-freeze, and final-acceptance phases in
-[`validation.md`](validation.md). Adapt and review the complete queue with
-nearest regressions, affected upstream/case modules, relevant native/compiled
-checks, and early relevant live profiles. Only after the candidate is stable
-fill the final evidence gaps. The complete requirements below are not a matrix
-to rerun after each case edit; input-verified development results may already
-satisfy them.
+This refresh has a mandatory code-review phase before runtime validation:
+
+```text
+new embedded source → every patch's applicability → deep manual queue review
+  → reasoned keep/adapt/retire decisions → implement and re-review all changes
+  → manual-review exit gate → clean controls and affected runtime tests
+  → candidate freeze → remaining final acceptance
+```
+
+Follow the development, candidate-freeze, and final-acceptance phases in
+[`validation.md`](validation.md) only after the manual-review exit gate.
+During the initial review, finish all review-driven adaptations, removals and
+regression-ownership migrations before starting any new Xpra test, quarantine
+run, native/compiled regression, live profile, or real package build. Initial
+applicability checks, static inspection, whitespace/lint and offline
+fork-control/safety checks are not runtime validation and remain allowed.
+
+After that gate, use nearest regressions, affected upstream/case modules,
+relevant native/compiled checks, and the early complete live suite. Only after
+the candidate is stable fill the final evidence gaps; do not repeat the whole
+matrix after each subsequent correction. Tests can refute or strengthen a
+review conclusion, but never replace the agent's reasoning about correctness,
+necessity and uncovered behavior. Exhaustive test coverage is not achievable,
+and a green suite cannot establish that every patch is correct or still needed.
 
 This is the canonical autonomous end-to-end runbook for an operator-selected
 upstream refresh. Use it after the operator has synchronized
@@ -48,15 +69,16 @@ must not dispatch the hosted sync workflow, run `gh repo sync`, push or
 force-push a ref, or change the default branch. A remote mismatch returns the
 workflow to the operator; it is not repaired locally.
 
-Moving the embedded source invalidates every previous functional result. The
-agent therefore reads and semantically reassesses every active production
-patch in its current surrounding source, gives each case an explicit
-keep/adapt/retire conclusion, reassesses the quarantine duty, resolves the
-complete queue, and passes every available tests-only control, focused/native
-test, both real distribution package builds, all three full upstream legs,
-all nine complete-stack live profiles. The
-primary case is reviewed first and receives the most detailed written mapping;
-every other case still receives the same correctness and retirement decision.
+Moving the embedded source invalidates every previous functional result. The agent therefore reads and semantically reassesses every active patch in
+its current surrounding source, gives every production case an explicit
+keep/adapt/retire conclusion, reviews the quarantine duty, implements the
+conclusions, and resolves the complete resulting queue before runtime tests.
+It then confirms or revisits those conclusions through every available
+tests-only control, the clean quarantine reassessment, focused/native tests,
+both real distribution package builds, all three full upstream legs, and all
+nine complete-stack live profiles. Every case requires the same detailed
+correctness and necessity analysis, including cases whose patch bytes do not
+change.
 
 Invoking this runbook authorizes one local preservation commit at the very
 beginning when legitimate non-ignored changes already exist. The agent makes
@@ -67,10 +89,11 @@ uncommitted for operator review.
 
 ## Inputs and reading
 
-The invocation supplies `PRIMARY_CASE`, which must be one production slug in
-the pre-refresh `stacks/develop.toml`. Derive `CYCLE` as specified by the single
-entry point and use it for every `RUN`, `IMAGE_RUN`, and `WORKSPACE` created by
-this refresh. The directive itself confirms that this refresh should move
+The invocation needs no case selection. If the operator explicitly supplies
+the optional `PRIMARY_CASE`, it must be one production slug in the pre-refresh
+`stacks/develop.toml` and affects only starting order, never review depth.
+Derive `CYCLE` as specified by the single entry point and use it for every
+`RUN`, `IMAGE_RUN`, and `WORKSPACE` created by this refresh. The directive itself confirms that this refresh should move
 `develop` to the current verified fork `master`; there are no additional
 required inputs.
 
@@ -113,14 +136,15 @@ ownership and executable-file boundary are reviewed. The optional tooling venv
 is not created by this runbook and is not acceptance evidence.
 
 If the retained artifact inventory contains an owner from the retired
-`xpra-lab-*` namespace, also read the historical
-[`../namespace-migration.md`](../namespace-migration.md) completely before
-classifying it. Current lifecycle readers intentionally have no compatibility
-mode for that namespace.
+`xpra-lab-*` namespace, use only the exact retired-namespace classification in
+[the pre-refresh record](#pre-refresh-record). The old migration document is
+no longer maintained. Current lifecycle readers intentionally have no
+compatibility mode for that namespace; unmatched state remains a stop, not
+permission to restore old tools or weaken the ownership audit.
 
-The primary slug cannot be `upstream-test-quarantine`: it is a temporary test
-duty, not a production behavior. The duty is nevertheless always in scope and
-is reassessed through `test-quarantine.md`.
+An optional starting slug cannot be `upstream-test-quarantine`: it is a
+temporary test duty, not a production behavior. The duty is nevertheless
+always in scope and is reassessed through `test-quarantine.md`.
 
 ## One start commit and the clean boundary
 
@@ -200,7 +224,7 @@ Record in the handoff notes, without creating a tracked evidence file:
 - local and cached fork-master commits;
 - every active case patch SHA-256 and the complete stack resolution digest;
 - current branch/status;
-- the primary case and derived cycle identifiers.
+- the derived cycle identifier and any explicit operator-requested starting order.
 
 Use commands which do not change refs or tracked source, and require exactly
 one old embedded source commit. Fork-control checks may update only ignored
@@ -657,10 +681,14 @@ make -C fork-maintenance patch-start-check
 make -C fork-maintenance patch-check CASE=<case>
 ```
 
-Run `patch-check` for every case in current stack order. Run `stack-check` only
-after every individual case resolves. `apply` and exact `already-present` are
-the only acceptable resolver states; `diverged` or `ambiguous` requires review
-and adaptation before the queue can be accepted.
+Run `patch-check` for every case in current stack order, recording each result
+even if an earlier case fails. This is a textual/provenance inventory, not
+manual review or permission to test. Run `stack-check` only after every
+individual case resolves. `apply` and exact `already-present` are the only
+acceptable resolver states for a selected runtime candidate; `diverged` or
+`ambiguous` requires investigation before that candidate can be tested.
+Every case, including `apply` and `already-present`, must next pass the deep
+manual review below. Do not repair only conflict hunks and proceed to tests.
 
 Also run:
 
@@ -686,33 +714,41 @@ An upstream rebase is never a single-patch operation. The invocation expressly
 authorizes the agent to inspect, retain, adapt, narrow, or retire every active
 production case; update the quarantine duty; and repair the fork control,
 tests, runners, documentation, and runbook needed to complete this refresh.
-The primary case is only the first and most detailed review. Before
-complete-stack heavy tests:
+There is no low-priority or applicability-only review path. Before any new
+runtime validation:
 
-- every active case must be `apply` or exact `already-present` against the new
-  source;
+- every pre-refresh case must have a complete manual review and a reasoned
+  decision, with all resulting production and regression-ownership changes
+  implemented and re-reviewed;
+- every remaining active case must be `apply` or exact `already-present`
+  against the new source;
 - all overlapping cases must still compose in declared order;
-- stale quarantine entries must be removed or narrowed;
+- quarantine modules and per-leg assumptions must be manually reviewed; the
+  subsequent clean gates must confirm or correct their empirical assignments;
 - any changed upstream workflow boundary must be reconciled;
 - no applied production source may remain in host `develop`.
 
-These resolution checks are necessary but not sufficient for final scheduling.
-Complete the candidate-freeze review in [`validation.md`](validation.md),
-including tests, live oracles, compiled risks, and build inputs, before starting
-the complete-stack final workload.
+These resolution checks are necessary but cannot satisfy the manual-review
+exit gate. That gate precedes even clean controls and focused diagnosis.
+The later candidate-freeze review in [`validation.md`](validation.md),
+including tests, live oracles, compiled risks, and build inputs, remains a
+separate prerequisite for the complete-stack final workload.
 
-If any case diverges, its clean control passes, skips, or no longer observes its
-claimed defect, perform the complete semantic mapping and keep/adapt/retire
-analysis below for that case in this same pass. Do not request scope expansion,
-preserve a potentially redundant or vacuous patch merely because it still
-applies, or run the expensive final matrix on an unresolved stack.
+Perform the complete semantic mapping and keep/adapt/retire analysis below for
+every case without waiting for a failure. If later testing passes unexpectedly,
+skips, or no longer observes the claimed defect, reopen the affected case's
+review and its overlapping consumers in this same pass. Do not request scope
+expansion, preserve a potentially redundant or vacuous patch merely because it
+still applies, or run the expensive final matrix on an unresolved stack.
 
 When execution exposes an in-scope error or omission in this runbook, a related
 contract, control-plane implementation, test, live/package harness, or case
 documentation, repair it immediately and add or update the narrow regression
-which proves the correction. Keep those changes with the other uncommitted
-refresh results and continue the same runbook pass; do not restart the process
-from its first step merely because the written procedure changed.
+which proves the correction. Runtime checks of review-driven changes wait for
+the manual-review exit gate; narrow offline fork-control checks may run during
+review. Keep those changes with the other uncommitted refresh results and
+continue the same runbook pass; do not restart the process from its first step
+merely because the written procedure changed.
 
 Maintain a current external run ledger of the exact source, case, selection,
 runner, image-input, command, and result identities. Reuse an already valid
@@ -730,7 +766,7 @@ unsafe, secret, unexplained, or externally owned local state; an unresolved
 semantic choice where a correct implementation cannot be established; or a
 mandatory physical/resource boundary which is genuinely unavailable. Report
 the exact blocker and all completed current evidence. Ordinary difficulty, a
-non-primary case change, or a repair to this runbook is not a scope stop.
+change to any active case, or a repair to this runbook is not a scope stop.
 
 Every applicable or diverged case is inspected and updated one at a time in an
 isolated workspace, even while reviewed fork-control results are uncommitted.
@@ -739,235 +775,98 @@ diverged case uses the provenance-bound `PATCH_MODE=reconstruct` flow below;
 never fall back to an intermediate commit merely to make the next case
 possible.
 
-## Prepare the test image and plan quarantine reassessment
-
-Verify the image before the first test which uses it. Reassess quarantine for
-the new source and actual image/module/gate inputs before applying the duty
-case, but do not block independent production-case development on that work.
-Reuse current collected reassessment results when those inputs are unchanged.
-The quarantine must resolve before its named clean gates can start. If its old patch is `diverged`,
-use the isolated reconstruction flow below to preserve only the still-required
-declared test-module changes, publish that complete candidate, and then return
-here. If current upstream makes the correct candidate empty, retire the duty
-case only through its documented semantic and clean-test decision; do not
-manufacture an empty patch or use an ad hoc diagnostic as acceptance.
-
-Now verify the input-keyed upstream-test image:
-
-```bash
-make -C fork-maintenance test-image
-```
-
-The check uses the same exact Python ownership verifier as test startup,
-including the current source label, build-run UUID, complete maintenance label
-set, input digest, and workflow digest. It must not be a weaker shell-only
-label probe. If the image is absent, build it through its named lifecycle. If
-the tag instead names an otherwise exact owned image whose sole mismatch is an
-older source label, the removal target must prove that label names an existing
-Git commit which is an ancestor of the current embedded source. Only then remove
-that cache through the locked
-`test-image-cache-remove` target, require `test-image` to report absence, and
-then use the same named build lifecycle. Any other provenance mismatch is a
-hard stop; do not remove or overwrite it.
-
-```bash
-make -C fork-maintenance test-image-cache-remove
-make -C fork-maintenance test-image
-```
-
-For the absent-image branch, inspect the collected status and log, verify the
-resulting cache entry, and remove only the transient build ownership:
-
-```bash
-make -C fork-maintenance test-image-start \
-  IMAGE_RUN=<cycle>-upstream-image-01
-make -C fork-maintenance test-image-wait \
-  IMAGE_RUN=<cycle>-upstream-image-01
-make -C fork-maintenance test-image-status \
-  IMAGE_RUN=<cycle>-upstream-image-01
-make -C fork-maintenance test-image-logs \
-  IMAGE_RUN=<cycle>-upstream-image-01
-make -C fork-maintenance test-image
-make -C fork-maintenance test-image-remove \
-  IMAGE_RUN=<cycle>-upstream-image-01
-```
-
-Any failure other than absence or the exact stale-source classification above
-requires diagnosis; do not overwrite or delete an unverified cache entry.
-Follow [`bootstrap.md`](bootstrap.md) for recovery and abort paths.
-Any later change to the image inputs or embedded upstream workflow changes the
-image key; repeat this verification/build lifecycle before the next test.
-
-Execute the duty case against clean new production and clean upstream tests in
-all three modes, with unique names:
-
-```bash
-make -C fork-maintenance test-start \
-  CASE=upstream-test-quarantine PATCH_MODE=clean \
-  TARGET=quarantine RUN=<cycle>-quarantine-01
-make -C fork-maintenance test-start \
-  CASE=upstream-test-quarantine PATCH_MODE=clean \
-  TARGET=quarantine-cython RUN=<cycle>-quarantine-cython-01
-make -C fork-maintenance test-start \
-  CASE=upstream-test-quarantine PATCH_MODE=clean \
-  TARGET=quarantine-no-compat RUN=<cycle>-quarantine-no-compat-01
-```
-
-Wait for, inspect, and remove each job through the matching `test-*` lifecycle.
-Each gate runs the complete quarantine module union. Success means its exact
-gate-specific subset is the ordered ignored-failure set, every complement
-module passes, and there are no unignored failures or skipped modules. An
-assigned module which becomes green makes that assignment stale; a complement
-failure requires current clean-source diagnosis and an exact new assignment.
-The autonomous invocation already authorizes that queue-wide duty update.
-Update the case through the atomic admission sequence in
-[`test-quarantine.md`](test-quarantine.md), then complete the clean gates whose
-source, environment, module union, or expected subset changed. Every one of the
-three final assignments still requires current, exact proof; an unrelated
-production-only edit does not require another reassessment.
-
-If any duty module remains, prove that the current quarantine patch itself
-applies and its focused module selection is valid:
-
-```bash
-make -C fork-maintenance test-start \
-  CASE=upstream-test-quarantine PATCH_MODE=patched TARGET=focused \
-  RUN=<cycle>-quarantine-patched-focused-01
-make -C fork-maintenance test-wait \
-  RUN=<cycle>-quarantine-patched-focused-01
-make -C fork-maintenance test-status \
-  RUN=<cycle>-quarantine-patched-focused-01
-make -C fork-maintenance test-logs \
-  RUN=<cycle>-quarantine-patched-focused-01
-make -C fork-maintenance test-remove \
-  RUN=<cycle>-quarantine-patched-focused-01
-```
-
-If every declared upstream module is now green, retire the duty case as
-required by [`test-quarantine.md`](test-quarantine.md) and omit this case-only
-patched command. The resulting stack-focused and full legs below remain
-mandatory.
-
-Complete CI-layout repair before source builds and quarantine reassessment
-before applying the duty case. Run their individual resolution and available
-the complete live suite as soon as its prerequisites are meaningful, but keep every repair
-uncommitted. Independent case work continues through
-the isolated applicable/reconstruction flows without touching the host source
-or index. Once all cases resolve and the candidate is reviewed and frozen,
-complete the missing or invalidated `check` and `stack-check` coverage. Do not
-repeat the complete offline suite after each individual case adaptation, or
-claim complete-stack acceptance while the queue is still divergent.
-
 ## Reassess every production case semantically
 
-Applicability is not a necessity decision. Enumerate every production case
-from the recorded pre-refresh queue, then account for every case still present
-after any retirement or ownership migration. Review the primary case first and
-record its map in greatest detail, but apply the same decision bar to all
-cases. For the old and new source commits, inspect each manifest's paths,
-complete patch, surrounding callers/tests, overlapping queue changes, and
-relevant upstream history. Build an explicit map for every case of:
+This is a mandatory manual code review by the agent, not a test-dispatch phase.
+Begin after recording every applicability result and completing the new-source
+and CI-boundary reading above. Enumerate the recorded pre-refresh queue and
+account for every case after any proposed retirement or ownership migration.
+Review all cases to the same depth, including unchanged patches and exact
+`already-present` cases. Never let a failed first case hide the rest.
 
-| Question | Required evidence |
+Read each complete patch and manifest against the actual new embedded source,
+not just the old/new diff, conflict hunks, case README, or test assertions.
+Trace the clean upstream behavior and the candidate with the patch applied in
+a supported isolated workspace; inspect the composed candidate where cases
+overlap. Read callers and callees across the changed boundary, adjacent tests,
+feature/platform gates, and relevant maintainer-authored history between the
+old and new source. History explains intent; current executable code is the
+authority for behavior.
+
+### Required reasoning for every case
+
+Build the following map in the ignored cycle ledger. Identify concrete source
+commits, paths and symbols for each claim. A checkbox, patch digest, test name,
+or statement that the code "looks correct" is not a review.
+
+| Question | Required manual analysis |
 | --- | --- |
-| Trigger | The real input, state, race, packaging result, or protocol sequence which exposed the defect. |
-| Entry points | Every production caller and callback that can reach the changed code. |
-| Ownership | The subsystem, thread, process, connection, or package which owns the state and cleanup. |
-| Invariants | Ordering, rollback, compatibility, bounds, lifecycle, and failure behavior required by the case README. |
-| Upstream change | Exact new code and maintainer history that preserves, narrows, replaces, or conflicts with each invariant. |
-| Regression authority | A retained clean control that fails for the intended reason, or the documented semantic inspection when no clean real-boundary mode exists, followed by a patched or upstream-replaced candidate which passes the durable real boundary. |
-| Real boundary | Each declared native, package, and live observation required by the case. |
+| Original defect and present trigger | Explain the actual input, state transition, race, protocol sequence or package result; trace whether clean new upstream can still reach it. |
+| Entry and exit paths | Trace relevant callers, callbacks and consumers, including alternate entries, early returns and failures, not only the regression's route. |
+| Ownership and lifetime | Identify the subsystem, thread, process, connection or package responsible for each state/resource; reason through publication, replacement, cancellation and cleanup. |
+| Correctness of the candidate | Explain why the applied patch establishes each required invariant and does not introduce a new defect in its current surroundings. Inspect ordering, reentrancy, stale callbacks, concurrent teardown, partial initialization, rollback and exception paths where relevant. |
+| Compatibility and scope | Check feature toggles, disabled/readonly policies, protocol/platform/build variants, ABI and packaging ownership; justify each changed hunk within the atomic case boundary. |
+| Current necessity | Compare the behavior with and without the patch. Map upstream replacements, redesigns, removed consumers and narrower remaining gaps to exact code, not a similar symptom or commit subject. |
+| Queue interaction | Review overlapping paths and shared interfaces in declared order, including semantically related cases which touch different files; identify duplicate fixes, inconsistent ownership and assumptions about another patch. |
+| Coverage and blind spots | Read what each test actually stimulates and asserts. List important paths/interleavings/configurations it does not cover and reason about them directly; name useful additional regressions without claiming exhaustive coverage. |
+| Durable verification plan | State the expected clean-control behavior and the focused/native/package/live observations which will later challenge the conclusion. Distinguish planned checks from results already collected. |
 
-Current source and maintainer-authored history outrank old patch context,
-commit subjects, prior logs, or similarity of function names. Review adjacent
-callers and tests, not just changed lines. An upstream commit message saying it
-fixed the same symptom is a lead, never retirement evidence.
+For a genuinely inapplicable dimension, explain why; do not invent concurrency
+requirements for a static packaging manifest. Conversely, do not omit a
+relevant failure or lifecycle path merely because the existing tests omit it.
+Passing tests, textual applicability and previous acceptance are never
+substitutes for this analysis. An upstream commit message claiming the same
+fix is only a lead.
 
-Complete this map and choose a provisional decision for every production case
-before entering complete-stack validation. Apply the appropriate refresh,
-reconstruction, or retirement section below to each case in stack order after
-the primary review, and update the ledger after every exported or retired
-candidate. A case which still applies textually is not exempt from this review.
+Review the quarantine patch and every declared upstream test module manually
+as well: check what is disabled, its isolation from production fixes, changes
+in current assertions and their subjects, and the rationale for each per-leg
+assignment. Record the candidate disposition and the exact clean reassessment
+plan. Actual failing-leg assignments still require the later three clean
+gates; neither a code-reading hypothesis nor old logs can certify them.
 
-### Establish the clean control or documented substitute
+### Record decisions before executing tests
 
-`PATCH_MODE=tests-only` and `PATCH_MODE=clean` still validate the complete
-case patch before starting a container. Do not invoke either command while
-that case is `diverged` or `ambiguous`. For `diverged`, first
-reconstruct and publish a nonempty current candidate as described below, then
-return to this control. If upstream appears to have replaced the behavior so
-completely that the correct candidate is empty, `patch-update` cannot publish
-it and the current resolver cannot select its retained tests. Before retirement,
-add a provenance-preserving diagnostic mode or migrate the regression into an
-equivalent durable retained gate. `ambiguous` remains a hard stop until source
-and patch identity are trustworthy.
+Conclude the review of every production case with one of:
 
-If the production patch owns one or more `tests/` paths, apply only those tests
-to clean new-source production:
+- `keep`: a specific defect remains reachable without the patch, and every
+  retained hunk is necessary and correct in the new source and complete queue;
+- `adapt`: a specific residual defect remains, but the old implementation,
+  scope or regression is no longer correct/minimal; specify the replacement;
+- `retire`: upstream now establishes all required invariants, or the original
+  production path no longer exists with no equivalent affected consumer;
+  specify the durable regression and gate ownership after removal.
 
-```bash
-make -C fork-maintenance test-start \
-  CASE=<case> PATCH_MODE=tests-only TARGET=focused \
-  RUN=<cycle>-<case>-clean-focused-01
-make -C fork-maintenance test-wait \
-  RUN=<cycle>-<case>-clean-focused-01
-make -C fork-maintenance test-status \
-  RUN=<cycle>-<case>-clean-focused-01
-make -C fork-maintenance test-logs \
-  RUN=<cycle>-<case>-clean-focused-01
-make -C fork-maintenance test-remove \
-  RUN=<cycle>-<case>-clean-focused-01
-```
+The conclusion must explain both correctness and continued necessity.
+Separately record findings, code references, uncovered risks, required
+production/test/metadata changes, and planned positive and negative checks.
+For `adapt`, also explain why the final revised delta still belongs in the
+fork; `apply` is not that explanation. For `retire`, account for every old
+invariant, not just the one exercised by a passing test. Do not keep a
+redundant patch only because its tests or a live fixture are stored inside it.
 
-The expected result for a still-needed patch is a nonzero test result whose
-first failure is the exact retained regression. Inspect it with `test-status`
-and `test-logs`; setup, build, import, unrelated, skipped, or differently
-failing results are not proof. Run these lifecycle steps as separate
-invocations: the expected nonzero `test-wait` must not prevent the subsequent
-status, log, and exact remove checks. `test-remove` validates a consistently
-recorded failed result. Never hide the expected nonzero result with a shell
-fallback.
+A test cannot be the reason to skip the decision until later. State a
+code-supported conclusion now and label its runtime verification as pending.
+If a fundamental ownership or correctness question cannot be established from
+the available source, record the exact unresolved question; the review gate
+does not pass by changing it to "let the tests decide".
 
-Before retiring a case which declares a native/subsystem target, repeat that
-target with `PATCH_MODE=tests-only` while the retained tests still exist. This
-checks clean new-source production through the real native build/import
-boundary, not only its Python-focused subset.
+### Implement and re-review the conclusions
 
-Some production cases, currently `debian-libva-codecs-package`, name an
-existing upstream focused module but own no test file. `tests-only` correctly
-refuses such a selection, and the focused runner also rejects
-`PATCH_MODE=clean`; do not turn either guard failure into a control. Inspect the
-clean new upstream packaging, dependency resolution, install ownership, and
-module imports directly before making a necessity hypothesis. A patched
-focused run still covers the existing codec helper, but passing it is not proof
-that package manifests contain the compiled modules. The durable proof is
-always the two real package builds below against the complete resulting stack:
-the retained/adapted stack for keep, or the whole reviewed retirement candidate
-for remove. The current DEB runner has no `PATCH_MODE=clean`; if a
-pre-retirement clean package experiment is needed, add that mode and its
-provenance/fork-control tests rather than bypassing `deb-policy-check`. If no
-durable control observes the disputed behavior, strengthen the retained case
-test or runner before retirement. Do not present an ad hoc probe as acceptance.
+Complete the whole queue's initial review before implementing its
+review-driven production changes. Then apply the appropriate applicable,
+reconstruction, or retirement flow below in operational stack order. Export
+one atomic candidate at a time; update regressions, manifests, documentation,
+dependencies and gate ownership together. Do not start a real test between
+these initial case adaptations.
 
-### Interpret the resolver and control together
-
-| Result | Required conclusion path |
-| --- | --- |
-| `apply`, clean regression fails as intended | The patch is still needed in some form. Review the applied code in its new surroundings, then retain unchanged only if every invariant and test remains correct. |
-| `apply`, clean regression passes | The patch may be redundant, stale, or its regression may be vacuous. Map every invariant to upstream code and strengthen the test if necessary before choosing retirement or narrowing. |
-| `already-present` | Upstream contains the exact patch diff, but retirement is still deliberate. Verify current callers, every available tests-only focused/native control or documented no-test substitute, and every real boundary before removing the case. |
-| `diverged` | Upstream changed an owned boundary. Reconstruct the complete candidate on the new source; never force, fuzz, use rejects, or preserve old text mechanically. |
-| `ambiguous` | Applicability is not trustworthy. Stop and inspect the patch/source identity before any edit or test claim. |
-
-The legitimate final decisions are:
-
-- retain the patch unchanged;
-- adapt or narrow its production code and regression;
-- retire it because current upstream fully and safely replaces the complete
-  behavior.
-
-“It still applies” is not enough for retention, and “the clean test passes” is
-not enough for retirement.
+Re-read each final candidate in the new source and composed queue, including
+the consumers affected by another case's changes. Resolve every finding or
+record a supported reason it requires no change. Update the ledger with each
+old/new digest, implemented decision, and remaining runtime risk. Material
+changes reopen the affected reviews; an earlier review of different code does
+not close them. All review-driven code changes and removals must be complete
+before the manual-review exit gate.
 
 ## Refresh an applicable patch
 
@@ -1073,52 +972,316 @@ cases can be reconstructed sequentially while earlier results remain dirty.
 
 ## Retire a fully replaced case
 
-Prepare a retirement candidate only after the semantic map and available clean
-controls justify the hypothesis that upstream implements every required
-invariant, including compatibility, failure, and lifecycle behavior. Accept
-that retirement only after the complete resulting candidate passes every
-durable boundary below. Before removing the case, run its focused and declared
-native targets in `tests-only` mode when it owns retained tests. After removing
-it, rerun those boundaries through the resulting stack. For a package or live
-distinction, the positive replacement proof is likewise the resulting stack
-after retirement; a clean-source diagnostic cannot publish acceptance.
-Explicitly map the downstream regression to an equivalent upstream test or to
-another durable retained gate. If removing the case would silently discard the
-only non-vacuous regression, stop and resolve that test-ownership gap; do not
-misclassify it as an upstream-failure quarantine.
+Make the retirement decision from the complete current-code analysis above,
+then implement the retirement candidate during manual review, before runtime
+validation. Final acceptance remains pending: later controls and the resulting
+stack must confirm the conclusion or reopen the affected review. This ordering
+does not turn an untested retirement into a validated result.
+
+Before deleting the case, preserve its verification boundary under durable,
+current ownership. Map every case-owned regression and fixture to an equivalent
+upstream test or a retained gate which actually observes the same behavior.
+Reading that replacement is part of review; do not infer equivalence from its
+name. Plan both clean new-source and resulting-stack checks for every available
+focused/native boundary, and the required resulting-stack package/live proof.
+
+The current `CASE=<retired-slug> PATCH_MODE=tests-only` interface cannot select
+a deleted case. Do not postpone the manual decision or keep a redundant
+production delta just to make that command usable. If no equivalent durable
+test is selectable after removal, first migrate its tests/fixtures to suitable
+maintained ownership and provide a supported provenance-bound selection
+through the public Make interface. Add or repair its admission, frozen-source,
+inventory and ownership checks and narrow fork-control tests before deleting
+the old owner. Do not invent an unsupported mode, retain an archive as a test
+authority, or use an ad hoc source probe as acceptance. If the ownership
+boundary cannot be established safely, report that exact unresolved review
+issue rather than silently dropping coverage.
 
 There is no automatic `case-retire` target. In one reviewed content change:
 
-1. remove the case from `stacks/develop.toml` and remove its slug from every
-   dependency or case-ownership reference; preserve any independently required
-   global gate after migrating its inputs and provenance;
-2. remove its tracked case directory rather than keeping a historical copy;
-3. update current active-case lists and documentation;
-4. resolve and test the resulting complete stack;
-5. record the upstream replacement and old/new source commits in the external
-   handoff, never a tracked evidence archive or an automatic result commit.
+1. migrate all still-required regressions, fixtures and gate inputs as above;
+2. remove the case from `stacks/develop.toml` and remove its slug from every
+   dependency or case-ownership reference;
+3. remove its tracked case directory rather than keeping a historical copy;
+4. update active-case lists and documentation, then resolve and manually review
+   the resulting complete stack;
+5. record the old/new source, upstream replacement or eliminated path, and
+   replacement test ownership in the ignored ledger; execute its planned
+   controls and resulting-stack gates only after the manual-review exit gate.
 
-Deletion is a material decision, but the autonomous invocation explicitly
-authorizes it when the complete semantic map and durable replacement evidence
-satisfy this section. Keep the retirement uncommitted for operator review; do
-not ask for a separate scope expansion or commit it.
+Deletion is a material decision, but the autonomous invocation authorizes this
+code-supported, uncommitted retirement candidate and the necessary coverage
+migration. It is accepted only after the subsequent durable checks pass. No
+separate scope expansion or result commit is authorized or needed.
 
 The current `wayland-client-keymap-sync` case has an additional hard retirement
 boundary. Its versioned `tests/live-wayland-keyboard.json` scenario is the sole
 input for `live-wayland-keyboard`, and both the runner and job provenance
-currently require that input to be owned by one exact case selection. Removing the
-case as-is makes the mandatory stack-wide keyboard gate fail before Xpra starts.
-Before retiring it, migrate the scenario to durable neutral ownership or add an
+require that input to be owned by one exact case selection. Removing the case
+as-is makes the mandatory stack-wide keyboard gate fail before Xpra starts.
+During review, migrate the scenario to durable neutral ownership or an
 equivalent generic manifest-declared mechanism, then update the runner,
-provenance schema, immutable inventories, mutation tests, contract, and live
-runbook together. Prove the migrated gate with `STACK=develop`. Otherwise keep
-the case; an upstream unit test alone does not satisfy this live-input boundary.
+provenance schema, immutable inventories, mutation tests, contract and live
+runbook together. After the review gate, prove the migrated gate with
+`STACK=develop`. A redundant production fix is not the long-term owner of a
+still-required live input, and an upstream unit test cannot replace it.
+
+## Manual-review exit gate before runtime validation
+
+Record this gate explicitly in the ignored cycle ledger before the first new
+Xpra test, quarantine run, native/compiled regression, live profile or real
+DEB build. Preparing the test image below also waits for this gate. Offline
+fork-control checks, static analysis and ownership/lifecycle preflight are
+allowed during review, but prove neither patch correctness nor necessity.
+
+The gate passes only when:
+
+- every pre-refresh production case has the full current-code map, equal-depth
+  correctness/necessity analysis, and implemented `keep`, `adapt` or `retire`
+  conclusion; the quarantine has its manual assessment and clean-gate plan;
+- all review findings have dispositions, required changes/removals and durable
+  regression migrations are complete, and no review is deferred to test output;
+- every retained/adapted patch has been re-read in its final surrounding code;
+  all individual selections resolve and the resulting complete stack composes;
+- cross-case consumers, compatibility/failure/lifecycle behavior, test blind
+  spots and residual runtime risks are explicitly accounted for;
+- the CI boundary, source/queue identities, per-case digests, exact planned
+  controls and replacement gates for retired cases are recorded.
+
+This is the agent's documented reasoning checkpoint, not an existing Make
+target or an automated correctness certificate. There must be a review record
+for the whole queue before any runtime run identity is launched; a resolver
+summary or green checks cannot stand in for it. Do not require impossible
+exhaustive test coverage, and do not equate untested branches with safe code.
+
+After the gate, execute clean controls and the development tests below, then
+freeze the runtime-validated candidate for final acceptance. A contradicting
+test, newly found code defect or material candidate change reopens its owner
+and affected consumers for manual review and correction before starting
+further runtime validation. Update the whole-queue gate for the changed inputs;
+unchanged case analyses and exact independent results need not be repeated.
+This keeps early live diagnosis and nearest-regression iteration after review,
+without allowing them to bypass it.
+
+## Prepare the test image and plan quarantine reassessment
+
+Enter this section only after the recorded whole-queue manual-review exit
+gate. Verify the image before the first test which uses it. Reassess quarantine
+for the new source and actual image/module/gate inputs before using the duty
+case in runtime validation; isolated application for code review or export is
+not a validated quarantine assignment. Independent reviewed production-case
+tests may proceed without waiting for unrelated quarantine results.
+Reuse current collected reassessment results when those inputs are unchanged.
+The quarantine must resolve before its named clean gates can start. If an
+identity check now reports `diverged`, reopen manual review and use the isolated
+reconstruction flow above to preserve only the still-required declared
+test-module changes. Publish and re-review the candidate and update the review
+exit record before returning here. If new findings make the correct candidate
+empty, retire the duty case only through its documented semantic and clean-test
+decision; do not
+manufacture an empty patch or use an ad hoc diagnostic as acceptance.
+
+Now verify the input-keyed upstream-test image:
+
+```bash
+make -C fork-maintenance test-image
+```
+
+The check uses the same exact Python ownership verifier as test startup,
+including the current source label, build-run UUID, complete maintenance label
+set, input digest, and workflow digest. It must not be a weaker shell-only
+label probe. If the image is absent, build it through its named lifecycle. If
+the tag instead names an otherwise exact owned image whose sole mismatch is an
+older source label, the removal target must prove that label names an existing
+Git commit which is an ancestor of the current embedded source. Only then remove
+that cache through the locked
+`test-image-cache-remove` target, require `test-image` to report absence, and
+then use the same named build lifecycle. Any other provenance mismatch is a
+hard stop; do not remove or overwrite it.
+
+```bash
+make -C fork-maintenance test-image-cache-remove
+make -C fork-maintenance test-image
+```
+
+For the absent-image branch, inspect the collected status and log, verify the
+resulting cache entry, and remove only the transient build ownership:
+
+```bash
+make -C fork-maintenance test-image-start \
+  IMAGE_RUN=<cycle>-upstream-image-01
+make -C fork-maintenance test-image-wait \
+  IMAGE_RUN=<cycle>-upstream-image-01
+make -C fork-maintenance test-image-status \
+  IMAGE_RUN=<cycle>-upstream-image-01
+make -C fork-maintenance test-image-logs \
+  IMAGE_RUN=<cycle>-upstream-image-01
+make -C fork-maintenance test-image
+make -C fork-maintenance test-image-remove \
+  IMAGE_RUN=<cycle>-upstream-image-01
+```
+
+Any failure other than absence or the exact stale-source classification above
+requires diagnosis; do not overwrite or delete an unverified cache entry.
+Follow [`bootstrap.md`](bootstrap.md) for recovery and abort paths.
+Any later change to the image inputs or embedded upstream workflow changes the
+image key; repeat this verification/build lifecycle before the next test.
+
+Execute the duty case against clean new production and clean upstream tests in
+all three modes, with unique names:
+
+```bash
+make -C fork-maintenance test-start \
+  CASE=upstream-test-quarantine PATCH_MODE=clean \
+  TARGET=quarantine RUN=<cycle>-quarantine-01
+make -C fork-maintenance test-start \
+  CASE=upstream-test-quarantine PATCH_MODE=clean \
+  TARGET=quarantine-cython RUN=<cycle>-quarantine-cython-01
+make -C fork-maintenance test-start \
+  CASE=upstream-test-quarantine PATCH_MODE=clean \
+  TARGET=quarantine-no-compat RUN=<cycle>-quarantine-no-compat-01
+```
+
+Wait for, inspect, and remove each job through the matching `test-*` lifecycle.
+Each gate runs the complete quarantine module union. Success means its exact
+gate-specific subset is the ordered ignored-failure set, every complement
+module passes, and there are no unignored failures or skipped modules. An
+assigned module which becomes green makes that assignment stale; a complement
+failure requires current clean-source diagnosis and an exact new assignment.
+The autonomous invocation already authorizes that queue-wide duty update.
+Update the case through the atomic admission sequence in
+[`test-quarantine.md`](test-quarantine.md), then complete the clean gates whose
+source, environment, module union, or expected subset changed. Every one of the
+three final assignments still requires current, exact proof; an unrelated
+production-only edit does not require another reassessment.
+
+If any duty module remains, prove that the current quarantine patch itself
+applies and its focused module selection is valid:
+
+```bash
+make -C fork-maintenance test-start \
+  CASE=upstream-test-quarantine PATCH_MODE=patched TARGET=focused \
+  RUN=<cycle>-quarantine-patched-focused-01
+make -C fork-maintenance test-wait \
+  RUN=<cycle>-quarantine-patched-focused-01
+make -C fork-maintenance test-status \
+  RUN=<cycle>-quarantine-patched-focused-01
+make -C fork-maintenance test-logs \
+  RUN=<cycle>-quarantine-patched-focused-01
+make -C fork-maintenance test-remove \
+  RUN=<cycle>-quarantine-patched-focused-01
+```
+
+If every declared upstream module is now green, retire the duty case as
+required by [`test-quarantine.md`](test-quarantine.md) and omit this case-only
+patched command. The resulting stack-focused and full legs below remain
+mandatory.
+
+The review gate and CI-layout repair precede source builds; clean quarantine
+proof precedes runtime use of the duty patch. Start the complete live suite
+early in this post-review development phase once its focused/native and
+complete-stack prerequisites are satisfied, without waiting for the full
+upstream matrix. Keep every repair uncommitted. Any newly required source or
+test correction first reopens its affected manual review, then uses the
+isolated applicable/reconstruction flow without touching host source or index.
+After the candidate is stable and frozen, fill missing or invalidated final
+coverage; do not repeat the complete offline suite after each adaptation.
+
+## Confirm review decisions with clean controls
+
+### Establish the clean control or documented substitute
+
+This section executes the verification plan recorded before the manual-review
+exit gate. It does not make the initial keep/adapt/retire decision.
+`PATCH_MODE=tests-only` and `PATCH_MODE=clean` still validate the complete
+case patch before starting a container. Do not invoke either command while
+that case is `diverged` or `ambiguous`. For a new `diverged` finding, reopen
+manual review, reconstruct and publish the candidate through the flow above,
+and update the review exit record before returning to this control. If a new
+finding indicates full upstream replacement and an empty delta, return to the
+manual retirement and regression
+migration flow; `patch-update` cannot publish an empty patch. For an already
+retired case, use the replacement owner and supported commands recorded at the
+review gate, never the removed `CASE` slug. `ambiguous` remains a hard stop
+until source and patch identity are trustworthy.
+
+If the production patch owns one or more `tests/` paths, apply only those tests
+to clean new-source production:
+
+```bash
+make -C fork-maintenance test-start \
+  CASE=<case> PATCH_MODE=tests-only TARGET=focused \
+  RUN=<cycle>-<case>-clean-focused-01
+make -C fork-maintenance test-wait \
+  RUN=<cycle>-<case>-clean-focused-01
+make -C fork-maintenance test-status \
+  RUN=<cycle>-<case>-clean-focused-01
+make -C fork-maintenance test-logs \
+  RUN=<cycle>-<case>-clean-focused-01
+make -C fork-maintenance test-remove \
+  RUN=<cycle>-<case>-clean-focused-01
+```
+
+The expected result for a still-needed patch is a nonzero test result whose
+first failure is the exact retained regression. Inspect it with `test-status`
+and `test-logs`; setup, build, import, unrelated, skipped, or differently
+failing results are not proof. Run these lifecycle steps as separate
+invocations: the expected nonzero `test-wait` must not prevent the subsequent
+status, log, and exact remove checks. `test-remove` validates a consistently
+recorded failed result. Never hide the expected nonzero result with a shell
+fallback.
+
+Also run every declared native/subsystem target with `PATCH_MODE=tests-only`
+for each retained or adapted test-owning case, not only the Python-focused
+subset. For a retired case, run the equivalent clean and resulting-stack
+focused/native checks through the durable ownership and selection migrated
+during review. A missing replacement gate reopens review; deletion never waives
+a behavioral boundary.
+
+Some production cases, currently `debian-libva-codecs-package`, name an
+existing upstream focused module but own no test file. `tests-only` correctly
+refuses such a selection, and the focused runner also rejects
+`PATCH_MODE=clean`; do not turn either guard failure into a control. Inspect the
+clean new upstream packaging, dependency resolution, install ownership and
+import paths by reading the code during manual review to justify the necessity
+decision. A patched focused run still covers the existing codec helper, but
+passing it is not proof that package manifests contain the compiled modules.
+The durable proof is
+always the two real package builds below against the complete resulting stack:
+the retained/adapted stack for keep, or the whole reviewed retirement candidate
+for remove. The current DEB runner has no `PATCH_MODE=clean`; if a
+clean package comparison is needed, provide that mode and its
+provenance/fork-control tests in the review phase rather than bypassing
+`deb-policy-check`. If no durable control observes the disputed behavior,
+reopen review and strengthen or migrate its test/runner boundary. Do not
+present an ad hoc probe as acceptance.
+
+### Reconcile runtime results with the manual conclusions
+
+| Result | Required conclusion path |
+| --- | --- |
+| `apply`, clean regression fails as intended | Supports the reviewed defect for this tested trigger only; it does not prove every hunk necessary or every path correct. Compare the actual failure with the recorded code reasoning. |
+| `apply`, clean regression passes | Contradicts the expected clean-control result. Reopen the manual map: the patch may be redundant/stale, the environment may miss the trigger, or the regression may be vacuous. Do not retire on this result alone. |
+| `already-present` | Exact source presence is not a new decision. Confirm the reviewed candidate through its retained or migrated controls and every durable real boundary; neither resolver status nor green tests certify the complete behavior. |
+| `diverged` | The reviewed input identity or queue changed; runtime admission must stop. Reopen review and reconstruct the complete candidate on the current source; never force, fuzz or use rejects. |
+| `ambiguous` | Applicability is not trustworthy. Stop and inspect the patch/source identity before any edit or test claim. |
+
+The code-supported decisions, confirmed or revised after testing, remain:
+
+- retain the patch unchanged;
+- adapt or narrow its production code and regression;
+- retire it because upstream safely replaces the complete behavior or removes
+  the affected production path, with durable verification preserved.
+
+“It still applies” is not enough for retention, and “the clean test passes” is
+not enough for retirement.
 
 ## Final post-rebase acceptance
 
-After the development loop and reviewed candidate freeze, reconcile the ledger
-against all requirements below. Run only missing or invalidated checks; do not
-repeat a valid development result merely because final acceptance has begun.
+After the manual-review exit gate, post-review development loop and reviewed
+candidate freeze, reconcile the ledger against all requirements below. Run
+only missing or invalidated checks; do not repeat a valid development result
+merely because final acceptance has begun.
 The evidence-reuse rules in [`validation.md`](validation.md) retain original
 run identities and require exact input proof.
 
@@ -1165,12 +1328,14 @@ prove the durable real boundary against the complete resulting stack. Do not
 invoke the unsupported `PATCH_MODE=clean TARGET=focused` combination or a
 native target absent from that case's manifest. If any clean control passes,
 skips, or ceases to reproduce the exact retained regression, return to that
-case's already-authorized semantic keep/adapt/retire analysis before
-continuing. Do the same when a no-test case's semantic inspection indicates
-that upstream may now replace its behavior. Do not freeze or accept the final
-complete queue until every such decision is resolved. Independent case
-development, including its relevant early live gate after focused/native
-prerequisites, may continue under [`validation.md`](validation.md).
+case's already-authorized semantic keep/adapt/retire analysis and update the
+manual-review exit gate before further runtime validation. Do the same when a
+no-test case's semantic inspection indicates that upstream may now replace its
+behavior. Do not freeze or accept the final complete queue until every such
+decision is resolved. Independent manual
+case analysis may continue; new runtime checks require the updated review gate.
+Early live validation remains part of post-review development under
+[`validation.md`](validation.md), after focused/native prerequisites.
 
 For every retained or adapted production case, ensure its individual focused
 selection passes with the complete patch. Enumerate the current stack and use
@@ -1388,9 +1553,13 @@ The handoff must state:
 - old and new fork-master/source/develop commits;
 - the sole automatic start-commit SHA, or that the checkout began clean;
 - rewritten commit range and any rebase conflict resolutions;
-- each case's old/new patch digests, semantic map, available clean-control or
-  documented no-test evidence, and keep/adapt/retire conclusion, with the
-  primary case recorded in greatest detail;
+- the whole-queue manual-review exit record before the first runtime run,
+  including any reopening for later findings or changed candidates;
+- each case's old/new patch digests, equally detailed correctness/necessity
+  map, uncovered risks, code-supported keep/adapt/retire conclusion,
+  implemented changes and durable test ownership after retirement;
+- the subsequent clean-control or documented no-test evidence, and how runtime
+  results confirmed or changed the earlier manual conclusions;
 - quarantine reassessment and any assignment changes;
 - focused/native, package, full-leg, all nine complete-stack live
   run identities/results;

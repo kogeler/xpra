@@ -27,6 +27,34 @@ frozen base → atomic edit → affected regression/native/live → review and f
                                   new defect → affected development loop
 ```
 
+## Upstream-refresh manual-review prerequisite
+
+An explicit upstream refresh adds a mandatory phase before the development
+testing loop above; see [the complete runbook](upstream-refresh.md). After
+recording every patch's applicability against the new embedded source, the
+agent deeply reviews the whole queue with equal priority and depth. For each
+case, reason from current code about correctness and continued necessity,
+including callers, ownership, error/lifecycle/compatibility paths, interactions
+with other patches, and behavior not covered by tests.
+
+Record code-supported keep/adapt/retire conclusions, implement all initial
+review-driven changes/removals and durable regression migrations, and re-review
+the resulting composed code. Record the runbook's manual-review exit gate
+before any new Xpra test, clean/quarantine control, native/compiled regression,
+live profile or real DEB build; upstream-test image preparation waits too.
+Applicability, static and offline fork-control/safety checks remain allowed.
+This is a reasoning checkpoint, not a Make target or a green-test certificate.
+
+The instructions below to run a nearest regression after each edit or start
+live early apply only after that gate during a refresh, not between initial
+review-driven case adaptations. Existing tests neither cover every state nor
+replace manual reasoning; a passing suite cannot justify retaining redundant
+code or accepting an unreviewed branch. Later runtime findings reopen the
+affected reviews and require an updated exit record before further runtime
+validation. Preserve unchanged reviews and exact independent results rather
+than restarting the entire cycle. Ordinary unchanged-base patch development
+still uses the loop below without imposing a new whole-queue refresh review.
+
 ## Development phase
 
 1. Inspect and preserve current work. Run `isolated-start-check` and use its
@@ -71,9 +99,11 @@ while a gate is unresolved, without presenting the candidate as accepted.
 The three clean quarantine gates depend on the embedded source, environment,
 module union and per-leg assignments. Reassess when those inputs change and
 before accepting a stack containing the quarantine. After rebase, reassess
-before applying the duty case as required by [the quarantine runbook](test-quarantine.md).
-Do not make that reassessment a prerequisite for independent production-case
-development, or repeat it for an unrelated production-only edit.
+after the manual-review exit gate and before using the duty patch in runtime
+validation as required by [the quarantine runbook](test-quarantine.md).
+Isolated application for manual inspection/export is not quarantine acceptance.
+Do not block independent reviewed production-case tests on unrelated quarantine
+results, or repeat them for an unrelated production-only edit.
 
 ### Narrow test execution and its cost
 
@@ -173,8 +203,9 @@ obligation merely because the tooling task has reached its final phase.
 
 An explicit rebase invalidates acceptance from the previous embedded source.
 The complete new-base acceptance set remains mandatory even if patches apply
-without textual changes. Adapt all affected cases in the development loop
-first; do not run that complete set after every intermediate adaptation.
+without textual changes. Complete the initial whole-queue manual review and
+its implemented decisions before the runtime development loop; do not run the
+complete final set after every adaptation.
 
 If a final gate finds a defect, return its owning boundary to development,
 implement the atomic correction and run the nearest regression. Stabilize that

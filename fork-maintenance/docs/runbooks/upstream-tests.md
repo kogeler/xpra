@@ -121,6 +121,13 @@ make -C fork-maintenance stack-check STACK=develop
 Resolution must report only `apply` or exact `already-present`. A divergent or
 ambiguous patch stops the ladder.
 
+For an explicit upstream refresh, applicability is followed by the mandatory
+whole-queue manual review in [upstream refresh](upstream-refresh.md), not a
+test start. Review correctness and necessity equally deeply for every patch,
+implement and re-review all initial keep/adapt/retire decisions and regression
+migrations, and record its manual-review exit gate before image preparation
+or any runtime control/test. Even a green suite cannot replace this analysis.
+
 ## Unchanged-base non-semantic refreshes
 
 Before `test-start`, compare the exact old and new applied trees. Do not start

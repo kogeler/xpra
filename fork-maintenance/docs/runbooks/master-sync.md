@@ -87,12 +87,13 @@ adapt the complete queue to it, invoke the **Autonomous Upstream Refresh and
 Full Queue Adaptation** procedure with:
 
 ```text
-Execute autonomous-upstream-refresh PRIMARY_CASE=<slug> against the current fork master.
+Execute autonomous-upstream-refresh against the current fork master.
 ```
 
 This is an agent directive, not a shell command. The exhaustive procedure is
-[`upstream-refresh.md`](upstream-refresh.md); `PRIMARY_CASE` changes only
-review order and detail, never scope. Its initial local
+[`upstream-refresh.md`](upstream-refresh.md); every case receives equal-depth
+manual review. The older optional `PRIMARY_CASE=<slug>` spelling affects only
+starting order, never depth or scope. Its initial local
 worktree review and optional one preservation commit must finish before the
 first command below. That invocation needs no additional commit confirmation;
 all later adaptation and validation results remain uncommitted. Its ref and
@@ -106,8 +107,12 @@ make -C fork-maintenance develop-rebase
 make -C fork-maintenance patch-start-check
 ```
 
-Resolve every rebase conflict, reassess the quarantine case, resolve the active
-queue, and follow development then frozen-candidate final acceptance in
+Resolve every rebase conflict and record every patch's applicability. Then
+deeply review all patches in the current code, record correctness/necessity
+conclusions, implement all initial adaptations/removals and regression
+migrations, and re-review the resulting queue before runtime validation.
+After that manual-review exit gate, reassess quarantine and follow development
+then frozen-candidate final acceptance in
 [`validation.md`](validation.md) before publishing the rewritten `develop`
 with an exact-SHA force-with-lease. Final coverage is mandatory even when
 the queue applies unchanged: offline fork checks, clean quarantine reassessment,
