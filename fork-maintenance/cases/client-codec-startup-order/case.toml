@@ -1,0 +1,29 @@
+schema = 1
+slug = "client-codec-startup-order"
+kind = "production"
+title = "Start the decode worker before validating client codecs"
+commit_subject = "Start the decode worker before validating client codecs"
+patch_sha256 = "059bbe1966a9e51bb543a02ad203231563641e40a0aedbc551f17ad81121adb1"
+dependencies = []
+paths = [
+  "tests/unittests/unit/client/subsystem/codec_startup_test.py",
+  "xpra/client/subsystem/decode.py",
+  "xpra/scripts/main.py",
+]
+
+[tests]
+list = [
+  "unit.client.subsystem.codec_startup_test",
+  "unit.client.subsystem.decode_test",
+  "unit.client.subsystem.encodings_test",
+  "unit.client.subsystem.seccomp_encoding_test",
+  "unit.seccomp_test",
+  "unit.scripts.main_test",
+  "unit.scripts.args_test",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = ["live-rgb", "live-h264", "live-wayland-h264-hardware", "live-wayland-opengl-h264-hardware"]

@@ -1,0 +1,382 @@
+diff --git a/tests/unittests/unit/client/subsystem/codec_startup_test.py b/tests/unittests/unit/client/subsystem/codec_startup_test.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..537177bb93b5c7c759c746426c10f5d4f1548d9d
+--- /dev/null
++++ b/tests/unittests/unit/client/subsystem/codec_startup_test.py
+@@ -0,0 +1,309 @@
++#!/usr/bin/env python3
++# This file is part of Xpra.
++# Copyright (C) 2026 kogeler
++# Xpra is released under the terms of the GNU GPL v2, or, at your option, any
++# later version. See the file COPYING for details.
++
++import errno
++import os
++import subprocess
++import sys
++import unittest
++from contextlib import contextmanager
++from threading import Event, current_thread
++from types import SimpleNamespace
++from unittest.mock import patch
++
++from xpra.client.base import features
++from xpra.client.base.stub import StubClientSubsystem
++from xpra.client.subsystem import encoding
++from xpra.client.subsystem.decode import Decode
++from xpra.scripts import main as scripts
++from xpra.scripts.config import InitInfo
++from xpra.util.glib_scheduler import GLibScheduler
++
++
++class ObservedEncodings(encoding.Encodings):
++
++    def do_load_all_codecs(self):
++        self.client.note("codecs")
++        if self.client.native:
++            super().do_load_all_codecs()
++
++    def get_encodings(self):
++        if self.client.native:
++            return super().get_encodings()
++        return ("rgb", "webp")
++
++
++class ObservedDecode(Decode):
++
++    def _decode_thread_loop(self):
++        self.client.workers.append(current_thread())
++        if len(self.client.workers) > 1:
++            self.client.extra_worker.set()
++        super()._decode_thread_loop()
++
++    def seccomp_enabled(self):
++        return self.client.native and super().seccomp_enabled()
++
++    def install_seccomp(self):
++        self.client.note("filter")
++        if self.client.native:
++            super().install_seccomp()
++
++
++class Consumer(StubClientSubsystem):
++    PREFIX = "consumer"
++
++    def preload_decode(self):
++        self.client.note("consumer-preload")
++
++
++class BootstrapClient:
++    """UI shell around the real bootstrap, encoding and decode code paths."""
++
++    idle_add = staticmethod(GLibScheduler.idle_add)
++    timeout_add = staticmethod(GLibScheduler.timeout_add)
++    source_remove = staticmethod(GLibScheduler.source_remove)
++
++    def __init__(self, *, decode=True, native=False):
++        self.native = native
++        self.exit_code = None
++        self.ui_ready = self.load_ready = False
++        self.trace = []
++        self.workers = []
++        self.extra_worker = Event()
++        self.handshakes = []
++        self.subsystems = {}
++        if decode:
++            self.subsystems["decode"] = ObservedDecode(self)
++        self.subsystems["encoding"] = ObservedEncodings(self)
++        self.subsystems["consumer"] = Consumer(self)
++
++    def note(self, name):
++        self.trace.append((name, current_thread(), self.ui_ready, self.load_ready))
++
++    def get_subsystem(self, name):
++        return self.subsystems.get(name)
++
++    def init(self, opts):
++        self.note("init")
++        for subsystem in self.subsystems.values():
++            subsystem.init(opts)
++
++    def init_ui(self, opts):
++        for subsystem in self.subsystems.values():
++            subsystem.init_ui(opts)
++        self.ui_ready = True
++        self.note("init-ui")
++
++    def load(self):
++        for subsystem in self.subsystems.values():
++            subsystem.load()
++        self.load_ready = True
++        self.note("load")
++
++    def run(self):
++        for subsystem in self.subsystems.values():
++            subsystem.run()
++
++    def after_handshake(self, callback):
++        self.handshakes.append(callback)
++
++    @staticmethod
++    def client_toolkit():
++        return "test"
++
++    def cleanup(self):
++        self.exit_code = 0
++        decode = self.get_subsystem("decode")
++        if decode:
++            # Clean-source duplicate-worker controls must not leave a blocked
++            # non-daemon thread behind after their assertion fails.
++            for _ in range(len(self.workers) + 2):
++                decode._queue.put(None)
++            decode.cleanup()
++        for worker in self.workers:
++            worker.join(5)
++            if worker.is_alive():
++                raise AssertionError("decode worker survived test cleanup")
++        for name, subsystem in self.subsystems.items():
++            if name != "decode":
++                subsystem.cleanup()
++
++
++def options(value):
++    return SimpleNamespace(
++        encoding=value, encodings=("rgb", "webp"), video_scaling="auto",
++        quality=-1, min_quality=0, speed=-1, min_speed=0,
++        csc_modules=("none",), video_decoders=("none",),
++    )
++
++
++@contextmanager
++def bootstrap(app):
++    with (
++        patch.object(scripts, "make_client", return_value=app),
++        patch.object(scripts, "may_show_progress"),
++        patch.object(scripts, "may_notify_client"),
++        patch.object(features, "encoding", True),
++        patch.object(encoding, "CODEC_LOAD_TIMEOUT", 5 if app.native else 0.2),
++        patch.object(encoding, "log", wraps=encoding.log) as logger,
++    ):
++        try:
++            yield lambda value: scripts.get_client_gui_app(options(value), "", (), "attach"), logger
++        finally:
++            app.cleanup()
++
++
++def queue_barrier(app):
++    finished = Event()
++    app.get_subsystem("decode").add_work(finished.set)
++    if not finished.wait(5):
++        raise AssertionError("decode queue did not reach the barrier")
++
++
++class CodecStartupTest(unittest.TestCase):
++
++    def assert_owner_order(self, app):
++        loads = [entry for entry in app.trace if entry[0] == "codecs"]
++        self.assertEqual(len(loads), 1, app.trace)
++        self.assertIsNot(loads[0][1], current_thread())
++        self.assertEqual(loads[0][2:], (True, True))
++        phases = [entry[0] for entry in app.trace]
++        self.assertLess(phases.index("load"), phases.index("codecs"))
++        self.assertLess(phases.index("codecs"), phases.index("consumer-preload"))
++        self.assertLess(phases.index("consumer-preload"), phases.index("filter"))
++        for entry in app.trace:
++            if entry[0] in ("codecs", "consumer-preload", "filter"):
++                self.assertIs(entry[1], app.workers[0])
++
++    def test_explicit_encoding_starts_the_ready_codec_owner(self):
++        app = BootstrapClient()
++        with bootstrap(app) as (create, logger):
++            self.assertIs(create("rgb"), app)
++            queue_barrier(app)
++            self.assert_owner_order(app)
++            logger.warn.assert_not_called()
++
++    def test_later_run_reuses_the_worker_and_cleanup_does_not_restart_it(self):
++        app = BootstrapClient()
++        with bootstrap(app) as (create, logger):
++            create("rgb")
++            # Also starts the worker on clean source, where validation used
++            # the main-thread timeout fallback instead.
++            app.run()
++            queue_barrier(app)
++            worker = app.get_subsystem("decode")._thread
++            app.run()
++            self.assertFalse(app.extra_worker.wait(0.2), "run() started a second decode worker")
++            self.assertIs(app.get_subsystem("decode")._thread, worker)
++            queue_barrier(app)
++            self.assert_owner_order(app)
++            logger.warn.assert_not_called()
++        app.get_subsystem("decode").run()
++        try:
++            self.assertIs(app.get_subsystem("decode")._thread, worker)
++            self.assertFalse(worker.is_alive())
++        finally:
++            app.cleanup()
++
++    def test_help_and_invalid_encoding_clean_up_the_worker(self):
++        for value in ("help", "not-an-encoding"):
++            with self.subTest(value=value):
++                app = BootstrapClient()
++                with bootstrap(app) as (create, logger):
++                    with self.assertRaisesRegex(InitInfo, "supports the following encodings"):
++                        create(value)
++                    self.assertEqual(len(app.workers), 1)
++                    self.assertFalse(app.workers[0].is_alive())
++                    self.assert_owner_order(app)
++                    logger.warn.assert_not_called()
++
++    def test_automatic_encoding_keeps_normal_run_startup(self):
++        for value in ("", "auto"):
++            with self.subTest(value=value):
++                app = BootstrapClient()
++                with bootstrap(app) as (create, logger):
++                    create(value)
++                    self.assertEqual(app.workers, [])
++                    app.run()
++                    queue_barrier(app)
++                    self.assert_owner_order(app)
++                    logger.warn.assert_not_called()
++
++    def test_client_without_decode_loads_inline(self):
++        app = BootstrapClient(decode=False)
++        with bootstrap(app) as (create, logger):
++            create("rgb")
++            self.assertEqual(app.workers, [])
++            loads = [entry for entry in app.trace if entry[0] == "codecs"]
++            self.assertEqual(len(loads), 1)
++            self.assertIs(loads[0][1], current_thread())
++            logger.warn.assert_not_called()
++
++    def test_disabled_or_absent_encoding_does_not_start_decode(self):
++        app = BootstrapClient()
++        try:
++            with patch.object(features, "encoding", False):
++                self.assertEqual(scripts.handle_client_encoding_option(app, "rgb"), "")
++            app.subsystems.pop("encoding")
++            with patch.object(features, "encoding", True):
++                self.assertEqual(scripts.handle_client_encoding_option(app, "rgb"), "")
++            self.assertEqual(app.workers, [])
++        finally:
++            app.cleanup()
++
++    def test_native_codecs_and_seccomp_on_the_same_worker(self):
++        env = dict(os.environ, XPRA_SECCOMP="1", XPRA_SECCOMP_DECODE_ACTION="errno")
++        result = subprocess.run(
++            (sys.executable, __file__, "--native"), env=env,
++            capture_output=True, text=True, timeout=30, check=False,
++        )
++        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
++        self.assertIn("native-codec-startup=passed", result.stdout)
++
++
++def native_control():
++    from xpra import seccomp
++    from xpra.codecs.loader import get_codec
++
++    assert seccomp.is_enabled(), "native seccomp is required for this regression"
++    app = BootstrapClient(native=True)
++    with bootstrap(app) as (create, logger):
++        create("webp")
++        queue_barrier(app)
++        CodecStartupTest().assert_owner_order(app)
++        logger.warn.assert_not_called()
++        decoder = get_codec("dec_webp")
++        assert decoder is not None, "the actual WebP decoder did not load"
++        assert decoder.__file__.endswith(".so"), decoder.__file__
++        assert "webp" in decoder.get_encodings()
++        results = []
++        done = Event()
++
++        def try_open():
++            try:
++                descriptor = os.open(__file__, os.O_RDONLY)
++            except OSError as error:
++                results.append(error.errno)
++            else:
++                os.close(descriptor)
++                results.append(0)
++            finally:
++                done.set()
++
++        app.get_subsystem("decode").add_work(try_open)
++        assert done.wait(5), "filtered worker did not complete the probe"
++        assert results == [errno.EPERM], results
++        descriptor = os.open(__file__, os.O_RDONLY)
++        os.close(descriptor)
++    print("native-codec-startup=passed")
++
++
++if __name__ == "__main__":
++    if sys.argv[1:] == ["--native"]:
++        native_control()
++    else:
++        unittest.main()
+diff --git a/xpra/client/subsystem/decode.py b/xpra/client/subsystem/decode.py
+index 2e4a69bc71815d1440709019cc523d990b15392a..de6b057504f0e6e5587bb9632c3aa8ff4c3a02b1 100644
+--- a/xpra/client/subsystem/decode.py
++++ b/xpra/client/subsystem/decode.py
+@@ -12,7 +12,7 @@ from collections.abc import Callable
+ from xpra.os_util import LINUX
+ from xpra.exit_codes import ExitCode, ExitValue
+ from xpra.util.env import envbool, envint
+-from xpra.util.thread import start_thread
++from xpra.util.thread import make_thread, start_thread
+ from xpra.client.base.stub import StubClientSubsystem
+ from xpra.log import Logger
+ 
+@@ -84,7 +84,11 @@ class Decode(StubClientSubsystem):
+         self._counter: int = 0
+ 
+     def run(self) -> ExitValue:
+-        self._thread = start_thread(self._decode_thread_loop, "decode")
++        # Explicit encoding validation can start us before the application run
++        # phase. Both calls belong to the client lifecycle owner, not workers.
++        if self._thread is None:
++            self._thread = make_thread(self._decode_thread_loop, "decode")
++            self._thread.start()
+         return ExitCode.OK
+ 
+     def cleanup(self) -> None:
+@@ -115,7 +119,7 @@ class Decode(StubClientSubsystem):
+             with log.trap_error("Error in decode work %s%s", fn, args):
+                 fn(*args)
+                 sleep(0)
+-        self._thread = None
++        # Retain the one worker identity: a later run() must not restart it.
+         log("decode thread ended")
+ 
+     def preload(self) -> None:
+diff --git a/xpra/scripts/main.py b/xpra/scripts/main.py
+index 97eac58c7252ad3fcf5e1fa172be9bfeadd8d65c..8be7e2113fe40f69e0748e94b2ff83208c8c5986 100755
+--- a/xpra/scripts/main.py
++++ b/xpra/scripts/main.py
+@@ -1524,7 +1524,6 @@ def get_client_gui_app(opts, request_mode: str, extra_args: Sequence[str], mode:
+     may_show_progress(app, 30, "client configuration")
+     try:
+         app.init(opts)
+-        opts.encoding = handle_client_encoding_option(app, opts.encoding)
+ 
+         def handshake_complete(*_args) -> None:
+             may_show_progress(app, 100, "connection established")
+@@ -1544,6 +1543,7 @@ def get_client_gui_app(opts, request_mode: str, extra_args: Sequence[str], mode:
+         app.init_ui(opts)
+         may_show_progress(app, 50, "loading user interface")
+         app.load()
++        opts.encoding = handle_client_encoding_option(app, opts.encoding)
+         if request_mode:
+             sns = get_start_new_session_dict(opts, request_mode, extra_args)
+             extra_args = [f"socket:{opts.system_proxy_socket}"]
+@@ -1587,7 +1587,10 @@ def handle_client_encoding_option(app, encoding: str) -> str:
+     enc_subsystem = app.get_subsystem("encoding")
+     if not enc_subsystem:
+         return ""
+-    # codecs may still be loading in the decode thread at this point (see `Encodings.load`):
++    # Validation runs before app.run(), but after its consumers have finished
++    # init_ui/load. Start the codec owner before waiting for its inventory.
++    if decode := app.get_subsystem("decode"):
++        decode.run()
+     enc_subsystem.ensure_codecs_loaded()
+     einfo = ""
+     encodings = list(enc_subsystem.get_encodings()) + ["auto", "stream"]

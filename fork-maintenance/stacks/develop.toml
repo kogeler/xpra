@@ -15,6 +15,9 @@ series = [
   "packet-handler-error-boundary",
   "wayland-pointer-scroll-normalization",
   "gtk-client-scroll-deduplication",
+  "wayland-display-name-signal",
+  "client-codec-startup-order",
+  "x11-selection-refusal",
   "upstream-test-quarantine",
 ]
 

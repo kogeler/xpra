@@ -1,0 +1,39 @@
+diff --git a/va/va_trace.c b/va/va_trace.c
+--- a/va/va_trace.c
++++ b/va/va_trace.c
+@@ -643,6 +643,12 @@ static int open_tracing_log_file(
+         FILE_NAME_SUFFIX(env_value, 1024,
+                          "thd-", (unsigned int)thd_id);
+ 
++        /* Live diagnostic capture: never truncate another display's trace. */
++        size_t len = strlen(env_value);
++        if (len + sizeof(".XXXXXX") > sizeof(env_value))
++            goto FAIL;
++        memcpy(env_value + len, ".XXXXXX", sizeof(".XXXXXX"));
++
+         if (plog_file->fn_log)
+             free(plog_file->fn_log);
+ 
+@@ -653,11 +659,19 @@ static int open_tracing_log_file(
+         new_fn_flag = 1;
+     }
+ 
+     if (!plog_file->used) {
+-        if (new_fn_flag)
+-            pfp = fopen(plog_file->fn_log, "w");
+-        else
++        if (new_fn_flag) {
++            int fd = mkstemp(plog_file->fn_log);
++            if (fd >= 0) {
++                pfp = fdopen(fd, "w");
++                if (!pfp) {
++                    close(fd);
++                    unlink(plog_file->fn_log);
++                }
++            }
++        } else {
+             pfp = fopen(plog_file->fn_log, "a");
++        }
+ 
+         if (!pfp)
+             goto FAIL;

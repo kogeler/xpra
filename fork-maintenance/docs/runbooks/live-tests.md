@@ -172,6 +172,14 @@ The exact set is `live-rgb`, `live-h264`, `live-xpra-detach`,
 member-level lifecycle interfaces, not independent patch acceptance.
 `live-suite-check` recomputes all nine retained reports, checks the current
 complete queue and harness, and rejects missing, failed, stale or mixed inputs.
+After each collected/removed member, and again during suite verification, the
+controller scans the four complete report-bound peer stdout/stderr files in
+every scenario. Missing, changed, symlinked or oversized logs fail closed.
+Undeclared Wayland `display-name`, decode-codec startup timeouts, clipboard rate
+warnings and CLIPBOARD/PRIMARY/SECONDARY selection timeouts stop the suite before
+another profile starts. Diagnostics identify the file and warning category,
+never reproduce a possibly clipboard-bearing log line. These checks complement
+the application and per-profile oracles; they do not replace them.
 The same Zed payload is required in RGB and H.264. Review/save the summary in the
 ignored cycle handoff before cycle cleanup removes its underlying evidence.
 A changed patch invalidates the whole live suite. Unchanged exact-input evidence
@@ -634,6 +642,30 @@ presentation renderer, reconnect, or transport fallback is not acceptance.
 Fallback classifiers remain unit-diagnostic helpers only. They are not
 accepted live profiles, cannot be started as named live jobs, and cannot
 produce acceptance evidence.
+
+### Lossless native VA trace capture
+
+Both live image builders obtain the exact installed `libva2` source version from
+their existing signed distribution archives. After Xpra's build/native checks,
+`build_libva_trace.py` applies only `libva_trace.patch` to the general trace-file
+writer. A new per-display log uses an atomic private unique filename; reopening
+that same log still appends. The original seconds/thread suffix can collide on
+rapid codec recreation and overwrite a startup context before collection.
+Encoding/decoding, drivers and release packages are unchanged.
+
+`libva_trace_test.c` compiles the distribution's actual writer with fixed wall
+time and real file I/O. Its clean run must demonstrate the overwrite, not an
+unrelated failure. Its patched run must preserve both independent displays'
+contents, append on reopen, reject a busy foreign thread, and release failed
+opens without leaking files or descriptors. Each runtime image verifies the
+source/binary package versions, library digest and exact ABI loader path against
+the retained build record at `/opt/xpra-fork-maintenance/libva-trace.json`.
+Both image IDs and all three build inputs remain bound to the frozen run.
+
+The parser still reads every native trace file and the adaptive-alpha Zed gate
+still requires a complete VA encoder/decoder context for **every** H.264 stream,
+including startup. Missing traces or initial frames are never excluded to make
+the gate pass. Revalidate this boundary through the full nine-profile suite.
 
 ## H.264 packet-sequence authority
 

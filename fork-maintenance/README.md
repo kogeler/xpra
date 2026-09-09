@@ -30,13 +30,17 @@ The active patches are:
 4. `wayland-initial-window-state`;
 5. `wayland-client-keymap-sync`;
 6. `x11-client-clipboard-events`;
-7. `wayland-empty-damage-throttle`;
-8. `jph-parallel-build-objects`;
-9. `debian-libva-codecs-package`;
-10. `packet-handler-error-boundary`;
-11. `wayland-pointer-scroll-normalization`;
-12. `gtk-client-scroll-deduplication`;
-13. `upstream-test-quarantine` (test-only duty case).
+7. `wayland-clipboard-token-coalescing`;
+8. `wayland-empty-damage-throttle`;
+9. `jph-parallel-build-objects`;
+10. `debian-libva-codecs-package`;
+11. `packet-handler-error-boundary`;
+12. `wayland-pointer-scroll-normalization`;
+13. `gtk-client-scroll-deduplication`;
+14. `wayland-display-name-signal`;
+15. `client-codec-startup-order`;
+16. `x11-selection-refusal`;
+17. `upstream-test-quarantine` (test-only duty case).
 
 `stacks/develop.toml` applies them in integration order. `develop` here is the
 stable queue slug, not a requirement that every consumer run from the Git branch
