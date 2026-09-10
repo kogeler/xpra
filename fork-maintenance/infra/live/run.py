@@ -130,7 +130,7 @@ SUBSURFACE_UPPER_BUFFER_TRANSFORM = "180"
 SUBSURFACE_COMPOSITE_MODE = "premultiplied-source-over-v1"
 SUBSURFACE_COMPOSITE_FORMATS = frozenset(("BGRA", "BGRX", "RGBA", "RGBX"))
 SUBSURFACE_CHILD_FORMATS = frozenset(("BGRA", "RGBA"))
-SUBSURFACE_BASELINE_RGB24_FORMATS = frozenset(("BGR", "RGB"))
+SUBSURFACE_BASELINE_RGB24_FORMATS = frozenset(("BGR", "RGB", "BGRX", "RGBX"))
 SUBSURFACE_PARENT_DIMENSIONS = {
     "primary": (420, 300),
     "secondary": (360, 260),
@@ -8239,6 +8239,134 @@ def _normalise_log_value(value: Any) -> Any:
     return value
 
 
+def _h264_nonoverlapping_edge_ack(
+    client_log: str,
+    ack: re.Match[str],
+    saved: dict[str, Any],
+    updates: dict[str, Any],
+) -> bool:
+    """Admit only an exactly bound codec edge which cannot overwrite the IDR."""
+    sequence = int(ack.group("sequence"))
+    packets = [packet for packet in updates["updates"] if packet.get("sequence") == sequence]
+    if len(packets) != 1:
+        return False
+    edge = packets[0]
+    geometry = _packet_geometry(edge)
+    main = _packet_geometry(saved)
+    if (
+        not _lossless_rgb_edge_kind(edge)
+        or geometry is None or main is None
+        or _packet_window_size(edge) != _packet_window_size(saved)
+        or edge["options"].get("backing-epoch") != saved["options"].get("backing-epoch")
+    ):
+        return False
+    x, y, width, height = geometry
+    mx, my, mw, mh = main
+    if x < mx + mw and mx < x + width and y < my + mh and my < y + height:
+        return False
+    processes = [
+        match for match in H264_PROCESS_DRAW_RE.finditer(client_log, 0, ack.start())
+        if int(match.group("window_id")) == int(ack.group("window_id"))
+        and int(match.group("sequence")) == sequence
+    ]
+    if len(processes) != 1:
+        return False
+    process = processes[0]
+    return bool(
+        int(ack.group("width")) == width and int(ack.group("height")) == height
+        and tuple(int(process.group(key)) for key in ("x", "y", "width", "height")) == geometry
+        and process.group("encoding") == edge["encoding"]
+        and int(process.group("payload_bytes")) == edge["payload_bytes"]
+        and _normalise_log_value(_typedict_literal(process.group("options")))
+        == _normalise_log_value(edge["options"])
+    )
+
+
+def _h264_presentation_before_overwrite(
+    client_log: str,
+    ack: re.Match[str],
+    saved: dict[str, Any],
+    updates: dict[str, Any],
+    backing_size: tuple[int, int] | None,
+) -> tuple[bool, list[int]]:
+    """Bind a complete GL swap to the acknowledged pixels, not just its window."""
+    window_id = int(ack.group("window_id"))
+    geometry = _packet_geometry(saved)
+    if backing_size is None or geometry is None:
+        return False, []
+    # A GL presentation is synchronous on the UI thread. Do not borrow a swap
+    # or completion from another presentation (including another window).
+    headers = list(re.finditer(
+        r"(?m)^.*?do_present_fbo\([^\n]+\) will blit (?P<rectangles>\[[^\n]*\])$",
+        client_log[ack.end():],
+    ))
+    for index, header in enumerate(headers):
+        start = ack.end() + header.end()
+        end = ack.end() + headers[index + 1].start() if index + 1 < len(headers) else len(client_log)
+        swaps = list(re.finditer(
+            r"(?m)^.*?\b(?P<count>\d+)\.do_gl_show\("
+            r"(?P<backing>GLDrawingArea\((?P<window_id>\d+), \((?P<w>\d+), (?P<h>\d+)\)\))"
+            r"\) swapping buffers now$",
+            client_log[start:end],
+        ))
+        if not any(int(swap.group("window_id")) == window_id for swap in swaps):
+            continue
+        if len(swaps) != 1:
+            return False, []
+        swap = swaps[0]
+        # The numeric prefix is the rectangle count, NOT the Xpra window ID.
+        if (int(swap.group("w")), int(swap.group("h"))) != backing_size:
+            return False, []
+        completions = list(re.finditer(
+            rf"(?m)^.*?{re.escape(swap.group('backing'))}\.do_present_fbo\(\) done$",
+            client_log[start + swap.end():end],
+        ))
+        if len(completions) != 1:
+            return False, []
+        try:
+            rectangles = ast.literal_eval(header.group("rectangles"))
+        except (SyntaxError, ValueError):
+            return False, []
+        if (
+            not isinstance(rectangles, list) or not rectangles
+            or len(rectangles) != int(swap.group("count"))
+            or any(
+                not isinstance(rect, (tuple, list)) or len(rect) != 4
+                or any(_exact_int(value) is None for value in rect)
+                or min(rect[:2]) < 0 or min(rect[2:]) <= 0
+                or rect[0] + rect[2] > backing_size[0] or rect[1] + rect[3] > backing_size[1]
+                for rect in rectangles
+            )
+        ):
+            return False, []
+        x, y, width, height = geometry
+        # render_planar_update uses a bottom-origin GL viewport. The backing
+        # can be larger than the source viewport in a tiled client window.
+        y = backing_size[1] - y - height
+        if y < 0 or x + width > backing_size[0]:
+            return False, []
+        if not any(
+            rx <= x and ry <= y and rx + rw >= x + width and ry + rh >= y + height
+            for rx, ry, rw, rh in rectangles
+        ):
+            return False, []
+        done = start + swap.end() + completions[0].end()
+        edges = []
+        for later_ack in H264_ACK_RE.finditer(client_log, ack.end(), done):
+            if int(later_ack.group("window_id")) != window_id:
+                continue
+            # An ACK follows the actual UI paint. A queued process_draw alone
+            # is not an overwrite. Only exact nonoverlapping lossless edges
+            # may paint before this swap; unknown, repeated or overlapping ACKs
+            # fail closed even if a later screenshot happens to look correct.
+            sequence = int(later_ack.group("sequence"))
+            if sequence in edges or not _h264_nonoverlapping_edge_ack(client_log, later_ack, saved, updates):
+                return False, edges
+            edges.append(sequence)
+        return True, edges
+    return False, []
+
+
 def h264_client_packet_chain(
     directory: Path,
     updates: dict[str, Any],
@@ -8383,6 +8511,16 @@ def h264_client_packet_chain(
     decode_success_end = (
         paint_end + decode_success_match.end() if decode_success_match else paint_end
     )
+    render_matches = list(re.finditer(
+        rf"(?m)^.*?GLDrawingArea\({window_id}, \((?P<w>\d+), (?P<h>\d+)\)\)"
+        rf"\.render_planar_update\({int(saved['x'])}, {int(saved['y'])}, "
+        rf"{encoded_width}, {encoded_height}, {width}, {height}, 'NV12_to_RGB'\) pixel_format=NV12$",
+        client_log[paint_end:decode_success_end],
+    ))
+    backing_size = (
+        (int(render_matches[0].group("w")), int(render_matches[0].group("h")))
+        if len(render_matches) == 1 else None
+    )
     ack_matches = [
         match
         for match in H264_ACK_RE.finditer(client_log, decode_success_end)
@@ -8391,60 +8529,16 @@ def h264_client_packet_chain(
         and int(match.group("width")) == width
         and int(match.group("height")) == height
     ]
-    ack_match = ack_matches[0] if ack_matches else None
+    ack_match = ack_matches[0] if len(ack_matches) == 1 else None
     ack_position = ack_match.start() if ack_match else -1
     intervening_decode = (
         "record_decode_time(" in client_log[decode_success_end:ack_position]
         if ack_position >= 0
         else True
     )
-    present_match = re.search(
-        r"(?m)^.*?do_present_fbo\([^\n]+\) will blit",
-        client_log[ack_match.end() :] if ack_match else "",
-    )
-    present_position = (
-        ack_match.end() + present_match.start() if ack_match and present_match else -1
-    )
-    next_ack = (
-        next(
-            (
-                match
-                for match in H264_ACK_RE.finditer(client_log, ack_match.end())
-                if int(match.group("window_id")) == window_id
-            ),
-            None,
-        )
-        if ack_match
-        else None
-    )
-    unambiguous_presentation = bool(
-        present_position >= 0
-        and (next_ack is None or present_position < next_ack.start())
-    )
-    presentation_end = (
-        ack_match.end() + present_match.end() if ack_match and present_match else 0
-    )
-    swap_match = (
-        re.search(
-            rf"(?m)^.*?\b{window_id}\.do_gl_show\("
-            rf"GLDrawingArea\({window_id},[^\n]+swapping buffers now",
-            client_log[presentation_end:],
-        )
-        if unambiguous_presentation
-        else None
-    )
-    swap_end = presentation_end + swap_match.end() if swap_match else 0
-    present_done_match = (
-        re.search(
-            rf"(?m)^.*?GLDrawingArea\({window_id},[^\n]+"
-            rf"\.do_present_fbo\(\) done",
-            client_log[swap_end:],
-        )
-        if swap_match
-        else None
-    )
-    presentation_complete = bool(
-        unambiguous_presentation and swap_match and present_done_match
+    presentation_complete, intervening_edges = (
+        _h264_presentation_before_overwrite(client_log, ack_match, saved, updates, backing_size)
+        if ack_match else (False, [])
     )
     base_chain_complete = bool(
         packet_fields_match
@@ -8466,10 +8560,12 @@ def h264_client_packet_chain(
         "draw_region_matches_saved_packet": draw_fields_match,
         "encoded_size": [encoded_width, encoded_height],
         "libva_decode_log_matches_saved_packet": bool(libva_decode_match),
-        "nv12_painted": bool(paint_match),
+        "nv12_painted": bool(paint_match and backing_size),
+        "paint_backing_size": list(backing_size) if backing_size else None,
         "payload_bytes": payload_bytes,
         "payload_sha256": saved.get("payload_sha256", ""),
-        "presented_before_later_ack": presentation_complete,
+        "presented_before_overwrite": presentation_complete,
+        "intervening_edge_sequences": intervening_edges,
         "process_draw_matches_saved_packet": packet_fields_match,
         "sequence": sequence,
         "size": [width, height],
@@ -14395,10 +14491,15 @@ def _subsurface_raw_packet_image(
         if encoding == "rgb32"
         else SUBSURFACE_BASELINE_RGB24_FORMATS
     )
-    bytes_per_pixel = 4 if encoding == "rgb32" else 3
     stride = _exact_int(packet.get("stride"), positive=True)
     _x, _y, width, height = geometry
-    if rgb_format not in formats or stride is None or stride < width * bytes_per_pixel:
+    if not isinstance(rgb_format, str) or rgb_format not in formats:
+        raise LabFailure("subsurface saved packet RGB format or stride is invalid")
+    # Upstream keeps the requested rgb24 coding for a supported opaque BGRX/
+    # RGBX input. As in the real client, rgb_format owns the actual pixel size.
+    # Transaction packets remain rgb32 and the ordinary rgb24 root stays opaque.
+    bytes_per_pixel = len(rgb_format)
+    if stride is None or stride < width * bytes_per_pixel:
         raise LabFailure("subsurface saved packet RGB format or stride is invalid")
     expected_size = stride * height
     payload_bytes = _exact_int(packet.get("payload_bytes"), positive=True)
@@ -19125,7 +19226,7 @@ def classify_boundaries(
         }
         presentation_checks = {
             "packet_chain_presented": bool(packet_chain.get("complete")),
-            "opengl_presented": bool(packet_chain.get("presented_before_later_ack")),
+            "opengl_presented": bool(packet_chain.get("presented_before_overwrite")),
             "hardware_opengl_renderer": bool(renderer) and not software_renderer,
             "hardware_desktop_renderer": bool(client_desktop.get("hardware_renderer")),
             "client_render_node_open": str(args.render_node)

@@ -10,8 +10,8 @@ cleanup begins. Rebuilding encoder callables or resetting negotiated policy
 does not recreate that lifetime.
 
 The protected resource set is larger than the current CSC/video pair. It also
-includes captured images waiting for A/V delay, the timeout and idle sources
-which drain that queue, delayed B-frame flush state, the inactive-encoder
+includes captured images waiting for A/V delay, the UI timeout source
+which drains that queue, delayed B-frame flush state, the inactive-encoder
 watchdog, scroll state released on the encode worker, the optional saved
 bitstream file, the UI picture-refresh request after an x264 reset, and both
 refresh timers owned by `VideoSubregion`.
@@ -51,7 +51,7 @@ that instruction.
 ## Embedded-source context
 
 The case resolves against source commit
-`212038243d0067b6860ebe7d6953692179ef353f`, embedded in the current `develop`
+`d95058b0916913fe6ae5296fb702f66d833898b0`, embedded in the current `develop`
 history. That source already supplies the following surrounding behavior:
 
 - every client connection has one FIFO encode worker shared by its window
@@ -73,7 +73,25 @@ history. That source already supplies the following surrounding behavior:
   cleaned in the muxer's established reverse ordering; each selected mixin and
   the final base connection retain distinct cleanup responsibilities.
 
-This patch does not replace those policies. It supplies the ownership state
+This source has also absorbed parts of the earlier downstream implementation:
+all accepted encode items now run unconditionally; worker startup has one
+`encode_thread_lock`; `encode_at_end`,
+`call_in_encode_thread_at_end()` and `stop_encode_thread()` own the shared
+resource tail; CUDA release is registered unconditionally; mmap read/write
+areas have independent at-end callbacks; and the UI thread alone drains the
+A/V image list, after sequence cancellation. Those implementations are retained,
+not copied back from the old patch. There is no downstream mmap hunk, second
+tail registry, optional task flag, encode-or-free adapter or worker-to-UI
+A/V idle.
+
+The remaining source still resets live video fields during registry rebuild,
+can lose unpublished or detached resources on exceptions, does not bind all
+video timers to exact terminal generations, accepts retained producers behind
+the worker sentinel, and does not fence the independent calculator/CUDA
+publisher. These residual boundaries justify retaining an adapted case rather
+than retiring it merely because individual upstream fixes now exist.
+
+This patch does not replace the absorbed policies. It supplies the ownership state
 around them. On an upstream refresh, retention is behavioral: the resolved
 source must still provide one-time video ownership, atomic pair publication,
 exception-complete retirement, exact timer cancellation, and the same
@@ -100,13 +118,14 @@ backend boundaries:
 | CSC and video backends | Own the CPU, GPU, driver, surface, bitstream, and backend-worker resources released by their `clean()` implementations. |
 | `tests/unittests/unit/server/window/video_compress_test.py` | Drives exact interleavings with real Python threads, events, a FIFO worker, controlled GLib publication, and throwing resource doubles. |
 | `tests/unittests/unit/server/source/encoding_lifecycle_test.py` | Exercises the real connection muxer, encode worker, background-calculation completion fence, local CUDA publication, and native GLib calculation handoff. |
+| `tests/unittests/unit/server/encoder_server_test.py` | Keeps the real standalone encoder roundtrip and verifies encoder-before-CUDA release through an initialized encoding connection muxer and its sole worker-stop owner. |
 
 Three encoder-related collections must remain distinct:
 
 | State | Contents | Lifetime authority |
 | --- | --- | --- |
 | `_all_encoders` / `_encoders` | Python callables available for future damage. | Rebuilt by `init_encoders()`; contains no live native context ownership. |
-| `WindowVideoSource.encode_queue` | Frozen `ImageWrapper` instances delayed for A/V synchronization. | Video source plus its timeout/idle generations; items later resolve the current callable and pipeline. |
+| `WindowVideoSource.encode_queue` | Frozen `ImageWrapper` instances delayed for A/V synchronization. | UI-owned video list plus its exact timeout generation; accepted items later resolve the current callable and pipeline. |
 | Connection encode queue | Compression work, scroll release, codec cleanup, `encode_ended`, connection-wide end callbacks, and `None`. | `ClientConnection`; one worker consumes it in FIFO order and only the base connection publishes `None`. |
 
 Clearing one domain cannot stand in for cleaning another. Replacing callable
@@ -137,10 +156,10 @@ The one-time fields are:
 | `_video_state_lock` | Re-entrant ownership lock for terminal state, pair publication/detachment, the delayed-image queue, and video-only timer identities. |
 | `_video_source_closed` | Monotonic terminal bit. Once true, constructors and timer producers cannot publish new work. |
 | `_video_cleanup_queued` | The terminal pair-cleanup/late-sweep handoff has been accepted by the encode FIFO. Later external cancellation must not enqueue another release behind the final barrier. |
-| `_video_refresh_lock`, `video_fallback_refresh_idle`, `_video_fallback_refresh_generation` | Exact x264 fallback UI refresh and completion fence; the refresh body may enter generic damage/timer code without holding the video-state lock. |
+| `_video_refresh_lock`, `video_fallback_refresh_idle`, `_video_fallback_refresh_generation` | A/V drain and x264 fallback UI execution fence; generic delay/refresh bodies run without the video-state lock. |
 | `video_subregion` | One terminal `VideoSubregion` owner, created after base construction and retained until UI cleanup. |
 | `_csc_encoder`, `_video_encoder` | The currently published native pair; both are transferred through one locked boundary. |
-| `encode_from_queue_timer`, `encode_from_queue_idle`, `encode_from_queue_due` and their generations | Timeout/idle ownership for the A/V-delayed image queue. |
+| `encode_from_queue_timer`, `encode_from_queue_due`, `_encode_from_queue_generation` | One exact UI timeout and reservation for the A/V-delayed image queue. |
 | `b_frame_flush_timer`, `b_frame_flush_data` and `_b_frame_flush_generation` | Delayed video-frame flush ownership. |
 | `video_encoder_timer` and `_video_encoder_timer_generation` | Inactive-encoder watchdog ownership. |
 | `scroll_data` | Current scroll encoder state, released by ordered worker work. |
@@ -216,9 +235,9 @@ attempted if it raises. Direct `ve.clean()` is used for an unpublished encoder,
 because no decoder stream, inactivity timer, saved stream, or EOS side effect
 belongs to an instance which never became current.
 
-After successful initialization, the method records the selected limits,
-masks, scaling, and first-frame state. It then enters `_video_state_lock` and
-performs one publication transition:
+After successful initialization, the method enters `_video_state_lock` and
+publishes the selected limits, masks, scaling and first-frame state together
+with the pair only while live:
 
 ```text
 if source is live:
@@ -265,8 +284,7 @@ encode worker
        clean pair B directly
 ```
 
-The callback is queued with `optional=False`. Optional encoding jobs may be
-discarded once the connection close event is set; resource cleanup may not.
+Every accepted callback uses the current unconditional `(fn, args)` FIFO API.
 The closure retains strong references to pair A until the worker reaches it.
 Detachment and FIFO insertion are one locked handoff: terminal cleanup cannot
 observe the empty public pair and enqueue `encode_ended()` while an earlier
@@ -274,6 +292,14 @@ caller still holds detached resources outside the queue. After terminal
 handoff succeeds, `_video_cleanup_queued` prevents later external pair or scroll
 release requests from landing behind that final barrier. The worker-side late
 sweep remains permitted; it is the release owner already accepted by the FIFO.
+
+If queue admission raises before acceptance, both fields are restored under
+the same lock. The pair must not be leaked or destroyed on the UI thread.
+The inherited terminal `encode_ended()` worker barrier also sweeps any remaining
+source-owned pair and scroll state before its normal base action. It does not
+retry cleanup on an object already detached and attempted. Exception-complete
+arrival at that base barrier during generic cleanup is supplied by the separate
+timer-lifecycle case in the complete stack.
 
 The late sweep is deterministic because pipeline construction and the sweep
 share the same serial encode worker. Every encode item ahead of the cleanup
@@ -288,25 +314,13 @@ it is not a shortcut for UI or protocol callers.
 
 ## Cleanup completeness and exception visibility
 
-The captured-pair closure uses nested `finally` blocks:
-
-```text
-try:
-    try:
-        clean captured CSC
-    finally:
-        clean captured video encoder
-finally:
-    if request came from outside the worker:
-        run the late sweep
-```
-
-Consequently a CSC exception cannot skip its paired encoder, an encoder
-exception cannot skip the late sweep, and a late-sweep CSC exception cannot
-skip its paired encoder. Exceptions remain visible to the encode worker's
-normal error boundary. When multiple native cleanup operations raise, ordinary
-Python `finally` semantics determine the active exception; this patch does not
-invent a backend exception protocol.
+The captured-pair closure attempts CSC cleanup, encoder cleanup and the late
+sweep independently, recording their exceptions before reporting the first.
+A failed diagnostic cannot skip resource cleanup either. Each native owner
+therefore receives its cleanup attempt even if another owner raises.
+Unpublished local-pair cleanup retains its narrower nested-`finally`
+boundary, which also attempts both constructed objects without stream side
+effects.
 
 Sibling teardown actions which are not one nested resource pair use explicit
 aggregation. `_raise_video_cleanup_errors()` logs every error after the first,
@@ -347,15 +361,15 @@ that boundary observes cancellation or terminal state under
 
 The remaining video-owned actions are attempted in this order:
 
-1. invalidate and remove both the A/V timeout and A/V idle source;
+1. invalidate and remove the exact A/V timeout and clear its due reservation;
 2. invalidate the x264 fallback UI refresh;
 3. atomically swap `encode_queue` to an empty list and free every captured
    image from the old list;
 4. cancel both video and non-video `VideoSubregion` refresh timers;
 5. queue mandatory `do_free_scroll_data()` on the encode worker;
-6. clear `last_scroll_time`; and
-7. cancel video flush/watchdog state, detach the codec pair, and queue its
-   mandatory cleanup transaction.
+6. cancel video flush/watchdog state, detach the codec pair, and queue its
+   mandatory cleanup transaction; and
+7. clear `last_scroll_time` before reporting accumulated errors.
 
 Each step runs even if a previous one raises. The first failure is reported
 only after every later owner has received its cleanup attempt.
@@ -391,71 +405,61 @@ publication permanently.
 
 ## A/V-delayed image ownership
 
-`process_damage_region()` may freeze a captured image and delay encoding to
-align video with audio. The delayed item carries geometry, capture and queue
-times, the image, requested coding, damage sequence, options, and flush state.
-It deliberately does not retain a CSC or video-encoder generation. When due,
-the normal encode callback resolves and validates the current pipeline.
+`do_process_damage_image()` runs in the UI domain, including filtered captures
+returned there by the image-filter subsystem. It freezes images when required
+by A/V delay or the native encoder, preserving the upstream policy. Each list
+item contains geometry, capture/queue times, the image, requested coding,
+damage sequence, options and flush state, not a native codec generation.
 
-The final UI-side handoff is guarded by `_video_state_lock`:
+The final admission checks cancellation and terminal state under
+`_video_state_lock`. An immediate image transfers directly to the existing
+`make_data_packet_cb`, whose `finally` releases it. A delayed image remains
+owned by the UI list until an individual worker handoff succeeds. No optional
+job flag or extra encode-or-free callback exists. All diagnostics which can
+fail precede admission; a successful FIFO return is the ownership transfer.
 
-- terminal or cancelled work frees its image;
-- zero-delay work transfers its image to a mandatory `_encode_or_free_image`
-  item while the terminal lease is held; and
-- delayed work is appended atomically, then receives an exact timeout.
+Appending a delayed image and reserving its timeout form one operation. Failed
+Source construction, callback registration or attachment clears the exact
+reservation and removes the unaccepted item; its original caller still owns
+the image. Captured edge subimages are separate owners: if extraction or a
+later handoff fails, only unaccepted derived images are released here.
+Previously accepted edges remain worker-owned and the unaccepted original
+remains caller-owned. This fanout also binds each derived wrapper to its exact
+encoded dimensions: the right strip spans the original height, the bottom
+strip spans only the masked main width, and their intersection is never sent
+twice. A zero masked main width or height leaves positive picture strips,
+including the case where `get_sub_image()` returns the original full image.
+That original is still the final handoff and is not freed by local derived-image
+cleanup after acceptance.
 
-`free_encode_queue_images()` swaps the list under the lock and frees wrappers
-outside it. A concurrent producer either appends before the swap and transfers
-its image to the cleanup list, or observes cancellation/closure and frees the
-image itself.
+WIS owns whether coding is alpha-safe and whether dimension masks apply at all.
+It does not rewrite this ownership loop. Keep one-line export context around
+the adjacent mask/fanout boundary and inspect the actual composed method.
 
-An immediate image is no longer owned by `encode_queue` after handoff. Its
-mandatory worker item therefore must run even when connection closure skips
-optional compression: it either frees the cancelled image or enters
-`make_data_packet_cb()`, whose existing `finally` owns release. Marking that
-item optional would discard the only remaining release owner. A delayed-queue
-wakeup may remain optional because the source still owns its untransferred
-images and frees them during cancellation.
+The UI list owns one retained `GLib.Source`, one due time and
+`_encode_from_queue_generation`. Scheduling keeps an already earlier deadline.
+For a new deadline it cancels the previous generation, publishes the exact
+Source before attach, and rolls back that reservation if publication fails.
+The callback claims only its current generation, clears the slot and due time,
+then invokes `encode_from_queue()` directly on UI. Cancellation invalidates
+the generation before destroying the retained object. A stale callback cannot
+clear or dispatch a replacement. There is no worker-to-UI idle to cancel.
 
-The delayed queue owns two GLib identities:
+`encode_from_queue()` uses the separate refresh execution fence and calls
+`update_av_sync_delay()` outside the short video-state lock, because that
+inherited method can schedule a generic timer. It rechecks closure afterward.
+While holding the short state lock it transfers at most one due item and
+removes that accepted item immediately, before freeing another cancelled item
+or publishing the next timeout can fail. A later failure must not leave an
+already transferred image in the UI cleanup list. Untransferred items remain
+UI-owned; ordinary subsequent damage or cleanup can consume them, without an
+invented retry loop.
 
-| Source | Role | Identity state |
-| --- | --- | --- |
-| `encode_from_queue_timer` | Makes the first eligible item available to the encode worker at its A/V due time. | `_encode_from_queue_generation`, retained source object, and `encode_from_queue_due`. |
-| `encode_from_queue_idle` | Returns a worker-computed next due time to the UI scheduling domain. | `_encode_from_queue_idle_generation` and retained source object. |
-
-For either source, scheduling reserves a new generation under the video lock,
-creates a timeout or idle `GLib.Source`, and attaches it outside the lock using
-the small `attach_source()` helper shared with `VideoSubregion`. Publication
-retains that object only if the source is live, the queue still exists, damage
-is not cancelled, and the generation still matches. The helper owns the object
-until attach completes and destroys it if registration raises.
-
-A callback may dispatch before attach returns. It claims its generation and
-performs its one allowed handoff; the publisher then destroys its exact local
-object rather than publishing a stale owner. GLib may already have destroyed
-that one-shot source when its callback returned `False`. Object destruction is
-idempotent and remains tied to that instance; a recyclable numeric source ID
-is not a safe cancellation identity after this boundary. Numeric IDs are used
-only for diagnostics, not for reacquiring ownership from the global context.
-
-Cancellation advances both generations, clears both slots, and attempts both
-object destructions even when the first raises. A blocked idle publication
-released after cleanup fails its recheck, destroys its own source, and cannot
-schedule a timeout or enqueue work. Zero remains the absent-slot value, not a
-second kind of live source.
-
-`encode_from_queue()` performs an initial live/non-empty check, then calls the
-inherited `update_av_sync_delay()` outside `_video_state_lock`. That inherited
-method may schedule a generic timer, so keeping it outside prevents a
-video-lock to timer-lock edge. The worker reacquires the video lock, revalidates
-terminal state, removes cancelled entries, and transfers at most one due item.
-Images are freed and encoding is invoked outside the lock. Remaining work is
-rescheduled through the guarded idle path.
-
-If cleanup wins the unlocked A/V-update interval, the worker cancels any
-generic A/V timer which the inherited update just published and exits without
-touching cleaned video state.
+`free_encode_queue_images()` detaches the whole list under the lock and
+attempts every wrapper release outside it, reporting errors after all attempts.
+Terminal cleanup closes video admission before waiting for a claimed UI drain
+or fallback refresh, so either the worker accepted an image or the detached
+cleanup list owns it. Neither path may release an image belonging to the other.
 
 ## B-frame flush and inactivity watchdog
 
@@ -466,15 +470,15 @@ records the tuple under `_video_state_lock`, registers the timeout outside the
 lock, and publishes its object only after a live/generation recheck.
 
 The timeout callback must match the exact generation. It clears its slot and,
-while holding the terminal-state lease, queues the established optional
+while holding the terminal-state lease, queues the established unconditional
 `do_flush_video_encoder(worker_generation, captured_tuple)` work. Both the
 exact tuple and its generation cross the UI-to-worker boundary; the worker
 must never reinterpret an older request using a replacement tuple. A later
 encode, replacement, or cancellation invalidates that queued request. This
 short locked handoff ensures connection
 cleanup cannot publish the worker tail between the callback's live check and
-its queue insertion. If connection close has already made optional encoding
-work skippable, the later mandatory codec cleanup remains authoritative. Native
+its queue insertion. The worker rechecks its captured generation and closed state; later codec
+cleanup remains authoritative for an invalidated request. Native
 flush work does not execute under the lock.
 
 `flush_video_encoder_now()` invalidates only the timer identity, retains the
@@ -606,17 +610,17 @@ best-effort success. Once all bases have had their cleanup opportunity, the
 first retained failure is reported. Reaching the later bases is what makes the
 tail below unconditional even when a window source reports a cleanup error.
 
-`ClientConnection` initializes `encode_end_callbacks`, `_encode_lock`, and
-`_encode_queue_closed` beside its encode queue. The class-level `queue_encode`
-method serializes acceptance and lazy worker creation under this lock; it does
-not replace itself with an unguarded queue method after the first item. Worker
-creation succeeds before an item is accepted. After sealing, optional work is
-discarded and mandatory work raises visibly. Callers cannot enqueue `None`.
+`ClientConnection` retains upstream's `encode_at_end` and `encode_thread_lock`
+and adds `_encode_queue_closed`. Its `queue_encode` entry remains bound to
+`start_queue_encode`, serializing every acceptance and lazy worker creation;
+it never switches to an unguarded raw `put`. Worker creation succeeds before
+an item is accepted. After sealing, all ordinary and at-end submissions raise
+visibly. Callers cannot enqueue `None`; only `stop_encode_thread()` can.
 `call_in_encode_thread_at_end()` records a mandatory callable and arguments
 which require every subsystem's ordinary cleanup to have queued first.
 `EncodingsConnection.cleanup()` cancels its recalculation timer and registers
-`free_cuda_device_context()` there when a context exists; it does not queue
-`None`.
+`free_cuda_device_context()` there unconditionally, as current upstream does;
+it does not queue `None`.
 
 The calculation thread is not the encode thread. `add_work_item()` schedules
 `recalculate_delays()` on the process-wide background worker, which reads
@@ -636,8 +640,19 @@ establish that this producer has stopped accessing window state.
 pixel threshold and one-second scheduling policy, but cannot admit work after
 closure. A delayed handoff owns a `GLib.Source`; the callback clears that exact
 slot before enqueueing background work, and cancellation destroys the retained
-object. A previously queued background item rechecks terminal state before
-entering the body. No delayed numeric-ID lookup is used for release.
+object. A queued closure carries an exact request identity and rechecks it and closure
+before entering the body. The actual background worker can enqueue a callback
+before a later bookkeeping failure raises. Failed handoff therefore invalidates
+that closure as well as its reservation; a stale callback cannot consume a
+replacement request.
+
+Constructor, callback/attach and background-admission failures release all
+coalesced pending WIDs but preserve their pixel totals for the next real
+update. An active calculator claims and removes its complete WID/pixel batch
+under the short state lock before a successor is admitted; rollback of the
+successor cannot erase the active batch. No generic background-worker change,
+polling or additional retry timer is needed. No delayed numeric-ID lookup is
+used for release.
 
 Cleanup first closes admission under the state lock, cancels the owned GLib
 source, and waits for the calculation execution lock without holding the state
@@ -653,8 +668,13 @@ for initialization. Its reverse cleanup order consequently drains calculation
 before window-source cleanup or base statistics reset. Keep that relationship
 when changing mixin composition. It is a connection-close fence, not a promise
 that merely copying a window-source dictionary pins each source. Individual
-parent/child removal and exact-object claims during calculation belong to the
-separately composable `wayland-subsurface-stream-ownership` case.
+parent/child removal and exact-object claim providers belong to the separately
+composable `wayland-subsurface-stream-ownership` case. This case owns the whole
+calculator consumer: when `window_source_items`, `get_pixel_source` and
+`pixel_source_operation` are available, it borrows each exact source across
+statistics/batch/reconfigure and each final root-only weight sample. Without
+those providers it retains ordinary upstream sources and a null context.
+The two patches do not separately replace the same calculation body.
 
 CUDA publication has its own local-construction boundary. Both capability
 negotiation and later codec initialization/configuration may request a context.
@@ -665,7 +685,12 @@ helper returns a lazy `cuda_device_context` wrapper: creating that wrapper is
 not itself proof that a driver context has already been allocated. The wrapper
 owns its eventual native context through the backend's existing enter/free
 contract. The published owner remains available to accepted window encodes
-until its tail callback detaches the field and invokes `free()`.
+until its tail callback detaches the field and invokes `free()`. Late
+`reinit_encodings()` checks closure before publishing policy and again under
+the same state lock before copying the context into existing window sources.
+It uses an optional `all_pixel_sources` view for this propagation, preserving
+already assigned contexts. The subsurface case provides that view without
+rewriting this publication fence.
 
 The independent `EncoderServer` service also calls the allocator, so its
 construction receives the same publication guard. Its packet-thread encoder
@@ -677,7 +702,7 @@ When the exhaustive muxer traversal reaches base
 `ClientConnection.cleanup()`, it:
 
 1. publishes the close event;
-2. takes `_encode_lock`, ensures the worker exists, and seals queue admission
+2. takes `encode_thread_lock`, ensures the worker exists, and seals queue admission
    exactly once;
 3. moves the end-callback list to a local list and appends every callback as
    mandatory work under the same lock;
@@ -705,14 +730,12 @@ still exactly one FIFO and one worker. The design does not retry arbitrary
 mixin or native cleanup after exceptions: those APIs do not promise that a
 failed call had no side effects.
 
-`MMAP_Connection.cleanup()` first detaches both shared areas from connection
-state. With a dynamically composed connection it registers one tail callback
-which attempts both physical closes and preserves the first exception after
-logging later ones. A standalone mmap mixin without the tail interface closes
-them synchronously. The delayed close is required because a mandatory window
-encode already accepted by the FIFO may still be writing its captured mmap
-area; detaching the public fields prevents new use while the queued owner
-finishes before physical release.
+`MMAP_Connection.cleanup()` is unchanged upstream code. It detaches both shared
+areas and registers one `clean_mmap_area` tail item for each. Their independent
+items, combined with continued worker drain after an exception, keep one failed
+close from skipping the other. The delayed close is required because an
+accepted window encode may still use its captured area. No downstream mmap
+fallback, combined closer or second queue is restored.
 
 ## EOS and stream identity
 
@@ -750,11 +773,11 @@ unnested at their crossing points rather than treated as one global lock:
 | --- | --- | --- |
 | Connection damage-packet lock | Exact packet publication, ACK ownership, or source deactivation from the subsurface case. | Source maps and ACK identities are detached under the connection lock; source cleanup runs after releasing it. |
 | Generic `WindowSource._timer_lock` | Lease-map, epoch, slot, and active-callback accounting from `window-source-timer-lifecycle`. | A callback claims under the lock, increments the active count, then runs its body outside the lock. Cleanup closes leases and waits on the condition. |
-| Connection `_cleanup_lock` / `_encode_lock` | One terminal mixin traversal / exact encode admission and final tail publication. | Queue acceptance never calls back into a window owner; window handoffs may take the encode lock, not the reverse. No worker join is performed under either lock. |
+| Connection `_cleanup_lock` / `encode_thread_lock` | One terminal mixin traversal / exact encode admission and final tail publication. | Queue acceptance never calls back into a window owner; window handoffs may take the encode lock, not the reverse. No worker join is performed under either lock. |
 | Encoding `_encoding_state_lock` / `_calculate_execution_lock` | Short terminal/scheduler/CUDA publication / one active background calculation. | Cleanup releases the state lock before waiting for execution; `may_recalculate` never takes the execution lock. Per-source operation claims belong to WSSO. |
-| `WindowVideoSource._video_state_lock` | Video terminal bit, pair publication/detachment, queue transfer, and video timer generations. | Do not call generic timer scheduling while held; `update_av_sync_delay()` is deliberately outside it. Native cleanup and image freeing occur outside it. |
+| `WindowVideoSource._video_state_lock` | Video terminal bit, pair publication/detachment, queue transfer, and video timer generations. | Do not call generic timer scheduling while held; `update_av_sync_delay()` is deliberately outside it. Native codec teardown and detached-list cleanup occur outside it; cancelled UI-list items cannot be concurrently worker-owned. |
 | `VideoSubregion._lifecycle_lock` | Region state, timer generation claim, and one claimed `refresh_cb`. | Video-source cleanup marks video state under its lock, releases it, then closes the subregion. Timer registration/removal occurs outside the subregion lock. |
-| `_video_refresh_lock` | One claimed x264 fallback UI refresh and cancellation fence. | Claim video state briefly, then release its lock before calling generic `refresh`; video cleanup releases its state lock before waiting for this fence. |
+| `_video_refresh_lock` | One claimed A/V drain or x264 fallback UI refresh and cancellation fence. | Claim video state briefly, then release its lock before calling generic `refresh`; video cleanup releases its state lock before waiting for this fence. |
 | Connection encode FIFO | Native codec construction/use/cleanup and scroll release. | No caller-thread join. Mandatory cleanup and end callbacks precede the sentinel. |
 
 The generic timer callback body running outside `_timer_lock` is essential for
@@ -791,7 +814,7 @@ Responsibility is divided as follows:
 
 | Case | Owned boundary |
 | --- | --- |
-| `video-pipeline-cleanup-race` | Native pair publication/retirement, video images/sources, flush/fallback/watchdog generations, `VideoSubregion`, scroll/saved-stream cleanup, terminal connection calculation/CUDA publication, exhaustive muxer close, mmap close ordering, ordinary EOS intent, and the base connection encode tail. |
+| `video-pipeline-cleanup-race` | Native pair publication/retirement, video images/sources, flush/fallback/watchdog generations, `VideoSubregion`, scroll/saved-stream cleanup, terminal connection calculation/CUDA publication, exhaustive muxer close, ordinary EOS intent, and sealing/drain of the upstream base connection encode tail. |
 | `window-source-timer-lifecycle` | Generic `WindowSource` timer leases, callback completion accounting, terminal idempotence, icon timer, and exception-complete generic cleanup. |
 | `wayland-initial-window-state` | Current Wayland buffer format, frame-alpha selector, CSC readiness, popup publication order, and opaque-region/dimension rebinding. |
 | `wayland-subsurface-stream-ownership` | Retained normalized root/child rasters, stable surface identity, authoritative topology, ordered raw RGB32 parent-backing transactions, exact packet ownership and client draw-ACK routing, atomic Cairo/OpenGL staging, native pointer targeting, composite-root acknowledgement, child frame completion, and its live gate. |
@@ -801,7 +824,7 @@ The timer case and this case both modify video call sites, but neither is a
 production dependency of the other. The timer case must retain the inherited
 `expire_timer` producer; this case must retain its separate video generations
 and the unlocked A/V-delay update. The subsurface case overlaps
-`xpra/server/source/client_connection.py`: this case owns the connection-wide
+`xpra/server/source/client_connection.py`: this case seals and drains the upstream connection-wide
 end-callback registry and sole sentinel, while WSSO owns safe packet-enqueue
 notification, composite packet filtering, ordinary-packet priority, and exact
 ACK claims. It also overlaps `xpra/server/source/encoding.py`: WSSO fans generic
@@ -821,9 +844,9 @@ manifest digest, or its derived path list.
 - `xpra/server/source/client_connection.py`;
 - `xpra/server/source/encoding.py`;
 - `xpra/server/source/factory.py`;
-- `xpra/server/source/mmap.py`;
 - `xpra/server/window/video_compress.py`;
 - `xpra/server/window/video_subregion.py`;
+- `tests/unittests/unit/server/encoder_server_test.py`;
 - `tests/unittests/unit/server/source/encoding_lifecycle_test.py`; and
 - `tests/unittests/unit/server/window/video_compress_test.py`.
 
@@ -833,16 +856,16 @@ Its production responsibility is limited to:
 - registry reinitialization through the common context-clean transaction;
 - atomic live-pair publication and terminal constructor-loser cleanup;
 - worker-serialized captured cleanup plus a late sweep;
-- nested pair cleanup and sibling-action exception aggregation;
-- terminal ownership of delayed A/V images and their timeout/idle sources;
+- exhaustive pair cleanup and sibling-action exception aggregation;
+- terminal ownership of delayed A/V images, their exact timeout, and failed handoffs;
 - B-frame flush and inactivity timer generations;
 - terminal `VideoSubregion` refresh ownership;
 - scroll and saved-stream release ordering;
 - explicit ordinary-stream EOS intent and direct established packet emission;
 - exhaustive reverse-order dynamic-mixin cleanup;
 - terminal background-calculation completion and local CUDA-owner publication; and
-- connection-wide end callbacks, deferred shared mmap close, and one
-  base-owned encode sentinel.
+- sealing and exhaustive drain of upstream connection-wide end callbacks,
+  including shared mmap release, before one base-owned sentinel.
 
 It does not:
 
@@ -855,7 +878,7 @@ It does not:
 - join the encode worker or backend-private cleanup threads;
 - suppress cleanup errors or turn backend failure into success;
 - change mmap negotiation, ring/descriptors, or per-packet lease semantics;
-  this case owns only connection-area close ordering after queued encodes;
+  the unchanged upstream mmap code owns its at-end registration;
 - synthesize EOS for an unpublished encoder;
 - create a child decoder identity or own subsurface transaction, packet, ACK,
   client-backing, input, or frame-callback behavior;
@@ -877,12 +900,11 @@ block initialization/information access. `ScrollOwner` counts release.
 `BlockingSources` can dispatch a callback before attach returns, or block
 timeout/idle publication across cleanup. Two native regressions additionally
 dispatch the real GLib default context and observe automatic one-shot source
-destruction across all seven video/subregion source families. They require
+destruction across all six video/subregion source families. They require
 completion with no invalid-source warning and no retained stale timer; a
 numeric-ID-only double cannot establish that native ownership contract.
-`EncodeWorker` preserves FIFO
-order, records mandatory/optional flags, and continues draining after an
-injected exception.
+`EncodeWorker` preserves the current unconditional FIFO shape, records callback
+order, and continues draining after an injected exception.
 
 ### `VideoSubregionLifecycleTest`
 
@@ -902,13 +924,15 @@ injected exception.
 | `test_mmap_area_outlives_queued_window_encodes` | The connection drains mandatory per-window encode cleanup before closing the shared mmap write area, then releases CUDA and mmap exactly once ahead of the sole queue sentinel. |
 | `test_queue_sentinel_and_later_mixins_survive_cleanup_error` | A window cleanup which queues codec release and then raises does not stop reverse mixin traversal: CUDA release and the base sentinel still run, the worker terminates with an empty queue, and close reports failure. |
 | Repeated connection close | The actual `ClientConnection` constructor, lazy queue admission, dynamic muxer, and worker leave no resource callback or duplicate sentinel behind termination. A copied fake queue cannot establish this guarantee. |
-| Immediate captured-image close | A real accepted image handoff reaches its mandatory release owner after the connection closes, even though optional compression is now skipped. |
+| Sealed FIFO and failed worker start | A retained producer and late at-end registration are rejected after the sole sentinel; failed worker startup accepts no resource and can be retried explicitly. |
+| Worker `BaseException` | Failed ordinary and tail callbacks do not abandon later accepted work, CUDA/mmap owners, or the sentinel. |
+| Immediate captured-image close | A real accepted image handoff reaches its mandatory release owner after the connection closes, using the upstream callback's image-release `finally`. |
 
 ### `VideoContextCleanTest`
 
 | Test | Required behavior |
 | --- | --- |
-| `test_cancels_timers_without_a_context` | An empty external snapshot still queues a non-optional cleanup/late-sweep barrier and repeats timer cancellation on the worker. |
+| `test_cancels_timers_without_a_context` | An empty external snapshot still queues a unconditional cleanup/late-sweep barrier and repeats timer cancellation on the worker. |
 | `test_cleans_context_published_after_empty_snapshot` | A pair published after an empty caller snapshot is detached and cleaned by the worker-side late sweep. |
 | `test_detaches_and_cleans_context` | The visible pair detaches synchronously, then both captured elements are cleaned through one mandatory callback. |
 | `test_timer_cancel_error_does_not_bypass_context_cleanup` | A flush-timer cancellation error remains visible but does not skip watchdog cancellation, pair detachment, queueing, or later codec cleanup. |
@@ -923,8 +947,8 @@ injected exception.
 | --- | --- |
 | `test_cleanup_sweeps_pipeline_published_by_setup` | Cleanup racing blocked construction retires the newly published pair; with an old throwing CSC, the old encoder and complete late pair are still attempted and the error remains visible. |
 | `test_subregion_cleanup_error_does_not_bypass_base_cleanup` | Video terminal state is set and inherited cleanup is attempted even when subregion cleanup raises; the first error is retained. |
-| `test_damage_cancel_error_does_not_bypass_owned_cleanup` | Failure removing the first A/V source does not skip the second source, queued-image free, both subregion timers, scroll release, B-frame/watchdog cancellation, pair detachment, or cleanup queueing. |
-| `test_av_timer_cancel_attempts_timeout_and_idle_sources` | A/V cancellation clears and attempts both timeout and idle source destructions when the first raises. |
+| `test_damage_cancel_error_does_not_bypass_owned_cleanup` | Failure removing the A/V source does not skip fallback cancellation, queued-image free, both subregion timers, scroll release, B-frame/watchdog cancellation, pair detachment, or cleanup queueing. |
+| `test_failed_av_timer_removal_still_clears_reservation` | A failed Source destroy still leaves no current timeout or due reservation. |
 | `test_reinitialization_cleans_existing_pipeline` | A real registry refresh detaches and cleans the old pair while preserving inherited CSC parsing and selection update. |
 | `test_reinitialization_sweeps_pipeline_published_during_rebuild` | A pair which finishes publication while the callable registry is blocked is retained in one-time fields and retired by the queued late sweep. |
 | `test_terminal_setup_releases_pair_without_publication` | A constructor which finishes after terminal closure cleans both locals exactly once and publishes neither. |
@@ -938,9 +962,24 @@ injected exception.
 | `test_x264_fallback_refresh_is_cancelled_by_cleanup` | The real frame-zero path creates a tracked refresh which cleanup cancels; stale dispatch cannot reach generic refresh after terminal cleanup. |
 | `test_full_cleanup_cancels_timer_and_queues_one_barrier` | Full inherited cleanup removes the watchdog, frees a delayed image before worker release, cleans the pair once, cleans batch state, and preserves `setup -> held work -> scroll free -> codec clean -> encode_ended`. |
 | `test_full_cleanup_preserves_resources_for_worker_sweep` | Scroll state, a captured old pair, a pair and both video timers published by work ahead of cleanup all remain observable until the worker releases/frees them exactly once before `encode_ended`. |
-| `test_cleanup_reclaims_post_cancel_encode_queue_idle` | A blocked idle source published after cancellation is removed, its delayed image is freed, and later callback dispatch cannot schedule a timeout or enqueue work. |
-| `test_av_sync_update_does_not_hold_video_state_lock` | A non-reentrant lock probe proves inherited A/V-delay update runs without the video-state lock, then the due item is encoded. |
-| `test_callback_before_av_source_publication_is_not_retained` | Immediate timeout and idle dispatch cannot strand their source objects; timeout work is handed off once and idle rescheduling can be cancelled without retained sources. |
+| Failed AV publication and stale callbacks | Failed construction/registration/attach rolls back image and due-time ownership; an old callback cannot revoke a replacement or reopen a closed source. |
+| `test_av_sync_update_does_not_hold_video_state_lock` | A non-reentrant lock probe proves inherited A/V-delay update runs without the video-state lock, then the due image is handed to the worker. |
+| Real AV timeout and failed subsequent work | Native GLib drains the UI list and hands only individual images to the worker. Later image-free or reschedule errors cannot return an accepted image to UI ownership. |
+| Fanout failure controls | Real image subregions are released only when unaccepted; failed second extraction and first/second/main handoff distinguish local, caller and worker owners. |
+| Odd fanout geometry | Width-only, height-only, both-odd and 1-pixel dimensions hand off positive exact edge wrappers; coordinate-labelled pixels cover the original rectangle exactly once, retain source offsets and end flush at zero. |
+| Failed codec handoff and terminal barrier | A rejected pair stays source-owned until the real `encode_ended` boundary sweeps it; repeated sweeps do not repeat native cleanup. |
+| Encoder timer failure | Failed watchdog destruction cannot skip native cleanup or the exact saved-stream close. |
+
+Both modules order an existing-API behavioral control first and use the same
+fail-fast policy in clean and patched modes. The video module begins with
+actual GLib dispatch through `add_video_refresh()`; the connection module
+begins with registry reinitialization after a real close. A successful patched
+run still executes every retained method. Read-only native logger methods are
+observed by replacing the module's logger reference, not by mutating the
+extension instance. Connection fixtures register teardown after assertions;
+a leaked non-daemon worker triggers an explicit terminal request and remains
+a test failure even if that request releases it. This keeps an assertion
+failure from silently stranding the module process.
 
 The clean tests-only control must reach these production methods on the frozen
 source and fail non-vacuously at the lifecycle assertions, while the retained
@@ -967,7 +1006,27 @@ terminal publication rejection and exact loser release. A throwing calculation
 source destroy must not skip the CUDA tail, and post-close damage cannot admit
 another calculation. Its native GLib test proves the real delayed handoff
 clears its source before worker delivery and that already queued work remains
-inert after closure.
+inert after closure. Additional controls exercise immediate/timed admission
+failures, a callback queued before rejection, failed Source publication,
+retained pixel totals and active-batch isolation.
+
+The optional pixel-source CUDA propagation control gives each source double
+its normal `cleanup()` boundary. In the complete stack, WSSO's window owner
+also consumes that view during connection close. The control still closes the
+real muxer, joins the worker, requires an empty encode queue and checks exactly
+one shared-context release; incomplete doubles must not turn that legitimate
+cross-case cleanup into a fixture error.
+
+The existing `unit.server.encoder_server_test` also belongs to the focused
+selection. Its cleanup-order control constructs the real factory muxer with
+the connection and encoding subsystems initialized, then closes that muxer.
+It no longer transplants encoding cleanup methods onto a bare connection with
+partial private state. The actual FIFO is held by an event until cleanup has
+been queued; encoder cleanup must precede CUDA release and both must execute
+on the encode worker, with exactly the original two recorded actions. Error
+teardown uses the idempotent `stop_encode_thread()` boundary and joins the
+captured worker instead of inserting a second terminal sentinel directly.
+The standalone JPEG client/server roundtrip remains unchanged in this module.
 
 Mock resources do not claim hardware-driver completion. They make publication,
 queue order, callback identity, cleanup count, and exception propagation
@@ -1046,17 +1105,21 @@ does not regress unrelated live ownership.
 - Publish damage cancellation before swapping or freeing delayed images.
 - Treat the A/V image queue separately from native codec generations.
 - Swap the image queue under the video lock and free wrappers outside it.
-- An immediate captured image requires a mandatory encode-or-free handoff;
-  optional wakeups may own only work whose images remain in the source queue.
-- Keep timeout and idle generations distinct; cancellation owns both.
-- Revalidate live state, queue state, cancellation, and exact generation after
-  each GLib registration returns.
+- Keep the UI as the sole A/V list owner; transfer each image through the
+  unconditional upstream `make_data_packet_cb` API, not an optional adapter.
+- Roll back failed AV admission and due-time reservations; release only
+  unaccepted derived images, never an accepted worker owner.
+- Bind edge dimensions to their actual wrappers; keep right and bottom strips
+  disjoint and the original wrapper at the final handoff even when the main
+  video rectangle collapses to zero.
+- Publish the exact AV Source before attach and invalidate failed reservations.
+  Other video/subregion producers retain their generation recheck after attach.
 - Destroy the exact locally retained Source when publication loses, including
   early callback and terminal cleanup races. Never reacquire it by a recycled
   numeric ID.
 - Run `update_av_sync_delay()` outside the video lock and revalidate afterward.
-- Queue at most one due A/V item per drain iteration and return later scheduling
-  through the guarded idle path.
+- Queue at most one due A/V image per UI drain and remove each accepted item
+  immediately, before a later operation can fail. Reschedule directly on UI.
 - Keep B-frame flush payload and its timer in one generation domain.
 - Carry the exact captured payload and generation into the worker; never let a
   stale flush request consume a replacement frame.
@@ -1114,24 +1177,29 @@ stopping escalation at the first unexplained failure. During development,
 run the nearest lifecycle regression immediately after each atomic edit,
 including affected upstream modules and the timer/subsurface composed tests.
 Exercise real compiled and compatibility modes when their behavior is involved.
-Relevant hardware/lifecycle live runs use the admitted complete-stack selection
+During an explicit upstream refresh, finish the incremental manual-review and
+composed-review exit gate before any runtime test. Thereafter,
+relevant hardware/lifecycle live runs use the admitted complete-stack selection
 and may run before full suites; this case has no standalone live gate.
 The table is final coverage, not a per-edit schedule. After candidate freeze,
 fill only missing or invalidated requirements:
 
 | Validation | Required proof |
 | --- | --- |
-| Clean tests-only focused control | Both final focused modules reach their frozen production boundaries and fail non-vacuously on absent lifecycle behavior rather than import or fixture setup. |
-| Patched standalone focused run | Both complete declared focused modules pass with only this case selected. |
-| Complete-stack focused run | Both focused modules pass after frame-state, generic timer, subsurface, and other active patches compose. |
+| Clean tests-only focused control | The lifecycle modules reach their frozen production boundaries and fail non-vacuously on absent lifecycle behavior rather than import or fixture setup; the existing standalone encoder controls remain executable. Existing public registry reinitialization,
+failed local construction, retained-producer admission and real GLib source
+lifetime are non-vacuous negative boundaries; absence of a new private helper
+is not a valid clean failure. |
+| Patched standalone focused run | All three complete declared focused modules pass with only this case selected. |
+| Complete-stack focused run | All three focused modules pass after frame-state, generic timer, subsurface, and other active patches compose. |
 | Composition-specific focused runs | Generic timer and subsurface modules pass with the unlocked timer callback body, exact cleanup order, direct ordinary video EOS behavior, and connection-tail behavior retained. |
 | Patch and fork controls | Standalone/stack apply and reverse resolution, manifest-derived paths/digest, whitespace, lint, and repository controls pass. |
-| Clean quarantine reassessment | All three assigned clean-source quarantine gates reproduce only their current exact subsets before patched results are interpreted. |
+| Clean quarantine reassessment | If a duty case is active, all three clean-source quarantine gates reproduce only their assigned subsets before patched results are interpreted. With no active duty case, record that absence and do not restore retired skips. |
 | `full`, `full-cython`, `full-no-compat` | The complete queue passes all maintained upstream unit-test legs. |
 | Complete-stack `live-wayland-h264-hardware` | The Vulkan/RADV primary and alpha auxiliary complete the real codec, presentation, input, exit, and cleanup contract. |
 | Complete-stack `live-wayland-opengl-h264-hardware` | The independent native OpenGL/render-node/viewport primary completes the same resource lifecycle. |
 | Mandatory complete-stack live suite | Every profile, including subsurface and clipboard, contains VPC and all other active patches on both endpoints. Every patch validation requires all nine profiles; isolated live products are forbidden. |
-| Seven complete-stack positive live profiles | RGB, H.264, detach, transport loss, input, both hardware paths, application lifecycle, and owned cleanup remain green before publication. |
+| All nine complete-stack positive live profiles | Use `live-all STACK=develop RUN=<fresh-prefix>` and require `live-suite-check`: RGB, H.264, detach, transport loss, keymap, both hardware paths, clipboard and subsurface remain green. |
 
 Retain the exact clean failure and every named patched result below
 `.artifacts/fork-maintenance/`. A semantic change to pair publication, cleanup

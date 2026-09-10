@@ -188,6 +188,8 @@ def read_case(lab_root: Path, slug: str) -> Case:
     manifest = parse_toml(manifest_bytes, f"case manifest {slug}")
     if manifest.get("schema") != 1:
         fail(f"unsupported case manifest schema: {slug}")
+    if manifest.get("draft") is True:
+        fail(f"draft case is not test-selectable: {slug}")
     if require_slug(manifest.get("slug"), "manifest case slug") != slug:
         fail(f"case manifest slug does not match its directory: {slug}")
     kind = manifest.get("kind", "production")

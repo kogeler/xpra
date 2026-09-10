@@ -44,8 +44,25 @@ backings, poll their pixels, or create a new stateful child codec stream.
 ## Frozen source and refresh boundary
 
 The case resolves against embedded source commit
-`212038243d0067b6860ebe7d6953692179ef353f`. Its isolated resolution must
-implement the complete behavior described here.
+`d95058b0916913fe6ae5296fb702f66d833898b0`. Upstream now records raw buffer
+FourCC, separates internal per-frame alpha from stable backing capability,
+and requires damage options at packet publication. Raster bounds use the
+current `xpra.constants.MAX_WINDOW_SIZE` owner, not its removed `xpra.common`
+export. Preserve those upstream
+owners. They do not replace persistent child identity, negotiated atomic
+composition, exact source lifetimes or terminal mmap ownership.
+
+A child's raw buffer format follows its attached buffer, not effective
+visibility. Its synchronized commit can precede the parent's first map;
+clearing the format while retaining that buffer loses its identity without
+any subsequent child commit to restore it. Buffer detach and terminal surface
+destruction still clear the format. The native mapped-pixel regression binds
+this first-map ordering, format replacement and null-buffer reset.
+
+The complete queue's VPC case owns calculator/CUDA consumer integration.
+WSSO supplies its source views and exact-operation provider without rewriting
+the calculator algorithm. Isolated provider/native/rendering checks do not
+replace the required complete-stack consumer checks.
 
 On an operator-selected upstream refresh, review the complete ownership chain
 rather than judging the case by patch applicability. A replacement is complete
@@ -294,6 +311,12 @@ The preferred DRM read format maps as follows.
 | `DRM_FORMAT_ARGB8888` | `BGRA` | Premultiplied alpha retained |
 | `DRM_FORMAT_XRGB8888` | `BGRX` | Strictly opaque |
 
+Normalized ingest updates upstream's raw-source FourCC before readback. An
+XRGB/XBGR client buffer remains an X-format image even when the preferred
+texture format has an alpha layout: byte order and producer opacity are
+separate inputs. Null-buffer/unmapped commits and destruction clear native
+format state. A mapped root's format-only transition forces a new capture.
+
 An unsupported preferred format is warned once and captured through the
 ABGR/RGBA fallback. The result is packed, four bytes per pixel, tightly
 normalized to the surface-local logical size, marked thread-safe, and retains
@@ -365,6 +388,15 @@ common identity case returns the original captured wrapper without a second
 copy. Invalid logical dimensions, transform values, source boxes, plane
 layouts, or bytes-per-pixel fail instead of silently guessing.
 
+Logical and physical dimensions are bounded by `MAX_WINDOW_SIZE` (24576 on
+this source) before texture download or destination allocation. The XDG
+canvas has the same bound. Before its unchecked `nogil` loop, the compiled
+sampler validates packed row width, positive stride, complete source storage,
+finite in-bounds source coordinates and `Py_ssize_t` allocation bounds. Row
+and destination offsets use checked wide products, not C-int intermediates.
+A 4×4 buffer with a 65536×65536 viewport is rejected before constructing that
+logical raster; a later valid commit can recover.
+
 Normalization always occurs on the full image before a partial crop. Therefore
 the bytes used by a full transaction and the corresponding region used by a
 tiled transaction are identical. Downstream logical and transport dimensions
@@ -380,14 +412,16 @@ viewport state, and the previous sampled geometry.
 
 `xdg_root_damage()` translates surface-local effective damage into the
 XDG-geometry canvas and clips it there. A geometry change, logical-size change,
-transform change, scale change, viewport change, or pending recovery capture
-forces full-canvas damage.
+transform change, scale change, viewport change, raw-format change, or pending
+recovery capture forces full-canvas damage.
 
 Before a required readback, the native commit emits
 `surface-snapshot(wid, None)`. This advances and clears the retained model
 generation before capture. A failed capture can therefore leave the client
 showing its already presented frame, but it cannot label old bytes as the new
-native commit.
+native commit. Model-retention failures propagate to the native capture owner,
+which keeps recovery pending; the next empty commit retries instead of leaving
+a static root permanently without a snapshot.
 
 `image_for_xdg_geometry()` then places the normalized root raster into the exact
 `(gx, gy, width, height)` XDG canvas:
@@ -403,13 +437,15 @@ The exact identity geometry keeps the original wrapper and resets its target
 origin to zero.
 
 The root `Window` retains a private byte copy. Replacing an image publishes its
-pixel format before the retained image, treats both as one model generation,
-increments a monotonic snapshot generation, and frees the previous retained
+internal frame alpha and optional pixel format before the retained image,
+treats all three as one model generation, increments a monotonic snapshot
+generation, and frees the previous retained
 wrapper only after successful publication. Because GObject property
-notification may raise after storing a value, replacement restores both
+notification may raise after storing a value, replacement restores all
 previous fields before freeing a failed candidate. Clearing the image is also
 an authoritative generation and frees the old image even if pixel-format
-notification fails.
+or frame-alpha notification fails. Clearing conservatively resets unknown
+frame alpha without changing the client's stable `has-alpha` capability.
 
 `get_image()` returns a new metadata wrapper over retained immutable bytes.
 Cropping or freeing that borrowed wrapper during asynchronous encode cannot
@@ -449,11 +485,10 @@ only after successful replacement. It is an internal capture facade only: it
 has no client metadata, decoder, title, transient relation, presentation
 lifecycle, or wire window.
 
-The WIS-owned `set_image()` seam remains the composition point for a coherent
-current image/pixel-format pair before child damage. The facade's private image
-slot and internal format property do not expose a separate ordering contract.
-WSSO adds retained-generation ownership around the pair; it does not redefine
-the WIS frame-format policy.
+The existing `set_image()` seam retains upstream's frame-alpha update and
+WIS's optional pixel-format metadata. Image, frame alpha and optional format
+are restored together after failed publication. WSSO adds retained-generation
+ownership; it does not turn the stable backing capability into per-frame policy.
 
 ## Native commit and compatibility API boundary
 
@@ -902,14 +937,16 @@ Composite idles and stage watchdogs are connection-owned, not generic
 - exact parent WID;
 - exact transaction token;
 - callback kind (`idle` or `watchdog`);
-- returned GLib source ID; and
+- exact retained `GLib.Source` object; and
 - cancellation state.
 
-The registry publishes a reservation before calling `GLib.idle_add()` or
-`GLib.timeout_add()`. This handles both real asynchronous registration and test
-schedulers which invoke a callback synchronously before returning an ID. If
-teardown cancels the reservation while registration is in progress, a positive
-late source ID is immediately removed rather than leaked.
+The registry reserves before construction and publishes the exact source
+before `set_callback()` and `attach()`. Attachment and callback execution do
+not hold the connection lock. Cancellation destroys that object even while
+attachment is returning; it never calls `source_remove()` with a possibly
+reused ID. An early one-shot dispatch is successful scheduling even if the
+source is destroyed before attachment returns. Construction, callback setup
+and attachment failures remove only their own reservation and source.
 
 A stage watchdog defaults to 15000 ms and has a hard minimum of 1000 ms through
 `XPRA_SUBSURFACE_COMPOSITE_STAGE_TIMEOUT`. Timeout cancels the exact source
@@ -932,8 +969,8 @@ Deactivation, source replacement under the same WID, and connection closing
 reject new borrows. The callout runs without the connection lock, and its
 `finally` releases the same source identity and wakes unregister waiters.
 
-The delay calculator uses this lease around the complete per-source
-statistics/batch/reconfigure callout and separately around each final weighted
+The VPC-owned delay calculator consumes this provider around the complete
+per-source statistics/batch/reconfigure callout and each final weighted
 ordinary-window batch sample. Bandwidth calculation uses the same lease for
 each ordinary-window weight read and each assigned limit. Its distribution
 formula and toplevel-only population remain unchanged. The source object
@@ -1513,9 +1550,9 @@ ownership must remain separate.
 
 ### `wayland-initial-window-state`
 
-WIS owns publication of the current Wayland image and pixel format before
-damage, frame-aware alpha state, CSC readiness, and ordinary frame encoding
-selection. WSSO consumes that model seam, adds retained snapshot generations
+Upstream owns per-frame alpha separate from stable backing capability. WIS
+owns residual first-frame/metadata/CSC readiness and ordinary frame selection.
+WSSO preserves that model policy, adds retained snapshot generations
 and a raw composite transaction, and intentionally bypasses ordinary
 frame/video selection while a child tree is active.
 
@@ -1555,8 +1592,10 @@ borrows, including removal of a child while the connection remains open. The
 connection-wide VPC fence cannot substitute for this per-source boundary;
 conversely, WSSO's leases do not stop a connection's calculator producer or
 define when its shared encode queue and CUDA context may close. The calculator
-body uses WSSO's optional borrow hook, while VPC owns the surrounding scheduling
-and execution lifecycle, so the two cases remain independently selectable.
+body and late CUDA publisher belong entirely to VPC and consume WSSO's optional
+borrow/view providers. WSSO owns those providers and other generic fanouts,
+without duplicating the algorithm. The cases remain independently selectable;
+provider and consumer regressions must also run on the resulting complete queue.
 
 A WSSO child is directly a `WindowSource` and never owns any of those objects.
 An active composite forces the root and children through the base raw capture
@@ -1570,9 +1609,10 @@ pacing/coalescing timer, consumer replacement, and terminal timer cleanup.
 WSSO owns the commit-classification adapter around that policy. A root-only
 empty generation with no successful repair delegates to WEDT's scheduler. A
 root-only explicit damage cancels the WEDT entry and marks the model frame
-pending before ordinary source fanout. A successful reconciliation repair is
-recorded separately, cancels and marks after it is scheduled, and remains the
-only ordinary request and ACK owner. An active composite cancels the ordinary
+pending before ordinary source fanout. A reconciliation repair uses the same
+cancel/mark guard before its first source handoff; success is recorded
+separately and remains the only ordinary request and ACK owner. An active
+composite cancels the ordinary
 entry and acknowledges the root exactly once after transaction input has been
 distributed. WSSO also owns the exactly-once child commit callback.
 
@@ -1581,6 +1621,11 @@ selectable: without WEDT, only the root-only empty case uses the ordinary
 immediate acknowledgement fallback. With the complete stack, WEDT remains the
 sole owner of timer allocation, replacement, firing, and terminal cancellation;
 WSSO never stores a duplicate timer or consumer.
+
+The topology regression initializes WEDT's optional reservation and terminal
+admission fields alongside its timer/map fields. This is fixture composition,
+not a WSSO implementation of timer ownership: the combined ordinary-root
+controls still call WEDT's real schedule/cancel/model methods.
 
 Normalized native damage is an immutable tuple; the standalone upstream/WEDT
 path may supply a list. Both use sequence emptiness, not the container type,
@@ -1703,28 +1748,52 @@ option parsing.
 | Module | Case-owned boundary |
 | --- | --- |
 | `unit.server.window.subsurface_source_test` | Source policy, eligibility/refusal, damage deferral, atomic snapshot ownership, continuous-generation progress, transaction order, scheduler/watchdog, publication, ACK, genuine composition drain, mmap, teardown, and fanout |
-| `unit.wayland.subsurface_discovery_test` and its C protocol client | Real wlroots role publication: prebuilt root, prebuilt child, and synchronized first-commit trees; unmapped descendant identity, one listener per wrapper, and terminal registry cleanup |
+| `unit.wayland.subsurface_discovery_test` and its C protocol client | Real compositor discovery, stable identity, raw-format transitions, oversized viewport refusal, empty-commit capture recovery, and terminal registry cleanup |
 | `unit.wayland.subsurface_stream_test` | Deterministic native-adapter/model controls: stable identity, role loss/reparent, authoritative tuple dispatch, root-indexed reconciliation, WEDT handoff, topology, transforms, scale/viewport, XDG canvas, snapshots, colourspace, and child callbacks |
 | `unit.wayland.pointer_test` | Native pointer adapter hit testing, move/reparent coordinates, no-target clearing, lifecycle, and failure paths |
 | `unit.client.cairo_backing_test` | Exact validation, premultiplied staging, atomic swap, invalidation, scaling, and failures |
 | `unit.client.opengl_backing_test` | Real mapped FBO staging, reset, blend/state restoration, direct-present rectangles, format handling, atomic commit, deferred-context ownership, backing replacement, close, and failures |
+| `unit.client.x11_client_paint_test` | Existing real Xpra X11 server/client PNG, WebP and forced-OpenGL quadrant pixels; preserves ordinary non-transactional rendering through the changed shared backing/paint path, including compiled mode |
 | `unit.client.subsystem.window_test` | Ingress identity, backing epochs, ACK outcomes, paint faults, and transaction-bound refresh |
 | `unit.client.gtk3.subsystem.display_test` | Cairo/GL capability intersection and fail-closed discovery |
 | `unit.client.terminal.terminal_client_test` | No terminal composite advertisement |
 | `unit.client.terminal.terminal_window_test` | Unsolicited composite rejection |
 | `unit.wayland.window_test` | Ordinary list-shaped commit/frame integration at the model/subsystem seam |
 
+The standalone and connection-owned damage-option snapshot hooks accept a
+read-only `Mapping[str, Any]` and return an owned plain dictionary. Ordinary
+encoder packet construction supplies `typedict`, so an exact builtin `dict`
+input annotation would reject real traffic under Cython even though Python
+accepts it. Direct controls cover dictionaries, `typedict` and immutable mapping
+views, input non-mutation, independent result ownership, ordinary/child epoch
+selection and preservation of an explicit captured epoch. The draw-packet
+control also uses the real `typedict` producer representation. These checks do
+not disable annotation typing globally or change the snapshot's locking,
+publication or stale-frame rules.
+
+The real X11 paint regression retains all four application/pixel checks and
+their original timing and tolerance. On an assertion failure it reports the
+first traceback and captured client/server output before teardown, so a later
+native X11 error cannot hide an earlier packet-production failure. Passing the
+isolated backing tests alone does not establish that real encoder packets reach
+either Cairo or OpenGL in compiled mode.
+
 The discovery regression compiles its tracked protocol client in the frozen
 test image and starts a real headless pixman compositor in a fresh process for
-each ordering. Its unmapped children deliberately require lifetime discovery
+each ordering. Its model lookup uses a normally initialized slotted subsystem
+subclass; it does not overwrite a read-only method on an uninitialized instance.
+Its unmapped children deliberately require lifetime discovery
 before any buffer or rendering. Later commits must reach each wrapper exactly
 once without changing its native pointer or WID; destroying the client removes
 every exact registry entry. Native imports, compiler support, or compositor
 startup failures cannot turn this subject-of-case test into a skip. The fake
 native objects used by the deterministic adapter module cannot substitute for
-this first-publication control. Conversely, this deliberately bufferless
-discovery test does not observe a mapped root's damage plan. The exact mapped
-new-role and reparent full-repair geometry is proved by the durable live gate,
+this first-publication control. Its additional mapped-pixel phase uses real
+SHM buffers and the viewporter protocol: root/child format-only transitions,
+oversized logical destination refusal/recovery, injected model-retention
+failure followed by empty-commit recovery, and null-buffer format reset. The
+original discovery phases remain bufferless independent public-path controls.
+The exact mapped new-role and reparent full-repair geometry is proved by the durable live gate,
 through native role publication, reconciliation, and the retained wire packets.
 Its infrastructure controls pin independent full-repair packet plans and reject
 a substituted partial plan; they do not derive that expectation from whichever
@@ -1741,12 +1810,13 @@ The server module covers at least these state families:
 - capture-pass content changes plus geometry-, topology-, backing-,
   transaction-, and source-staleness;
 - serial stage completion, bounded retry, idle registration races, watchdog,
-  synchronous scheduler callbacks, and cleanup cancellation;
+  real GLib early dispatch, construction/setup/attachment failure, exact-source
+  cancellation during blocked attachment, and no numeric-ID removal;
 - global packet sequence allocation, exact ACK ownership, post-append
   diagnostics, publication rollback, active-operation leases, and concurrent
   unregister;
 - background source callouts retained across parent/child removal, final
-  averaging and bandwidth read/write ownership, exact source replacement,
+  sample-borrow and bandwidth read/write ownership, exact source replacement,
   exception-safe borrow release, and closing/deactivation admission;
 - stale queue revalidation and mmap terminal drain;
 - direct `process_damage_region` deferral and decode-error refresh through its
@@ -1776,7 +1846,8 @@ metadata for a compiled parent method.
 The client modules cover every mandatory field, boolean rejection, exact flush,
 reset placement, transaction floors, skipped/duplicate/stale stages, backing
 reuse, decode-thread/UI-thread races, ordinary draw invalidation, malformed
-mmap consumption, reported and silent paint faults, Cairo and GL
+mmap consumption (including exact real-ring drain before ACK when queued
+composition is overtaken by backing/window replacement), paint faults, Cairo and GL
 pre-commit/post-commit errors, format alpha semantics, final-only redraw,
 idle-before-close, pre-realize close for both GTK GL backends, backing identity
 replacement, and exception-complete GL teardown.
@@ -2236,12 +2307,22 @@ Future work must preserve all of these invariants.
 ## Required validation
 
 Follow [development and final acceptance](../../docs/runbooks/validation.md).
-Run the nearest real regression immediately after each atomic edit, include
+During a refresh, first close the runbook's incremental manual review and
+implementation pass plus composed exit gate. After that gate, run the nearest
+real regression after each atomic test-driven edit, include
 affected existing upstream and dependent/composed case modules, and stop
 escalation at the first unexplained failure. The development boundaries are:
 
 1. Retain a tests-only control which fails non-vacuously on the clean embedded
    source for the production behavior under test.
+   The Cairo module first paints a real first stage through the existing
+   `do_paint_rgb` interface and compares the visible surface bytes before
+   final commit. Clean source publishes those pixels immediately. This exact
+   pixel mismatch, not absence of a new transaction helper, is its negative
+   control. Standard unittest ordering and fail-fast are identical in every
+   mode; a patched pass must execute all 111 retained Cairo tests. Other
+   selected modules retain their full inventories; clean missing-helper
+   diagnostics are not additional behavioral proof.
 2. Run the dedicated server module:
    `unit.server.window.subsurface_source_test`.
 3. Run the dedicated native modules:
@@ -2250,6 +2331,7 @@ escalation at the first unexplained failure. The development boundaries are:
 4. Run the affected client modules:
    `unit.client.cairo_backing_test`,
    `unit.client.opengl_backing_test`,
+   `unit.client.x11_client_paint_test`,
    `unit.client.subsystem.window_test`,
    `unit.client.gtk3.subsystem.display_test`,
    `unit.client.terminal.terminal_client_test`, and
@@ -2260,14 +2342,16 @@ escalation at the first unexplained failure. The development boundaries are:
    Resolve the complete stack and repeat both
    `unit.wayland.subsurface_stream_test` and `unit.wayland.window_test` there;
    the pair binds WSSO's commit adapter to WEDT's real scheduler, model guard,
-   and cleanup owner while preserving the ordinary compatibility path.
+   and cleanup owner while preserving the ordinary compatibility path. Run
+   VPC's calculator/CUDA consumer regressions and WSSO's exact-source provider
+   regressions on the complete queue as well.
 6. Run case resolution, whitespace, manifest/path/digest, fork-control, and
    isolated-workspace checks required by the current repository contract.
 7. Exercise the real compiled implementation and compatibility-disabled packet
    route when those boundaries change; Python-only tests do not substitute.
-8. Run the case-owned positive
-   `live-wayland-subsurface STACK=develop` gate with a
-   fresh unique run identity. It must prove at least two complete transactions
+8. Run all nine profiles through `live-all STACK=develop RUN=<fresh-prefix>`
+   and require `live-suite-check`. Its case-owned `live-wayland-subsurface`
+   member must prove at least two complete transactions
    while the callback-gated producer is active, then exact completion for every
    captured transaction, independent generated commit/callback accounting,
    genuine queue drain, and the final committed source pixels after stop.
@@ -2276,9 +2360,10 @@ escalation at the first unexplained failure. The development boundaries are:
 
 Changes to connection-wide packet ownership, sequence allocation, or saved
 packet metadata also require an early affected complete-stack H.264 hardware
-profile with both title-bound windows. The full-stack RGB transaction gate
-cannot exercise the shared ordinary-root H.264 observers. Use the existing
-fixed wrapper with `STACK=develop` after the relevant focused/native checks;
+member with both title-bound windows as part of the same complete live suite.
+The full-stack RGB transaction gate cannot exercise the shared ordinary-root
+H.264 observers. Use the existing
+complete-suite wrapper with `STACK=develop` after the focused/native checks;
 do not invent an atomic H.264 gate for this case or require full upstream
 suites or DEB builds before this integration feedback. This additional
 development check does not replace the case-owned RGB transaction proof.

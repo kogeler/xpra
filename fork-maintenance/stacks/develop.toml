@@ -13,20 +13,22 @@ series = [
   "jph-parallel-build-objects",
   "debian-libva-codecs-package",
   "packet-handler-error-boundary",
-  "wayland-pointer-scroll-normalization",
   "gtk-client-scroll-deduplication",
   "wayland-display-name-signal",
   "client-codec-startup-order",
   "x11-selection-refusal",
-  "upstream-test-quarantine",
+  # Enable only to disable currently broken upstream tests after clean-source proof.
+  # Keep the inactive case infrastructure and empty patch even when all tests pass.
+  # "upstream-test-quarantine",
 ]
 
 [tests]
 list = [
+  "unit.wayland.pointer_scroll_test",
+  "unit.server.subsystem.pointer_test",
+  "unit.client.subsystem.pointer_test",
+  "unit.pointer_loopback_test",
   "focused",
-  "quarantine",
-  "quarantine-cython",
-  "quarantine-no-compat",
   "wayland",
   "live-rgb",
   "live-h264",

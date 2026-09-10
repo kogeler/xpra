@@ -5334,6 +5334,55 @@ int main(int argc, char **argv) {
         self.assertEqual(updates["updates"][0]["sequence"], 3)
         pull.assert_called_once_with("server", root, (relative,))
 
+    def test_subsurface_rgb24_baseline_uses_declared_opaque_pixel_size(self) -> None:
+        pixels = ((11, 23, 47), (71, 89, 107), (127, 149, 163), (181, 211, 239))
+        for rgb_format in ("RGB", "BGR", "RGBX", "BGRX"):
+            with self.subTest(rgb_format=rgb_format):
+                root = self.root / f"rgb24-{rgb_format}"
+                group = root / "screen-updates" / "2" / "100"
+                group.mkdir(mode=0o700, parents=True)
+                for directory in (root, group.parent.parent, group.parent):
+                    directory.chmod(0o700)
+                stride = 2 * len(rgb_format) + 3
+                payload = bytearray()
+                for row in range(2):
+                    for red, green, blue in pixels[2 * row:2 * row + 2]:
+                        channels = {"R": red, "G": green, "B": blue, "X": 17 + row}
+                        payload.extend(channels[channel] for channel in rgb_format)
+                    payload.extend(b"\x81\x93\xa5")
+                payload_path = group / "0.rgb24"
+                payload_path.write_bytes(payload)
+                payload_path.chmod(0o600)
+                info = {
+                    "encoding": "rgb24", "x": 0, "y": 0, "w": 2, "h": 2,
+                    "sequence": 1, "stride": stride,
+                    "options": {"rgb_format": rgb_format}, "file": "0.rgb24",
+                }
+                info_path = group / "0.info"
+                self.write_private_json(info_path, info)
+
+                def decode() -> live_run.Image.Image:
+                    packet = live_run._subsurface_saved_updates(root, 2)["updates"][0]
+                    return live_run._subsurface_raw_packet_image(root, packet, 2, composite=False)
+
+                expected = bytes(channel for pixel in pixels for channel in (*pixel, 255))
+                self.assertEqual(decode().tobytes(), expected)
+                for bad_format in ("RGBA", "BGRA", "ARGB", [rgb_format]):
+                    info["options"]["rgb_format"] = bad_format
+                    self.write_private_json(info_path, info)
+                    with self.assertRaisesRegex(live_run.LabFailure, "RGB format or stride"):
+                        decode()
+                info["options"]["rgb_format"] = rgb_format
+                info["stride"] = 2 * len(rgb_format) - 1
+                self.write_private_json(info_path, info)
+                with self.assertRaisesRegex(live_run.LabFailure, "RGB format or stride"):
+                    decode()
+                info["stride"] = stride
+                self.write_private_json(info_path, info)
+                payload_path.write_bytes(payload[:-1])
+                with self.assertRaisesRegex(live_run.LabFailure, "payload size"):
+                    decode()
+
     def test_subsurface_raw_packet_decoder_rejects_non_raw_authorities(self) -> None:
         mutations = {
             "compression": (
@@ -6006,7 +6055,11 @@ int main(int argc, char **argv) {
 
     def test_private_state_tightens_owned_directories(self) -> None:
         self.artifact_root.mkdir(mode=0o755)
+        # mkdir's mode is filtered by the process umask; establish the actual
+        # pre-existing boundary which prepare_private_state must preserve.
+        self.artifact_root.chmod(0o755)
         self.state_root.mkdir(mode=0o775)
+        self.state_root.chmod(0o775)
         job.prepare_private_state()
         for path in (
             self.state_root,
@@ -11077,8 +11130,15 @@ class LiveTransportProfileTest(unittest.TestCase):
         client = source.split("FROM docker.io/library/debian:13-slim AS client\n", 1)[1]
         self.assertIn('test "$XPRA_SELECTION" = stacks/develop', client)
         self.assertIn("from xpra.client.gtk3 import client_base", client)
-        self.assertIn("from xpra.x11.common import has_pywindow_lookup", client)
+        self.assertIn("from xpra.x11.gtk import bindings, display_source, gtk_get_pywindow", client)
+        self.assertIn('assert error.Xenter == gi_import("Gdk").error_trap_push', client)
         self.assertIn("from xpra.x11.selection.clipboard import X11Clipboard", client)
+        self.assertIn("helper = X11Clipboard(", client)
+        self.assertIn("assert helper.gtk_filter", client)
+        self.assertIn("helper.gtk_event_window.get_xid() == helper.event_window_xid", client)
+        self.assertIn("gtk_get_pywindow(helper.event_window_xid).get_xid()", client)
+        self.assertIn("helper.cleanup()", client)
+        self.assertNotIn("has_pywindow_lookup", client)
         self.assertNotIn("cases/", client)
         self.assertNotIn("       else ", client)
 
@@ -13148,9 +13208,10 @@ class H264EvidenceTest(unittest.TestCase):
     def test_scaled_packet_chain_uses_encoded_decoder_dimensions(self) -> None:
         packet = self.packet(3, 0)
         packet["payload_sha256"] = "a" * 64
+        packet["options"]["window-size"] = [1596, 1173]
         updates = {"updates": [packet], "window_id": 1}
         callback = "0x7f8bf8bdb920"
-        options = "{'frame': 0, 'type': 'IDR', 'scaled_size': (1064, 780)}"
+        options = "{'frame': 0, 'type': 'IDR', 'scaled_size': (1064, 780), 'window-size': (1596, 1173)}"
         log = "\n".join(
             (
                 (
@@ -13172,6 +13233,7 @@ class H264EvidenceTest(unittest.TestCase):
                     "(0, 0, 1064, 780, 24):PLANAR_2), "
                     f"record_decode_time at {callback}>"
                 ),
+                "GLDrawingArea(1, (1596, 1173)).render_planar_update(0, 0, 1064, 780, 1596, 1172, 'NV12_to_RGB') pixel_format=NV12",
                 "record_decode_time(True, ) wid=0x1, h264: 1596x1172, 8.4ms",
                 "sending ack: ('window-ack', 1, 1596, 1172, 3, 8468, \"''\")",
                 (
@@ -13213,8 +13275,157 @@ class H264EvidenceTest(unittest.TestCase):
                     self.assertEqual(result["size"], [1596, 1172])
                     self.assertEqual(result["encoded_size"], [1064, 780])
 
+    @staticmethod
+    def presentation_log(window_id: int = 7, *, count: int = 1) -> str:
+        rectangles = [(0, 0, 1596, 1173)] * count
+        return "\n".join((
+            f"do_present_fbo(GLXWindowContext(0x400015)) will blit {rectangles}",
+            f"{count}.do_gl_show(GLDrawingArea({window_id}, (1596, 1173))) swapping buffers now",
+            f"GLDrawingArea({window_id}, (1596, 1173)).do_present_fbo() done",
+        )) + "\n"
+
+    def test_presentation_allows_only_bound_nonoverlapping_codec_edges(self) -> None:
+        main = self.packet(11, 0, scaled=False)
+        main["options"].update({"window-size": [1596, 1173], "backing-epoch": 0})
+        edge = {
+            "sequence": 12, "encoding": "rgb24", "x": 0, "y": 1172, "w": 1596, "h": 1,
+            "payload_bytes": 6384,
+            "options": {"rgb_format": "RGBX", "flush": 1, "window-size": [1596, 1173], "backing-epoch": 0},
+        }
+        initial_ack = "sending ack: ('window-ack', 7, 1596, 1172, 11, 49829, \"''\")\n"
+        edge_process = (
+            "process_draw: 6384 bytes for window 7, sequence 12, 1596x1 at 0,1172 "
+            f"using rgb24 encoding with options=typedict({edge['options']})\n"
+        )
+        edge_ack = "sending ack: ('window-ack', 7, 1596, 1, 12, 2070, \"''\")\n"
+        next_main_ack = "sending ack: ('window-ack', 7, 1596, 1172, 13, 3910, \"''\")\n"
+        presentation = self.presentation_log()
+        updates = {"window_id": 7, "updates": [main, edge]}
+        for label, middle, tail, candidate, accepted in (
+            ("exact edge then swap then next main", edge_process + edge_ack, presentation + next_main_ack, updates, True),
+            ("edge already queued before main ACK", edge_ack, presentation, updates, True),
+            ("edge ACK after blit before swap", "", presentation.replace("1.do_gl_show", edge_process + edge_ack + "1.do_gl_show"), updates, True),
+            ("later H264 overwrite", edge_process + edge_ack + next_main_ack, presentation, updates, False),
+            ("unknown ACK", edge_ack.replace(", 12,", ", 77,"), presentation, updates, False),
+            ("unsaved edge", edge_process + edge_ack, presentation, {"window_id": 7, "updates": [main]}, False),
+            ("duplicate saved edge", edge_process + edge_ack, presentation, {"window_id": 7, "updates": [main, edge, edge]}, False),
+            ("duplicate process", edge_process * 2 + edge_ack, presentation, updates, False),
+            ("missing process", edge_ack, presentation, updates, False),
+            ("wrong process owner", edge_process.replace("window 7", "window 8") + edge_ack, presentation, updates, False),
+            ("wrong payload", edge_process.replace("6384 bytes", "6383 bytes") + edge_ack, presentation, updates, False),
+            ("wrong coordinates", edge_process.replace("0,1172", "0,1171") + edge_ack, presentation, updates, False),
+            ("ACK dimensions mismatch", edge_process + edge_ack.replace("1596, 1,", "1596, 2,"), presentation, updates, False),
+            ("duplicate ACK", edge_process + edge_ack * 2, presentation, updates, False),
+        ):
+            # Both actual interleavings are legal: process_draw may be queued
+            # before the IDR ACK, or just before the edge's own UI callback.
+            prefix = edge_process if label == "edge already queued before main ACK" else ""
+            log = prefix + initial_ack + middle + tail
+            ack = next(live_run.H264_ACK_RE.finditer(log, len(prefix)))
+            result, edges = live_run._h264_presentation_before_overwrite(log, ack, main, candidate, (1596, 1173))
+            with self.subTest(label=label):
+                self.assertEqual(result, accepted)
+                if accepted:
+                    self.assertEqual(edges, [12])
+        for label, mutate in (
+            ("overlapping edge", lambda packet: packet.update(y=1171)),
+            ("alpha edge", lambda packet: packet["options"].update(rgb_format="RGBA")),
+            ("wrong backing epoch", lambda packet: packet["options"].update({"backing-epoch": 1})),
+            ("resized backing", lambda packet: packet["options"].update({"window-size": [1596, 1174]})),
+            ("nonedge encoding", lambda packet: packet.update(encoding="webp")),
+        ):
+            bad_edge = copy.deepcopy(edge)
+            mutate(bad_edge)
+            log = initial_ack + edge_process + edge_ack + presentation
+            ack = next(live_run.H264_ACK_RE.finditer(log))
+            with self.subTest(label=label):
+                self.assertFalse(live_run._h264_presentation_before_overwrite(
+                    log, ack, main, {"window_id": 7, "updates": [main, bad_edge]}, (1596, 1173),
+                )[0])
+
+    def test_presentation_requires_one_complete_matching_gl_transaction(self) -> None:
+        main = self.packet(11, 0, scaled=False)
+        main["options"]["window-size"] = [1596, 1173]
+        updates = {"window_id": 7, "updates": [main]}
+        initial_ack = "sending ack: ('window-ack', 7, 1596, 1172, 11, 49829, \"''\")\n"
+        presentation = self.presentation_log()
+        foreign = self.presentation_log(8)
+        for label, candidate, accepted in (
+            ("rectangle count is not window ID", presentation, True),
+            ("multiple rectangles", self.presentation_log(count=2), True),
+            ("foreign presentation first", foreign + presentation, True),
+            ("foreign presentation only", foreign, False),
+            ("missing swap", "\n".join(line for line in presentation.splitlines() if "swapping" not in line), False),
+            ("missing done", "\n".join(presentation.splitlines()[:-1]), False),
+            ("wrong completion window", presentation.replace("GLDrawingArea(7, (1596, 1173)).do_present", "GLDrawingArea(8, (1596, 1173)).do_present"), False),
+            ("wrong backing size", presentation.replace("(1596, 1173)", "(1596, 1174)"), False),
+            ("swap borrowed across presentations", presentation.replace("7, (1596", "8, (1596") + "\n".join(presentation.splitlines()[1:]), False),
+            ("late completion borrowed across presentations", "\n".join(presentation.splitlines()[:-1]) + "\n" + foreign + presentation.splitlines()[-1], False),
+            ("rectangle count mismatch", presentation.replace("1.do_gl_show", "2.do_gl_show"), False),
+            ("partial blit", presentation.replace("[(0, 0, 1596, 1173)]", "[(0, 0, 10, 10)]"), False),
+            ("malformed blit", presentation.replace("[(0, 0, 1596, 1173)]", "[bogus]"), False),
+            ("duplicate main ACK", initial_ack + presentation, False),
+        ):
+            log = initial_ack + candidate
+            ack = next(live_run.H264_ACK_RE.finditer(log))
+            with self.subTest(label=label):
+                self.assertEqual(live_run._h264_presentation_before_overwrite(log, ack, main, updates, (1596, 1173))[0], accepted)
+
+        # glmark2's fixed source viewport is smaller than the Sway-tiled client
+        # backing; bind the actual paint backing and bottom-origin GL region.
+        main.update(w=640, h=480)
+        main["options"]["window-size"] = [640, 480]
+        for label, rectangles, backing, accepted in (
+            ("full backing", [(0, 0, 796, 1173)], (796, 1173), True),
+            ("actual GL viewport", [(0, 693, 640, 480)], (796, 1173), True),
+            ("unflipped source coordinates", [(0, 0, 640, 480)], (796, 1173), False),
+            ("no actual paint backing", [(0, 0, 796, 1173)], None, False),
+        ):
+            candidate = presentation.replace("1596, 1173", "796, 1173")
+            candidate = candidate.replace("[(0, 0, 796, 1173)]", repr(rectangles))
+            log = initial_ack + candidate
+            ack = next(live_run.H264_ACK_RE.finditer(log))
+            with self.subTest(label=label):
+                self.assertEqual(live_run._h264_presentation_before_overwrite(log, ack, main, updates, backing)[0], accepted)
+
 
 class LiveFixtureBuildOrderTest(unittest.TestCase):
+    def test_public_source_permissions_precede_both_runtime_installs(self) -> None:
+        recipe = (LIVE_DIRECTORY / "Containerfile").read_text(encoding="utf-8")
+        source_stage = recipe.split("FROM xpra-source-base AS xpra-source", 1)[0]
+        normalization = "RUN chmod -R go+rX /src/xpra"
+        self.assertEqual(recipe.count(normalization), 1)
+        self.assertGreater(source_stage.index(normalization), source_stage.index("done < "))
+        for role in ("server", "client"):
+            stage = re.search(rf"(?ms)^FROM [^\n]+ AS {role}\n(.*?)(?=^FROM |\Z)", recipe)
+            self.assertIsNotNone(stage)
+            assert stage is not None
+            user_boundary = stage[1].index("USER lab\n")
+            for resource in ("css/10_header_bar.css", "icons/xpra.png"):
+                guard = f"test -r /usr/local/share/xpra/{resource}"
+                self.assertGreater(stage[1].index(guard), user_boundary)
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source"
+            resources = source / "fs" / "share"
+            resources.mkdir(parents=True, mode=0o700)
+            for directory in (source, source / "fs", resources):
+                directory.chmod(0o700)
+            data = resources / "style.css"
+            data.write_bytes(b"public resource\n")
+            data.chmod(0o600)
+            executable = source / "setup.py"
+            executable.write_bytes(b"#!/usr/bin/env python3\n")
+            executable.chmod(0o700)
+            result = subprocess.run(
+                ["chmod", "-R", "go+rX", str(source)], check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(data.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(executable.stat().st_mode & 0o777, 0o755)
+            for directory in (source, source / "fs", resources):
+                self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(data.read_bytes(), b"public resource\n")
+
     FIXTURES = (
         (
             "server",

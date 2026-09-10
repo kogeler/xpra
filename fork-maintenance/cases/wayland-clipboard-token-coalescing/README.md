@@ -23,8 +23,9 @@ ready native source. New changes update that source identity without moving
 the callback's deadline. Continuous selection changes must make progress,
 and the final ready selection must not be lost when the burst stops.
 
-The patch also makes token cancellation part of shared selection, direction
-and peer revocation. It does not raise the server flood limit, extend request
+The patch makes token cancellation part of native selection/direction
+revocation and the shared peer-reset boundary. Wayland alone owns its backoff
+and reset history; the generic scheduler's ordinary cancellation is unchanged. It does not raise the server flood limit, extend request
 timeouts, cache arbitrary clipboard contents or suppress diagnostic warnings.
 Clipboard ownership, native transfer completion and loop prevention remain
 separate responsibilities.
@@ -32,18 +33,30 @@ separate responsibilities.
 ## Embedded-source context
 
 The case resolves against source commit
-`212038243d0067b6860ebe7d6953692179ef353f`, embedded in current `develop`.
+`d95058b0916913fe6ae5296fb702f66d833898b0`, embedded in current `develop`.
 Upstream commit `19a70cc7216bfa38dc788982a0fd9dd01dfeb237` already introduced
 exponential token backoff in the X11 selection proxy. The Wayland adapter
 overrides the generic token scheduler and emits its GObject token signal
 directly, so inheriting the shared proxy does not give it that X11 behavior.
 
-The new `xpra/wayland/server/clipboard_token.py` helper uses the same named
-backoff settings without importing an X11 binding or making Wayland startup
-depend on an X11 display. The native `clipboard.pyx` change is a narrow hook
-in `WaylandPrimaryClipboardProxy.do_owner_changed()`. The ordinary clipboard
-proxy shares that implementation while retaining its own selection API and
-state.
+Current `41d88fd2355` and `1eb1ddaf5cb` also provide a common scheduler with
+elapsed-time subtraction and earliest-deadline retention. The Wayland override
+still bypasses it, so the native burst defect remains. The previous downstream
+patch reset generic last-send history on every cancellation; that is no longer
+valid when cancellation merely moves an existing deadline earlier.
+
+The adapted `xpra/wayland/server/clipboard_token.py` owns a cooperative
+`WaylandTokenMixin` and the ready-owner admission helper. It uses the same named
+backoff settings without importing X11. Explicit native constructors initialize
+its state before connecting compositor callbacks. Source notifications and
+origin/eager completions carry a token-specific generation, even on an isolated
+case without the separate transfer-lifecycle patch.
+
+This is an ADAPT decision, not retirement: the common scheduler's new timing
+rules are preserved, obsolete generic proxy hunks are removed, and native
+admission keeps its additional readiness/reservation boundary. Reading callers,
+cancellation order and asynchronous source transitions establishes the need;
+tests challenge those conclusions rather than replacing the manual review.
 
 On an upstream refresh, compare behavior rather than patch applicability.
 An equivalent upstream replacement must bound continuous owner notification
@@ -57,8 +70,8 @@ successful single paste does not establish those properties.
 | --- | --- |
 | `xpra/wayland/server/compositor.pyx` | Owns the seat and dispatches ordinary and primary selection changes from native clients. |
 | `xpra/wayland/server/clipboard.pyx` | Owns the selection adapters, native source pointers, origin resolution, target discovery, GObject token signals and content-transfer callbacks. |
-| `xpra/wayland/server/clipboard_token.py` | Admits a ready owner notification immediately or assigns it to one per-proxy backoff timer. |
-| `xpra/clipboard/proxy.py` | Owns shared enablement/direction policy, token timer cancellation, token counters and eager-content collection. |
+| `xpra/wayland/server/clipboard_token.py` | Owns native-only backoff/reset, readiness epoch and exact delayed reservation; admits a ready owner now or through one per-proxy timer. |
+| Unmodified `xpra/clipboard/proxy.py` | Owns the shared policy fields, ordinary scheduler, timer cancellation and eager collection. Wayland cooperatively specializes revocation without changing other backends' scheduling history. |
 | `xpra/clipboard/core.py` | Maps selections, processes tokens and requests, tracks clipboard origins and resets state associated with the peer. |
 | `xpra/clipboard/timeout.py` | Owns wire request IDs, completion callbacks and remote-request deadlines. |
 | `xpra/server/source/clipboard.py` | Applies the outgoing clipboard packet budget and queues accepted messages for compression and transport. |
@@ -99,15 +112,20 @@ become a new local owner advertisement.
 Origin discovery can be asynchronous. `local_source_changed()` first obtains
 the target list and then, when necessary, reads the private origin MIME type.
 Only the accepted origin completion calls `do_owner_changed()`. The backoff
-helper records `_emit_token_source` at that ready boundary, not at the first
+helper records `_token_ready_source` at that ready boundary, not at the first
 native pointer notification.
 
-`source_key()` combines the native pointer with `local_generation` when that
-field exists. The standalone embedded adapter has no generation field and
-uses `None` in that position. With the complete queue, the separate X11
-clipboard case supplies native source generations and stale-transfer guards.
-This case consumes that stronger identity without duplicating or taking over
-its generation lifecycle.
+Every ordinary/primary native selection callback first advances
+`_token_source_generation` and invalidates ready state, without postponing an
+already armed timer. `source_key()` combines the pointer and this token epoch.
+Origin completion compares its captured epoch before changing origin or
+announcing readiness. An old read cannot bless a replacement which happens to
+reuse the same pointer. Cancellation advances the epoch as well.
+
+This readiness epoch is independent of the local/remote transfer generations
+owned by the X11 clipboard case. That case additionally retires reads, writes
+and sequential collectors at their native source boundary. The token case
+does not duplicate its FD registry or pretend a timer owns the source.
 
 A timer may therefore encounter several different situations:
 
@@ -130,25 +148,31 @@ Each selection proxy owns independent scheduling state:
 
 | Field | Meaning |
 | --- | --- |
-| `_emit_token_timer` | The one pending GLib source ID, or zero when no timer owns emission. |
-| `_emit_token_source` | The latest source pointer/generation admitted after origin resolution. |
-| `_last_emit_token` | Monotonic time of the last admitted emission attempt. |
-| `_emit_token_backoff` | Delay to use for the next deferred owner notification. |
-| `_sent_token_events` | Existing token accounting, updated when this helper admits an emission attempt. |
+| `_emit_token_timer` / `_emit_token_due` | Pending GLib source ID and its monotonic millisecond deadline; zero when no timer owns admission. |
+| `_token_reservation` | Unique object identifying that particular delayed callback, independent of numeric ID reuse. |
+| `_token_source_generation` / `_token_ready_source` | Native notification/cancellation epoch and latest pointer/epoch admitted after origin resolution. |
+| `_token_last_attempt` / `_token_backoff` | Native admission time and next spacing policy, independent of generic last-send history. |
+| `_sent_token_events` | Actual GObject token-publication count, not the number of eager attempts started. |
 
 The helper follows this ordering:
 
-1. Reject disabled or send-denied notifications.
+1. Reject disabled/send-denied, empty and remote-owned notifications.
 2. Publish the current ready-source key.
-3. If a timer already exists, return without replacing it or changing its
-   deadline.
-4. With no timer, reset backoff after the configured quiet interval since
-   the last admitted emission.
-5. If backoff is zero, record the emission attempt and let the native caller
-   continue immediately to `schedule_emit_token()`.
-6. Otherwise, register one timer for the current backoff delay. Its callback
-   revalidates ownership and source state before recording another attempt
-   and entering the same native scheduler.
+3. Keep an existing timer and deadline unchanged. New native notifications
+   invalidate readiness; only their accepted origin completion updates it.
+4. With no timer, compute elapsed time from separately rounded monotonic
+   millisecond readings and reset backoff after the configured quiet interval.
+5. Subtract elapsed time from the backoff. If nothing remains, record an
+   admission attempt and immediately enter the native token constructor.
+6. Otherwise register one timer, then publish its unique reservation, ID and
+   deadline. A registration failure publishes none of those owners.
+7. Its callback first claims that exact reservation, retires ID/deadline and
+   rechecks current policy/source/readiness before admitting construction.
+
+The native hook receives ordinary owner-change requests, not generic
+`min_delay` rescheduling requests. It retains the first deadline for that
+burst. No generic reschedule calls into its cancellation/reset method, and
+the unmodified common scheduler retains its earliest-deadline behavior.
 
 The existing X11-named environment settings are milliseconds:
 
@@ -159,8 +183,8 @@ The existing X11-named environment settings are milliseconds:
 | `XPRA_CLIPBOARD_TOKEN_BACKOFF_MAX` | 1000 | Cap on the next backoff delay, including the initial scaled delay. |
 
 After an admitted emission, a nonzero backoff doubles up to the cap. A zero
-backoff becomes the scaled initial delay. The timer delay is the selected
-backoff, not a deadline repeatedly extended from the newest owner event.
+backoff becomes the scaled initial delay. The timer waits only the remaining spacing after elapsed time, not a full
+new backoff from each owner event or a repeatedly extended deadline.
 These values describe defaults and existing configuration knobs, not an
 unconditional packets-per-second guarantee for every environment setting.
 
@@ -171,29 +195,38 @@ returns `False`, and another notification is needed to schedule further work.
 
 ## Timer cancellation and peer lifetime
 
-`cancel_emit_token()` clears the published source ID before asking GLib to
-remove it, and resets both the last-emission time and the backoff. A later
-eligible notification therefore does not inherit the previous peer's delay.
-No new public cancellation API is introduced.
+`WaylandTokenMixin.cancel_emit_token()` retires the reservation and ready epoch,
+resets native admission history, and delegates to ordinary core cancellation.
+Core cancellation retires the ID/deadline before GLib removal. A removal
+exception is contained after retirement; it cannot authorize the old closure
+or prevent remaining native teardown. This reset does not change generic or
+X11 throttle history during an ordinary earlier-deadline reschedule.
 
-The common proxy now calls that method when `set_enabled(False)` or
-`set_direction(False, ...)` revokes outgoing work. The protocol helper calls
-it for every proxy in `client_reset()` before clearing its clipboard origin.
-Existing received-token and cleanup paths continue to use the same method.
+The mixin cancels on disabled/send-denied policy. Its methods cooperate through
+`super()` with the transfer-lifecycle overrides in the X11 clipboard case;
+they do not replace those overrides' read/write/source cleanup. The protocol
+helper calls the existing cancellation method for each proxy at peer reset
+before clearing origin. No alternate network reset or cancellation API is added.
 
 Receive permission is independent of send permission. A transition to
-`can_send=True, can_receive=False` must preserve an already scheduled local
-token. Becoming receive-only cancels outgoing notification work but does not
-make this helper responsible for clearing received contents. Native source,
-read and write revocation remain in the owning adapter and its composed
-transfer-lifecycle patch.
+`can_send=True, can_receive=False` preserves an already scheduled local token.
+Becoming receive-only cancels outgoing announcements but does not make this
+scheduler responsible for clearing received contents.
 
-The delayed closure captures its own timer ID. It first compares that ID with
-the proxy's current `_emit_token_timer`; a removed callback cannot clear a
-newer timer or use a later peer merely because the same proxy object remains.
-Only the matching callback clears the ID and performs policy/source checks.
-The regression explicitly invokes a captured old callback after revocation
-and again after a new timer has been installed.
+Receipt of a nonclaiming or receive-denied token is not native ownership
+revocation. The separate transfer-lifecycle case owns that receiving boundary,
+including empty claims which cannot replace an independent native owner.
+The complete queue must preserve its cache/origin and pending announcement.
+This case does not reintroduce the old test which incorrectly labelled
+`got_token((), claim=False)` as a real remote takeover. Its remote-cancellation
+control installs an actual native source for an accepted receiving claim.
+
+The delayed closure captures a unique reservation object. An obsolete callback
+must match that object before it can clear the proxy's ID or emit; recycling
+the numeric GLib ID is not sufficient. The regression deliberately gives old
+and new callbacks the same ID and invokes the old closure after revocation and
+after replacement. This is UI-loop lifetime protection, not a claim that
+native clipboard state is safe for arbitrary cross-thread access.
 
 ## Eager reads, packet accounting and diagnostic limits
 
@@ -208,10 +241,12 @@ validated the latest ready source. Target selection, per-target data formats,
 content-size limits and origin filtering remain in the native/shared
 clipboard code, not in the backoff helper.
 
-Similarly, `_sent_token_events` counts the helper's admitted emission attempts;
-it is not a transport acknowledgement or proof that asynchronous collection
-eventually produced a packet. Request IDs, timeout sources and returned data
-must be checked at their own completion boundaries.
+Admission updates `_token_last_attempt` and backoff, so even attempts abandoned
+during asynchronous collection are rate bounded. `_sent_token_events` advances
+only at the actual GObject publication boundary after the captured token epoch
+still matches. It is not a transport acknowledgement: helper loop filtering or
+connection policy may still reject the packet. Request IDs, deadlines and
+returned data must be checked at their own completion boundaries.
 
 The warning about "clipboard requests per second" comes from
 `send_clipboard()`, which counts outgoing clipboard packets before encoding.
@@ -223,8 +258,8 @@ peer flood, slow source or transport failure can never cause another timeout.
 ## Patch-queue and integration ownership
 
 `fix.patch` adds the Wayland scheduling helper and its native regression,
-hooks `clipboard.pyx`, and extends cancellation in `xpra/clipboard/proxy.py`
-and `xpra/clipboard/core.py`. The existing clipboard-core regression gains a
+hooks `clipboard.pyx`, and extends peer-reset cancellation in
+`xpra/clipboard/core.py`. The generic proxy is no longer a changed path. The existing clipboard-core regression gains a
 checked peer-reset cancellation assertion. These paths form one outgoing
 notification lifecycle; they do not include the packet limiter or request
 timeout implementation.
@@ -235,9 +270,11 @@ complete stack. Both cases touch clipboard infrastructure, so review their
 combined source and run the composed focused modules after a change. Do not
 export the stack as this case's patch.
 
-The X11 clipboard case still owns event-filter leases, native display
-publication, source generations, pipe/FD cleanup, exact request completion
-and loop-prevention integration. This case owns when a ready local owner may
+The X11 clipboard case owns the residual helper/filter lifetime,
+source generations, pipe/FD cleanup, exact request completion and receiving-claim
+integration. Current upstream already supplies filter counting, wrapper
+retention, GTK packaging and native display flush; neither case should carry
+duplicate implementations. This case owns when a ready local owner may
 start a token emission and when that deferred permission expires. Backoff
 cannot replace a missing XFixes event route or a stale native transfer guard.
 
@@ -270,7 +307,7 @@ clipboard behavior while exercising the proxy's normal token construction and
 asynchronous content callback. Both CLIPBOARD and PRIMARY follow their actual
 native-adapter entry points.
 
-The six tests cover:
+The native regressions cover:
 
 - A synchronous burst of 100 source replacements per selection: one immediate
   token, one final deferred token, targets from source 100, independent proxy
@@ -278,22 +315,34 @@ The six tests cover:
 - Continuous changes with GLib dispatch between them: bounded intermediate
   progress and eventual delivery of the final source, rather than indefinite
   postponement.
-- Disablement, send revocation, peer reset, receipt of a remote token and
-  cleanup: timer cancellation and a stale callback unable to clear or use a
-  newly installed timer. Only this callback-identity control substitutes timer
-  registration/removal so that the obsolete closure can be invoked directly.
+- Disablement, send revocation, peer reset, an actual claimed remote source
+  and cleanup: cancellation and a stale closure unable to use a new reservation,
+  even when both have the same numeric GLib ID.
+- Deterministic elapsed/quiet-period policy: a 40 ms spacing with 25 ms elapsed
+  schedules 15 ms, a later source does not postpone it, and a quiet interval
+  permits immediate admission. Only the policy clock and timer registration
+  are substituted; separate tests still dispatch real GLib sources.
+- Failed timer registration and failed source removal: no orphan reservation,
+  no stale publication and no counter increment for an unadmitted attempt.
 - Receive-only revocation while sending remains allowed: the pending outbound
   token survives and completes.
-- Empty or not-yet-resolved replacement: the obsolete ready key cannot
-  advertise the new pointer, and a later ready source remains deliverable.
+- Empty replacement and two real origin-pipe reads with the same reused source
+  pointer: the obsolete completion cannot make the new owner ready, the timer
+  must not advertise unresolved state, and the current completion delivers the
+  final source and origin.
+- Cancelled eager acquisition: its late pipe completion cannot publish or
+  increment the sent-token count.
 - Greedy collection: no read starts for superseded intermediate owners, and
   the deferred read obtains source 3's bytes and target format.
 
 `unit.clipboard_core_test` separately checks that peer reset invokes token
 cancellation. The manifest retains existing client and server clipboard
 subsystem modules, the native `wayland` gate and all three full upstream legs.
-The composed queue additionally exercises the generation and transfer guards
-owned by the X11 clipboard case.
+The composed queue additionally exercises the generation/transfer guards and
+nonclaim/receive-denied/empty-decline continuity controls owned by the X11
+clipboard case. The selection fixture destroys old native wrappers
+synchronously, and holds real origin/eager write FDs where the test requires
+in-flight work; it does not simulate unresolved origin by changing a field.
 
 The tests-only clean control must reach the existing native owner-change
 implementation and expose its unbounded burst. Failure to import the new
@@ -344,9 +393,10 @@ case-only live-product selection.
 - Update the ready key without restarting an already scheduled callback.
 - Read current targets and eager contents when emission starts, not when an
   intermediate owner first requested a delay.
-- Check timer identity before clearing its published ID; then recheck send
-  policy and native source/generation.
-- Reset backoff on cancellation, including shared peer reset and disablement.
+- Match the unique reservation before clearing the published timer ID; then
+  recheck send policy and native source/readiness epoch.
+- Reset only Wayland admission history on revocation, peer reset and cleanup;
+  never reset the generic scheduler's last-send time when moving a deadline.
 - Do not cancel outgoing work merely because receive permission is revoked.
 - Preserve native transfer guards and the unchanged server packet limiter.
 - Distinguish admitted emission attempts, emitted tokens and completed
@@ -357,7 +407,9 @@ case-only live-product selection.
 ## Required validation
 
 Follow [development and final acceptance](../../docs/runbooks/validation.md).
-After a behavior change, run the manifest's focused modules and the tests-only
+During an upstream refresh, first complete the incremental manual review,
+implemented case checkpoints and whole-queue composed-review exit. Only then
+start runtime validation. After a behavior change, run the manifest's focused modules and the tests-only
 clean control against the same frozen source/image. Include the composed
 clipboard modules, actual native Wayland linkage and the compiled/no-compat
 dimensions; bytecode compilation cannot prove the native signal and timer
@@ -371,8 +423,8 @@ The manifest's `live-x11-clipboard` ownership does not waive the other eight.
 Use the canonical scheduling and evidence-reuse rules rather than repeating
 unchanged expensive checks after each edit.
 
-Package/build validation follows the enclosing contract; this case does not
-change packaging rules or a native ABI. The
+The full refresh also requires both real DEB builds under the enclosing
+contract. This case changes neither packaging rules nor a native ABI. The
 [scoped mypy gate](../../docs/runbooks/typecheck.md) does not currently own
 these clipboard modules, so its success cannot be reported as their type
 coverage. Keep source, selection, image and named-result identities in the

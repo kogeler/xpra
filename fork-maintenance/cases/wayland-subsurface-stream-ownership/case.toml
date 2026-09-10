@@ -3,7 +3,7 @@ slug = "wayland-subsurface-stream-ownership"
 kind = "production"
 title = "Compose native Wayland surface trees atomically"
 commit_subject = "Compose native Wayland surface trees atomically"
-patch_sha256 = "793eb49aa40fd83e5de51a1d7c62d3b062d60c5a9f82a1891acb531df429615b"
+patch_sha256 = "17522ac4c88c41bfb0182371f831bd83627f6d95a1edc8a4078dfd02c64298a6"
 dependencies = []
 paths = [
   "tests/unittests/unit/client/cairo_backing_test.py",
@@ -12,6 +12,7 @@ paths = [
   "tests/unittests/unit/client/subsystem/window_test.py",
   "tests/unittests/unit/client/terminal/terminal_client_test.py",
   "tests/unittests/unit/client/terminal/terminal_window_test.py",
+  "tests/unittests/unit/client/x11_client_paint_test.py",
   "tests/unittests/unit/server/window/subsurface_source_test.py",
   "tests/unittests/unit/wayland/pointer_test.py",
   "tests/unittests/unit/wayland/subsurface_discovery_client.c",
@@ -59,6 +60,7 @@ list = [
   "unit.client.cairo_backing_test",
   "unit.client.gtk3.subsystem.display_test",
   "unit.client.opengl_backing_test",
+  "unit.client.x11_client_paint_test",
   "unit.client.subsystem.window_test",
   "unit.client.terminal.terminal_client_test",
   "unit.client.terminal.terminal_window_test",
