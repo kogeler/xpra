@@ -30,7 +30,7 @@ the timeout for a genuinely stalled initializer remain unchanged.
 ## Embedded-source context
 
 The case resolves against source commit
-`212038243d0067b6860ebe7d6953692179ef353f`, embedded in current `develop`.
+`d95058b0916913fe6ae5296fb702f66d833898b0`, embedded in current `develop`.
 Upstream commit `2638fb3762b` generalized the former draw thread into a shared
 `decode` subsystem. Picture, icon and cursor consumers can now post work to
 one worker, whose preload phase precedes the thread-local seccomp filter.
@@ -52,6 +52,14 @@ hooks and security boundary together. An equivalent replacement must load on
 the intended owner after consumers are initialized, avoid duplicate workers,
 preserve early-option cleanup and leave real timeout diagnostics intact. A
 shorter wait or a codec preload on the main thread is not equivalent.
+
+Current-code reassessment retains the production fix. Upstream
+`37f5a05759f` already directs validation through the composed encoding
+subsystem, but the current call site still waits before starting decode.
+The new base changes neither that ordering nor the loader/worker lifetime.
+The regression's fresh native child explicitly inherits the parent's selected
+Python import paths so compiled and no-compat runs test the same source and
+extensions rather than another installation.
 
 ## Surrounding code and ownership map
 
@@ -350,7 +358,9 @@ network lifecycle. Both proof levels are retained.
 ## Required validation
 
 Follow [development and final acceptance](../../docs/runbooks/validation.md).
-After a behavior change, run the same-image tests-only clean control and all
+During an upstream refresh, finish and record the incremental manual review
+and resulting-stack exit gate before runtime validation. Then run the
+same-image tests-only clean control and all
 manifest focused modules. Exercise `focused-cython` and `focused-no-compat`,
 including the native WebP/seccomp child, and the affected composed stack
 inventory. Import-only checks and mocked worker calls cannot prove the owner.

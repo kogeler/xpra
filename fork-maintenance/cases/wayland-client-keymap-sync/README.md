@@ -17,6 +17,32 @@ readonly policy in different subsystems. Wire negotiation, normalization,
 candidate compilation, device replacement, input settlement, ownership
 promotion, and release/repeat identity therefore form one atomic behavior.
 
+## Current upstream boundary and retained necessity
+
+At source `d95058b0916913fe6ae5296fb702f66d833898b0`, upstream
+`ac732233d68` installs client keymaps and `6b79cb2db5a` combines the layouts
+of connected clients, limits that union to four groups, and returns
+`(keycode, group)` from native lookup. That is a partial replacement, not this
+case's contract. A union changes group positions, drops duplicate identities
+and later layouts, and selects a symbol's first matching group. It also mutates
+the seat during hello parsing and records the proposed configuration before
+native installation succeeds.
+
+The retained patch replaces that policy with exact owner-map installation and
+source-local translation. It does not layer a second installer underneath the
+new upstream `set_current_config()` path. The upstream public native bool
+refusal and tuple lookup interfaces, generic `key_events` accounting, and
+canonical `setting-changed` / `client-exited` signals remain intact. No
+separate `readonly-changed` signal is needed.
+
+The current upstream parser/install test module is retained and adapted,
+rather than overwritten by the older downstream new-file hunk. Its useful
+hello, flat-packet, legacy update, identical-install, configured-default,
+readonly, disabled-keyboard, rejection and no-device boundaries remain.
+Union, truncation and deduplication expectations are explicitly replaced by
+exact positional identity and stable owner assertions. Downstream-specific
+normalizer tests live in the separate `keyboard_rmlvo_test.py` module.
+
 ## Surrounding code and ownership map
 
 The case crosses client discovery, generic protocol code, the native Wayland
@@ -28,7 +54,7 @@ in the current source:
 | `xpra/client/subsystem/keyboard.py` | Creates the GUI helper, puts keyboard properties in the hello packet, schedules delayed configuration after the handshake, and records the server's exact-RMLVO capability before that callback runs. |
 | `xpra/client/gui/keyboard_helper.py` | Combines platform discovery with command-line overrides and builds the versioned exact RMLVO block. A server which advertises the same version receives one flat `keyboard-config`; an unnegotiated server retains the established `layout-changed` then nested `keymap-changed` compatibility flow. |
 | `xpra/client/gtk3/keyboard_helper.py`, `xpra/platform/keyboard_base.py`, and `xpra/platform/posix/keyboard.py` | React to a real X11 keymap change and invalidate the cached modifier meanings before the refreshed packet is built. |
-| `xpra/server/source/keyboard.py` | Stores one `keyboard_config` per connection and distinguishes a requested recording client from one which was actually authorized to record. |
+| `xpra/server/source/keyboard.py` | Stores one `keyboard_config` per connection and distinguishes a requested recording client from one which was actually authorized to record, preserving upstream event accounting and recording delivery. |
 | `xpra/server/subsystem/keyboard.py` | Owns generic packet decoding, key injection, UI-driver arbitration, keyboard-sync, and repeat interfaces. This case extends its internal key/repeat calls with source and wire-key identity without changing the non-Wayland behavior. |
 | `xpra/wayland/server/keyboard_config.py` | Normalizes untrusted structured RMLVO data, records presence and last-known-good state, and pins press-time translations. It deliberately does not own the wlroots device. |
 | `xpra/wayland/server/subsystem/keyboard.py` | Owns policy and the shared-seat state machine: per-source configurations, deterministic map ownership, validation versus installation, group translation, modifiers, held keys, repeat timers, promotion, rollback, and keyboard information. |
@@ -254,6 +280,12 @@ server does not try to prove availability with a language, country, layout,
 variant, option, or model allowlist: after syntax and size checks,
 libxkbcommon and the installed XKB rules/data are authoritative.
 
+For sequence-valued groups, each element's exact builtin string type and
+length are checked before scanning its contents or encoding it. The bounded
+name grammar also rejects embedded commas. Checking for a comma first would
+still traverse an arbitrarily large builtin string; tests using only hostile
+string subclasses cannot expose that distinct ordering error.
+
 Generic command-line parsing materializes absent keyboard options as empty
 strings and lists. Wayland setup removes those empty legacy defaults before
 normalization, retains `sync` as runtime policy, and now carries the configured
@@ -326,6 +358,16 @@ repeat timers and old press translations, commits the new effective metadata,
 and flushes the compositor. Scheduler cleanup errors are made harmless by
 retiring timer ownership before calling the scheduler; they cannot split an
 already committed native replacement.
+
+The public `set_layout()` wrapper retains upstream's boolean result: a
+rejected compile or preparation returns false, while transactional manager
+callers use the separate exception-reporting compile/install methods.
+Construction refuses to attach a keyboard whose initial map failed. Native
+lookup retains `(keycode, group)` results, searching groups in order when no
+explicit group is supplied. A closed device refuses installation and returns
+the ordinary no-key pair. Installation also settles the native device's own
+held-key set, not only a manager-supplied list; direct public replacement must
+not silently discard that ownership.
 
 The Cython device is constructed with a small hard `evdev/pc105/us` map so a
 no-client or legacy session always has a keyboard. Startup then normalizes and
@@ -444,6 +486,13 @@ holders. Tracking is bounded per source, across all sources, and by wlroots'
 fixed distinct-keycode capacity; alias identities for an already held server
 keycode remain legal.
 
+Generic input handling records and injects a press before admitting its repeat
+timer. The Wayland wrapper reconciles the source holder in `finally`, using
+that recorded press intent. Otherwise a scheduler exception after injection
+would leave a pressed native key with no holder, and the matching release
+would be discarded as unmatched. This repair does not emit a second press or
+introduce another repeat scheduler.
+
 Hello repeat values are accepted only as an exact two-integer bounded pair;
 either zero disables both values. Because server capabilities are sent before
 `add_new_client()` can validate and install the source map, they report the
@@ -503,11 +552,15 @@ an ambiguous input source and is excluded even though authorization did not
 set `keyboard_record`.
 
 Readonly can change globally, from a client setting, or through a control
-command. `SettingsServer` emits `readonly-changed` before broadcasting the new
-setting, and `ServerCore` routes control changes through that same boundary.
-The Wayland manager can therefore settle held input and reconcile ownership
-before later packets observe the new policy. Bypassing the settings subsystem
-would leave a stale owner or depressed state on the shared device.
+command. The manager subscribes through the generic keyboard setup to the
+canonical `setting-changed` signal and reads the actual global/per-source
+effective policy. Global readonly and the control command emit after applying
+policy but before fallible peer sends, matching the existing client-setting
+path; unrelated settings preserve upstream's after-send ordering and exact
+per-source values. A notification failure must not prevent input settlement.
+Both readonly directions matter: re-enabling input clears settled identities
+which could otherwise suppress the next real press. Mask-only pointer/focus
+sources participate even if their `key_events` counter is still zero.
 
 Recording-only input is rejected at both relevant Wayland window boundaries.
 The inner `_focus()` guard protects the wlroots device and modifier state from
@@ -526,11 +579,16 @@ keyboard, lets the generic pointer path run, and then applies a source-tagged
 modifier update. The keyboard manager performs the final eligibility check,
 including recording policy.
 
-The client-session registry removes a source before subsystem
-`cleanup_protocol()` callbacks run. The keyboard manager therefore identifies
-departed clients by object identity against the current registry rather than
-expecting the protocol callback to carry the old source. Changing this generic
-cleanup order requires revisiting promotion and per-source settlement.
+The client-session registry removes a source and emits `client-exited` before
+closing it and before subsystem `cleanup_protocol()` callbacks run. The
+Wayland signal handler retires that exact registered source immediately.
+Unlike the generic clear-all callback, a non-owner's exit must not release
+keys still held by another client. Registry reconciliation remains an
+idempotent cleanup fallback: after signal-driven retirement it must not
+reinstall bootstrap or reset surviving repeat/modifier state. It still
+promotes an already-stale owner if another protocol finishes first. The
+regression exercises the real `ClientSessionServer` removal/signal/close
+sequence, not just a direct cleanup-method call.
 
 ## Information and diagnostics
 
@@ -620,8 +678,11 @@ ABI declarations, or native cleanup. Conversely, compiling a keymap only proves
 symbol availability, not shared-client behavior. Preserve both layers.
 `WaylandKeyboardWireBoundaryTest` invokes the existing setup, hello parsing,
 connection acceptance and input APIs on both clean and patched source. Its
-clean controls fail on an unchanged startup map after acceptance and on a
-readonly event mutating native modifiers. Patch-only constants are loaded only
+clean controls fail on premature hello-time device mutation, a group-one
+symbol collision, and a readonly event mutating native modifiers. The fake
+device implements current upstream's bool installation and tuple lookup, and
+sources inherit the real `KeyboardConnection` accounting/API, so these
+failures must not come from stale fixture attributes. Patch-only constants are loaded only
 inside the tests which need them, so their absence cannot prevent these
 behavioral controls from running. Missing new parser/native APIs in other
 tests remain explicit failures; they are not themselves non-vacuous controls
@@ -631,11 +692,12 @@ declared `wayland` gate must build all Wayland extensions and make its isolated
 keyboard import non-skipping.
 
 The case also changes narrow generic interfaces whose other backends inherit:
-source/key identity on `_handle_key()` and repeat callbacks, the
-`readonly-changed` settings signal, and control-command routing. After an
-upstream refresh, inspect every caller and override rather than mechanically
-retaining old signatures. Generic X11 keyboard behavior must remain unchanged,
-while the Wayland subclass consumes the extra identity.
+source/key identity on `_handle_key()` and repeat callbacks, and the timing of
+the existing readonly notification before peer sends. After an upstream
+refresh, inspect every caller and override rather than mechanically retaining
+old signatures or adding duplicate signals. Generic X11 key injection and
+event accounting remain unchanged, while the Wayland subclass consumes the
+extra identity and exact-source lifecycle callbacks.
 
 The case-owned live scenario is tracked outside `fix.patch`; production patches
 must never contain `fork-maintenance/` paths. New case-owned upstream test files
@@ -690,6 +752,15 @@ foreign non-owner translation, shared holders, source-scoped repeat, lock and
 depressed modifier state, zero-keycode clients, invalid windows, cleanup, and
 native-install rollback.
 
+The adapted upstream `keyboard_config_test.py` retains its original boundary
+coverage using the shared transactional device fixture; installation records
+belong to each compiled candidate, not the last unrelated non-owner compile.
+`keyboard_rmlvo_test.py` owns the detailed downstream parser/snapshot checks.
+Canonical-signal tests use actual `SignalEmitter` subscriptions and
+`KeyboardConnection` sources, including shared-holder departure,
+readonly reversal, failed repeat admission, and signal-before-close ordering.
+Settings/core controls also inject a failed outbound send after the signal.
+
 Real compiled-XKB tests cover arbitrary installed layouts, variants and
 options, all four groups, common keys in every global group, the `us,fr` A/Q
 collision, Caps/Num Lock, AltGr, dead keys, keypad symbol priority, Unicode
@@ -699,6 +770,14 @@ Cython extension so a Python mock cannot hide a declaration or linkage error.
 The repeat regression also connects manager input handling to a real compiled
 XKB candidate and verifies the repeated physical key still produces `Q` or `@`
 with inferred modifiers, under both synchronized and unsynchronized input.
+
+A fresh-interpreter native probe constructs an actual headless compositor,
+seat and compiled keyboard. It checks bool installation/refusal, default and
+explicit-group tuple lookups, preservation of held keys and modifiers after a
+failed compile or closed-candidate refusal, replacement state, and idempotent
+device cleanup before seat destruction. This is a native API/state control,
+not proof of application keyboard delivery; the complete-stack live fixture
+below owns that real protocol/application boundary.
 
 The dedicated positive live scenario is
 `tests/live-wayland-keyboard.json`. Before attachment, the runner seeds the
@@ -754,7 +833,10 @@ upstream absorbs the production diff. The scenario must first move to durable
 neutral ownership, or to an equivalent generic manifest-declared mechanism,
 with the runner, provenance, inventories, schema checks, mutation tests,
 contract, and live runbook updated together. The migrated
-`live-wayland-keyboard STACK=develop` gate must pass before deleting this case.
+`live-wayland-keyboard STACK=develop` result must remain part of the mandatory
+complete live suite. During an explicit refresh, perform any such migration
+and manual composition review before the runtime phase; retirement is not
+accepted until the migrated complete-stack boundary passes.
 
 ## Invariants not to simplify
 
@@ -793,7 +875,9 @@ contract, and live runbook updated together. The migrated
   own, inject, or redirect focus.
 - Do not remove the outer recording focus guard merely because `_focus()` also
   rejects the source; generic parent side effects occur outside `_focus()`.
-- Do not bypass `readonly-changed` when changing client or global policy.
+- Do not bypass the canonical `setting-changed` readonly notification or the
+  exact-source `client-exited` boundary; do not add a duplicate signal.
+- Do not let repeat-timer admission failure orphan an already injected press.
 - Do not destroy the native keyboard after its seat, and do not trust an
   optional linkage-test skip in place of the native `wayland` gate.
 - Do not trust patch applicability alone when adjacent queue cases touch the
@@ -804,7 +888,9 @@ contract, and live runbook updated together. The migrated
 Follow [development and final acceptance](../../docs/runbooks/validation.md)
 and the current isolated-workspace, upstream-test, and live-test runbooks;
 do not apply the production source to the host checkout or use ad hoc output as
-acceptance. The retained tests-only regression must fail non-vacuously against
+acceptance. In an explicit refresh, complete the recorded incremental manual
+review/export and whole-queue composition gate before any runtime tests.
+The retained tests-only regression must fail non-vacuously against
 the embedded clean source. Run all focused modules declared by `case.toml`
 with the standalone case after atomic changes, including affected upstream
 modules and the real compiled mixin boundary when relevant, then run the native
@@ -812,8 +898,11 @@ modules and the real compiled mixin boundary when relevant, then run the native
 `stacks/develop` so adjacent Wayland patches and generic interface changes are
 exercised together.
 
-Run the dedicated positive `live-wayland-keyboard` gate early after its
-focused/native prerequisites, without waiting for full suites. The live result
+Start all nine positive profiles early through
+`live-all STACK=develop RUN=<fresh-prefix>`, after the relevant focused/native
+prerequisites and without waiting for full upstream suites. Both endpoints
+always carry the entire queue; no isolated or partial live run accepts this
+case. Require `live-suite-check`. Its keyboard member's live result
 must retain the exact versioned scenario digest, both four-group maps, every
 press/release observation, authoritative eight-character application sequence,
 runtime replacement, connection/process identities, information snapshot,

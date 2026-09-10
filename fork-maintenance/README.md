@@ -35,17 +35,27 @@ The active patches are:
 9. `jph-parallel-build-objects`;
 10. `debian-libva-codecs-package`;
 11. `packet-handler-error-boundary`;
-12. `wayland-pointer-scroll-normalization`;
-13. `gtk-client-scroll-deduplication`;
-14. `wayland-display-name-signal`;
-15. `client-codec-startup-order`;
-16. `x11-selection-refusal`;
-17. `upstream-test-quarantine` (test-only duty case).
+12. `gtk-client-scroll-deduplication`;
+13. `wayland-display-name-signal`;
+14. `client-codec-startup-order`;
+15. `x11-selection-refusal`.
+
+No quarantine duty case is currently active. The permanent
+[`upstream-test-quarantine` scaffold](cases/upstream-test-quarantine/README.md)
+retains its manifest, description and empty patch as `draft = true`, with
+commented TOML queue and gate entries for future clean-source-proven upstream
+failures. Never delete this infrastructure when all tests pass or restore
+obsolete skips merely to activate it.
 
 `stacks/develop.toml` applies them in integration order. `develop` here is the
 stable queue slug, not a requirement that every consumer run from the Git branch
 of that name. Cases contain patch inputs and test requirements; generated run
 output is never stored here.
+
+The upstream-owned native pointer conversion retains its real protocol tests
+under the runner's [neutral regression ownership](infra/upstream-tests/neutral/README.md),
+independent of a production case. Clean and complete-stack native checks remain
+required; retirement does not remove the shared live scroll oracles.
 
 ## Layout
 
@@ -344,7 +354,7 @@ a live main owner is gone, `live-status` reports `phase=removing` or
 evidence; `live-logs` likewise returns only the digest-bound final log.
 
 After every explicitly selected upstream rebase, first pass the runbook's
-whole-queue manual-review exit gate. Then reassess the duty quarantine against
+whole-queue manual-review exit gate. If a duty case is active, reassess it against
 its new clean source before using the duty patch in runtime validation:
 
 ```bash
@@ -360,6 +370,11 @@ skips. A newly passing assigned module must be removed from that leg; remove
 the module and its patch path only when no gate still assigns it. A newly
 failing complement module must first be reproduced and then assigned to its
 exact affected leg before the patched matrix is accepted.
+
+When no duty is active, record the reassessment as not applicable and omit
+these three case commands. If the last assignment is obsolete, deactivate the
+duty and preserve its empty scaffold through the quarantine runbook; do not
+delete the directory. All production and final full-suite gates remain.
 
 After adaptation and candidate freeze, every explicit upstream rebase requires
 the complete current final coverage,

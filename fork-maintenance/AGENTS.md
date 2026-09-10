@@ -32,9 +32,11 @@ the fork-owned contract and runbooks alone decide when and how our checks run.
 
 ## Layout
 
-- `cases/`: atomic production patches plus the single test-only quarantine case;
+- `cases/`: atomic production patches plus the permanent test-only quarantine
+  scaffold, active only while justified upstream failures remain;
 - `stacks/develop.toml`: the ordered complete queue;
-- `infra/upstream-tests/`: embedded-source container test runner;
+- `infra/upstream-tests/`: embedded-source container test runner, including its
+  current image-bound `neutral/` protocol regressions independent of case lifetime;
 - `infra/live/`: direct-transport and physical-GPU runner;
 - `infra/deb-packages/`: branch-agnostic Ubuntu/Debian package runner;
 - `tools/background_job.py`: common owned process supervisor;
@@ -169,6 +171,17 @@ complement must pass without skips. A newly green assigned module makes that
 leg assignment stale; remove the module and its patch path only after it has no
 remaining failing-leg assignment. Resolve every stale or newly failing leg
 before the patched full matrix is accepted.
+
+No duty is currently active. Preserve `cases/upstream-test-quarantine/` as an
+inactive `draft = true` scaffold with its README, manifest and zero-byte patch.
+Keep its TOML queue and gate entries commented with the reason to enable them
+when currently broken upstream tests require quarantine. Never delete this
+infrastructure or its supporting gates/runbook because the module union is
+empty. Deactivate obsolete assignments through
+[`docs/runbooks/test-quarantine.md`](docs/runbooks/test-quarantine.md), not the
+production-case deletion flow. Record reassessment as not applicable, skip
+inactive case-specific commands and keep every production and final matrix
+gate. Do not restore retired skips.
 
 When upstream absorbs a patch exactly, the resolver reports
 `already-present`. Removing it from the active queue still requires a current

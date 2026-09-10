@@ -1,45 +1,37 @@
 schema = 1
+# Permanent inactive infrastructure, not a production fix. Never delete this case.
+# Enable only to disable currently broken upstream tests, after clean-source proof.
+# workspace-update removes the draft marker and derives the active patch fields.
+draft = true
 slug = "upstream-test-quarantine"
 kind = "test-quarantine"
 title = "Quarantine failing upstream test modules"
 commit_subject = "Quarantine failing upstream test modules"
-patch_sha256 = "5279ec6909f79bd2d229858b4c1fb3a8751a417be77a8e40f957ae87017de68d"
+# Empty draft placeholders: fix.patch is zero bytes and is not selectable.
+patch_sha256 = ""
 dependencies = []
-paths = [
-  "tests/unittests/unit/client/record_test.py",
-  "tests/unittests/unit/client/x11_client_paint_test.py",
-]
+paths = []
 
 [tests]
 list = [
-  "unit.client.x11_client_paint_test",
-  "unit.client.record_test",
-  "full",
-  "full-cython",
-  "full-no-compat",
+  # Add the current unit.* module union before promotion, then enable these legs:
+  # "full",
+  # "full-cython",
+  # "full-no-compat",
 ]
 
 [quarantine]
-modules = [
-  "unit.client.x11_client_paint_test",
-  "unit.client.record_test",
-]
+modules = []
 
 [quarantine.gates]
-quarantine = [
-  "unit.client.x11_client_paint_test",
-]
-quarantine-cython = [
-  "unit.client.x11_client_paint_test",
-  "unit.client.record_test",
-]
-quarantine-no-compat = [
-  "unit.client.x11_client_paint_test",
-]
+quarantine = []
+quarantine-cython = []
+quarantine-no-compat = []
 
 [evidence]
 required_gates = [
-  "quarantine",
-  "quarantine-cython",
-  "quarantine-no-compat",
+  # Enable all three only when quarantining currently broken upstream tests:
+  # "quarantine",
+  # "quarantine-cython",
+  # "quarantine-no-compat",
 ]

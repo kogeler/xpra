@@ -33,11 +33,18 @@ remote wire-request timeouts.
 ## Embedded-source context
 
 The case resolves against source commit
-`212038243d0067b6860ebe7d6953692179ef353f`, embedded in current `develop`.
+`d95058b0916913fe6ae5296fb702f66d833898b0`, embedded in current `develop`.
 The current `ClipboardProxy.get_contents()` asks `XConvertSelection` to place
 results on the helper's shared event window using a selection/target-derived
 property. Successful property changes can reach the proxy through the helper;
 that route cannot observe a refusal because no result property is created.
+
+An absent owner is a normal X11 selection state. The conversion still reaches
+`XConvertSelection` and consumes the server's refusal, but its diagnostic
+description must not call `get_wininfo(0)`: that helper queries window title
+properties and causes `BadWindow` even when debug output is disabled. The
+request boundary formats the absent owner without native window queries;
+nonzero-owner diagnostics and the actual refusal protocol remain unchanged.
 
 There are three missing pieces at the native reply boundary: a core-event
 signal mapping, admission of owner-sent synthetic replies and an explicit
@@ -56,6 +63,15 @@ correlate concurrent/retried conversions, preserve positive and incremental
 delivery, and retire native requestor resources. A new signal name alone or
 longer conversion timeout is not an equivalent repair.
 
+Current-code reassessment retains the refusal repair and adapts its native
+ownership. Upstream `af0d210f310` removed the injected
+`xpra.x11.common.get_pywindow` API. The helper now explicitly passes its
+GTK-filter route to the proxy; only that route uses the maintained
+`gtk_event_window()` adapter. Raw X11 server conversions must neither require
+a GDK wrapper nor import GTK. The review also separates private INCR streams
+and their cancellation: independent requestor windows cannot safely share the
+legacy helper-window accumulator.
+
 ## Surrounding code and ownership map
 
 | Component | Responsibility |
@@ -65,7 +81,7 @@ longer conversion timeout is not an equivalent repair.
 | `xpra/x11/bindings/window.pyx` | Performs native window creation/destruction, conversion requests and property I/O. |
 | `xpra/x11/bindings/events.pyx` | Parses core X events, applies synthetic-event admission and supplies the signal/window metadata used by dispatch. |
 | `xpra/x11/gtk/bindings.pyx` | Supplies the real GDK X11 filter which feeds native events into Xpra's parser/dispatcher. |
-| `xpra/x11/common.py` and the GTK lookup adapter | Supply and retain the toolkit's wrapper for a requestor XID. |
+| `xpra/x11/selection/common.py` and the GTK lookup adapter | Supply the optional toolkit wrapper only when the helper's GTK filter routes events. |
 | `xpra/x11/dispatch.py` | Maps XIDs to receivers and forwards only signals declared by those GObject receivers. |
 | `xpra/clipboard/core.py` and `xpra/clipboard/timeout.py` | Own clipboard protocol messages, selection mapping and remote request completion/deadlines. |
 | `xpra/server/source/clipboard.py` | Owns the separate outgoing clipboard packet budget. |
@@ -125,12 +141,14 @@ available, the existing immediate-empty path remains. A requestor is allocated
 only when an actual native conversion is needed.
 
 Each conversion receives an unmapped InputOnly child of the root, with
-property-change and structure notifications selected. It is not a visible
+property-change notifications selected. The GTK route also selects structure
+notifications and requires a retained GDK wrapper; the raw event-loop route
+needs neither GTK nor that extra event mask. It is not a visible
 application window and does not claim the selection. Its native XID is
 registered in the dispatcher, and the lookup wrapper is retained for the
 whole conversion so GTK can continue to associate events with that window.
 
-The proxy's new state is bounded by its active conversions:
+The proxy's per-request state is bounded by its active conversions:
 
 | Field | Meaning |
 | --- | --- |
@@ -138,6 +156,8 @@ The proxy's new state is bounded by its active conversions:
 | `_requestor_windows[xid]` | Target, local request ID and retained window wrapper for one conversion. |
 | `_requestor_xids[request_id]` | Reverse lookup used by completion, timeout and cancellation. |
 | `_requestor_notified` | Requestors whose matching positive acknowledgement was accepted; not a completed-data set. |
+| `_requestor_incr[xid]` | Independent chunks, actual byte count, type, format and exact timer reservation for one incremental conversion. |
+| `_requestor_gtk` | Helper-owned event-route choice; it does not acquire another filter lease. |
 | `_requestors_closed` | Terminal cleanup flag preventing later native conversions on this proxy. |
 
 The property name remains `selection-target`. It need not encode a unique
@@ -156,6 +176,11 @@ the handler requires that same value in the reply. The patch does not add a
 timestamp-allocation policy or treat target spelling as a request ID. Matching
 CLIPBOARD data must not complete PRIMARY work, and a reply to a retired XID
 must not cancel a newer conversion merely because its target matches.
+
+The ICCCM recommends using the triggering event's timestamp instead of
+`CurrentTime`. This case preserves the existing conversion API; distinct XIDs
+make its unchanged timestamp unambiguous without claiming to implement that
+separate timestamp policy.
 
 ## Refusal, acknowledgement and property ordering
 
@@ -203,10 +228,11 @@ with an empty callback result. The regression sends exactly that sequence.
 
 ## Positive contents and incremental transfer
 
-`read_property(xid, atom)` extracts the former property-reading body so both
-the acknowledgement and subsequent property events can read the correct
-window. Native type/format discovery, maximum data handling, target extraction
-and existing data filtering remain in that path.
+`read_requestor_property(xid, atom)` reads the acknowledged conversion's own
+property. Type/format discovery, TARGETS extraction and content filtering still
+use the native bindings and existing codecs. The unchanged legacy
+`do_property_notify()` reader remains separate for the helper window; its
+accumulator cannot intercept a private requestor's data.
 
 An ordinary result completes through `got_requestor_contents()`. It resolves
 the private XID back to one local request ID, removes that callback, destroys
@@ -214,33 +240,53 @@ the requestor and removes its deadline before returning filtered contents.
 A successful reply no longer completes every pending request for the same
 target just because they shared one property on the helper window.
 
-The helper-window path remains available: if the reader was invoked for
-`self.xid`, it delegates to the existing `got_local_contents()` interface.
-That method now also closes any private requestors associated with callbacks
-it retires. This preserves integration with the surrounding proxy code rather
-than deleting its established completion entry point.
+The helper-window path still completes through `got_local_contents()`. That
+existing entry point detaches all callbacks for its target and retires their
+private requestors and deadlines before invoking any consumer. A raising
+consumer cannot strand another callback; the batch is exhausted before the
+first error is propagated. Re-entrant new reads are not part of that retired
+batch.
 
-INCR uses the same existing aggregation logic on the requestor's property.
-The initial INCR value starts the transfer; deleting that property lets the
-owner send chunks. Matching property changes append data and advance the
-existing incremental timer. The zero-length terminator joins the chunks,
-resets aggregation state and completes the corresponding requestor.
+Private INCR state belongs to the exact requestor. The initial one-integer,
+format-32 INCR property starts a stream; its lower bound may be zero and is
+not an exact final length. Deleting it admits the first chunk. Each later
+nonempty chunk is appended only to that requestor's accumulator, with matching
+type and format; deleting it admits the next chunk. An empty property joins
+and completes that stream. A missing property is not an empty terminator.
 
-The change relocates reads and deletes to the actual requestor XID; it does
-not redesign the proxy's single incremental accumulator into concurrent
-per-request INCR streams. The positive regression exercises sequential INCR
-delivery for both selections and an acknowledgement/refusal race during one
-transfer. It is not evidence for arbitrary simultaneous INCR transfers on one
-selection proxy. Existing size, type-change and incremental-timeout semantics
-remain separate from the new negative-completion boundary.
+Both a regular result property and the final empty INCR property are explicitly
+deleted before native window destruction. Owners observing property deletion
+therefore receive the protocol's completion acknowledgement. Positive
+SelectionNotify still precedes reading, so destruction cannot overtake the
+owner's success acknowledgement.
+
+Each stream retains the existing one-second incremental deadline, with an
+exact request/stream/reservation identity checked by its callback. Rescheduling
+or retirement invalidates the previous reservation before timer removal; a
+queued old callback cannot expire its replacement. The separate conversion
+deadline still applies and is not extended by chunks. Expiry retires that
+requestor's accumulator too, so an interrupted transfer cannot contaminate a
+retry, a parallel INCR or an ordinary reply on another XID.
+
+The private reader rejects malformed headers, changes of type or format and
+data above `MAX_DATA_SIZE` (4 MiB). This bound now applies to the complete
+accumulated result as well as individual native properties; it does not
+silently truncate them or concatenate an unbounded sequence of chunks.
+Invalid data retires the affected conversion with an empty result and reports
+the error. This is not a new global clipboard memory quota or a limit on the
+number of peer requests. The legacy helper-window reader retains its upstream
+size and incremental policy, including the companion patch's timer ordering.
 
 ## Completion, cancellation and failure lifetime
 
-`close_requestor()` removes the reverse ID mapping, unregisters the dispatcher
-receiver, discards its accepted marker, destroys the native window and drops
-the retained wrapper. Normal completion and refusal remove the pending entry
-before invoking a callback, so callback code does not observe that request as
-still active. Closing an already retired ID is harmless.
+`take_conversion_request()` removes the pending callback before retiring its
+requestor and conversion deadline. `close_requestor()` detaches both XID
+lookups, the accepted marker and private INCR reservation before unregistering
+the receiver or destroying the native window. The GDK wrapper remains locally
+retained through destruction. Native/timer cleanup attempts are independent;
+a timer-removal exception cannot prevent another requestor from being retired.
+Callbacks left queued by such an error see no active identity. Closing an
+already retired ID is harmless.
 
 The main terminal paths remain distinct:
 
@@ -250,6 +296,7 @@ The main terminal paths remain distinct:
 | Complete positive contents | Retire only that requestor and callback, then return filtered contents. |
 | Silent-owner deadline | Retire the requestor, retain the existing two-line timeout warning and return the existing empty result. |
 | Proxy cleanup | Set the closed flag, destroy active requestors and cancel their deadlines without replaying the abandoned conversion callbacks. |
+| Temporary selection/send revocation | Detach all private conversions, then empty-complete their callbacks without a timeout; later reenable may allocate new requestors. |
 | New read after terminal cleanup | Return an empty result without allocating another native window or deadline. |
 
 `CONVERT_TIMEOUT` still comes from `XPRA_CLIPBOARD_CONVERT_TIMEOUT`, with the
@@ -257,12 +304,21 @@ existing 100 ms default. It is not the remote clipboard timeout or the separate
 INCR timer. This case neither increases those values nor adds retries or
 polling to conceal an owner which never responds.
 
-Request setup must also be exception-safe. Failure to obtain/register the
-window wrapper destroys the new native window and removes any receiver.
+Request setup must also be exception-safe. Failure to obtain/register a
+required GTK wrapper destroys the new native window and removes any receiver.
 If deadline allocation fails, the already created requestor is retired and
 the exception propagates without leaving a pending callback. If conversion
 setup fails after a callback was registered, that pending request is completed
-and retired before the original exception propagates.
+and retired before the original exception propagates. Synchronizing X11 context
+exit is inside the rollback boundary too. A failing consumer cannot replace
+that original setup exception.
+
+New conversions require selection enablement and send permission as well as
+an open lifecycle. A temporary revocation cancels only these locally sourced
+conversions, not the helper's remote-wire requests or selection ownership.
+Changing receive permission alone does not cancel a still-permitted local
+read. All old callbacks are detached before empty completion, so re-entrant
+reenablement cannot expose an old request or accidentally cancel a new one.
 
 After a timeout, an owner attempting to send a late reply to the destroyed
 requestor encounters an X11 `BadWindow` rather than reaching a retry on a new
@@ -271,15 +327,16 @@ connection, then proves the new request still accepts its own positive reply.
 An expected old-window error is confined to that control, not a production
 warning suppression rule.
 
-Broader helper, token, remote-request and INCR teardown is still owned by the
-surrounding clipboard lifecycle and its existing patch. This case cancels its
-new native conversion resources first; it does not replace direction/peer
-revocation or native Wayland pipe cancellation with the closed flag.
+Broader helper, token, remote-request and legacy INCR teardown is still owned
+by the surrounding clipboard lifecycle and its existing patch. This case
+cancels its private conversion resources first; it does not replace helper
+peer revocation or native Wayland pipe cancellation with the closed flag.
 
 ## Patch-queue and integration ownership
 
-`fix.patch` changes `xpra/x11/bindings/events.pyx` and
-`xpra/x11/selection/proxy.py`, and adds
+`fix.patch` changes `xpra/x11/bindings/events.pyx`,
+`xpra/x11/selection/proxy.py` and the helper's proxy initialization in
+`xpra/x11/selection/clipboard.py`, and adds
 `tests/unittests/unit/x11/selection_refusal_test.py`. The manifest has no
 dependencies: a balanced test-owned filter makes its refusal control reachable
 on embedded clean source without borrowing another case's production repair.
@@ -315,17 +372,20 @@ The case does not:
 - change clipboard packet formats, origin-loop prevention or remote request IDs;
 - raise packet budgets, extend deadlines, retry silent owners or hide warnings;
 - accept arbitrary synthetic X events or authenticate same-display X11 clients;
-- introduce parallel per-request INCR aggregation or a general clipboard cache;
+- replace the legacy helper-window INCR implementation or add a general cache;
 - fix native Wayland I/O, transport loss, an application stall or every possible
   source of a clipboard timeout.
 
 ## Focused regression design
 
-`unit.x11.selection_refusal_test` uses `DisplayContext` to start a private
-Xvfb, imports actual compiled Xpra bindings and installs the real GDK X11 filter.
-The test requires those native subjects; their absence must fail, not skip.
-Its class-level filter acquisition/release is balanced independently of the
-helper's full-stack filter lease.
+`unit.x11.selection_refusal_test` runs the native controls in two fresh
+interpreters with the parent's selected import paths. The GTK child uses
+`DisplayContext` and a private Xvfb, actual compiled bindings and the real GDK
+filter. Its class-level filter lease is independently balanced even when the
+filter was already installed. The raw child uses another owned Xvfb, the real
+native X11 GLib event source and the server's GTK-import prohibition. It must
+finish without importing `xpra.x11.gtk`. Missing native subjects fail, not skip;
+process-global display pointers never leak into the surrounding unit suite.
 
 An independent `ctypes` Xlib connection owns CLIPBOARD and PRIMARY. A GLib I/O
 watch receives real `SelectionRequest` events. The owner can hold a request,
@@ -339,12 +399,12 @@ which would obscure the refusal defect. Requests enter through the existing
 proxy `get_contents()` API; the new handler need not exist for a tests-only
 control to execute its stimulus.
 
-The nine tests cover:
+The 21 native tests execute on both event routes and cover:
 
 | Control | Required observation |
 | --- | --- |
 | Refused targets | Both UTF-8 MIME spellings and TARGETS complete with the exact empty callback shape on CLIPBOARD and PRIMARY, without timeout warnings. |
-| No owner | The X server's refusal completes both selections without a request reaching the raw owner. |
+| No owner | The X server's refusal completes both selections without a request reaching the raw owner or diagnostic property queries against XID 0. |
 | Positive contents | TARGETS, UTF8_STRING and sequential incremental TEXT return the actual owner data for both selections, with one callback and drained transfer state. |
 | Identical concurrent conversions | Refusing the first request leaves the second pending; its later positive reply returns its own contents without a timeout. |
 | Duplicate negative acknowledgement | A refusal following accepted INCR cannot replace the successful incremental result or cause duplicate completion. |
@@ -352,16 +412,33 @@ The nine tests cover:
 | Mismatched reply metadata | Wrong selection, target, timestamp, property or requestor cannot cancel the request; its subsequent valid positive reply succeeds. |
 | Silence and late reply | A genuinely silent owner reaches the real conversion deadline and warning; a late old-window refusal cannot cancel a fresh retry. |
 | Pending cleanup | Repeated cleanup removes active conversion timers and receivers and does not later invoke the abandoned callback or emit a timeout. |
+| Parallel INCR and ordinary replies | Same/different targets return their own exact bytes; an ordinary result cannot join a paused stream. |
+| Partial-transfer expiry and retry | The real conversion deadline retires old partial data; a subsequent ordinary conversion remains intact. |
+| Incremental deadline and header | A one-second INCR deadline completes only that request; a zero lower-bound header still transfers data. |
+| Size and format errors | The complete-result byte limit and an in-stream format change retire the affected request without falling through to conversion timeout. |
+| Timer failure and supersession | Raising removal still attempts all native cleanup; captured stale callbacks cannot complete a retired request or expire a rescheduled stream. |
+| Temporary revocation | Disable/send denial empty-completes pending work, denies new reads and allows a successful later reenable. |
+| Event-route ownership | A failed required GTK lookup restores root children and receiver state; actual raw conversions never invoke that lookup. |
+| Synchronized setup failure | A fault after actual XConvertSelection and native synchronization retires resources and keeps the original error despite a raising consumer. |
+| Legacy batch callback failure | All native requestors and deadlines are retired before the first callback; a raising consumer does not prevent the next completion. |
+
+Sequential INCR also checks that the independent owner receives the final
+property-deletion acknowledgement, not just that Xpra returned the bytes.
+Only the parallel-ordering and isolated INCR-deadline controls lengthen their
+test-local conversion deadline; ordinary positive, refusal and silence
+controls retain the production default. No production timeout is changed.
 
 The owner uses a fixed public marker, not operator clipboard contents. Bounded
 GLib pumping observes asynchronous progress; it is test synchronization, not
 production clipboard polling. Native owner errors are checked, with only the
 explicit old-requestor `BadWindow` consumed in its dedicated assertion.
 
-The regression's drain checks inspect pending conversions and native receiver
-registration, not just returned text. Teardown balances the helper, selection
-proxies, filter, owner connection, I/O watch and private display. Pending-test
-work must not survive a failed clean-source assertion.
+The regression's drain checks inspect pending conversions, private XID/INCR
+state and native receiver registration, not just returned text. Independent
+cleanup registrations balance helper, proxies, filter, raw owner connection,
+I/O watch and display even after a failed assertion. The owner stops sending
+fixture replies before helper retirement. Pending test work must not outlive
+a failing clean-source control.
 
 `PATCH_MODE=tests-only` must expose actual refusals falling through to timeout,
 wrong shared-request completion or unretired state. An empty callback alone
@@ -369,9 +446,20 @@ would be vacuous because the old timeout produces one too: warning assertions,
 request isolation and native lifetime distinguish the repaired result. Positive
 text/TARGETS/INCR and unrelated-reply controls remain necessary on clean source.
 An import failure, missing new API or disconnected event filter is not the
-intended negative result.
+intended negative result. The additional raw route and property-deletion
+controls are positive protocol obligations, not alternatives to observing
+the original native refusal failure on clean source.
 
-The manifest also retains `unit.clipboard_core_test` and
+Both native child modes run the original refused-alias/TARGETS test first with
+the same fail-fast ordering on clean and patched source. That makes a real
+refusal falling through to timeout the first reported negative observation,
+before checks of newly introduced requestor state. Every successful child
+still executes all 21 methods exactly once. A wrapping owner-info observer
+additionally rejects XID 0 queries in both GTK and raw modes; it does not
+replace XConvertSelection, native events or the global X error recorder.
+
+The manifest also retains `unit.x11.clipboard_filter_test` for upstream GTK
+filter ownership and raw-server routing, and `unit.clipboard_core_test` and
 `unit.client.subsystem.clipboard_test` for protocol/helper and client-adapter
 controls. Composed focused checks additionally exercise the companion X11 and
 Wayland clipboard cases; the standalone native owner test does not establish
@@ -417,21 +505,28 @@ checks and owned cleanup are all required; none substitutes for another.
 - Keep selection-owner windows separate from private conversion requestors.
 - Correlate replies by owned XID plus selection, target and the request time;
   target spelling or one shared property cannot identify a refused conversion.
-- Register and retain each requestor until completion, timeout or cancellation.
+- Register and retain each requestor until completion, timeout or cancellation;
+  keep GTK lookup conditional on the helper's actual event route.
 - Wait for its positive acknowledgement before consuming property events and
   keep that accepted state through INCR completion.
 - Ignore duplicate or mismatched replies without completing another request.
+- Keep private INCR bytes, type/format and exact timer reservation per request;
+  delete the final property before destroying its window.
 - Preserve the empty TARGETS versus ordinary-content callback formats.
 - Retire native windows, receivers and deadlines before publishing completion;
   do not replay abandoned callbacks during terminal cleanup.
 - Keep real silence timeouts, size/filter policy and companion cleanup intact.
+- Separate temporary send/selection revocation from terminal cleanup; retire
+  an old batch before re-entrant callbacks can admit new work.
 - Require native negative/positive controls and complete live delivery/drain/log
   evidence; a shorter delay or one successful paste does not prove the fix.
 
 ## Required validation
 
 Follow [development and final acceptance](../../docs/runbooks/validation.md).
-After a behavior change, run the manifest's tests-only clean control and
+During an upstream refresh, finish and record the incremental manual review
+and resulting-stack exit gate before runtime validation. Then run the
+manifest's tests-only clean control and
 patched focused inventory against the same frozen source/image. Exercise
 compiled and no-compat focused modes with actual native X11 bindings, plus the
 composed X11/Wayland clipboard regressions. A constructed Python event or

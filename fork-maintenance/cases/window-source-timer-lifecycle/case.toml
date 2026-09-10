@@ -3,7 +3,7 @@ slug = "window-source-timer-lifecycle"
 kind = "production"
 title = "Own window source timers through terminal cleanup"
 commit_subject = "Own window source timers through terminal cleanup"
-patch_sha256 = "8a23d8b1293735ee73d6e1441d45028bee924d81b4aa80f59ca3c349048d20a5"
+patch_sha256 = "0d59bde18244abc34f820ac852339dfd43d8abbcd39b2706ac4e1ebc69fcc414"
 dependencies = []
 paths = [
   "tests/unittests/unit/server/window/compress_test.py",

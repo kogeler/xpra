@@ -1,24 +1,22 @@
 diff --git a/setup.py b/setup.py
-index 670795ecc83eec44020f83e8305bd7d07ad4e4e5..40a758aece52812fda43147d08d2d46216f7578b 100755
+index 593f54e6539029605ae7e079ff4361f64ca4923b..ad27dac4963ec1da08db6c1b6c5133484b699c18 100755
 --- a/setup.py
 +++ b/setup.py
-@@ -3654,8 +3654,8 @@ toggle_packages(avif_ENABLED, "xpra.codecs.avif")
- tace(avif_encoder_ENABLED, "xpra.codecs.avif.encoder", "libavif")
- tace(avif_decoder_ENABLED, "xpra.codecs.avif.decoder", "libavif")
+@@ -3674,4 +3674,6 @@ tace(avif_decoder_ENABLED, "xpra.codecs.avif.decoder", "libavif")
  toggle_packages(jph_ENABLED, "xpra.codecs.jph")
--tace(jph_encoder_ENABLED, "xpra.codecs.jph.encoder,xpra/codecs/jph/jph.cpp", OPENJPH_PKG_CONFIG, language="c++")
--tace(jph_decoder_ENABLED, "xpra.codecs.jph.decoder,xpra/codecs/jph/jph.cpp", OPENJPH_PKG_CONFIG, language="c++")
-+tace(jph_encoder_ENABLED, "xpra.codecs.jph.encoder", OPENJPH_PKG_CONFIG, language="c++")
-+tace(jph_decoder_ENABLED, "xpra.codecs.jph.decoder", OPENJPH_PKG_CONFIG, language="c++")
+-tace(jph_encoder_ENABLED, "xpra.codecs.jph.encoder,xpra/codecs/jph/jph_encode.cpp", OPENJPH_PKG_CONFIG, language="c++")
+-tace(jph_decoder_ENABLED, "xpra.codecs.jph.decoder,xpra/codecs/jph/jph_decode.cpp", OPENJPH_PKG_CONFIG, language="c++")
++tace(jph_encoder_ENABLED, "xpra.codecs.jph.encoder,xpra/codecs/jph/jph_encode.cpp", OPENJPH_PKG_CONFIG,
++     language="c++", depends=["xpra/codecs/jph/jph_common.h"])
++tace(jph_decoder_ENABLED, "xpra.codecs.jph.decoder,xpra/codecs/jph/jph_decode.cpp", OPENJPH_PKG_CONFIG,
++     language="c++", depends=["xpra/codecs/jph/jph_common.h"])
  toggle_packages(csc_libyuv_ENABLED, "xpra.codecs.libyuv")
- if csc_libyuv_ENABLED:
-     if libyuv_fallback:
 diff --git a/tests/unittests/unit/codecs/jph_build_test.py b/tests/unittests/unit/codecs/jph_build_test.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..ee2e0ace1047dfe53e81295a832d0f8a3da654cc
+index 0000000000000000000000000000000000000000..a365f308079635af039a6fdc5ba0199d5119e592
 --- /dev/null
 +++ b/tests/unittests/unit/codecs/jph_build_test.py
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,220 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 kogeler
@@ -37,11 +35,57 @@ index 0000000000000000000000000000000000000000..ee2e0ace1047dfe53e81295a832d0f8a
 +import tarfile
 +from tempfile import TemporaryDirectory
 +import unittest
++from unittest.mock import patch
 +
 +
 +PLAN_PREFIX = "jph-build-plan="
 +JPH_PACKAGE = "xpra.codecs.jph."
-+HELPER_PATHS = ("xpra/codecs/jph/jph.cpp", "xpra/codecs/jph/jph.h")
++COMMON_HEADER = "xpra/codecs/jph/jph_common.h"
++ROLE_PATHS = {
++    "encoder": ("xpra/codecs/jph/jph_encode.cpp", "xpra/codecs/jph/jph_encode.h"),
++    "decoder": ("xpra/codecs/jph/jph_decode.cpp", "xpra/codecs/jph/jph_decode.h"),
++}
++HELPER_PATHS = (COMMON_HEADER, *ROLE_PATHS["encoder"], *ROLE_PATHS["decoder"])
++
++
++def incremental_decision(extension):
++    from distutils.command.build_ext import build_ext
++    from distutils.ccompiler import new_compiler
++    from setuptools import Distribution
++
++    class RebuildRequested(Exception):
++        pass
++
++    # The extension is from actual setup + Cython, not a fabricated plan.
++    # Enter the production native build_ext skip branch, but stop at the real
++    # compiler's compile entry rather than running a compiler or native loader.
++    command = build_ext(Distribution({"ext_modules": [extension]}))
++    command.ensure_finalized()
++    command.compiler = new_compiler()
++    output = Path(command.get_ext_fullpath(extension.name))
++    output.parent.mkdir(parents=True, exist_ok=True)
++    output.write_bytes(b"build-plan-only output marker")
++    header = Path(COMMON_HEADER)
++    original = header.stat()
++    stamp = max(Path(path).stat().st_mtime_ns for path in (*extension.sources, *extension.depends, COMMON_HEADER))
++
++    def needs_rebuild() -> bool:
++        try:
++            command.build_extension(extension)
++        except RebuildRequested:
++            return True
++        return False
++
++    try:
++        os.utime(output, ns=(stamp + 10_000_000_000, stamp + 10_000_000_000))
++        with patch.object(command.compiler, "compile", side_effect=RebuildRequested):
++            unchanged = needs_rebuild()
++            os.utime(header, ns=(original.st_atime_ns, stamp + 20_000_000_000))
++            changed_header = needs_rebuild()
++    finally:
++        os.utime(header, ns=(original.st_atime_ns, original.st_mtime_ns))
++        output.unlink()
++    return {"unchanged": unchanged, "changed-header": changed_header}
 +
 +
 +def describe_setup(flags):
@@ -69,6 +113,7 @@ index 0000000000000000000000000000000000000000..ee2e0ace1047dfe53e81295a832d0f8a
 +            "sources": extension.sources,
 +            "depends": extension.depends,
 +            "objects": compiler.object_filenames(extension.sources, output_dir="build/jph-objects"),
++            "incremental": incremental_decision(extension),
 +        })
 +    print(PLAN_PREFIX + json.dumps({"compiler": compiler.compiler_type, "extensions": extensions}))
 +
@@ -143,12 +188,21 @@ index 0000000000000000000000000000000000000000..ee2e0ace1047dfe53e81295a832d0f8a
 +        shared = {obj: names for obj, names in owners.items() if len(names) != 1}
 +        self.assertEqual(shared, {}, f"parallel extensions share writable compiler objects: {shared}")
 +
-+    def test_shared_helper_and_header_remain_dependencies(self):
++    def test_role_sources_and_shared_header_remain_dependencies(self):
 +        for name, plan in self.plans.items():
 +            for extension in plan["extensions"]:
 +                with self.subTest(selection=name, extension=extension["name"]):
 +                    inputs = set(extension["sources"]) | set(extension["depends"])
-+                    self.assertTrue(set(HELPER_PATHS) <= inputs, inputs)
++                    role = extension["name"].removeprefix(JPH_PACKAGE)
++                    self.assertTrue({COMMON_HEADER, *ROLE_PATHS[role]} <= inputs, inputs)
++                    other = "decoder" if role == "encoder" else "encoder"
++                    self.assertTrue(set(ROLE_PATHS[other]).isdisjoint(extension["sources"]))
++
++    def test_common_header_change_reaches_native_incremental_build(self):
++        for name, plan in self.plans.items():
++            for extension in plan["extensions"]:
++                with self.subTest(selection=name, extension=extension["name"]):
++                    self.assertEqual(extension["incremental"], {"unchanged": False, "changed-header": True})
 +
 +    def test_encoder_and_decoder_remain_independently_selectable(self):
 +        for name in ("encoder", "decoder"):
@@ -183,35 +237,3 @@ index 0000000000000000000000000000000000000000..ee2e0ace1047dfe53e81295a832d0f8a
 +        describe_setup(sys.argv[2:])
 +    else:
 +        unittest.main()
-diff --git a/xpra/codecs/jph/decoder.pyx b/xpra/codecs/jph/decoder.pyx
-index bca0577de9e5c48e3ba6bd00af8dadaea8a9dbe8..138040ab6ad17154a38964b91e81f566c96e8894 100644
---- a/xpra/codecs/jph/decoder.pyx
-+++ b/xpra/codecs/jph/decoder.pyx
-@@ -31,6 +31,11 @@ cdef extern from "jph.h":
-                    char *error, size_t error_size) nogil
- 
- 
-+# Each extension owns its compiled object, even under parallel build_ext.
-+cdef extern from "jph.cpp":
-+    pass
-+
-+
- def get_version() -> Tuple[int, int, int]:
-     return jph_version_major(), jph_version_minor(), jph_version_patch()
- 
-diff --git a/xpra/codecs/jph/encoder.pyx b/xpra/codecs/jph/encoder.pyx
-index afb5b32c2705707409a1afece8bffdbd3de474bc..602ef4d1a8e17f9231f62092bf89df619475f9bc 100644
---- a/xpra/codecs/jph/encoder.pyx
-+++ b/xpra/codecs/jph/encoder.pyx
-@@ -34,6 +34,11 @@ cdef extern from "jph.h":
-                    char *error, size_t error_size) nogil
- 
- 
-+# Each extension owns its compiled object, even under parallel build_ext.
-+cdef extern from "jph.cpp":
-+    pass
-+
-+
- INPUT_FORMATS: Dict[str, Tuple[int, int, int, int]] = {
-     "RGB": (3, 0, 1, 2),
-     "BGR": (3, 2, 1, 0),

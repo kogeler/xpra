@@ -28,7 +28,8 @@ override BASE_COMMIT := $(if $(strip $(SOURCE_COMMIT)),$(strip $(SOURCE_COMMIT))
 override SOURCE_SHORT := $(shell printf '%s' "$(BASE_COMMIT)" | cut -c1-12)
 override SOURCE_BUNDLE := $(SOURCE_BUNDLE_ROOT)/$(SOURCE_TIP_COMMIT)-$(SOURCE_REMOTE).bundle
 override WORKFLOW_SHA := $(shell git -C "$(SOURCE_HOST)" show "$(BASE_COMMIT):.github/workflows/test.yml" 2>/dev/null | sha256sum | awk '{print $$1}')
-override IMAGE_INPUT_SHA := $(shell { sha256sum .containerignore Containerfile entrypoint.sh selection.py 2>/dev/null; sha256sum "$(PAYLOAD_HELPER)" 2>/dev/null | sed 's|  .*|  container_payload.py|'; printf '%s\n' "$(WORKFLOW_SHA)"; } | sha256sum | awk '{print $$1}')
+override NEUTRAL_INPUTS := neutral_tests.py neutral/pointer_scroll_test.py neutral/pointer_scroll_client.c
+override IMAGE_INPUT_SHA := $(shell { sha256sum .containerignore Containerfile entrypoint.sh selection.py $(NEUTRAL_INPUTS) 2>/dev/null; sha256sum "$(PAYLOAD_HELPER)" 2>/dev/null | sed 's|  .*|  container_payload.py|'; printf '%s\n' "$(WORKFLOW_SHA)"; } | sha256sum | awk '{print $$1}')
 override IMAGE_INPUT_SHORT := $(shell printf '%s' "$(IMAGE_INPUT_SHA)" | cut -c1-16)
 override RUNNER_SHA := $(shell python3 "$(JOB)" runner-sha 2>/dev/null)
 override IMAGE := localhost/xpra-fork-maintenance-upstream-tests:ubuntu-26.04-$(IMAGE_INPUT_SHORT)$(IMAGE_TAG_SUFFIX)
@@ -63,7 +64,7 @@ help:
 	@printf '%s\n' \
 		'SELECTION=cases/<id> selects its case.toml and fix.patch' \
 		'SELECTION=stacks/<id> selects stacks/<id>.toml and its case series' \
-		'PATCH_MODE=patched applies all paths; tests-only applies retained tests; clean applies none' \
+		'PATCH_MODE selects case paths; production-clean and patched modes also install the fixed neutral tests' \
 		'make source-check         Verify the source boundary embedded in current develop' \
 		'make source-snapshot      Freeze that source history as a credential-free Git bundle' \
 		'make image                Verify the input-keyed, label-verified Ubuntu 26.04 image' \
@@ -112,7 +113,7 @@ inputs-check:
 	@[[ "$(IMAGE_TAG_SUFFIX)" =~ ^(-[a-z0-9]+(-[a-z0-9]+)*)?$$ ]] || { \
 		printf 'invalid IMAGE_TAG_SUFFIX: %s\n' "$(IMAGE_TAG_SUFFIX)" >&2; exit 2; \
 	}
-	@for input in .containerignore Containerfile entrypoint.sh selection.py; do \
+	@for input in .containerignore Containerfile entrypoint.sh selection.py $(NEUTRAL_INPUTS); do \
 		path="$(RUNNER_HOST)/$$input"; \
 		test ! -L "$$path" && test -f "$$path" || { \
 			printf 'runner input is missing or is a symlink: %s\n' "$$path" >&2; exit 2; \

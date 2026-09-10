@@ -3,7 +3,7 @@ slug = "client-codec-startup-order"
 kind = "production"
 title = "Start the decode worker before validating client codecs"
 commit_subject = "Start the decode worker before validating client codecs"
-patch_sha256 = "059bbe1966a9e51bb543a02ad203231563641e40a0aedbc551f17ad81121adb1"
+patch_sha256 = "06fbaa90ea34302b3da75d95568cbd5536a7c2d957b96fc60f0f6b6e355e6aa2"
 dependencies = []
 paths = [
   "tests/unittests/unit/client/subsystem/codec_startup_test.py",

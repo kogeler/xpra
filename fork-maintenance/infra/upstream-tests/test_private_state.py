@@ -61,6 +61,8 @@ class PrivateStateTest(unittest.TestCase):
     def test_rejects_writable_shared_parent_without_chmod(self) -> None:
         artifact_root = self.project_root / ".artifacts"
         artifact_root.mkdir(mode=0o775)
+        # Establish the tested mode independently of the runner's umask.
+        artifact_root.chmod(0o775)
 
         with self.assertRaisesRegex(
             private_state.PrivateStateError,
@@ -99,6 +101,7 @@ class PrivateStateTest(unittest.TestCase):
     def test_rejects_a_symlink_without_modifying_its_target(self) -> None:
         target = self.project_root / "outside"
         target.mkdir(mode=0o755)
+        target.chmod(0o755)
         (self.project_root / ".artifacts").symlink_to(
             target,
             target_is_directory=True,
@@ -118,6 +121,7 @@ class PrivateStateTest(unittest.TestCase):
         (self.project_root / ".artifacts").chmod(0o755)
         target = self.project_root / "outside"
         target.mkdir(mode=0o755)
+        target.chmod(0o755)
         (self.state_root / "logs").symlink_to(target, target_is_directory=True)
 
         with self.assertRaisesRegex(
@@ -132,6 +136,7 @@ class PrivateStateTest(unittest.TestCase):
     def test_rejects_wrong_owner_before_chmod(self) -> None:
         artifact_root = self.project_root / ".artifacts"
         artifact_root.mkdir(mode=0o755)
+        artifact_root.chmod(0o755)
 
         with self.assertRaisesRegex(
             private_state.PrivateStateError,
@@ -172,6 +177,7 @@ class UpstreamMakeContractTest(unittest.TestCase):
         )
         self.assertIn(
             "EXTRA_ARGS='--minimal --with-modules --with-server "
+            "--with-client --with-gtk3 "
             "--with-keyboard --with-wayland_server --with-clipboard --with-dmabuf'",
             entrypoint,
         )

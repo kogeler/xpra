@@ -3,12 +3,13 @@ slug = "wayland-client-keymap-sync"
 kind = "production"
 title = "Synchronize Wayland keymaps with clients"
 commit_subject = "Synchronize Wayland keymaps with clients"
-patch_sha256 = "00a5d27c0ce9e03996a95beb46f4e3028aa2ad0c363ce85e7f40c4aa8b174fa3"
+patch_sha256 = "cae763c5c2e9f8824fa86d44408fda84bc70da4e7bcda476b790045ee7e2b12e"
 dependencies = []
 paths = [
   "tests/unittests/unit/client/keyboard_helper_test.py",
   "tests/unittests/unit/server/subsystem/settings_test.py",
   "tests/unittests/unit/wayland/keyboard_config_test.py",
+  "tests/unittests/unit/wayland/keyboard_rmlvo_test.py",
   "tests/unittests/unit/wayland/keyboard_test.py",
   "tests/unittests/unit/wayland/linkage_test.py",
   "tests/unittests/unit/wayland/window_test.py",
@@ -34,6 +35,7 @@ list = [
   "unit.client.keyboard_helper_test",
   "unit.server.subsystem.settings_test",
   "unit.wayland.keyboard_config_test",
+  "unit.wayland.keyboard_rmlvo_test",
   "unit.wayland.keyboard_test",
   "unit.wayland.window_test",
   "wayland",

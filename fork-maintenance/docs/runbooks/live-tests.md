@@ -383,6 +383,23 @@ This mandatory build-time GL proof supplements the runtime Cairo oracle; it
 is not inferred from Cairo rendering; every live client build runs these GL checks. The remaining case-owned mapped OpenGL tests
 also stay in the focused/native upstream-test coverage.
 
+The ordinary opaque secondary root may carry `BGRX` or `RGBX` with an `rgb24`
+coding name: upstream's raw encoder keeps that name when no format conversion
+is required. Like the real client, the retained-packet decoder derives pixel
+size from the explicit `rgb_format`, not the coding name. It still validates
+row stride, exact payload size/digest and every expected pixel. Alpha-bearing
+formats are not admitted for this opaque `rgb24` baseline; composition stages
+remain strictly `rgb32` with their transaction fields and premultiplied pixels.
+
+Streamed source/context archives retain private host permissions. Only inside
+the image builder, the validated public Xpra source copy regains group/other
+read and directory traversal permissions before installation, preserving its
+executable bits. Otherwise data installation can preserve `0600` on CSS and
+icons even though Python/native imports work. Both final endpoint images must
+prove CSS/icon readability after switching to the actual unprivileged runtime
+user. Do not widen the host artifact boundary or use root-only import checks
+as proof that installed resources are accessible.
+
 The dedicated C fixture creates a 420x300 primary and 360x260 secondary
 `xdg_toplevel`. Its 220x140 lower and 160x100 upper children use real ARGB
 `wl_subsurface` buffers with fixed partial alpha and premultiplied patterned
@@ -727,6 +744,18 @@ list, then bind its address to the decoded NV12 paint and exact packet ACK.
 Never assume it is first, accept duplicate or missing decode callbacks, or
 replace packet identity with a generic successful paint. Retain the ordinary
 dimensions/options, payload, hardware presentation and ordering assertions.
+
+Bind presentation to one complete FBO blit/swap/completion transaction for the
+exact window and backing size, with a blit covering the selected H.264 region.
+The prefix in `N.do_gl_show(...)` is the rectangle count, not the window ID.
+An intervening same-window ACK does not necessarily replace the H.264 pixels:
+only an exactly saved and client-log-bound, nonoverlapping one-pixel lossless
+RGB codec edge may pass before the swap. Its window size and backing epoch must
+match. Reject overlapping, unknown, duplicate or unbound ACKs and incomplete or
+cross-window presentation transactions. A queued `process_draw` alone is not a
+completed paint. The report records `presented_before_overwrite` and the exact
+intervening edge sequences; a correct screenshot alone cannot establish this
+packet-specific proof.
 
 The frozen host runner computes this ordinary-root H.264 ledger from the saved
 packet metadata and payloads. It records readiness and profile-owned baseline/

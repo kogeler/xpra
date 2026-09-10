@@ -1,67 +1,101 @@
 # Upstream test quarantine
 
-This is the single duty case for upstream unit-test modules that are known to
-be non-green on the fork's frozen Ubuntu 26.04 matrix. It owns test disabling
-only; production behavior must never be changed here.
+## Status and lifetime
 
-At the historical embedded-source boundary
-`dbc575b063abbc6df314a63ee530fdb218776327`,
-`unit.client.x11_client_paint_test` was non-green in all three local matrix
-legs. Baseline and no-backwards-compatibility failed `test_colors_png` and
-`test_xterm_position_and_color`. The Cython-heavy leg errored in all four test
-methods because the spawned server reported no valid encodings. Upstream commit
-`a0e6b3935fe6` independently added this whole module to the canonical
-`--skip-fail` list. This historical rationale is not current acceptance
-evidence.
+The quarantine is currently inactive: there are no assigned upstream test
+modules, `fix.patch` is a zero-byte file, and `case.toml` uses the existing
+`draft = true` schema. Its reference in `stacks/develop.toml` and its test-gate
+entries in this manifest remain commented, with instructions to enable them
+only when currently broken upstream tests need quarantining.
 
-The patch marks the whole class skipped because the failure boundary changes
-between matrix legs. Before applying this case after every operator-selected
-upstream rebase, run all three clean `quarantine*` gates.
+This directory is permanent fork infrastructure. Never delete it, its manifest,
+empty patch, README, or the supporting quarantine gates and runbook just because
+all upstream tests are green. Retire obsolete disabling changes, not the
+quarantine mechanism. Do not retain historical skips or old module assignments
+in the inactive patch. Git history, not this directory, owns their history.
 
-At current embedded source `212038243d0067b6860ebe7d6953692179ef353f`,
-upstream commit
-[`1ca1155cd48f`](https://github.com/Xpra-org/xpra/commit/1ca1155cd48f0dd336e0166166ad4983da135324)
-added recursive blob extraction to `xpra/client/base/record.py`.
-`WindowModel.extract_blobs`
-annotates its argument as builtin `dict`, but window creation passes nested
-`typedict` metadata back into that method. In the Cython-heavy build, Cython's
-annotation typing enforces an exact builtin dictionary and the recursive call
-raises `TypeError`; 19 of the module's 24 tests error at the common window-create
-boundary. When `record.py` remains Python, the subclass is accepted and the
-same module stays green. No production case in the queue changes this recorder
-path, so it belongs to the upstream-test duty quarantine rather than to a
-Wayland production patch.
+## Boundary and ownership
 
-The recorder quarantine imports `importlib.machinery.EXTENSION_SUFFIXES` and
-skips `RecordClientTest` only when `xpra.client.base.record.__file__` ends in a
-real extension-module suffix. It therefore disables the current failure in
-`quarantine-cython` and `full-cython`, while baseline and no-compat continue to
-execute the upstream tests. The existing unconditional X11 client-paint class
-skip is unchanged because that module remains assigned to all three legs.
-An unskipped boundary test in the same module proves that a `.py` implementation
-does not trigger the quarantine, that every interpreter-declared extension
-suffix does, and that the live class skip flag matches the loaded module form.
-Keep that test outside `RecordClientTest`: placing it inside the quarantined
-class would make an accidentally over-broad decorator self-validating through
-skip rather than failing the standard or Cython-heavy leg.
+This is the single reserved `kind = "test-quarantine"` duty case, not a
+production fix. It may disable only upstream unit-test modules whose failures
+have been reproduced on the source embedded in current `develop`, in the
+frozen Ubuntu 26.04 matrix. A failure seen only with downstream patches applied
+is not quarantine authority. Setup, compiler, dependency, runner and fork
+regression failures must be diagnosed at their actual boundary.
 
-`[quarantine].modules` is the ordered union of both changed modules;
-`[quarantine.gates]` records the exact per-leg expected-failure subsets. Every
-clean gate runs the whole union, ignores only its own subset, and requires all
-remaining modules to pass with no skipped or unignored failure. A green
-assigned module makes only that assignment stale; remove the patch path and
-union entry only when no leg still needs it. A newly failing complement is a
-separate admission decision. Refresh this one case through the documented
-atomic `ALLOW_PATH_CHANGE=1` workspace transition before accepting the stack.
+The case must have no dependencies and must never change `xpra/`, packaging,
+fork regressions or unrelated upstream tests. No other case may adopt the
+quarantine kind, and this reserved slug must never become a production case.
+The maintained [quarantine runbook](../../docs/runbooks/test-quarantine.md)
+defines admission, reassessment, activation and deactivation.
 
-## Required validation
+## Active manifest contract
 
-Follow [the quarantine runbook](../../docs/runbooks/test-quarantine.md) and
-[development and final acceptance](../../docs/runbooks/validation.md). The
-three clean gates are required before applying the duty after rebase; retain
-their current collected results while source, image/environment, module union,
-and per-leg expectations remain unchanged. Independent production-case
-development need not wait, and unrelated production-only edits do not require
-reassessment. After a duty edit, run its nearest regression and affected clean
-gate checks. The complete patched matrix belongs to final acceptance on the
-stable resulting stack, not after every intermediate quarantine edit.
+When active, `[quarantine].modules` is the ordered, unique union of affected
+`unit.*` modules. Each entry owns exactly its corresponding
+`tests/unittests/<module>.py` path, and every entry remains in `tests.list`.
+The three `[quarantine.gates]` arrays assign the exact failing subset in each
+mode:
+
+| Gate | Build mode | Compatibility |
+| --- | --- | --- |
+| `quarantine` | Interpreted | Enabled |
+| `quarantine-cython` | `cythonize_more` | Enabled |
+| `quarantine-no-compat` | Interpreted | Disabled |
+
+Each subset preserves union order; their union must equal `modules`. A subset
+may be empty if every listed module passes in that leg. The active case still
+requires all three gates. Disable a module only in its failing modes; a
+compiled-only defect does not justify hiding a green interpreted test.
+
+The active patch must be nonempty, apply and reverse exactly, and match the
+automation-derived `patch_sha256` and `paths`. The empty inactive scaffold is
+not a valid active case, a successful clean control, or a way to bypass these
+checks.
+
+## Activation and deactivation
+
+Before activation, review current source and test ownership, reproduce the
+upstream failure in every affected clean leg, and establish task authority to
+quarantine it. Populate the human-authored module, test and gate fields and
+document each current failure here. Start a `PATCH_MODE=clean` draft workspace;
+stage and export the complete test-only candidate using `workspace-update`.
+Promotion removes `draft = true` and derives the real patch, digest and paths
+atomically. Only then uncomment the queue reference. Do not run `case-new`:
+this reserved directory already exists.
+
+When the last assignment becomes obsolete, review the exact clean/direct
+confirmations and finish any bound job/workspace lifecycle first. Comment the
+queue reference with its reactivation purpose, restore `draft = true`, empty
+the patch and manifest inventories, and comment the test-gate entries again.
+The narrow inactive reset leaves `patch_sha256 = ""` and `paths = []`; it is
+not a manual rewrite of an active patch's derived metadata. Preserve this
+structure and description. The runbook gives the complete sequence and checks.
+
+## Validation
+
+After every explicit upstream refresh, manually review the duty and its
+assignments as part of the incremental whole-queue review before runtime
+tests. With the duty inactive, record that there are no assignments, verify
+the preserved scaffold and commented queue reference, and omit its case-only
+runtime commands. Never activate an empty patch just to run quarantine gates.
+
+With the duty active, each clean gate executes the entire module union and
+uses `--skip-fail` only for its declared subset. Acceptance requires the exact
+ordered ignored-failure set, a passing complement, and no skipped or unignored
+failures. A now-green assigned module makes the gate stale; its same-job
+direct repeat without `--skip-fail` supplies confirmation to remove that
+assignment, not permission to report the old mapping as passing. Remove a
+module's disabling change only when no failing-leg assignment remains.
+
+After reassessment, run the patched case's focused check and the complete
+stack's three full upstream legs on the stable candidate. An inactive duty
+does not weaken or replace any production, native, package or nine-profile
+complete-stack live requirement. Tests challenge the manual review; they do
+not replace it.
+
+Offline fork-control tests protect the retained directory and empty draft
+state, exclude it from active selection and snapshots, reject an accidental
+queue activation or direct test selection, and retain the active quarantine
+manifest/path-transition checks. Run `make -C fork-maintenance check` after
+changing this infrastructure.
