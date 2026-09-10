@@ -2,9 +2,7 @@ diff --git a/tests/unittests/unit/client/keyboard_helper_test.py b/tests/unittes
 index d12582803dfa92cd60ed875a2971b25bb5c2608b..260c317c1d11e4368f0c997397ac397c9906592c 100755
 --- a/tests/unittests/unit/client/keyboard_helper_test.py
 +++ b/tests/unittests/unit/client/keyboard_helper_test.py
-@@ -5,9 +5,11 @@
- # later version. See the file COPYING for details.
- 
+@@ -7,5 +7,7 @@
  import unittest
 +from unittest.mock import Mock, patch
  
@@ -13,11 +11,7 @@ index d12582803dfa92cd60ed875a2971b25bb5c2608b..260c317c1d11e4368f0c997397ac397c
 +from xpra.net.common import BACKWARDS_COMPATIBLE
 +from xpra.util.objects import AdHocStruct, typedict
  from xpra.client.gui.keyboard_helper import KeyboardHelper
- from unit.process_test_util import DisplayContext
- 
-@@ -37,9 +39,515 @@ class KeyboardHelperTest(unittest.TestCase):
-         kh.query_xkbmap()
-         p = kh.get_keymap_properties()
+@@ -39,5 +41,511 @@ class KeyboardHelperTest(unittest.TestCase):
          assert p, "no keymap properties returned"
 -        assert len(p) >= 8, "not enough keymap properties (%i): %s" % (len(p), p)
 +        self.assertEqual(p.get("rmlvo-version"), 1)
@@ -530,110 +524,436 @@ index d12582803dfa92cd60ed875a2971b25bb5c2608b..260c317c1d11e4368f0c997397ac397c
 +            remove.assert_called_once_with(17)
 +
      def test_parse_shortcuts(self):
-         shortcuts = [
-             'Control+Menu:toggle_keyboard_grab',
 diff --git a/tests/unittests/unit/server/subsystem/settings_test.py b/tests/unittests/unit/server/subsystem/settings_test.py
-index 8bf19e68299f354fe8d8561a2ddf7168b3618431..d77d1ddda688947a0c41d2291b80008225137573 100644
+index 412dd2f3e2362ff1e379a21cb0c0a0ef7f0db57e..01d77157f9acc7ea10174f6ef0fdeebd06acfc04 100644
 --- a/tests/unittests/unit/server/subsystem/settings_test.py
 +++ b/tests/unittests/unit/server/subsystem/settings_test.py
-@@ -7,6 +7,7 @@
+@@ -7,4 +7,6 @@
  import unittest
++from unittest.mock import Mock
  
  from xpra.net.common import Packet
 +from xpra.server.core import ServerCore
  from xpra.server.subsystem.settings import SettingsServer
- from xpra.server.subsystem.stub import StubSubsystem
- from unit.server.subsystem.servermixintest_util import FakeServerBase
-@@ -14,21 +15,28 @@ from unit.server.subsystem.servermixintest_util import FakeServerBase
- 
- class FakeSource:
- 
--    def __init__(self, uuid: str):
-+    def __init__(self, uuid: str, events=None):
-         self.uuid = uuid
-         self.settings = []
-+        self.events = events
-         self.client_readonly = False
-+        self.control_readonly = False
-         self.enforced_readonly = False
- 
-     def send_setting_change(self, setting: str, value) -> None:
-+        if self.events is not None:
-+            self.events.append(("send", self.uuid, setting, value))
-         self.settings.append((setting, value))
- 
-     def server_enforced_readonly(self) -> bool:
--        return self.enforced_readonly
-+        return self.enforced_readonly or self.control_readonly
- 
-     def set_client_readonly(self, readonly: bool) -> None:
-         self.client_readonly = readonly
+@@ -34,2 +36,5 @@ class FakeSource:
  
 +    def set_control_readonly(self, readonly: bool) -> None:
-+        self.control_readonly = readonly
++        self.enforced_readonly = readonly
 +
  
- class FakeServer(FakeServerBase):
-     """ stands in for the source lookups `ServerCore` delegates to `client-session` """
-@@ -96,6 +104,52 @@ class SettingsTest(unittest.TestCase):
-         self.settings._process_readonly_toggled(proto2, Packet("readonly-toggled", True))
-         self.assertTrue(source2.client_readonly)
+@@ -101,2 +106,36 @@ class SettingsTest(unittest.TestCase):
  
-+    def test_readonly_notification_precedes_send(self) -> None:
-+        events = []
-+        source1 = FakeSource("one", events)
-+        source2 = FakeSource("two", events)
-+        self.server.sources.update({object(): source1, object(): source2})
-+        self.settings.connect(
-+            "readonly-changed",
-+            lambda _settings, source: events.append(("signal", getattr(source, "uuid", None))),
-+        )
++    def test_global_readonly_signal_precedes_failing_peer_send(self) -> None:
++        source = FakeSource("one")
++        self.server.sources[object()] = source
++        source.enforced_readonly = True
++        observed = []
++        self.server.connect("setting-changed", lambda _server, *args: observed.append(args))
++        source.send_setting_change = Mock(side_effect=RuntimeError("send failed"))
++        with self.assertRaisesRegex(RuntimeError, "send failed"):
++            self.settings.setting_changed("readonly", True)
++        self.assertEqual(observed, [("readonly", True, None)])
 +
-+        source1.enforced_readonly = True
-+        self.settings.setting_changed("readonly", True)
-+        self.assertEqual(events, [
-+            ("signal", None),
-+            ("send", "one", "readonly", True),
-+            ("send", "two", "readonly", False),
-+        ])
++    def test_control_readonly_signal_precedes_failing_peer_send(self) -> None:
++        source = FakeSource("one")
++        self.server.sources[object()] = source
++        observed = []
++        self.server.connect("setting-changed", lambda _server, *args: observed.append(args))
++        source.send_setting_change = Mock(side_effect=RuntimeError("send failed"))
++        with self.assertRaisesRegex(RuntimeError, "send failed"):
++            ServerCore.control_command_client_readonly(self.server, "*", True)
++        self.assertTrue(source.enforced_readonly)
++        self.assertEqual(observed, [("readonly", True, source)])
 +
-+        events.clear()
-+        self.settings.set_control_readonly(source2, True)
-+        self.assertTrue(source2.control_readonly)
-+        self.assertEqual(events, [
-+            ("signal", "two"),
-+            ("send", "two", "readonly", True),
-+        ])
-+
-+    def test_control_command_routes_readonly_through_settings(self) -> None:
-+        events = []
-+        source1 = FakeSource("one", events)
-+        source2 = FakeSource("two", events)
-+        self.server.sources.update({object(): source1, object(): source2})
-+        self.settings.connect(
-+            "readonly-changed",
-+            lambda _settings, source: events.append(("signal", getattr(source, "uuid", None))),
-+        )
-+
-+        result = ServerCore.control_command_client_readonly(self.server, "two", True)
-+
-+        self.assertEqual(result, "set client readonly=True for 1 client(s)")
-+        self.assertFalse(source1.control_readonly)
-+        self.assertTrue(source2.control_readonly)
-+        self.assertEqual(events, [
-+            ("signal", "two"),
-+            ("send", "two", "readonly", True),
++    def test_other_settings_keep_after_send_notification(self) -> None:
++        source = FakeSource("one")
++        self.server.sources[object()] = source
++        observed = []
++        self.server.connect("setting-changed", lambda _server, *args: observed.append(("signal", args)))
++        source.send_setting_change = lambda *args: observed.append(("send", args))
++        self.settings.setting_changed("session_name", "example")
++        self.assertEqual(observed, [
++            ("send", ("session_name", "example")),
++            ("signal", ("session_name", "example", None)),
 +        ])
 +
  
- def main():
-     unittest.main()
 diff --git a/tests/unittests/unit/wayland/keyboard_config_test.py b/tests/unittests/unit/wayland/keyboard_config_test.py
-new file mode 100644
-index 0000000000000000000000000000000000000000..c4874fee084f4d077323ee34422764ed108da064
---- /dev/null
+index 9a71811b6b6db91538a89a6f9fc6d735fc615b99..6f292ec88c47479250b755052100f8338e083117 100644
+--- a/tests/unittests/unit/wayland/keyboard_config_test.py
 +++ b/tests/unittests/unit/wayland/keyboard_config_test.py
-@@ -0,0 +1,566 @@
+@@ -3,2 +3,3 @@
+ # Copyright (C) 2026 Antoine Martin <antoine@xpra.org>
++# Copyright (C) 2026 kogeler
+ # Xpra is released under the terms of the GNU GPL v2, or, at your option, any
+@@ -7,25 +8,28 @@
+ import unittest
+-from unittest.mock import Mock
+ 
+ from xpra.util.objects import typedict
+-from xpra.keyboard.nokeyboard import NoKeyboardDevice
+-from xpra.server.source.keyboard import KeyboardConnection
+ from xpra.wayland.server.keyboard_config import KeyboardConfig
+ from xpra.wayland.server.subsystem.keyboard import WaylandKeyboardManager
++from unit.wayland.keyboard_test import FakeDevice as BoundaryDevice, FakeServer, FakeSource as BoundarySource
+ 
+ 
+-class FakeDevice(NoKeyboardDevice):
+-    """ records the keymaps installed on it - the real one is a `wlr_keyboard` """
+-    __slots__ = ("installed", "refused")
++class FakeDevice(BoundaryDevice):
++    """Record the exact candidate installed, not the last non-owner compile."""
+ 
+     def __init__(self, refused=()):
++        super().__init__()
+         self.installed: list[tuple[str, str, str, str]] = []
+-        # layout strings that xkb would fail to compile:
+         self.refused = tuple(refused)
+ 
+-    def set_layout(self, layout="us", model="pc105", variant="", options="") -> bool:
++    def compile_keymap(self, rules, model, layout, variant, options):
+         if layout in self.refused:
+-            return False
+-        self.installed.append((layout, model, variant, options))
+-        return True
++            raise ValueError("simulated unavailable XKB layout")
++        candidate = super().compile_keymap(rules, model, layout, variant, options)
++        candidate.install_tuple = layout, model, variant, options
++        return candidate
++
++    def install_keymap(self, candidate, settle_keycodes=(), modifiers=(), group=0):
++        groups = super().install_keymap(candidate, settle_keycodes, modifiers, group)
++        self.installed.append(candidate.install_tuple)
++        return groups
+ 
+@@ -33,3 +37,3 @@ class FakeDevice(NoKeyboardDevice):
+ class Opts:
+-    """ only the `keyboard_*` options are ever read from here """
++    """Only the keyboard_* options are ever read from here."""
+ 
+@@ -46,11 +50,7 @@ class Opts:
+ 
+-class FakeSource(KeyboardConnection):
+-    """ stands in for the per-client connection object """
+-
+-    def __init__(self, uuid: str):
+-        self.uuid = uuid
+-        self.init_state()
++class FakeSource(BoundarySource):
++    """Retain the real KeyboardConnection state and public source API."""
+ 
+-    def effective_readonly(self) -> bool:
+-        return False
++    def __init__(self, uuid: str, *, readonly=False):
++        super().__init__(uuid, 0, None, readonly=readonly)
+ 
+@@ -60,3 +60,3 @@ class KeyboardConfigTest(unittest.TestCase):
+     def test_parse_hello(self):
+-        # the hello packet nests everything in a `keymap` dictionary:
++        # The hello packet nests everything in a keymap dictionary.
+         kc = KeyboardConfig()
+@@ -70,12 +70,13 @@ class KeyboardConfigTest(unittest.TestCase):
+         }))
+-        self.assertEqual((kc.layout, kc.model, kc.variant, kc.options),
++        self.assertEqual((kc.rmlvo.layout, kc.rmlvo.model, kc.rmlvo.variant, kc.rmlvo.options),
+                          ("de", "pc104", "nodeadkeys", "compose:ralt"))
+-        self.assertEqual(mods, 4)
++        # RMLVO is one atomic change, not four independently mutated strings.
++        self.assertGreater(mods, 0)
+ 
+     def test_parse_config_packet(self):
+-        # the `keyboard-config` packet sends the same attributes at the top level:
++        # keyboard-config sends the same attributes at the top level.
+         kc = KeyboardConfig()
+         kc.parse(typedict({"layout": "fr", "query_struct": {"model": "pc105"}}))
+-        self.assertEqual((kc.layout, kc.model, kc.variant, kc.options), ("fr", "pc105", "", ""))
+-        # re-sending the same values changes nothing:
++        self.assertEqual((kc.rmlvo.layout, kc.rmlvo.model, kc.rmlvo.variant, kc.rmlvo.options),
++                         ("fr", "pc105", "", ""))
+         self.assertEqual(kc.parse(typedict({"layout": "fr", "query_struct": {"model": "pc105"}})), 0)
+@@ -83,15 +84,18 @@ class KeyboardConfigTest(unittest.TestCase):
+     def test_set_layout(self):
+-        # the legacy `layout-changed` packet, which does not carry the model:
++        # The legacy layout-changed packet does not carry the model.
+         kc = KeyboardConfig()
+-        kc.parse(typedict({"layout": "fr", "query_struct": {"model": "pc105"}}))
++        kc.parse(typedict({"layout": "fr", "query_struct": {"model": "pc104"}}))
+         self.assertTrue(kc.set_layout("gb", "", ""))
+-        self.assertEqual((kc.layout, kc.model, kc.variant), ("gb", "pc105", ""))
++        self.assertEqual((kc.rmlvo.layout, kc.rmlvo.model, kc.rmlvo.variant), ("gb", "pc104", ""))
+         self.assertFalse(kc.set_layout("gb", "", ""))
+ 
+-    def test_layout_groups(self):
++    def test_layout_groups_keep_exact_order(self):
+         kc = KeyboardConfig()
+-        kc.parse(typedict({"layout": "fr", "variant": "oss", "layouts": ["us", "fr", "de"],
+-                           "variants": ["", "oss", "nodeadkeys"]}))
+-        # the active layout comes first and is not repeated by its entry in the list:
+-        self.assertEqual(kc.get_layout_groups(), (("fr", "oss"), ("us", ""), ("de", "nodeadkeys")))
++        kc.parse(typedict({
++            "rmlvo-version": 1, "layout": "fr", "variant": "oss",
++            "layouts": ["us", "fr", "de"], "variants": ["", "oss", "nodeadkeys"],
++            "layout_groups": True,
++        }))
++        self.assertEqual(tuple(zip(kc.rmlvo.layouts, kc.rmlvo.variants)),
++                         (("us", ""), ("fr", "oss"), ("de", "nodeadkeys")))
+ 
+@@ -99,8 +103,19 @@ class KeyboardConfigTest(unittest.TestCase):
+         kc = KeyboardConfig()
+-        kc.parse(typedict({"layout": "us", "layouts": ["us", "fr"]}))
+-        # a layout with no variant of its own gets an empty one:
+-        self.assertEqual(kc.get_layout_groups(), (("us", ""), ("fr", "")))
++        kc.parse(typedict({"rmlvo-version": 1, "layouts": ["us", "fr"]}))
++        self.assertEqual(tuple(zip(kc.rmlvo.layouts, kc.rmlvo.variants)), (("us", ""), ("fr", "")))
+ 
+-    def test_no_layout_has_no_groups(self):
+-        self.assertEqual(KeyboardConfig().get_layout_groups(), ())
++    def test_legacy_selection_list_does_not_reorder_current_layout(self):
++        kc = KeyboardConfig()
++        kc.parse(typedict({
++            "layout": "fr", "variant": "oss",
++            "layouts": ["us", "fr", "de"], "variants": ["", "oss", "nodeadkeys"],
++        }))
++        self.assertEqual(tuple(zip(kc.rmlvo.layouts, kc.rmlvo.variants)), (("fr", "oss"),))
++
++    def test_no_layout_has_known_unapplied_bootstrap(self):
++        kc = KeyboardConfig()
++        self.assertEqual(tuple(zip(kc.rmlvo.layouts, kc.rmlvo.variants)), (("us", ""),))
++        self.assertFalse(kc.applied_hash)
++        self.assertFalse(kc.validated_hash)
++        self.assertEqual(kc.compiled_groups, 0)
+ 
+@@ -108,7 +123,9 @@ class KeyboardConfigTest(unittest.TestCase):
+         kc = KeyboardConfig()
+-        # an empty configuration must not look like one that was applied:
+-        self.assertEqual(kc.get_hash(), "")
++        # A normalized identity exists before it has been installed.
++        bootstrap_hash = kc.get_hash()
++        self.assertTrue(bootstrap_hash)
++        self.assertFalse(kc.applied_hash)
+         kc.parse(typedict({"layout": "fr"}))
+-        self.assertNotEqual(kc.get_hash(), "")
+-        self.assertNotEqual(KeyboardConfig().get_hash(), kc.get_hash())
++        self.assertNotEqual(bootstrap_hash, kc.get_hash())
++        self.assertFalse(kc.applied_hash)
+ 
+@@ -117,16 +134,7 @@ class WaylandKeymapInstallTest(unittest.TestCase):
+ 
+-    def setUp(self):
+-        self.sources: list[FakeSource] = []
+-
+     def make_manager(self, refused=(), **opts) -> tuple[WaylandKeyboardManager, FakeDevice]:
+         device = FakeDevice(refused)
+-        # the connected keyboard clients, which `get_layout_groups` iterates over:
+-        sources = self.sources = []
+-        server = Mock()
+-        server.compositor.get_keyboard_device.return_value = device
+-        # no `control` subsystem, so no control commands are registered:
+-        server.get_subsystem.return_value = None
+-        server.get_sources_by_type.side_effect = lambda atype, exclude=None: tuple(
+-            ss for ss in sources if ss is not exclude
+-        )
++        server = FakeServer()
++        server.compositor.keyboard_device = device
++        self.sources = server.sources
+         manager = WaylandKeyboardManager(server=server)
+@@ -137,8 +145,11 @@ class WaylandKeymapInstallTest(unittest.TestCase):
+ 
+-    def connect(self, manager, uuid: str, keymap: dict) -> FakeSource:
+-        # what `parse_hello_ui_keyboard` does for every new keyboard client:
+-        ss = FakeSource(uuid)
+-        ss.keyboard_config = manager.get_keyboard_config(typedict({"keyboard": True, "keymap": keymap}))
++    def connect(self, manager, uuid: str, keymap: dict, *, readonly=False, keyboard=True) -> FakeSource:
++        ss = FakeSource(uuid, readonly=readonly)
++        caps = typedict({"keyboard": keyboard, "keymap": keymap})
++        before = tuple(manager.server.compositor.keyboard_device.installed)
++        manager.parse_hello_ui_keyboard(ss, caps)
++        self.assertEqual(tuple(manager.server.compositor.keyboard_device.installed), before,
++                         "hello parsing must not mutate the shared seat before acceptance")
+         self.sources.append(ss)
+-        manager.set_keymap(ss)
++        manager.add_new_client(ss, caps)
+         return ss
+@@ -146,15 +157,16 @@ class WaylandKeymapInstallTest(unittest.TestCase):
+     def test_server_layout_option(self):
+-        # `--keyboard-layout=fr` must reach the device before any client connects:
+         manager, device = self.make_manager(layout="fr")
+         self.assertEqual(device.installed, [("fr", "pc105", "", "")])
+-        # the config recorded as current is the one installed on the seat:
+         self.assertEqual(manager.config_hash, manager.config.get_hash())
++        self.assertEqual(manager.config.applied_hash, manager.config_hash)
+ 
+-    def test_no_layout_installs_nothing(self):
+-        # the device compiles its own default keymap when it is created,
+-        # so a client which tells us nothing must not cause a re-install:
++    def test_no_layout_installs_bootstrap_once(self):
++        # The manager binds explicit known-good metadata to the native map.
++        # An identical default client must not trigger another installation.
+         manager, device = self.make_manager(layout="")
+-        self.assertEqual(device.installed, [])
+-        self.connect(manager, "client-1", {})
+-        self.assertEqual(device.installed, [])
++        self.assertEqual(device.installed, [("us", "pc105", "", "")])
++        ss = self.connect(manager, "client-1", {})
++        self.assertEqual(device.installed, [("us", "pc105", "", "")])
++        self.assertIs(manager._keyboard_owner_source, ss)
++        self.assertEqual(ss.keyboard_config.applied_hash, manager.config_hash)
+ 
+@@ -165,4 +177,4 @@ class WaylandKeymapInstallTest(unittest.TestCase):
+         })
+-        self.assertEqual(device.installed, [("de", "pc105", "nodeadkeys", "")])
+-        # the delayed `keyboard-config` packet repeats the same values:
++        self.assertEqual(device.installed, [("us", "pc105", "", ""), ("de", "pc105", "nodeadkeys", "")])
++        before = tuple(device.installed)
+         ss.keyboard_config.parse(typedict({"layout": "de", "variant": "nodeadkeys",
+@@ -170,5 +182,3 @@ class WaylandKeymapInstallTest(unittest.TestCase):
+         manager.set_keymap(ss, True)
+-        self.assertEqual(device.installed, [("de", "pc105", "nodeadkeys", "")],
+-                         "an unchanged keymap must not be re-installed")
+-        # now the client actually switches layout:
++        self.assertEqual(tuple(device.installed), before, "an unchanged keymap must not be re-installed")
+         ss.keyboard_config.parse(typedict({"layout": "fr", "query_struct": {"model": "pc105"}}))
+@@ -178,23 +188,29 @@ class WaylandKeymapInstallTest(unittest.TestCase):
+     def test_client_layout_groups(self):
+-        # a client which can switch layouts gets all of them, its active one first:
+         manager, device = self.make_manager(layout="")
+         self.connect(manager, "client-1", {
+-            "layout": "fr", "layouts": ["us", "fr"], "variants": ["", "oss"],
++            "rmlvo-version": 1, "layout": "fr", "layouts": ["us", "fr"], "variants": ["", "oss"],
++            "layout_groups": True,
+         })
+-        self.assertEqual(device.installed, [("fr,us", "pc105", ",", "")])
++        self.assertEqual(device.installed[-1], ("us,fr", "pc105", ",oss", ""))
+ 
+-    def test_union_of_client_layouts(self):
+-        # the seat has a single keymap, so it must carry every client's layout,
+-        # with the client being configured in the first group:
++    def test_other_clients_do_not_replace_the_owner_map(self):
++        # Replace upstream's union assertion: it renumbers the owner's groups.
+         manager, device = self.make_manager(layout="")
+-        self.connect(manager, "client-1", {"layout": "de"})
+-        self.assertEqual(device.installed[-1], ("de", "pc105", "", ""))
+-        self.connect(manager, "client-2", {"layout": "es"})
+-        self.assertEqual(device.installed[-1], ("es,de", "pc105", ",", ""))
+-
+-    def test_union_keeps_variants_positional(self):
+-        # xkb pairs layouts and variants by position and refuses a mismatched list:
++        owner = self.connect(manager, "client-1", {"layout": "de"})
++        before = tuple(device.installed)
++        other = self.connect(manager, "client-2", {"layout": "es"})
++        self.assertEqual(tuple(device.installed), before)
++        self.assertEqual(device.layouts, ("de",))
++        self.assertIs(manager._keyboard_owner_source, owner)
++        self.assertTrue(other.keyboard_config.validated_hash)
++        self.assertFalse(other.keyboard_config.applied_hash)
++
++    def test_owner_variants_stay_positional_after_foreign_validation(self):
+         manager, device = self.make_manager(layout="")
+-        self.connect(manager, "client-1", {"layout": "de", "variant": "nodeadkeys"})
+-        self.connect(manager, "client-2", {"layout": "us"})
++        self.connect(manager, "client-1", {
++            "rmlvo-version": 1, "layouts": ["us", "de"], "variants": ["", "nodeadkeys"],
++        })
++        before = tuple(device.installed)
++        self.connect(manager, "client-2", {"layout": "fr"})
++        self.assertEqual(tuple(device.installed), before)
+         layouts, _, variants, _ = device.installed[-1]
+@@ -203,18 +219,28 @@ class WaylandKeymapInstallTest(unittest.TestCase):
+ 
+-    def test_union_is_capped(self):
+-        # xkb silently truncates a keymap to its first 4 layouts,
+-        # so we have to do the truncating ourselves, keeping the active client's layout:
++    def test_too_many_groups_are_rejected_without_truncation(self):
++        manager, device = self.make_manager(layout="")
++        owner = self.connect(manager, "owner", {"layout": "de"})
++        before = tuple(device.installed)
++        rejected = self.connect(manager, "too-many", {
++            "rmlvo-version": 1, "layouts": ["de", "es", "it", "pt", "se"],
++        })
++        self.assertFalse(rejected.keyboard_config.valid)
++        self.assertTrue(rejected.keyboard_config.rejected)
++        self.assertEqual(tuple(device.installed), before)
++        self.assertIs(manager._keyboard_owner_source, owner)
++
++    def test_duplicate_groups_keep_their_positions(self):
+         manager, device = self.make_manager(layout="")
+-        for i, layout in enumerate(("de", "es", "it", "pt", "se")):
+-            self.connect(manager, f"client-{i}", {"layout": layout})
+-        layouts = device.installed[-1][0].split(",")
+-        self.assertEqual(len(layouts), 4)
+-        self.assertEqual(layouts[0], "se", "the client being configured must keep the first group")
++        self.connect(manager, "client-1", {
++            "rmlvo-version": 1, "layouts": ["de", "de", "us"],
++            "variants": ["nodeadkeys", "", ""], "layout_groups": True,
++        })
++        self.assertEqual(device.installed[-1], ("de,de,us", "pc105", "nodeadkeys,,", ""))
+ 
+-    def test_duplicate_layouts_are_not_repeated(self):
++    def test_identical_other_client_does_not_reinstall(self):
+         manager, device = self.make_manager(layout="")
+         self.connect(manager, "client-1", {"layout": "de"})
++        before = tuple(device.installed)
+         self.connect(manager, "client-2", {"layout": "de"})
+-        self.assertEqual([x[0] for x in device.installed], ["de"],
+-                         "a client with the same layout must not change the keymap")
++        self.assertEqual(tuple(device.installed), before)
+ 
+@@ -222,5 +248,3 @@ class WaylandKeymapInstallTest(unittest.TestCase):
+         manager, device = self.make_manager(layout="fr")
+-        ss = FakeSource("readonly-client")
+-        ss.effective_readonly = lambda: True
+-        ss.keyboard_config = manager.get_keyboard_config(typedict({"keymap": {"layout": "de"}}))
++        ss = self.connect(manager, "readonly-client", {"layout": "de"}, readonly=True)
+         manager.set_keymap(ss)
+@@ -230,21 +254,28 @@ class WaylandKeymapInstallTest(unittest.TestCase):
+         manager, device = self.make_manager(layout="")
+-        ss = FakeSource("client-1")
+-        ss.keyboard_config = manager.get_keyboard_config(typedict({"keyboard": False, "keymap": {"layout": "de"}}))
++        ss = self.connect(manager, "client-1", {"layout": "de"}, keyboard=False)
+         self.assertFalse(ss.keyboard_config.enabled)
+         manager.set_keymap(ss)
+-        self.assertEqual(device.installed, [])
+-
+-    def test_unusable_layout_falls_back(self):
+-        # one layout xkb cannot compile stops the whole keymap from compiling,
+-        # so the client being configured must still get its own layout:
+-        manager, device = self.make_manager(refused=("fr,de", ))
+-        self.connect(manager, "client-1", {"layout": "de"})
+-        self.connect(manager, "client-2", {"layout": "fr"})
+-        self.assertEqual([x[0] for x in device.installed], ["de", "fr"])
++        self.assertEqual(device.installed, [("us", "pc105", "", "")])
++
++    def test_unusable_foreign_layout_preserves_the_installed_owner(self):
++        manager, device = self.make_manager(refused=("fr",))
++        owner = self.connect(manager, "client-1", {"layout": "de"})
++        before = tuple(device.installed)
++        rejected = self.connect(manager, "client-2", {"layout": "fr"})
++        self.assertEqual(tuple(device.installed), before)
++        self.assertIs(manager._keyboard_owner_source, owner)
++        self.assertEqual(manager.config_hash, owner.keyboard_config.applied_hash)
++        self.assertFalse(rejected.keyboard_config.validated_hash)
++        self.assertTrue(rejected.keyboard_config.rejected)
+ 
+     def test_no_device(self):
+-        # `install_keymap` must cope with a server that has no keyboard device:
+-        manager, _ = self.make_manager(layout="")
++        manager, device = self.make_manager(layout="")
++        before = tuple(device.installed)
++        installed_hash = manager.config_hash
+         manager.device = None
+-        self.connect(manager, "client-1", {"layout": "de"})
++        rejected = self.connect(manager, "client-1", {"layout": "de"})
++        self.assertEqual(tuple(device.installed), before)
++        self.assertEqual(manager.config_hash, installed_hash)
++        self.assertFalse(rejected.keyboard_config.applied_hash)
++        self.assertTrue(rejected.keyboard_config.rejected)
+ 
+diff --git a/tests/unittests/unit/wayland/keyboard_rmlvo_test.py b/tests/unittests/unit/wayland/keyboard_rmlvo_test.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ce971d481bf4db31391bee774f254550edd37c4
+--- /dev/null
++++ b/tests/unittests/unit/wayland/keyboard_rmlvo_test.py
+@@ -0,0 +1,576 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 kogeler
@@ -1020,6 +1340,16 @@ index 0000000000000000000000000000000000000000..c4874fee084f4d077323ee34422764ed
 +            with self.subTest(values=values), self.assertRaises(RMLVOError):
 +                normalize_rmlvo(values)
 +
++    def test_builtin_sequence_names_are_bounded_individually(self):
++        for container in (tuple, list):
++            for field in ("layouts", "variants"):
++                for text in ("x" * (MAX_NAME_SIZE + 1), "x" * (1024 * 1024), "us,fr"):
++                    values = self.exact_values()
++                    values[field] = container((text,))
++                    with self.subTest(container=container, field=field, length=len(text)), \
++                            self.assertRaises(RMLVOError):
++                        normalize_rmlvo(values)
++
 +
 +class KeyboardConfigStateTest(unittest.TestCase):
 +
@@ -1202,22 +1532,29 @@ index 0000000000000000000000000000000000000000..c4874fee084f4d077323ee34422764ed
 +    main()
 diff --git a/tests/unittests/unit/wayland/keyboard_test.py b/tests/unittests/unit/wayland/keyboard_test.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef4257706279e9b829
+index 0000000000000000000000000000000000000000..27b81933ff1e55a1a7ff34f6d3b03cad60c7764c
 --- /dev/null
 +++ b/tests/unittests/unit/wayland/keyboard_test.py
-@@ -0,0 +1,2934 @@
+@@ -0,0 +1,3119 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 kogeler
 +# Xpra is released under the terms of the GNU GPL v2, or, at your option, any
 +# later version. See the file COPYING for details.
 +
++import os
++import subprocess
++import sys
 +import unittest
++from tempfile import TemporaryDirectory
 +from typing import ClassVar
 +from unittest.mock import Mock, patch
 +
 +from xpra.keyboard.mask import DEFAULT_MODIFIER_MEANINGS
 +from xpra.net.common import BACKWARDS_COMPATIBLE, Packet
++from xpra.server.source.keyboard import KeyboardConnection
++from xpra.server.subsystem.client_session import ClientSessionServer
++from xpra.util.signal_emitter import SignalEmitter
 +from xpra.util.objects import typedict
 +from xpra.wayland.server.keyboard_config import KeyboardConfig
 +from xpra.wayland.server.subsystem import keyboard as keyboard_module
@@ -1292,6 +1629,19 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        candidate = FakeCandidate(layouts)
 +        self.candidates.append(candidate)
 +        return candidate
++
++    def set_layout(self, layout="us", model="pc105", variant="", options="") -> bool:
++        # Current clean upstream installs through this public bool API.
++        candidate = None
++        try:
++            candidate = self.compile_keymap("evdev", model, layout, variant, options)
++            self.install_keymap(candidate)
++            return True
++        except (ValueError, RuntimeError):
++            return False
++        finally:
++            if candidate is not None:
++                candidate.cleanup()
 +
 +    def install_keymap(self, candidate, settle_keycodes=(), modifiers=(), group=0):
 +        if self.fail_install:
@@ -1395,16 +1745,15 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        return 32
 +
 +    def get_keycode_for_keysym(self, keysym):
-+        # The clean server's existing interface flattens the keymap and takes
-+        # the first symbol match.  Keep this boundary callable for the clean
-+        # control; its wrong group-one collision must fail an output assertion.
-+        for layout in self.layouts:
++        # Current clean upstream returns keycode AND group, preferring its
++        # first symbol match. Its group-one collision is an output failure.
++        for group, layout in enumerate(self.layouts):
 +            if keycode := self.SYMBOLS.get(layout, {}).get(keysym):
-+                return keycode
-+        return -1
++                return keycode, group
++        return -1, 0
 +
 +    def get_keycode_for_keyname(self, name):
-+        return self.KEYNAMES.get(name, -1)
++        return self.KEYNAMES.get(name, -1), 0
 +
 +    def set_repeat_rate(self, delay, interval):
 +        self.repeat_calls.append((delay, interval))
@@ -1425,8 +1774,11 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        self.flushes += 1
 +
 +
-+class FakeServer:
++class FakeServer(SignalEmitter):
++    __signals__ = ("client-exited", "setting-changed")
++
 +    def __init__(self):
++        super().__init__()
 +        self.readonly = False
 +        self.compositor = FakeCompositor()
 +        self.sources = []
@@ -1437,10 +1789,6 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        self.timers = {}
 +        self.removed_timers = []
 +        self.next_timer = 1
-+        self.signals = {}
-+
-+    def connect(self, signal, callback):
-+        self.signals[signal] = callback
 +
 +    def idle_add(self, callback, *args):
 +        return callback(*args)
@@ -1465,8 +1813,9 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        return self.protocol_sources.get(proto)
 +
 +
-+class FakeSource:
++class FakeSource(KeyboardConnection):
 +    def __init__(self, uuid, counter, config, *, readonly=False, record=False, record_requested=None):
++        self.init_state()
 +        self.uuid = uuid
 +        self.counter = counter
 +        self.keyboard_config = config
@@ -1475,6 +1824,7 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        self._readonly = readonly
 +        self.closed = False
 +        self.user_events = []
++        self.send_async = Mock()
 +
 +    def effective_readonly(self):
 +        return self._readonly
@@ -1565,6 +1915,111 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        })
 +
 +        self.assertEqual(manager.device.modifiers, before)
++        self.assertFalse(manager.device.keys_down)
++
++    def make_shared_signal_session(self):
++        server = FakeServer()
++        manager = WaylandKeyboardManager(server)
++        manager.setup()  # subscribes to the actual server SignalEmitter
++        sources = []
++        for index in range(2):
++            source = FakeSource(f"client-{index}", index + 1, None)
++            proto = object()
++            server.sources.append(source)
++            server.protocol_sources[proto] = source
++            caps = typedict({"keyboard": True, "keymap": {"layout": "us"}})
++            manager.parse_hello_ui_keyboard(source, caps)
++            manager.add_new_client(source, caps)
++            sources.append((proto, source))
++        return manager, server, sources
++
++    @staticmethod
++    def send_q(manager, proto, pressed):
++        manager.do_process_keyboard_event(proto, 0, "q", pressed, {
++            "modifiers": (), "keyval": Q, "string": "q", "keycode": 24, "group": 0,
++        })
++
++    def test_failed_repeat_admission_retains_releasable_source_holder(self):
++        manager, server, sources = self.make_shared_signal_session()
++        proto, source = sources[0]
++        with patch.object(server, "timeout_add", side_effect=RuntimeError("timer admission failed")):
++            # The scheduler method is copied from server by StubSubsystem.
++            with patch.object(manager, "timeout_add", server.timeout_add):
++                self.send_q(manager, proto, True)
++        self.assertEqual(source.key_events, 1)
++        self.assertEqual(manager.device.keys_down, {24})
++        self.assertEqual(manager._key_holders[24], {(source, 24)})
++        self.assertFalse(manager._key_repeat_timers)
++        self.send_q(manager, proto, False)
++        self.assertFalse(manager.device.keys_down)
++        self.assertFalse(manager._key_holders)
++
++    def test_nonowner_departure_signal_does_not_release_surviving_holder(self):
++        manager, server, sources = self.make_shared_signal_session()
++        (owner_proto, owner), (other_proto, other) = sources
++        self.send_q(manager, owner_proto, True)
++        self.send_q(manager, other_proto, True)
++        server.sources.remove(other)
++        server.protocol_sources.pop(other_proto)
++        server.emit("client-exited", other)
++        self.assertEqual(manager.device.keys_down, {24})
++        self.assertEqual(manager._key_holders[24], {(owner, 24)})
++        before = (list(manager.device.install_calls), list(manager.device.repeat_calls),
++                  list(manager.device.press_calls), server.compositor.flushes)
++        manager.cleanup_protocol(other_proto)
++        self.assertEqual(before, (manager.device.install_calls, manager.device.repeat_calls,
++                                  manager.device.press_calls, server.compositor.flushes))
++        self.send_q(manager, owner_proto, False)
++        self.assertFalse(manager.device.keys_down)
++
++    def test_real_client_session_exit_precedes_close_and_fallback_cleanup(self):
++        manager, server, sources = self.make_shared_signal_session()
++        (owner_proto, owner), (other_proto, other) = sources
++        self.send_q(manager, owner_proto, True)
++        self.send_q(manager, other_proto, True)
++        session = ClientSessionServer(server)
++        session.sources = server.protocol_sources
++        server.get_sources_by_type = session.get_sources_by_type
++        server.cleanup_source = session.do_cleanup_source
++        server.server_event = Mock()
++        chronology = []
++        server.connect("client-exited", lambda _server, source: chronology.append(
++            ("signal", source not in session.sources.values(), source.closed),
++        ))
++
++        def close():
++            self.assertNotIn(other, manager._keyboard_configs)
++            self.assertEqual(manager.device.keys_down, {24})
++            other.closed = True
++            chronology.append(("close", True, other.closed))
++
++        other.close = close
++        self.assertIs(session.cleanup_client_protocol(other_proto), other)
++        self.assertEqual(chronology, [("signal", True, False), ("close", True, True)])
++        before = (list(manager.device.install_calls), list(manager.device.repeat_calls),
++                  list(manager.device.press_calls), server.compositor.flushes)
++        manager.cleanup_protocol(other_proto)
++        self.assertEqual(before, (manager.device.install_calls, manager.device.repeat_calls,
++                                  manager.device.press_calls, server.compositor.flushes))
++        self.send_q(manager, owner_proto, False)
++        self.assertFalse(manager.device.keys_down)
++
++    def test_readonly_signal_settles_one_holder_and_promotes_in_both_directions(self):
++        manager, server, sources = self.make_shared_signal_session()
++        (owner_proto, owner), (other_proto, other) = sources
++        self.send_q(manager, owner_proto, True)
++        self.send_q(manager, other_proto, True)
++        other._readonly = True
++        server.emit("setting-changed", "readonly", True, other)
++        self.assertEqual(manager.device.keys_down, {24})
++        self.assertEqual(manager._key_holders[24], {(owner, 24)})
++        other._readonly = False
++        server.emit("setting-changed", "readonly", False, other)
++        self.send_q(manager, other_proto, True)
++        self.assertEqual(manager._key_holders[24], {(owner, 24), (other, 24)})
++        owner._readonly = True
++        server.emit("setting-changed", "readonly", True, owner)
++        self.assertEqual(manager.keyboard_owner, other.uuid)
 +        self.assertFalse(manager.device.keys_down)
 +
 +
@@ -1751,12 +2206,72 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        manager.do_process_keyboard_event(proto, 0, "q", False, q_event)
 +
 +
++def native_keyboard_public_api_probe():
++    # A fresh interpreter prevents other tests' mocked native imports from
++    # replacing the actual compositor, seat and compiled keyboard.
++    from xpra.wayland.server.compositor import WaylandCompositor
++
++    check = unittest.TestCase()
++    with TemporaryDirectory(prefix="xpra-native-keyboard-") as runtime:
++        with patch.dict(os.environ, {
++            "XDG_RUNTIME_DIR": runtime, "XPRA_WAYLAND_GPU": "no", "WLR_RENDERER": "pixman",
++        }):
++            compositor = WaylandCompositor()
++            device = None
++            try:
++                compositor.add_socket()
++                device = compositor.get_keyboard_device()
++                check.assertIs(device.set_layout("us,fr", variant=","), True)
++                check.assertEqual(device.get_keycode_for_keysym(Q), (24, 0))
++                check.assertEqual(device.get_keycode_for_keysym(A), (38, 0))
++                check.assertEqual(device.get_keycode_for_keysym(A, 1), (24, 1))
++                check.assertEqual(device.get_keycode_for_keyname("a", 1), (24, 1))
++                device.update_modifiers(("shift", "lock"), 1)
++                device.press_key(24, True)
++                check.assertIs(device.set_layout("xpra_missing_layout"), False)
++                check.assertEqual(device.get_keycodes_down(), (24,))
++                check.assertEqual(device.get_layout_group_count(), 2)
++                check.assertEqual(device.get_layout_group(), 1)
++                check.assertEqual(device.get_modifiers(), ("shift", "lock"))
++                check.assertEqual(device.get_keycode_for_keyname("a", 1), (24, 1))
++
++                closed = device.compile_keymap("evdev", "pc105", "de", "", "")
++                closed.cleanup()
++                with check.assertRaises(ValueError):
++                    device.install_keymap(closed)
++                check.assertEqual(device.get_keycodes_down(), (24,))
++                check.assertEqual(device.get_layout_group(), 1)
++
++                check.assertIs(device.set_layout("de"), True)
++                check.assertFalse(device.get_keycodes_down())
++                check.assertEqual(device.get_layout_group_count(), 1)
++                check.assertEqual(device.get_layout_group(), 0)
++                check.assertEqual(device.get_modifiers(), ())
++                device.cleanup()
++                check.assertIs(device.set_layout("us"), False)
++                check.assertEqual(device.get_keycode_for_keysym(Q), (-1, 0))
++                check.assertEqual(device.get_keycode_for_keyname("q"), (-1, 0))
++            finally:
++                if device is not None:
++                    device.cleanup()
++                compositor.cleanup()
++
++
 +class CompiledXKBKeymapTest(unittest.TestCase):
 +
 +    @staticmethod
 +    def compile(layout, variant="", options="", model="pc105", rules="evdev"):
 +        from xpra.wayland.server.keyboard import WaylandKeyboard
 +        return WaylandKeyboard.compile_keymap(rules, model, layout, variant, options)
++
++    def test_public_native_api_and_transactional_refusal(self):
++        result = subprocess.run((
++            sys.executable, "-c",
++            "from unit.wayland.keyboard_test import native_keyboard_public_api_probe; "
++            "native_keyboard_public_api_probe()",
++        ), env=dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path)),
++            capture_output=True, text=True, timeout=30, check=False)
++        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 +
 +    def test_installed_one_through_maximum_groups(self):
 +        layouts = ("us", "fr", "ru", "de")
@@ -1944,11 +2459,11 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        self.assertEqual(owner.keyboard_config.current_group, 0)
 +
 +        owner._readonly = True
-+        manager.readonly_changed(None, owner)
++        manager.setting_changed_handler(None, "readonly", owner.effective_readonly(), owner)
 +        self.assertIs(manager._keyboard_owner_source, fallback)
 +        owner._readonly = False
 +        fallback._readonly = True
-+        manager.readonly_changed(None, fallback)
++        manager.setting_changed_handler(None, "readonly", fallback.effective_readonly(), fallback)
 +        self.assertIs(manager._keyboard_owner_source, owner)
 +        self.assertEqual(manager.device.layouts, ("fr", "us"))
 +        self.assertEqual(manager.device.group, 0)
@@ -2742,7 +3257,7 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        manager.keys_pressed = {24: "q"}
 +
 +        owner._readonly = True
-+        manager.readonly_changed(None, owner)
++        manager.setting_changed_handler(None, "readonly", owner.effective_readonly(), owner)
 +        self.assertEqual(manager.keyboard_owner, "")
 +        self.assertIsNone(owner.keyboard_config.owner)
 +        self.assertEqual(manager.bootstrap_config.owner, "")
@@ -2750,7 +3265,7 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        self.assertFalse(manager.keys_pressed)
 +
 +        owner._readonly = False
-+        manager.readonly_changed(None, owner)
++        manager.setting_changed_handler(None, "readonly", owner.effective_readonly(), owner)
 +        self.assertIs(manager._keyboard_owner_source, owner)
 +        self.assertEqual(owner.keyboard_config.owner, "owner")
 +        self.assertIsNone(manager.bootstrap_config.owner)
@@ -2763,11 +3278,11 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        applied_hash = fallback.keyboard_config.applied_hash
 +
 +        fallback._readonly = True
-+        manager.readonly_changed(None, fallback)
++        manager.setting_changed_handler(None, "readonly", fallback.effective_readonly(), fallback)
 +        owner = FakeSource("owner", 1, config(manager, ("us", "fr")))
 +        accept(manager, server, owner)
 +        fallback._readonly = False
-+        manager.readonly_changed(None, fallback)
++        manager.setting_changed_handler(None, "readonly", fallback.effective_readonly(), fallback)
 +        proto = WaylandKeyboardPacketTest.bind(manager, server, fallback)
 +        manager._process_config(proto, Packet("keyboard-config", {
 +            "rmlvo-version": 1,
@@ -2795,11 +3310,11 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        applied_hash = fallback.keyboard_config.applied_hash
 +
 +        fallback._readonly = True
-+        manager.readonly_changed(None, fallback)
++        manager.setting_changed_handler(None, "readonly", fallback.effective_readonly(), fallback)
 +        owner = FakeSource("owner", 1, config(manager, ("de",)))
 +        accept(manager, server, owner)
 +        fallback._readonly = False
-+        manager.readonly_changed(None, fallback)
++        manager.setting_changed_handler(None, "readonly", fallback.effective_readonly(), fallback)
 +        proto = WaylandKeyboardPacketTest.bind(manager, server, fallback)
 +        manager._process_config(proto, Packet("keyboard-config", {
 +            "rmlvo-version": 1,
@@ -2887,13 +3402,13 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        manager.do_process_keyboard_event(proto, 0, "q", True, event)
 +
 +        source._readonly = True
-+        manager.readonly_changed(None, source)
++        manager.setting_changed_handler(None, "readonly", source.effective_readonly(), source)
 +        self.assertIn(24, source.keyboard_config.settled_translation)
 +        manager.do_process_keyboard_event(proto, 0, "q", False, event)
 +        self.assertNotIn(24, source.keyboard_config.settled_translation)
 +
 +        source._readonly = False
-+        manager.readonly_changed(None, source)
++        manager.setting_changed_handler(None, "readonly", source.effective_readonly(), source)
 +        manager.do_process_keyboard_event(proto, 0, "q", True, event)
 +        self.assertEqual(manager.device.keys_down, {24})
 +        manager.do_process_keyboard_event(proto, 0, "q", False, event)
@@ -2911,9 +3426,9 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        manager.do_process_keyboard_event(source_proto, 0, "Shift_L", True, event)
 +
 +        source._readonly = True
-+        manager.readonly_changed(None, source)
++        manager.setting_changed_handler(None, "readonly", source.effective_readonly(), source)
 +        source._readonly = False
-+        manager.readonly_changed(None, source)
++        manager.setting_changed_handler(None, "readonly", source.effective_readonly(), source)
 +
 +        release = dict(event, modifiers=("shift",))
 +        manager.do_process_keyboard_event(source_proto, 0, "Shift_L", False, release)
@@ -2936,9 +3451,9 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        self.assertEqual(manager.device.modifiers, ("lock",))
 +
 +        server.readonly = True
-+        manager.readonly_changed(None)
++        manager.setting_changed_handler(None, "readonly", manager.server.readonly)
 +        server.readonly = False
-+        manager.readonly_changed(None)
++        manager.setting_changed_handler(None, "readonly", manager.server.readonly)
 +        self.assertEqual(manager.device.modifiers, ("lock",))
 +
 +        manager.do_process_keyboard_event(
@@ -2962,7 +3477,7 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        self.assertEqual(manager.device.modifiers, ())
 +
 +        source._readonly = False
-+        manager.readonly_changed(None, source)
++        manager.setting_changed_handler(None, "readonly", source.effective_readonly(), source)
 +        self.assertIs(manager._keyboard_owner_source, source)
 +        self.assertEqual(manager.device.modifiers, ())
 +
@@ -2980,7 +3495,7 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        self.assertEqual(manager.device.modifiers, ())
 +
 +        source._readonly = False
-+        manager.readonly_changed(None, source)
++        manager.setting_changed_handler(None, "readonly", source.effective_readonly(), source)
 +        self.assertIs(manager._keyboard_owner_source, source)
 +        self.assertEqual(manager.device.modifiers, ("lock",))
 +
@@ -3084,10 +3599,10 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        self.assertEqual(fallback.keyboard_config.current_modifiers, ("shift",))
 +
 +        fallback._readonly = True
-+        manager.readonly_changed(None, fallback)
++        manager.setting_changed_handler(None, "readonly", fallback.effective_readonly(), fallback)
 +        self.assertEqual(fallback.keyboard_config.current_modifiers, ())
 +        fallback._readonly = False
-+        manager.readonly_changed(None, fallback)
++        manager.setting_changed_handler(None, "readonly", fallback.effective_readonly(), fallback)
 +
 +        server.sources = [fallback]
 +        manager.cleanup_protocol(object())
@@ -3105,10 +3620,10 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        self.assertFalse(manager._modifier_holders)
 +
 +        fallback._readonly = True
-+        manager.readonly_changed(None, fallback)
++        manager.setting_changed_handler(None, "readonly", fallback.effective_readonly(), fallback)
 +        self.assertEqual(fallback.keyboard_config.current_modifiers, ("lock",))
 +        fallback._readonly = False
-+        manager.readonly_changed(None, fallback)
++        manager.setting_changed_handler(None, "readonly", fallback.effective_readonly(), fallback)
 +
 +        server.sources = [fallback]
 +        manager.cleanup_protocol(object())
@@ -3122,11 +3637,11 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        manager.update_keyboard_modifiers(("shift", "lock"), source=owner)
 +
 +        server.readonly = True
-+        manager.readonly_changed(None)
++        manager.setting_changed_handler(None, "readonly", manager.server.readonly)
 +        self.assertEqual(owner.keyboard_config.current_modifiers, ("lock",))
 +        self.assertEqual(manager.keyboard_owner, "")
 +        server.readonly = False
-+        manager.readonly_changed(None)
++        manager.setting_changed_handler(None, "readonly", manager.server.readonly)
 +
 +        self.assertIs(manager._keyboard_owner_source, owner)
 +        self.assertEqual(manager.device.modifiers, ("lock",))
@@ -3140,11 +3655,11 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        manager.update_keyboard_modifiers(("shift", "lock"), source=owner)
 +
 +        owner._readonly = True
-+        manager.readonly_changed(None, owner)
++        manager.setting_changed_handler(None, "readonly", owner.effective_readonly(), owner)
 +        self.assertIs(manager._keyboard_owner_source, fallback)
 +        self.assertEqual(owner.keyboard_config.current_modifiers, ("lock",))
 +        owner._readonly = False
-+        manager.readonly_changed(None, owner)
++        manager.setting_changed_handler(None, "readonly", owner.effective_readonly(), owner)
 +        server.sources = [owner]
 +        manager.cleanup_protocol(object())
 +
@@ -3628,7 +4143,7 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        self.assertEqual(readonly.keyboard_config.current_modifiers, ("mod5",))
 +
 +        readonly._readonly = False
-+        manager.readonly_changed(None, readonly)
++        manager.setting_changed_handler(None, "readonly", readonly.effective_readonly(), readonly)
 +        self.assertIs(manager._keyboard_owner_source, owner)
 +        server.sources = [readonly]
 +        manager.cleanup_protocol(object())
@@ -3670,7 +4185,7 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        self.assertEqual(readonly.keyboard_config.validated_hash, readonly.keyboard_config.get_hash())
 +
 +        readonly._readonly = False
-+        manager.readonly_changed(None, readonly)
++        manager.setting_changed_handler(None, "readonly", readonly.effective_readonly(), readonly)
 +        server.sources = [readonly]
 +        manager.cleanup_protocol(object())
 +        self.assertIs(manager._keyboard_owner_source, readonly)
@@ -3716,7 +4231,7 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        )
 +
 +        readonly._readonly = False
-+        manager.readonly_changed(None, readonly)
++        manager.setting_changed_handler(None, "readonly", readonly.effective_readonly(), readonly)
 +        server.sources = [readonly]
 +        manager.cleanup_protocol(object())
 +        self.assertIs(manager._keyboard_owner_source, readonly)
@@ -3760,7 +4275,7 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +        self.assertEqual(tuple(manager.device.install_calls), installs)
 +
 +        readonly._readonly = False
-+        manager.readonly_changed(None, readonly)
++        manager.setting_changed_handler(None, "readonly", readonly.effective_readonly(), readonly)
 +        server.sources = [readonly]
 +        manager.cleanup_protocol(object())
 +        self.assertIs(manager._keyboard_owner_source, readonly)
@@ -4141,24 +4656,18 @@ index 0000000000000000000000000000000000000000..e79196f6b784670345e3ffef42577062
 +if __name__ == "__main__":
 +    main()
 diff --git a/tests/unittests/unit/wayland/linkage_test.py b/tests/unittests/unit/wayland/linkage_test.py
-index ae81b58787373bde33b31642c836dbb67cc32af9..ef1d3d58d67589d7e42e08ce76c8de79f5b91ae8 100644
+index 1304baf72b7ad7414ea700d9f63feb1b8c207891..733d7c259531456c3b0e465d3afe0502b7afe7bc 100644
 --- a/tests/unittests/unit/wayland/linkage_test.py
 +++ b/tests/unittests/unit/wayland/linkage_test.py
-@@ -13,6 +13,7 @@ import unittest
+@@ -13,2 +13,3 @@ import unittest
  WAYLAND_MODULES = (
-     "xpra.wayland.server.events",
-     "xpra.wayland.server.display",
 +    "xpra.wayland.server.keyboard",
- )
- 
- 
+     "xpra.wayland.server.events",
 diff --git a/tests/unittests/unit/wayland/window_test.py b/tests/unittests/unit/wayland/window_test.py
-index e047159aaf7649f342161a02c27840115be82ebd..bf08eb933893b433a7174bca8a63f05928a074de 100644
+index e1ce91fb1f72496d08d17da94552a6d99ca74b3b..f40b246169ebe547fe51c5811124bb5c90cfffd3 100644
 --- a/tests/unittests/unit/wayland/window_test.py
 +++ b/tests/unittests/unit/wayland/window_test.py
-@@ -181,6 +181,97 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
-                 server.server.compositor.flush.assert_not_called()
- 
+@@ -275,2 +275,93 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
  
 +class WaylandWindowServerFocusTest(unittest.TestCase):
 +
@@ -4252,24 +4761,16 @@ index e047159aaf7649f342161a02c27840115be82ebd..bf08eb933893b433a7174bca8a63f059
 +
 +
  def main():
-     unittest.main()
- 
 diff --git a/xpra/client/gtk3/keyboard_helper.py b/xpra/client/gtk3/keyboard_helper.py
 index 7d8fe13370113f6a9080d9291fa0e59aa2c9a5b2..c01a59c7bc1e0f50a8631c951fe55f187ffa042e 100644
 --- a/xpra/client/gtk3/keyboard_helper.py
 +++ b/xpra/client/gtk3/keyboard_helper.py
-@@ -26,6 +26,8 @@ class GTKKeyboardHelper(KeyboardHelper):
-         # used for delaying the sending of keymap changes
-         # (as we may be getting dozens of such events at a time)
+@@ -28,2 +28,4 @@ class GTKKeyboardHelper(KeyboardHelper):
          self._keymap_changing = False
 +        self._keymap_change_timer = 0
 +        self._keymap_closed = False
          self._keymap_change_handler_id = 0
-         self._keymap = get_default_keymap()
-         self.update()
-@@ -52,9 +54,11 @@ class GTKKeyboardHelper(KeyboardHelper):
- 
-     def keymap_changed(self, *args) -> None:
+@@ -54,5 +56,7 @@ class GTKKeyboardHelper(KeyboardHelper):
          log("keymap_changed%s", args)
 +        if self._keymap_closed:
 +            return
@@ -4278,11 +4779,7 @@ index 7d8fe13370113f6a9080d9291fa0e59aa2c9a5b2..c01a59c7bc1e0f50a8631c951fe55f18
 -            self._keymap_change_handler_id = None
 +            self._keymap_change_handler_id = 0
          self._keymap = get_default_keymap()
-         if self._keymap_changing:
-             # timer is already due
-@@ -62,8 +66,12 @@ class GTKKeyboardHelper(KeyboardHelper):
-         self._keymap_changing = True
- 
+@@ -64,4 +68,8 @@ class GTKKeyboardHelper(KeyboardHelper):
          def do_keys_changed() -> None:
 +            if self._keymap_closed:
 +                return
@@ -4292,16 +4789,12 @@ index 7d8fe13370113f6a9080d9291fa0e59aa2c9a5b2..c01a59c7bc1e0f50a8631c951fe55f18
 +            if self._keymap:
 +                self._keymap_change_handler_id = self._keymap.connect("keys-changed", self.keymap_changed)
              self._keymap_changing = False
-             if self.locked:
-                 # automatic changes not allowed!
-@@ -74,10 +82,15 @@ class GTKKeyboardHelper(KeyboardHelper):
-                 log.info(" sending updated mappings to the server")
-                 self.send_config()
+@@ -76,3 +84,3 @@ class GTKKeyboardHelper(KeyboardHelper):
  
 -        GLib.timeout_add(500, do_keys_changed)
 +        self._keymap_change_timer = GLib.timeout_add(500, do_keys_changed)
  
-     def update(self) -> bool:
+@@ -80,2 +88,7 @@ class GTKKeyboardHelper(KeyboardHelper):
          old_hash = self.hash
 +        if is_X11():
 +            # The X11 backend caches modifier meanings.  A keys-changed signal
@@ -4309,11 +4802,7 @@ index 7d8fe13370113f6a9080d9291fa0e59aa2c9a5b2..c01a59c7bc1e0f50a8631c951fe55f18
 +            # query_xkbmap builds the packet rather than one update later.
 +            self.keyboard.invalidate_keymap_modifiers()
          super().update()
-         if is_X11():
-             with log.trap_error("Error querying modifier map"):
-@@ -89,13 +102,26 @@ class GTKKeyboardHelper(KeyboardHelper):
-         return get_gtk_keymap()
- 
+@@ -91,9 +104,22 @@ class GTKKeyboardHelper(KeyboardHelper):
      def cleanup(self) -> None:
 -        super().cleanup()
 +        # Retire callback ownership before resetting negotiated state.  A
@@ -4339,69 +4828,43 @@ index 7d8fe13370113f6a9080d9291fa0e59aa2c9a5b2..c01a59c7bc1e0f50a8631c951fe55f18
 +        self._keymap = None
 +        super().cleanup()
  
- 
- def main() -> None:
 diff --git a/xpra/client/gui/keyboard_helper.py b/xpra/client/gui/keyboard_helper.py
 index 7558a42e4f1cdfe19dccb2e75f78e7f200b96971..574cd22e2ed1f40964c043d71f793c8b68bae0d9 100644
 --- a/xpra/client/gui/keyboard_helper.py
 +++ b/xpra/client/gui/keyboard_helper.py
-@@ -23,6 +23,7 @@ from xpra.log import Logger
- log = Logger("keyboard")
- 
+@@ -25,2 +25,3 @@ log = Logger("keyboard")
  LAYOUT_GROUPS = envbool("XPRA_LAYOUT_GROUPS", True)
 +RMLVO_VERSION = 1
  DEBUG_KEY_EVENTS = tuple(x.strip().lower() for x in os.environ.get("XPRA_DEBUG_KEY_EVENTS", "").split(",") if x.strip())
- 
- KEYCODE_DEF: TypeAlias = tuple[int, str, int, int, int]
-@@ -73,6 +74,7 @@ class KeyboardHelper:
-         self.variant_option = variant
-         self.layouts_option = layouts
+@@ -75,2 +76,3 @@ class KeyboardHelper:
          self.variants_option = variants
 +        self.options_option = options
          self.options = options
-         self.keyboard = self.make_keyboard()
-         log("KeyboardHelper(%s) keyboard=%s",
-@@ -109,11 +111,15 @@ class KeyboardHelper:
-         self.variant = ""
-         self.variants: list[str] = []
+@@ -111,2 +113,3 @@ class KeyboardHelper:
          self.options = ""
 +        self.options_option = ""
          self.backend = ""
-         self.backend_name = ""
-         self.query = ""
-         self.query_struct: dict[str, Any] = {}
+@@ -116,2 +119,5 @@ class KeyboardHelper:
          self.layout_groups = LAYOUT_GROUPS
 +        self.server_rmlvo_version = 0
 +        self.server_rmlvo_pending = False
 +        self.config_pending = False
          self.raw = False
- 
-         self.hash = ""
-@@ -273,7 +279,9 @@ class KeyboardHelper:
-         def inl(v, l) -> list:
-             try:
+@@ -275,3 +281,5 @@ class KeyboardHelper:
                  if v in l or v is None:
 -                    return l
 +                    return list(l)
 +                if isinstance(v, str) and "," in v and tuple(v.split(",")) == tuple(l):
 +                    return list(l)
                  return [v] + list(l)
-             except Exception:
-                 if v is not None:
-@@ -290,7 +298,9 @@ class KeyboardHelper:
-             layouts,
-             variant,
+@@ -292,3 +300,5 @@ class KeyboardHelper:
              variants,
 -            self.options or options,
 +            (
 +                "" if self.options_option.lower() == "none" else self.options_option
 +            ) if self.options_option else options,
          )
-         log("get_layout_spec()=%s", val)
-         return val
-@@ -309,11 +319,11 @@ class KeyboardHelper:
-                 query_struct["variant"] = self.variant_option
-             if self.variants_option:
+@@ -311,7 +321,7 @@ class KeyboardHelper:
                  query_struct["variants"] = csv(self.variants_option)
 -            if self.options:
 -                if self.options.lower() == "none":
@@ -4412,11 +4875,7 @@ index 7558a42e4f1cdfe19dccb2e75f78e7f200b96971..574cd22e2ed1f40964c043d71f793c8b
 -                    query_struct["options"] = self.options
 +                    query_struct["options"] = self.options_option
          return query_struct
- 
-     def query_xkbmap(self) -> None:
-@@ -354,6 +364,25 @@ class KeyboardHelper:
-     def send_config(self) -> None:
-         # this is the initial configuration, it must always be applied:
+@@ -356,2 +366,21 @@ class KeyboardHelper:
          # (the server has been waiting for it, see `DELAY_KEYBOARD_DATA`)
 +        if self.server_rmlvo_pending:
 +            # The GTK keymap signal can fire before the server hello has been
@@ -4438,11 +4897,7 @@ index 7558a42e4f1cdfe19dccb2e75f78e7f200b96971..574cd22e2ed1f40964c043d71f793c8b
 +                self.send(KEYBOARD_CONFIG, props)
 +                return
          if BACKWARDS_COMPATIBLE:
-             if self.layout:
-                 self.send_layout()
-@@ -404,8 +433,107 @@ class KeyboardHelper:
-     def get_full_keymap(self) -> Sequence[KEYCODE_DEF]:
-         return ()
+@@ -406,4 +435,103 @@ class KeyboardHelper:
  
 +    def get_rmlvo_properties(self) -> dict[str, Any]:
 +        """Return the versioned, positional XKB names used by the client."""
@@ -4547,11 +5002,7 @@ index 7558a42e4f1cdfe19dccb2e75f78e7f200b96971..574cd22e2ed1f40964c043d71f793c8b
 +        }
 +        exact_rmlvo = "rmlvo-version" in props
          for x in (
-                 "backend", "backend_name",
-                 "layout", "layouts", "variant", "variants", "options",
-@@ -416,6 +544,13 @@ class KeyboardHelper:
-         ):
-             if x in skip:
+@@ -418,2 +546,9 @@ class KeyboardHelper:
                  continue
 +            if exact_rmlvo and x in ("layouts", "variants"):
 +                # These legacy plural properties are platform selection lists
@@ -4561,24 +5012,16 @@ index 7558a42e4f1cdfe19dccb2e75f78e7f200b96971..574cd22e2ed1f40964c043d71f793c8b
 +            if x in props:
 +                continue
              v = None
-             if x in ("layout", "variant"):
-                 # let the 'layout_option' and 'variant_option' override:
 diff --git a/xpra/client/subsystem/keyboard.py b/xpra/client/subsystem/keyboard.py
 index 123d22a7006a7ac0cb4016414d2f0fd7b64f72a0..9f79badebb18556827c61c9bbe4012f114c8060e 100644
 --- a/xpra/client/subsystem/keyboard.py
 +++ b/xpra/client/subsystem/keyboard.py
-@@ -9,7 +9,7 @@ from collections.abc import Sequence
- 
- from xpra.client.base import features
+@@ -11,3 +11,3 @@ from xpra.client.base import features
  from xpra.client.base.stub import StubClientSubsystem
 -from xpra.client.gui.keyboard_helper import KeyboardHelper, KEYCODE_DEF
 +from xpra.client.gui.keyboard_helper import KeyboardHelper, KEYCODE_DEF, RMLVO_VERSION
  from xpra.keyboard.common import KeyEvent, DELAY_KEYBOARD_DATA
- from xpra.keyboard.mask import DEFAULT_MODIFIER_MEANINGS
- from xpra.util.objects import typedict
-@@ -72,8 +72,16 @@ class KeyboardClient(StubClientSubsystem):
-                                             opts.shortcut_modifiers,
-                                             opts.key_shortcut,
+@@ -74,4 +74,12 @@ class KeyboardClient(StubClientSubsystem):
                                              opts.keyboard_raw, **kwargs)
 -            if DELAY_KEYBOARD_DATA and not self.client.readonly:
 -                self.client.after_handshake(self.helper.send_config)
@@ -4593,11 +5036,7 @@ index 123d22a7006a7ac0cb4016414d2f0fd7b64f72a0..9f79badebb18556827c61c9bbe4012f1
 +                self.helper.config_pending = DELAY_KEYBOARD_DATA
 +                self.client.after_handshake(self._send_pending_keyboard_config)
          except ImportError as e:
-             log("error instantiating %s", self.helper_class, exc_info=True)
-             log.warn(f"Warning: no keyboard support, {e}")
-@@ -110,6 +118,14 @@ class KeyboardClient(StubClientSubsystem):
-         if not self.server_enabled and self.helper:
-             # swallow packets:
+@@ -112,2 +120,10 @@ class KeyboardClient(StubClientSubsystem):
              self.helper.send = noop
 +        helper = self.helper
 +        if helper:
@@ -4608,11 +5047,7 @@ index 123d22a7006a7ac0cb4016414d2f0fd7b64f72a0..9f79badebb18556827c61c9bbe4012f1
 +                else 0
 +            )
          try:
-             from xpra import keyboard
-             if not keyboard:
-@@ -119,13 +135,22 @@ class KeyboardClient(StubClientSubsystem):
-             log.warn("Warning: keyboard module is missing")
-             self.enabled = False
+@@ -121,6 +137,6 @@ class KeyboardClient(StubClientSubsystem):
              return True
 -        if self.helper:
 +        if helper:
@@ -4621,7 +5056,7 @@ index 123d22a7006a7ac0cb4016414d2f0fd7b64f72a0..9f79badebb18556827c61c9bbe4012f1
 -                self.helper.set_modifier_mappings(modifier_keycodes)
 +                helper.set_modifier_mappings(modifier_keycodes)
          self.key_repeat_delay, self.key_repeat_interval = c.intpair("key_repeat", (-1, -1))
-         return True
+@@ -128,2 +144,11 @@ class KeyboardClient(StubClientSubsystem):
  
 +    def _send_pending_keyboard_config(self) -> None:
 +        helper = self.helper
@@ -4633,80 +5068,50 @@ index 123d22a7006a7ac0cb4016414d2f0fd7b64f72a0..9f79badebb18556827c61c9bbe4012f1
 +            helper.send_config()
 +
      def get_keyboard_caps(self) -> dict[str, Any]:
-         caps = {}
-         kh = self.helper
 diff --git a/xpra/platform/keyboard_base.py b/xpra/platform/keyboard_base.py
 index b62a868512288f6214e8c69fb68fa4c79adeac32..7e9d20c9b11456b76113147c4e7493af86e5deb3 100644
 --- a/xpra/platform/keyboard_base.py
 +++ b/xpra/platform/keyboard_base.py
-@@ -89,6 +89,9 @@ class KeyboardBase:
-         """
-         return {}, [], ["lock"]
+@@ -91,2 +91,5 @@ class KeyboardBase:
  
 +    def invalidate_keymap_modifiers(self) -> None:
 +        """Discard any platform cache before querying a changed keymap."""
 +
      def get_keymap_spec(self) -> dict[str, Any]:
-         return {}
- 
 diff --git a/xpra/platform/posix/keyboard.py b/xpra/platform/posix/keyboard.py
 index 1a9977c23aaa97fd8584381549437582c89cf796..6f8ace31de8443078c0343066e94aa0bb54ad695 100644
 --- a/xpra/platform/posix/keyboard.py
 +++ b/xpra/platform/posix/keyboard.py
-@@ -206,6 +206,9 @@ class Keyboard(KeyboardBase):
-             self.keymap_modifiers = self.do_get_keymap_modifiers()
-         return self.keymap_modifiers
+@@ -208,2 +208,5 @@ class Keyboard(KeyboardBase):
  
 +    def invalidate_keymap_modifiers(self) -> None:
 +        self.keymap_modifiers = ()
 +
      def do_get_keymap_modifiers(self) -> tuple[dict, list[str], list[str]]:
-         if not self.keyboard_bindings:
-             if is_Wayland():
-@@ -308,5 +311,5 @@ class Keyboard(KeyboardBase):
-         except ImportError:
-             self.modifier_map = MODIFIER_MAP
+@@ -310,3 +313,3 @@ class Keyboard(KeyboardBase):
          # force re-query on next call:
 -        self.keymap_modifiers = ()
 +        self.invalidate_keymap_modifiers()
          log(f"update_modifier_map({mod_meanings}) modifier_map={self.modifier_map}")
 diff --git a/xpra/server/core.py b/xpra/server/core.py
-index 34a1327dd6602943fb2fdb5fcb33ffa3467f4029..30590195f861a34fa4edc3cdbfbe6eb605d246a7 100644
+index 640124abcf7e2a381298336ac55e21b96c7f3533..510c9cba29fe8d3872027bbfeb46d277f12ffcdc 100644
 --- a/xpra/server/core.py
 +++ b/xpra/server/core.py
-@@ -1975,11 +1975,15 @@ class ServerCore(GLibServer):
-             uuids = tuple(x.strip() for x in client_uuids.split(",") if x.strip())
-             sources = tuple(ss for ss in sources if getattr(ss, "uuid", "") in uuids)
-         count = 0
-+        settings = self.get_subsystem("setting")
-         for ss in sources:
-             if not hasattr(ss, "set_control_readonly"):
-                 continue
--            ss.set_control_readonly(onoff)
+@@ -1983,4 +1983,4 @@ class ServerCore(GLibServer):
+             ss.set_control_readonly(onoff)
 -            ss.send_setting_change("readonly", ss.server_enforced_readonly())
-+            if settings and hasattr(settings, "set_control_readonly"):
-+                settings.set_control_readonly(ss, onoff)
-+            else:
-+                ss.set_control_readonly(onoff)
-+                ss.send_setting_change("readonly", ss.server_enforced_readonly())
+             self.emit("setting-changed", "readonly", ss.effective_readonly(), ss)
++            ss.send_setting_change("readonly", ss.server_enforced_readonly())
              count += 1
-         msg = f"set client readonly={onoff} for {count} client(s)"
-         log.info(msg)
 diff --git a/xpra/server/source/keyboard.py b/xpra/server/source/keyboard.py
-index 013c03e86e61f809b29ec26a90401b0480423e65..092f832882ff11fc952b672e0627f42ad56b0e2d 100644
+index 98e6108a391005aea85aa0afed8159d9d31c5316..4f9d226fffd1795fb2bfdfdf3b1b6484536e5433 100644
 --- a/xpra/server/source/keyboard.py
 +++ b/xpra/server/source/keyboard.py
-@@ -36,6 +36,7 @@ class KeyboardConnection(StubClientConnection):
-         self.keyboard_config = None
-         self.ibus = False
+@@ -38,2 +38,3 @@ class KeyboardConnection(StubClientConnection):
          self.keyboard_record = False
 +        self.keyboard_record_requested = False
- 
-     def cleanup(self) -> None:
-         self.keyboard_config = None
-@@ -47,7 +48,10 @@ class KeyboardConnection(StubClientConnection):
-         self.ibus = c.boolget("ibus")
-         ibuslog(f"client ibus support: {self.ibus}")
+         # how many key events this client has sent:
+@@ -52,3 +53,6 @@ class KeyboardConnection(StubClientConnection):
          keyboard = c.get("keyboard")
 -        if isinstance(keyboard, dict) and typedict(keyboard).boolget("record", False):
 +        self.keyboard_record_requested = (
@@ -4714,32 +5119,20 @@ index 013c03e86e61f809b29ec26a90401b0480423e65..092f832882ff11fc952b672e0627f42a
 +        )
 +        if self.keyboard_record_requested:
              self.keyboard_record = is_recording_allowed(self, "keyboard")
- 
-     def get_info(self) -> dict[str, Any]:
-@@ -55,6 +59,7 @@ class KeyboardConnection(StubClientConnection):
-         kci = {
-             "ibus": self.ibus,
+@@ -60,2 +64,3 @@ class KeyboardConnection(StubClientConnection):
              "record": self.keyboard_record,
 +            "record-requested": self.keyboard_record_requested,
-         }
-         if kc := self.keyboard_config:
-             kci.update(kc.get_info())
+             "key-events": self.key_events,
 diff --git a/xpra/server/subsystem/keyboard.py b/xpra/server/subsystem/keyboard.py
-index efb3408c0578d6d8902b6f26480ce0878789b881..5d1ec26f6f484fd0681b191481ab6b4ba0c15d8e 100644
+index 8f214353128ef116029a08d668f5281957896b71..8b540180a4a932886870d7aa19b167c80c1a4945 100644
 --- a/xpra/server/subsystem/keyboard.py
 +++ b/xpra/server/subsystem/keyboard.py
-@@ -71,7 +71,7 @@ class KeyboardManager(StubSubsystem):
-         self.keys_pressed: dict[int, Any] = {}
- 
+@@ -73,3 +73,3 @@ class KeyboardManager(StubSubsystem):
      def init(self, opts) -> None:
 -        for option in ("sync", "layout", "layouts", "variant", "variants", "options"):
 +        for option in ("sync", "model", "layout", "layouts", "variant", "variants", "options"):
              v = getattr(opts, f"keyboard_{option}", None)
-             if v is not None:
-                 self.keymap_options[option] = v
-@@ -315,7 +315,11 @@ class KeyboardManager(StubSubsystem):
-         if keycode >= 0:
-             try:
+@@ -318,3 +318,7 @@ class KeyboardManager(StubSubsystem):
                  is_mod = ss.is_modifier(keyname, keycode)
 -                self._handle_key(wid, pressed, keyname, keyval, keycode, modifiers, is_mod, ss.keyboard_config.sync)
 +                self._handle_key(
@@ -4748,21 +5141,13 @@ index efb3408c0578d6d8902b6f26480ce0878789b881..5d1ec26f6f484fd0681b191481ab6b4b
 +                    client_keycode if client_keycode > 0 else (client_keycode, keyname or keyval),
 +                )
              except Exception as e:
-                 log("process_key_action%s", (proto, wid, keyname, pressed, attrs), exc_info=True)
-                 log.error("Error: failed to %s key", ["unpress", "press"][pressed])
-@@ -345,7 +349,8 @@ class KeyboardManager(StubSubsystem):
-             self.device.press_key(keycode, press)
- 
+@@ -348,3 +352,4 @@ class KeyboardManager(StubSubsystem):
      def _handle_key(self, wid: int, pressed: bool, name: str, keyval: int, keycode: int,
 -                    modifiers: list, is_mod: bool = False, sync: bool = True):
 +                    modifiers: list, is_mod: bool = False, sync: bool = True,
 +                    source=None, key_identity=None):
          """
-             Does the actual press/unpress for keys
-             Either from a packet (_process_key_action) or timeout (_key_repeat_timeout)
-@@ -399,7 +404,10 @@ class KeyboardManager(StubSubsystem):
-             else:
-                 log("handle keycode %s: key %s was already unpressed, ignoring", keycode, name)
+@@ -401,3 +406,6 @@ class KeyboardManager(StubSubsystem):
          if not is_mod and sync and self.key_repeat_delay > 0 and self.key_repeat_interval > 0:
 -            self._key_repeat(wid, pressed, name, keyval, keycode, modifiers, is_mod, self.key_repeat_delay)
 +            self._key_repeat(
@@ -4770,21 +5155,13 @@ index efb3408c0578d6d8902b6f26480ce0878789b881..5d1ec26f6f484fd0681b191481ab6b4b
 +                is_mod, self.key_repeat_delay, source, key_identity,
 +            )
  
-     def cancel_key_repeat_timer(self) -> None:
-         if krt := self.key_repeat_timer:
-@@ -407,7 +415,8 @@ class KeyboardManager(StubSubsystem):
-             self.source_remove(krt)
- 
+@@ -409,3 +417,4 @@ class KeyboardManager(StubSubsystem):
      def _key_repeat(self, wid: int, pressed: bool, keyname: str, keyval: int, keycode: int,
 -                    modifiers: list, is_mod: bool, delay_ms: int = 0) -> None:
 +                    modifiers: list, is_mod: bool, delay_ms: int = 0,
 +                    source=None, key_identity=None) -> None:
          """ Schedules/cancels the key repeat timeouts """
-         self.cancel_key_repeat_timer()
-         if pressed:
-@@ -415,15 +424,19 @@ class KeyboardManager(StubSubsystem):
-             log("scheduling key repeat timer with delay %s for %s / %s", delay_ms, keyname, keycode)
-             now = monotonic()
+@@ -417,6 +426,7 @@ class KeyboardManager(StubSubsystem):
              self.key_repeat_timer = self.timeout_add(delay_ms, self._key_repeat_timeout,
 -                                                     now, delay_ms, wid, keyname, keyval, keycode, modifiers, is_mod)
 +                                                     now, delay_ms, wid, keyname, keyval, keycode,
@@ -4794,8 +5171,7 @@ index efb3408c0578d6d8902b6f26480ce0878789b881..5d1ec26f6f484fd0681b191481ab6b4b
 -                            modifiers: list, is_mod: bool) -> None:
 +                            modifiers: list, is_mod: bool, source=None, key_identity=None) -> None:
          self.key_repeat_timer = 0
-         now = monotonic()
-         log("key repeat timeout for %s / '%s' - clearing it, now=%s, scheduled at %s with delay=%s",
+@@ -425,3 +435,6 @@ class KeyboardManager(StubSubsystem):
              keyname, keycode, now, when, delay_ms)
 -        self._handle_key(wid, False, keyname, keyval, keycode, modifiers, is_mod, True)
 +        self._handle_key(
@@ -4803,66 +5179,38 @@ index efb3408c0578d6d8902b6f26480ce0878789b881..5d1ec26f6f484fd0681b191481ab6b4b
 +            is_mod, True, source, key_identity,
 +        )
          self.keys_timedout[keycode] = now
- 
-     def _process_key_repeat(self, _proto, _packet: Packet) -> None:
-@@ -438,6 +451,9 @@ class KeyboardManager(StubSubsystem):
-         kc = ss.keyboard_config
-         if kc:
+@@ -440,2 +453,5 @@ class KeyboardManager(StubSubsystem):
              kc.sync = packet.get_bool(1)
 +            remember_runtime = getattr(kc, "remember_applied_runtime", None)
 +            if callable(remember_runtime):
 +                remember_runtime()
              log("toggled keyboard-sync to %s for %s", kc.sync, ss)
- 
-     def _keys_changed(self) -> None:
 diff --git a/xpra/server/subsystem/settings.py b/xpra/server/subsystem/settings.py
-index ce0024050a4663c39806bfea8202db03efb4628e..ca2cf04d0dcd773d78d2050f07ea827a265295d8 100644
+index be907dd04f6eae3a4532e9228a45602d581eae2a..9f2427885860a1bb00288bb2a8d2adc610ca9998 100644
 --- a/xpra/server/subsystem/settings.py
 +++ b/xpra/server/subsystem/settings.py
-@@ -25,6 +25,7 @@ class SettingsServer(StubSubsystem):
-     and applies the changes clients are allowed to make.
-     """
-     __slots__ = ("client_settings", )
-+    __signals__ = ("readonly-changed",)
-     PREFIX = "setting"
- 
-     def __init__(self, server=None):
-@@ -34,6 +35,8 @@ class SettingsServer(StubSubsystem):
-         self.add_client_setting("readonly", "get_bool", self.set_client_readonly)
- 
+@@ -36,2 +36,5 @@ class SettingsServer(StubSubsystem):
      def setting_changed(self, setting: str, value: Any) -> None:
 +        if setting == "readonly":
-+            self.emit("readonly-changed", None)
++            # Settle input under changed policy before any fallible peer send.
++            self.server.emit("setting-changed", setting, value, None)
          for ss in self.get_sources_by_type():
-             if setting == "readonly":
-                 value = ss.server_enforced_readonly()
-@@ -64,6 +67,12 @@ class SettingsServer(StubSubsystem):
-     def set_client_readonly(self, ss, readonly: bool) -> None:
-         ss.set_client_readonly(readonly)
-         log("client %s toggled readonly=%s", ss, ss.client_readonly)
-+        self.emit("readonly-changed", ss)
-+
-+    def set_control_readonly(self, ss, readonly: bool) -> None:
-+        ss.set_control_readonly(readonly)
-+        self.emit("readonly-changed", ss)
-+        ss.send_setting_change("readonly", ss.server_enforced_readonly())
+@@ -40,4 +43,4 @@ class SettingsServer(StubSubsystem):
+             ss.send_setting_change(setting, sv)
+-        # and let the subsystems react to it:
+-        self.server.emit("setting-changed", setting, value, None)
++        if setting != "readonly":
++            self.server.emit("setting-changed", setting, value, None)
  
-     def _process_readonly_toggled(self, proto, packet: Packet) -> None:
-         # legacy packet, superseded by "setting-change":
 diff --git a/xpra/wayland/server/keyboard.pyx b/xpra/wayland/server/keyboard.pyx
-index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20bd39f266b 100644
+index 658b2aa2febb8eb6c54e9bb78e4ad3e3514e06fe..3e9338676af4bc241b944ee87b6c34f0f44322e9 100644
 --- a/xpra/wayland/server/keyboard.pyx
 +++ b/xpra/wayland/server/keyboard.pyx
-@@ -3,28 +3,70 @@
- # Xpra is released under the terms of the GNU GPL v2, or, at your option, any
- # later version. See the file COPYING for details.
+@@ -5,2 +5,3 @@
  
 +from collections.abc import Sequence
  from time import monotonic
- 
- from xpra.log import Logger
- 
- from libc.stdlib cimport free, calloc
+@@ -11,8 +12,10 @@ from libc.stdlib cimport free, calloc
  from libc.string cimport memset
 -from libc.stdint cimport uintptr_t, uint32_t
 +from libc.stdint cimport uintptr_t, uint32_t, int32_t
@@ -4877,12 +5225,12 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 +    wlr_keyboard_key_event,
 +    wl_keyboard_key_state,
      WL_KEYBOARD_KEY_STATE_PRESSED, WL_KEYBOARD_KEY_STATE_RELEASED,
-     xkb_context, xkb_context_new, xkb_context_unref,
+@@ -20,9 +23,48 @@ from xpra.wayland.server.wlroots cimport (
      xkb_keymap, xkb_keymap_unref, wlr_keyboard_set_keymap, xkb_rule_names, xkb_keymap_new_from_names,
 -    XKB_CONTEXT_NO_FLAGS, XKB_KEYMAP_COMPILE_NO_FLAGS, XKB_KEYSYM_NO_FLAGS,
 -    xkb_keycode_t, xkb_keysym_t, xkb_layout_index_t, xkb_level_index_t,
 -    xkb_keymap_min_keycode, xkb_keymap_max_keycode,
--    xkb_keymap_num_layouts_for_key, xkb_keymap_num_levels_for_key,
+-    xkb_keymap_num_layouts, xkb_keymap_num_layouts_for_key, xkb_keymap_num_levels_for_key,
 -    xkb_keymap_key_get_syms_by_level, xkb_keysym_from_name,
 +    xkb_state, xkb_state_new, xkb_state_unref, xkb_state_update_mask, xkb_state_key_get_syms,
 +    XKB_CONTEXT_NO_FLAGS, XKB_KEYMAP_COMPILE_NO_FLAGS, XKB_KEYSYM_NO_FLAGS, XKB_KEYSYM_CASE_INSENSITIVE,
@@ -4931,11 +5279,7 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 +    unsigned int xpra_wlr_keyboard_keys_cap() noexcept
 +
  log = Logger("wayland", "keyboard")
- 
- base_time = monotonic()
-@@ -40,6 +82,16 @@ MOD_INDEX = {
-     "mod5": 7,
- }
+@@ -42,2 +84,12 @@ MOD_INDEX = {
  LOCKED_MODIFIERS = frozenset(("lock", "mod2"))
 +XKB_MOD_NAMES = {
 +    "shift": b"Shift",
@@ -4948,11 +5292,7 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 +    "mod5": b"Mod5",
 +}
  
- 
- cdef inline uint32_t get_time_msec() noexcept:
-@@ -49,7 +101,137 @@ cdef inline uint32_t get_time_msec() noexcept:
- cdef inline bytes b(s: str):
-     if not s:
+@@ -51,3 +103,133 @@ cdef inline bytes b(s: str):
          return b""
 -    return s.encode("latin1")
 +    return s.encode("ascii")
@@ -5087,11 +5427,7 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 +    finally:
 +        xkb_state_unref(state)
  
- 
- cdef void virtual_keyboard_led_update(wlr_keyboard *wlr_kb, uint32_t leds) noexcept:
-@@ -57,19 +239,122 @@ cdef void virtual_keyboard_led_update(wlr_keyboard *wlr_kb, uint32_t leds) noexc
-     log.info("led-update: %#x", leds)
- 
+@@ -59,2 +241,92 @@ cdef void virtual_keyboard_led_update(wlr_keyboard *wlr_kb, uint32_t leds) noexc
  
 +cdef class KeymapCandidate:
 +    cdef xkb_keymap *keymap
@@ -5184,9 +5520,7 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 +
 +
  cdef class WaylandKeyboard:
-     cdef wlr_seat *seat
-     cdef wlr_keyboard *keyboard
-     cdef wlr_keyboard_impl keyboard_impl
+@@ -64,4 +336,14 @@ cdef class WaylandKeyboard:
      cdef object modifiers
 +    cdef object rmlvo
      cdef int group
@@ -5202,8 +5536,7 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 +        self.keyboard_initialized = False
 +        self.keyboard_attached = False
  
-     def __init__(self, uintptr_t seat_ptr):
-         self.seat = <wlr_seat*>seat_ptr
+@@ -70,4 +352,7 @@ cdef class WaylandKeyboard:
          self.modifiers = ()
 +        self.rmlvo = None
          self.group = 0
@@ -5212,19 +5545,17 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 +        self.keysym_to_keycodes = {}
 +        self.keys_down = set()
          if not seat_ptr:
-             raise ValueError("seat pointer is NULL")
-         self.keyboard = <wlr_keyboard*> calloc(1, sizeof(wlr_keyboard))
-@@ -79,106 +364,308 @@ cdef class WaylandKeyboard:
-         self.keyboard_impl.name = b"xpra-virtual-keyboard"
-         self.keyboard_impl.led_update = virtual_keyboard_led_update
+@@ -81,7 +366,13 @@ cdef class WaylandKeyboard:
          wlr_keyboard_init(self.keyboard, &self.keyboard_impl, b"virtual-keyboard")
--        self.set_layout()
+-        if not self.set_layout():
+-            raise RuntimeError("failed to compile the default keymap")
 -        # set a default repeat rate:
 -        wlr_keyboard_set_repeat_info(self.keyboard, 25, 600)
 -        wlr_seat_set_keyboard(self.seat, self.keyboard)
 +        self.keyboard_initialized = True
 +        try:
-+            self.set_layout()
++            if not self.set_layout():
++                raise RuntimeError("failed to compile the default keymap")
 +            # set a default repeat rate:
 +            wlr_keyboard_set_repeat_info(self.keyboard, 25, 600)
 +            wlr_seat_set_keyboard(self.seat, self.keyboard)
@@ -5233,8 +5564,7 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 +            self.close()
 +            raise
  
-     def __repr__(self):
-         return "WaylandKeyboard(%#x)" % (<uintptr_t> self.seat)
+@@ -90,5 +381,10 @@ cdef class WaylandKeyboard:
  
 -    def cleanup(self) -> None:
 +    cdef void close(self) noexcept:
@@ -5247,12 +5577,21 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 +                wlr_keyboard_finish(self.keyboard)
 +                self.keyboard_initialized = False
              free(self.keyboard)
-             self.keyboard = NULL
+@@ -96,88 +392,223 @@ cdef class WaylandKeyboard:
  
--    def set_layout(self, layout="us", model="pc105", variant="", options="") -> None:
+-    def set_layout(self, layout="us", model="pc105", variant="", options="") -> bool:
+-        """
+-            Compile the layout and install it on the virtual keyboard.
+-            The layout attributes come from the client, so a layout we cannot compile
+-            is not a fatal error: we keep the keymap that is already installed.
+-        """
+-        if self.keyboard == NULL:
+-            # `cleanup` can have run before a packet gets here
+-            return False
 -        cdef xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS)
 -        if context == NULL:
--            raise RuntimeError("failed to create new xkb context")
+-            log.error("Error: failed to create a new xkb context")
+-            return False
 -        cdef xkb_rule_names rules
 -        memset(&rules, 0, sizeof(xkb_rule_names))
 -        rules.rules = NULL
@@ -5268,13 +5607,25 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 -            rules.options = boptions
 -        cdef xkb_keymap *keymap = xkb_keymap_new_from_names(context, &rules, XKB_KEYMAP_COMPILE_NO_FLAGS)
 -        if keymap == NULL:
--            raise RuntimeError(f"failed to set keymap layout {layout!r}")
+-            xkb_context_unref(context)
+-            log.warn("Warning: failed to compile the keymap for layout %r", layout)
+-            log.warn(" model=%r, variant=%r, options=%r", model, variant, options)
+-            return False
 -        wlr_keyboard_set_keymap(self.keyboard, keymap)
 -        self._build_keysym_map(keymap)
 -        xkb_keymap_unref(keymap)
 -        xkb_context_unref(context)
+-        log("set_layout(%r, %r, %r, %r) keymap installed", layout, model, variant, options)
+-        return True
 -
 -    cdef void _build_keysym_map(self, xkb_keymap *keymap) noexcept:
+-        """
+-            Map each keysym to the (keycode, layout group) which produces it.
+-            The keymap can hold up to 4 layout groups - one per client layout,
+-            see `WaylandKeyboardManager.get_layout_groups` - so the group has to be
+-            part of the answer: it tells the caller which group to switch to
+-            before pressing the key.
+-        """
 -        cdef xkb_keycode_t min_kc = xkb_keymap_min_keycode(keymap)
 -        cdef xkb_keycode_t max_kc = xkb_keymap_max_keycode(keymap)
 -        cdef xkb_keycode_t kc
@@ -5301,6 +5652,7 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
          cdef xkb_level_index_t level, n_levels
          cdef const xkb_keysym_t *syms
 -        cdef int n_syms, i
+-        cdef unsigned int sym
 +        cdef int n_syms, i, xkb_error = 0
          cdef dict mapping = {}
 -        for kc in range(min_kc, max_kc + 1):
@@ -5310,24 +5662,27 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 -                for level in range(n_levels):
 -                    n_syms = xkb_keymap_key_get_syms_by_level(keymap, kc, layout, level, &syms)
 -                    for i in range(n_syms):
--                        # Prefer the first (lowest keycode/layout/level) mapping for each keysym:
--                        mapping.setdefault(<unsigned int> syms[i], <unsigned int> kc)
+-                        sym = <unsigned int> syms[i]
+-                        existing = mapping.get(sym)
+-                        # prefer the lowest group, so that keysyms shared by more than one layout
+-                        # do not cause a group switch, then the lowest keycode / level within it:
+-                        if existing is None or existing[1] > <unsigned int> layout:
+-                            mapping[sym] = (<unsigned int> kc, <unsigned int> layout)
 -        self.keysym_to_keycode = mapping
--        log("built keysym->keycode map with %i entries (keycodes %i..%i)",
--            len(mapping), min_kc, max_kc)
+-        log("built keysym->keycode map with %i entries (keycodes %i..%i, %i group(s))",
+-            len(mapping), min_kc, max_kc, xkb_keymap_num_layouts(keymap))
 -
--    def get_keycode_for_keysym(self, keysym: int) -> int:
--        return self.keysym_to_keycode.get(int(keysym), -1)
+-    def get_keycode_for_keysym(self, keysym: int) -> tuple[int, int]:
+-        """ returns the (keycode, group) for this keysym, or (-1, 0) if the keymap has no such symbol """
+-        return self.keysym_to_keycode.get(int(keysym), (-1, 0))
 -
--    def get_keycode_for_keyname(self, name: str) -> int:
+-    def get_keycode_for_keyname(self, name: str) -> tuple[int, int]:
 -        cdef xkb_keysym_t sym
 -        if not name:
--            return -1
+-            return -1, 0
 -        bname = name.encode("latin1")
 -        sym = xkb_keysym_from_name(bname, XKB_KEYSYM_NO_FLAGS)
 -        if sym == 0:
--            return -1
--        return self.keysym_to_keycode.get(int(sym), -1)
 +        cdef list keycodes
 +        cdef KeymapCandidate candidate
 +        brules = b(rules)
@@ -5410,7 +5765,9 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 +            raise RuntimeError("keyboard is not available")
 +        if candidate is None or candidate.keymap == NULL or not candidate.group_count:
 +            raise ValueError("invalid XKB keymap candidate")
-+        keycodes = tuple(dict.fromkeys(settle_keycodes or ()))
++        # The native device owns every held key, including a direct public
++        # set_layout caller with no manager-provided settlement list.
++        keycodes = tuple(dict.fromkeys((*(settle_keycodes or ()), *self.keys_down)))
 +        normalized_modifiers = tuple(x for x in (modifiers or ()) if x)
 +        if group < 0 or group >= candidate.group_count:
 +            group = 0
@@ -5462,13 +5819,22 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 +        candidate.close()
 +        return self.group_count
 +
-+    def set_layout(self, layout="us", model="pc105", variant="", options="", rules="evdev") -> None:
-+        candidate = self.compile_keymap(rules, model, layout, variant, options)
++    def set_layout(self, layout="us", model="pc105", variant="", options="", rules="evdev") -> bool:
++        # Keep the upstream public refusal result; transactional callers use
++        # compile_keymap/install_keymap directly and receive their exceptions.
++        if self.keyboard == NULL:
++            return False
++        candidate = None
 +        try:
++            candidate = self.compile_keymap(rules, model, layout, variant, options)
 +            self.install_keymap(candidate)
-+        except Exception:
-+            candidate.cleanup()
-+            raise
++            return True
++        except Exception as exc:
++            log.warn("Warning: failed to install Wayland keyboard layout: %s", exc)
++            return False
++        finally:
++            if candidate is not None:
++                candidate.cleanup()
 +
 +    cpdef tuple keysyms(self, object keysym, str name, str keystr):
 +        return event_keysyms(keysym, name, keystr)
@@ -5499,7 +5865,8 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 +        cdef tuple trial
 +        cdef list masked_trials = []
 +        if not symbols or self.keyboard == NULL or self.keyboard.keymap == NULL:
-+            return -1, 0
+             return -1, 0
+-        return self.keysym_to_keycode.get(int(sym), (-1, 0))
 +        for trial in trials:
 +            depressed, locked = self.modifier_masks(trial)
 +            masked_trials.append((trial, depressed, locked))
@@ -5508,13 +5875,15 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 +            symbols, tuple(groups), tuple(masked_trials), modifiers,
 +        )
 +
-+    def get_keycode_for_keysym(self, keysym: int, group: int = 0, modifiers=()) -> int:
-+        return self.resolve_keycode(keysym, "", (group,), modifiers)[0]
++    def get_keycode_for_keysym(self, keysym: int, group: int = -1, modifiers=()) -> tuple[int, int]:
++        groups = tuple(range(self.group_count)) if group < 0 else (group,)
++        return self.resolve_keycode(keysym, "", groups, modifiers)
 +
-+    def get_keycode_for_keyname(self, name: str, group: int = 0, modifiers=()) -> int:
-+        return self.resolve_keycode(0, name, (group,), modifiers)[0]
++    def get_keycode_for_keyname(self, name: str, group: int = -1, modifiers=()) -> tuple[int, int]:
++        groups = tuple(range(self.group_count)) if group < 0 else (group,)
++        return self.resolve_keycode(0, name, groups, modifiers)
  
-     def press_key(self, keycode: int, press: bool) -> None:
+@@ -185,20 +616,51 @@ cdef class WaylandKeyboard:
          cdef uint32_t time_msec = get_time_msec()
 -        cdef uint32_t state = WL_KEYBOARD_KEY_STATE_PRESSED if press else WL_KEYBOARD_KEY_STATE_RELEASED
 -        if self.keyboard != NULL:
@@ -5577,8 +5946,7 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 +    def get_keycode_capacity(self) -> int:
 +        return xpra_wlr_keyboard_keys_cap()
  
-     def get_layout_group(self) -> int:
-         return self.group
+@@ -207,4 +669,15 @@ cdef class WaylandKeyboard:
  
 +    def get_layout_group_count(self) -> int:
 +        return self.group_count
@@ -5595,11 +5963,7 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 -        self.update_modifiers(self.modifiers, group)
 +        self.update_modifiers(self.modifiers, self.safe_group(group))
  
-     def reapply_modifiers(self) -> None:
-         self.update_modifiers(self.modifiers, self.group)
-@@ -186,43 +673,38 @@ cdef class WaylandKeyboard:
-     def update_modifiers(self, modifiers=(), group: int = 0) -> None:
-         cdef uint32_t depressed = 0
+@@ -216,19 +689,10 @@ cdef class WaylandKeyboard:
          cdef uint32_t locked = 0
 -        cdef uint32_t bit = 0
 -        cdef str modifier
@@ -5622,7 +5986,7 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 -        wlr_keyboard_notify_modifiers(self.keyboard, depressed, 0, locked, group)
 +        wlr_keyboard_notify_modifiers(self.keyboard, depressed, 0, locked, self.group)
          wlr_seat_keyboard_notify_modifiers(self.seat, &self.keyboard.modifiers)
- 
+@@ -236,9 +700,12 @@ cdef class WaylandKeyboard:
      cdef uint32_t modifier_bit(self, str modifier):
 +        return self.keyboard_modifier_bit(self.keyboard, modifier)
 +
@@ -5639,38 +6003,32 @@ index 2a4e67ada3f7af3923bd6870a662933313893c60..36a4edddc1e642ee5dabfd80381bc20b
 -        return 1 << mod_index
 +        return <uint32_t> 1 << mod_index
  
-     def focus(self, uintptr_t xdg_surface_ptr) -> None:
+@@ -246,3 +713,3 @@ cdef class WaylandKeyboard:
          if not xdg_surface_ptr:
 -            wlr_seat_keyboard_clear_focus(self.seat)
 +            wlr_seat_keyboard_notify_clear_focus(self.seat)
              log("focus(%#x) cleared focus", xdg_surface_ptr)
-             return
-         cdef wlr_xdg_surface *xdg_surface = <wlr_xdg_surface*> xdg_surface_ptr
-         cdef wlr_surface *surface = xdg_surface.surface
-         if not surface:
+@@ -253,2 +720,3 @@ cdef class WaylandKeyboard:
              log("surface is NULL, cleared focus")
 +            wlr_seat_keyboard_notify_clear_focus(self.seat)
              return
- 
-         wlr_seat_keyboard_notify_enter(self.seat, surface,
 diff --git a/xpra/wayland/server/keyboard_config.py b/xpra/wayland/server/keyboard_config.py
-index cd5d749551734acb6c95d3fce7613b8a6e1e34a2..63497f1843162a4bdb19234f5a1e46ae8996596a 100644
+index 27fef3f3264db4163c490a376cad522f03bab563..a6f91d7d73b89750fda13ad8ab18f35bb2a5ace9 100644
 --- a/xpra/wayland/server/keyboard_config.py
 +++ b/xpra/wayland/server/keyboard_config.py
-@@ -3,12 +3,750 @@
- # Xpra is released under the terms of the GNU GPL v2, or, at your option, any
- # later version. See the file COPYING for details.
+@@ -5,2 +5,7 @@
  
 +import hashlib
 +import json
 +import re
 +from collections.abc import Callable, Sequence
 +from dataclasses import dataclass, field
-+from typing import Any
+ from typing import Any
+@@ -9,5 +14,460 @@ from xpra.server.keyboard_config_base import KeyboardConfigBase
+ from xpra.util.objects import typedict
+-from xpra.log import Logger
  
- from xpra.server.keyboard_config_base import KeyboardConfigBase
-+from xpra.util.objects import typedict
-+
+-log = Logger("wayland", "keyboard")
 +
 +RMLVO_VERSION = 1
 +MAX_XKB_GROUPS = 4
@@ -6014,8 +6372,8 @@ index cd5d749551734acb6c95d3fce7613b8a6e1e34a2..63497f1843162a4bdb19234f5a1e46ae
 +        raise RMLVOError(f"{field_name} must be a string or sequence")
 +    result = []
 +    for entry in entries:
-+        if type(entry) is not str or "," in entry:
-+            raise RMLVOError(f"invalid {field_name}")
++        # Validate the exact type and bound length before any scan. The
++        # bounded name grammar also rejects commas inside a sequence entry.
 +        result.append(_bounded_name(entry, field_name, empty=empty))
 +    return tuple(result)
 +
@@ -6129,15 +6487,29 @@ index cd5d749551734acb6c95d3fce7613b8a6e1e34a2..63497f1843162a4bdb19234f5a1e46ae
 +
 +KeycodeResolver = Callable[["KeyboardConfig", str, list[str], int, str, int], tuple[int, int]]
  
- 
+@@ -15,23 +475,33 @@ log = Logger("wayland", "keyboard")
  class KeyboardConfig(KeyboardConfigBase):
- 
--    def do_get_keycode(self, client_keycode: int, keyname: str, pressed: bool,
--                       modifiers, keyval: int, keystr: str, group: int) -> tuple[int, int]:
--        return client_keycode, group
+-    """
+-    The whole seat shares a single `wlr_keyboard`, so this class only records
+-    the layout that one client asked for: installing it on the device belongs
+-    to the keyboard subsystem - see `WaylandKeyboardManager.install_keymap`.
+-    """
+-    __slots__ = ("layout", "layouts", "model", "variant", "variants", "options", "keys_pressed")
+-
+-    def __init__(self):
++
 +    def __init__(self, props=None, defaults: RMLVOConfig = BOOTSTRAP_RMLVO,
 +                 resolver: KeycodeResolver | None = None):
-+        super().__init__()
+         super().__init__()
+-        self.layout = ""
+-        self.model = ""
+-        self.variant = ""
+-        self.options = ""
+-        # the other layouts this client can switch to:
+-        self.layouts: tuple[str, ...] = ()
+-        self.variants: tuple[str, ...] = ()
+-        # this is shared between clients, see `KeyboardConnection.set_keymap`:
+-        self.keys_pressed: dict[int, Any] = {}
 +        self.defaults = defaults
 +        self.rmlvo = defaults
 +        self.last_good_rmlvo = defaults
@@ -6162,12 +6534,21 @@ index cd5d749551734acb6c95d3fce7613b8a6e1e34a2..63497f1843162a4bdb19234f5a1e46ae
 +        self._validated_state = None
 +        if props is not None:
 +            self.parse(props)
-+
-+    def __repr__(self):
+ 
+     def __repr__(self):
+-        return "wayland.KeyboardConfig(%s)" % "/".join(x for x in (self.layout, self.variant) if x)
 +        return f"KeyboardConfig({self.rmlvo.layout} / {self.rmlvo.variant} / {self.rmlvo.options})"
-+
-+    def get_info(self) -> dict[str, Any]:
-+        info = super().get_info()
+ 
+@@ -39,69 +509,244 @@ class KeyboardConfig(KeyboardConfigBase):
+         info = super().get_info()
+-        info |= {
+-            "layout": self.layout,
+-            "layouts": self.layouts,
+-            "model": self.model,
+-            "variant": self.variant,
+-            "variants": self.variants,
+-            "options": self.options,
+-        }
 +        info.update(self.rmlvo.as_dict())
 +        info["rmlvo-version"] = RMLVO_VERSION
 +        info["rmlvo-representation"] = self.representation
@@ -6178,8 +6559,8 @@ index cd5d749551734acb6c95d3fce7613b8a6e1e34a2..63497f1843162a4bdb19234f5a1e46ae
 +                "hash": self.rejected_hash,
 +                "reason": self.rejected,
 +            }
-+        return info
-+
+         return info
+ 
 +    def _mark_rejected(self, reason: str, props: Any = None) -> None:
 +        self.rejected = reason[:160]
 +        self.rejected_hash = _rejected_fingerprint(props)
@@ -6314,13 +6695,68 @@ index cd5d749551734acb6c95d3fce7613b8a6e1e34a2..63497f1843162a4bdb19234f5a1e46ae
 +        self.rejected_hash = ""
 +        return int(candidate != old) + int(self.sync != oldsync)
 +
-+    def parse(self, props: typedict) -> int:
+     def parse(self, props: typedict) -> int:
+-        # only used for the `keyboard-config` packet, which sends the attributes at the top level,
+-        # whereas the hello packet nests them all in a `keymap` dictionary:
+-        if "keymap" not in props:
+-            props = typedict({"keymap": dict(props)})
+-        return self.parse_layout(props) + self.parse_options(props)
+-
+-    def parse_layout(self, props: typedict) -> int:
+-        """ used by both the hello packet and the `keyboard-config` packet """
+-        keymap = typedict(props.dictget("keymap")) or props
+-        # the keyboard model is only ever sent as part of `query_struct`:
+-        model = typedict(keymap.dictget("query_struct")).strget("model")
+-        mods = self.update_layout(keymap.strget("layout"), model,
+-                                  keymap.strget("variant"), keymap.strget("options"))
+-        layouts = keymap.strtupleget("layouts")
+-        variants = keymap.strtupleget("variants")
+-        if (layouts, variants) != (self.layouts, self.variants):
+-            self.layouts = layouts
+-            self.variants = variants
+-            mods += 1
+-        return mods
+-
+-    def get_layout_groups(self) -> tuple[tuple[str, str], ...]:
+-        """
+-            The (layout, variant) pairs this client can use, active layout first.
+-            `layouts` and `variants` are paired by position, the way xkb pairs them,
+-            and a layout with no variant of its own simply gets an empty one.
+-            The active `layout` and `variant` are authoritative: a layout of the same
+-            name further down the list is that same layout, not another group.
+-        """
+-        groups: list[tuple[str, str]] = []
+-        if self.layout:
+-            groups.append((self.layout, self.variant))
+-        for i, layout in enumerate(self.layouts):
+-            if not layout or any(layout == name for name, _ in groups):
+-                continue
+-            groups.append((layout, self.variants[i] if i < len(self.variants) else ""))
+-        return tuple(groups)
+-
+-    def set_layout(self, layout: str, variant: str, options: str) -> bool:
+-        # the legacy `layout-changed` packet does not carry the model
+-        return self.update_layout(layout, self.model, variant, options) > 0
+-
+-    def update_layout(self, layout: str, model: str, variant: str, options: str) -> int:
+-        new = (layout, model, variant, options)
+-        old = (self.layout, self.model, self.variant, self.options)
+-        mods = sum(int(n != o) for n, o in zip(new, old))
+-        log("update_layout%s modified %i value(s), was %s", new, mods, old)
+-        self.layout, self.model, self.variant, self.options = new
+-        return mods
 +        return self._parse(props, self.defaults)
 +
 +    def parse_options(self, props: typedict) -> int:
 +        return self.parse(props)
-+
-+    def get_hash(self) -> str:
+ 
+     def get_hash(self) -> str:
+-        """ this hash changes whenever a different keymap would have to be installed """
+-        groups = self.get_layout_groups()
+-        if not groups and not any((self.model, self.options)):
+-            return ""
+-        return "/".join(("+".join(f"{layout}:{variant}" for layout, variant in groups),
+-                         self.model, self.options))
 +        return self.rmlvo.get_hash()
 +
 +    def set_layout(self, layout: str, variant: str, options: str | None) -> bool:
@@ -6412,12 +6848,10 @@ index cd5d749551734acb6c95d3fce7613b8a6e1e34a2..63497f1843162a4bdb19234f5a1e46ae
 +    def compute_modifier_keynames(self) -> None:
 +        return None
 diff --git a/xpra/wayland/server/subsystem/keyboard.py b/xpra/wayland/server/subsystem/keyboard.py
-index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966ec9ae718c 100644
+index b2c39ccfb048c21443645da2cd8c943871d343a5..19903ced9e4da2dac8fb62896fc073c2942a5010 100644
 --- a/xpra/wayland/server/subsystem/keyboard.py
 +++ b/xpra/wayland/server/subsystem/keyboard.py
-@@ -4,46 +4,1054 @@
- # later version. See the file COPYING for details.
- 
+@@ -6,13 +6,57 @@
  from collections.abc import Sequence
 +from time import monotonic
 +from typing import Any
@@ -6425,13 +6859,17 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966e
 +from xpra.keyboard.mask import DEFAULT_MODIFIER_MEANINGS
 +from xpra.net.common import BACKWARDS_COMPATIBLE, Packet
  from xpra.server.subsystem.keyboard import KeyboardManager
+-from xpra.server.source.keyboard import KeyboardConnection
  from xpra.util.objects import typedict
+-from xpra.util.str_fn import csv
 +from xpra.wayland.server.keyboard_config import MAX_NAME_SIZE, RMLVO_VERSION, _dict_compatible
  from xpra.log import Logger
  
 -log = Logger("server", "wayland")
 +log = Logger("server", "wayland", "keyboard")
-+
+ 
+-# xkb silently truncates a keymap to its first 4 layouts:
+-MAX_LAYOUT_GROUPS = 4
 +MODIFIER_ORDER = ("shift", "lock", "control", "mod1", "mod2", "mod3", "mod4", "mod5")
 +CANONICAL_MODIFIERS = frozenset(MODIFIER_ORDER)
 +LOCKED_MODIFIERS = frozenset(("lock", "mod2"))
@@ -6476,7 +6914,7 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966e
 +        return bool(dict.__len__(value))
 +    return default
  
- 
+@@ -20,5 +64,26 @@ MAX_LAYOUT_GROUPS = 4
  class WaylandKeyboardManager(KeyboardManager):
 -    __slots__ = ()
 +    __slots__ = (
@@ -6504,7 +6942,7 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966e
 +        self.last_rejected: dict[str, Any] = {}
 +
      def make_keyboard_device(self):
-         return self.server.compositor.get_keyboard_device()
+@@ -26,63 +91,813 @@ class WaylandKeyboardManager(KeyboardManager):
  
 +    def _get_defaults(self):
 +        if self.keyboard_defaults is not None:
@@ -6558,8 +6996,6 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966e
 +            config = fallback
 +        self.bootstrap_config = config
 +        self.set_keyboard_repeat(500, 30)
-+        if settings := self.get_subsystem("setting"):
-+            settings.connect("readonly-changed", self.readonly_changed)
 +
      def get_keyboard_config(self, props=None):
 +        # None means the ordinary server-default configuration.  Preserve any
@@ -6568,6 +7004,9 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966e
 +        p = {} if props is None else props
          from xpra.wayland.server.keyboard_config import KeyboardConfig
 -        keyboard_config = KeyboardConfig()
+-        p = typedict(props or {})
+-        keyboard_config.enabled = p.boolget("keyboard", True)
+-        keyboard_config.parse(p)
 -        log("get_keyboard_config(%s)=%s", props, keyboard_config)
 +        keyboard_config = KeyboardConfig(p, self._get_defaults(), self.resolve_keycode)
 +        keyboard_config.enabled = _mapping_bool(p, "keyboard", True)
@@ -6581,6 +7020,30 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966e
 +        )
          return keyboard_config
  
+-    def set_keymap(self, server_source, force=False) -> None:
+-        if getattr(server_source, "effective_readonly", lambda: self.server.readonly)():
+-            return
+-        log("set_keymap(%s, %s) current config=%s", server_source, force, self.config)
+-        server_source.set_keymap(self.config, self.config_hash, self.keys_pressed, force)
+-        self.set_current_config(server_source.keyboard_config)
+-
+-    def set_current_config(self, config) -> None:
+-        # the config we record as current is the one installed on the seat,
+-        # so only install a keymap when the recorded hash actually changes:
+-        installed = self.config_hash
+-        super().set_current_config(config)
+-        if config and config.enabled and self.config_hash != installed:
+-            self.install_keymap(config)
+-
+-    def get_layout_groups(self, config) -> tuple[tuple[str, str], ...]:
+-        # the whole seat shares a single `wlr_keyboard`, so its keymap has to carry
+-        # the layouts of every keyboard client: the one being configured owns the first
+-        # group and the others follow, which is what lets `get_keycode` below find a
+-        # symbol that only exists in another client's layout
+-        groups = list(config.get_layout_groups())
+-        for ss in self.get_sources_by_type(KeyboardConnection):
+-            other = getattr(ss, "keyboard_config", None)
+-            if other is None or other is config or not other.enabled:
 +    def get_caps(self, source) -> dict[str, Any]:
 +        # Capabilities are sent before add_new_client can validate and install
 +        # this source's RMLVO.  Advertise only the current device contract;
@@ -6741,7 +7204,18 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966e
 +        unique = []
 +        for config in configs:
 +            if not config or id(config) in seen:
-+                continue
+                 continue
+-            for group in other.get_layout_groups():
+-                if group not in groups:
+-                    groups.append(group)
+-        if len(groups) > MAX_LAYOUT_GROUPS:
+-            log.info("Warning: only the first %i keyboard layouts can be used", MAX_LAYOUT_GROUPS)
+-            log.info(" dropping %s", csv(f"{layout!r}" for layout, _ in groups[MAX_LAYOUT_GROUPS:]))
+-            groups = groups[:MAX_LAYOUT_GROUPS]
+-        return tuple(groups)
+-
+-    def install_keymap(self, config) -> None:
+-        if not self.device:
 +            seen.add(id(config))
 +            unique.append(config)
 +        return tuple(unique)
@@ -7142,7 +7616,22 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966e
 +    def _activate_owner_state(self, source, *, preserve_group: bool = False) -> None:
 +        config = self._keyboard_configs.get(source)
 +        if not config:
-+            return
+             return
+-        groups = self.get_layout_groups(config) or (("us", ""), )
+-        # xkb pairs the layouts and variants by position,
+-        # so the variant list must always have one entry per layout:
+-        layouts = ",".join(layout for layout, _ in groups)
+-        variants = ",".join(variant for _, variant in groups)
+-        model = config.model or "pc105"
+-        log("install_keymap(%s) layouts=%r, model=%r, variants=%r, options=%r",
+-            config, layouts, model, variants, config.options)
+-        if self.device.set_layout(layouts, model, variants, config.options) or len(groups) <= 1:
+-            return
+-        # a single unusable layout stops the whole keymap from compiling,
+-        # so fall back to the one belonging to the client we are configuring:
+-        layout, variant = groups[0]
+-        log.info("retrying with just the %r layout", layout)
+-        self.device.set_layout(layout, model, variant, config.options)
 +        state_source = source
 +        if not preserve_group:
 +            delay = int(getattr(config, "repeat_delay", 500))
@@ -7321,23 +7810,26 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966e
 +        return self.device.resolve_keycode(
 +            keyval, keyname, preferences, modifiers, keystr, self._held_modifier_names(),
 +        )
-+
-     def get_keycode(self, ss, client_keycode: int, keyname: str,
+ 
+@@ -90,22 +905,153 @@ class WaylandKeyboardManager(KeyboardManager):
                      pressed: bool, modifiers: list, keyval: int, keystr: str, group: int):
--        # The Wayland virtual keyboard uses its own xkb keymap, so the client's keycode
--        # (from a foreign keymap, e.g. Win32 VK codes) is not meaningful here.
+-        # The Wayland virtual keyboard uses its own xkb keymap, so neither the client's keycode
+-        # (from a foreign keymap, e.g. Win32 VK codes) nor its group (which indexes that keymap's
+-        # layouts) is meaningful here: we resolve the keysym against the keymap we installed and
+-        # return the group *that* keymap puts it in, which the caller applies before pressing.
 -        # The xkb keymap uses X11-style keycodes (evdev + 8) and `press_key` subtracts 8
 -        # before handing them to wlroots, so we just return what the keymap gives us.
 -        keycode = -1
+-        keymap_group = 0
 -        if self.device:
 -            if keyval > 0:
--                keycode = self.device.get_keycode_for_keysym(keyval)
+-                keycode, keymap_group = self.device.get_keycode_for_keysym(keyval)
 -            if keycode < 0 and keyname:
--                keycode = self.device.get_keycode_for_keyname(keyname)
+-                keycode, keymap_group = self.device.get_keycode_for_keyname(keyname)
 -        if keycode > 0:
--            log("get_keycode: keyname=%r keyval=%i client_keycode=%i -> xkb keycode=%i",
--                keyname, keyval, client_keycode, keycode)
--            return keycode, group
+-            log("get_keycode: keyname=%r keyval=%i client_keycode=%i, group=%i -> xkb keycode=%i, group=%i",
+-                keyname, keyval, client_keycode, group, keycode, keymap_group)
+-            return keycode, keymap_group
 -        log("get_keycode: no xkb mapping for keyname=%r keyval=%i, falling back",
 -            keyname, keyval)
 -        return super().get_keycode(ss, client_keycode, keyname, pressed, modifiers, keyval, keystr, group)
@@ -7415,15 +7907,19 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966e
 +                        wid, pressed, name, keyval, keycode, modifiers,
 +                        is_mod, sync, source, key_identity,
 +                    )
-+            result = super()._handle_key(
-+                wid, pressed, name, keyval, keycode, modifiers,
-+                is_mod, sync, source, key_identity,
-+            )
-+            if keycode in self.keys_pressed:
-+                holders.add(token)
-+            elif not holders:
-+                self._key_holders.pop(keycode, None)
-+            return result
++            try:
++                return super()._handle_key(
++                    wid, pressed, name, keyval, keycode, modifiers,
++                    is_mod, sync, source, key_identity,
++                )
++            finally:
++                # Generic handling records/presses before it schedules repeat.
++                # Failed timer admission (or a later notification) must not
++                # leave that press without a source holder able to release it.
++                if keycode in self.keys_pressed:
++                    holders.add(token)
++                elif not holders:
++                    self._key_holders.pop(keycode, None)
 +        if token not in holders:
 +            if not holders:
 +                self._key_holders.pop(keycode, None)
@@ -7489,11 +7985,7 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966e
 +        # after last-client-exited.
 +        self._settle_input()
  
-     def fake_key(self, keycode: int, press: bool) -> None:
-         log("fake_key(%i, %s)", keycode, press)
-@@ -52,18 +1060,456 @@ class WaylandKeyboardManager(KeyboardManager):
-         super().fake_key(keycode, press)
-         self.server.compositor.flush()
+@@ -118,16 +1064,137 @@ class WaylandKeyboardManager(KeyboardManager):
  
 -    def update_keyboard_modifiers(self, modifiers: Sequence[str], group: int = -1) -> None:
 -        if group < 0 and self.device:
@@ -7542,7 +8034,10 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966e
 +        ss = self.get_server_source(proto)
          attrs = typedict(kattrs)
 -        if "modifiers" in kattrs:
--            self.update_keyboard_modifiers(attrs.strtupleget("modifiers", ()), attrs.intget("group", 0))
+-            # the client's group indexes its own keymap, so keep the group we are on:
+-            # `get_keycode` resolves the one this key actually needs, and the superclass
+-            # applies it through `set_keyboard_layout_group` before pressing the key
+-            self.update_keyboard_modifiers(attrs.strtupleget("modifiers", ()))
 -        super().do_process_keyboard_event(proto, wid, keyname, pressed, kattrs)
 +        if (dict.__contains__(attrs, "group")
 +                and type(dict.__getitem__(attrs, "group")) is not int):
@@ -7638,8 +8133,7 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966e
 +        if not pressed:
 +            self._settled_modifier_meanings.pop(token, None)
  
-     def set_keyboard_layout_group(self, grp: int) -> None:
-         if self.device:
+@@ -136 +1203,336 @@ class WaylandKeyboardManager(KeyboardManager):
              self.device.set_layout_group(grp)
 +
 +    def _process_layout_changed(self, proto, packet) -> None:
@@ -7845,12 +8339,29 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966e
 +            info["rejected-configuration"] = dict(self.last_rejected)
 +        return info
 +
++    def client_exited(self, _server, source) -> None:
++        # ClientSession has already removed this exact source, but has not
++        # closed it or called cleanup_protocol yet. Never use the generic
++        # all-clients key release for one departed shared-key holder.
++        if source in self._keyboard_configs:
++            self._retire_keyboard_sources((source,))
++
 +    def cleanup_protocol(self, _protocol) -> None:
 +        current = self._current_sources()
 +        departed = tuple(
 +            source for source in self._keyboard_configs
 +            if not any(source is item for item in current)
 +        )
++        if departed:
++            self._retire_keyboard_sources(departed)
++        elif self._keyboard_owner_source is not None and not self._eligible(self._keyboard_owner_source):
++            # A different protocol can finish while the recorded owner is
++            # closed but still present. Preserve deterministic promotion.
++            self._reconcile_owner()
++        # No departure or stale owner: the earlier client-exited signal has
++        # already settled/promoted. Do not reinstall bootstrap or reset state.
++
++    def _retire_keyboard_sources(self, departed: tuple) -> None:
 +        owner_departed = any(self._keyboard_owner_source is source for source in departed)
 +        state_source = self._keyboard_state_source
 +        state_source_departed = any(state_source is source for source in departed)
@@ -7882,7 +8393,11 @@ index e5cbcbeff24992b599c174df96291484ab9a198b..5ede70ed542bd224e32807533cdf966e
 +        self._drop_owner()
 +        self._promote_owner()
 +
-+    def readonly_changed(self, _settings, source=None) -> None:
++    def setting_changed_handler(self, _server, setting: str, _value, source=None) -> None:
++        if setting != "readonly":
++            return
++        # Both transitions matter; read effective policy from its actual owner,
++        # including pointer/focus-only modifier sources with no key_events.
 +        owner = self._keyboard_owner_source
 +        restore_owner = False
 +        surviving_state_source = self._keyboard_state_source
@@ -7959,9 +8474,7 @@ diff --git a/xpra/wayland/server/subsystem/pointer.py b/xpra/wayland/server/subs
 index 764e86656ae320fd15d13af67bcbb21f6b882f41..22f61c5bb65637f6e1ef95a1595bd72a1830462c 100644
 --- a/xpra/wayland/server/subsystem/pointer.py
 +++ b/xpra/wayland/server/subsystem/pointer.py
-@@ -66,10 +66,17 @@ class WaylandPointerManager(PointerManager):
-             self.server.compositor.flush()
- 
+@@ -68,6 +68,13 @@ class WaylandPointerManager(PointerManager):
      def _update_modifiers(self, proto, wid: int, modifiers: Sequence[str]) -> None:
 +        # The generic path owns readonly and UI-driver arbitration.  Mirror
 +        # those guards before touching the shared wlroots keyboard state.
@@ -7977,15 +8490,11 @@ index 764e86656ae320fd15d13af67bcbb21f6b882f41..22f61c5bb65637f6e1ef95a1595bd72a
 -        super()._update_modifiers(proto, wid, modifiers)
 +            keyboard.update_keyboard_modifiers(modifiers, source=source)
  
-     def button_action(self, device_id: int, wid: int, button: int, pressed: bool, props: dict) -> None:
-         try:
 diff --git a/xpra/wayland/server/subsystem/window.py b/xpra/wayland/server/subsystem/window.py
-index 991139776bcab9e4b2c80c50050424ab2a76eda4..07835ca602980c8d76c8043cd7736adf08cbced6 100644
+index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..479d66aaff68f364f8f755bf8e0caf5d1ea16c9c 100644
 --- a/xpra/wayland/server/subsystem/window.py
 +++ b/xpra/wayland/server/subsystem/window.py
-@@ -461,12 +461,25 @@ class WaylandWindowServer(WindowServer):
-             surface.frame_done()
-             self.server.compositor.flush()
+@@ -490,3 +490,12 @@ class WaylandWindowServer(WindowServer):
  
 -    def _focus(self, _server_source, wid: int, modifiers) -> None:
 +    def _process_focus(self, proto, packet: Packet) -> None:
@@ -7999,7 +8508,7 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..07835ca602980c8d76c8043cd7736adf
 +
 +    def _focus(self, server_source, wid: int, modifiers) -> None:
          server = self.server
-         focuslog("_focus(%s, %s) current focus=%i", wid, modifiers, self.focused)
+@@ -494,4 +503,8 @@ class WaylandWindowServer(WindowServer):
          keyboard = server.subsystems.get("keyboard")
 +        if (server_source is not None and keyboard
 +                and keyboard.is_recording_source(server_source)):
@@ -8009,32 +8518,20 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..07835ca602980c8d76c8043cd7736adf
 -            keyboard.update_keyboard_modifiers(modifiers)
 +            keyboard.update_keyboard_modifiers(modifiers, source=server_source)
          if self.focused == wid:
-             return
-         for window_id, state in {
 diff --git a/xpra/wayland/server/wlroots.pxd b/xpra/wayland/server/wlroots.pxd
-index b1b2174f6bd80950aeabf3ca57080ec2540f1c2c..a22ce6d7e545822cd26f5cb658b5de5913df10d3 100644
+index 428b7807aca49b7d9883d3581690cad778ba919f..5c8b6ee0675020a428ffc98cae36cd36ae15ce27 100644
 --- a/xpra/wayland/server/wlroots.pxd
 +++ b/xpra/wayland/server/wlroots.pxd
-@@ -19,7 +19,7 @@ cdef extern from "xkbcommon/xkbcommon.h":
-     cdef struct xkb_keymap:
-         pass
+@@ -21,3 +21,3 @@ cdef extern from "xkbcommon/xkbcommon.h":
  
 -    ctypedef struct xkb_state:
 +    cdef struct xkb_state:
          pass
- 
-     ctypedef uint32_t xkb_led_index_t
-@@ -28,6 +28,7 @@ cdef extern from "xkbcommon/xkbcommon.h":
-     ctypedef uint32_t xkb_keysym_t
-     ctypedef uint32_t xkb_layout_index_t
+@@ -30,2 +30,3 @@ cdef extern from "xkbcommon/xkbcommon.h":
      ctypedef uint32_t xkb_level_index_t
 +    ctypedef uint32_t xkb_mod_mask_t
  
-     cdef enum xkb_keysym_flags:
-         XKB_KEYSYM_NO_FLAGS
-@@ -81,10 +82,23 @@ cdef extern from "xkbcommon/xkbcommon.h":
-     xkb_keymap* xkb_keymap_new_from_names(xkb_context *context, const xkb_rule_names *names, xkb_keymap_compile_flags flags)
-     void xkb_keymap_unref(xkb_keymap *keymap)
+@@ -83,2 +84,14 @@ cdef extern from "xkbcommon/xkbcommon.h":
  
 +    xkb_state* xkb_state_new(xkb_keymap *keymap)
 +    void xkb_state_unref(xkb_state *state)
@@ -8049,35 +8546,20 @@ index b1b2174f6bd80950aeabf3ca57080ec2540f1c2c..a22ce6d7e545822cd26f5cb658b5de59
 +                               const xkb_keysym_t **syms_out)
 +
      char *xkb_keymap_get_as_string(xkb_keymap *keymap, xkb_keymap_format format)
- 
-     xkb_keycode_t xkb_keymap_min_keycode(xkb_keymap *keymap)
+@@ -87,2 +100,3 @@ cdef extern from "xkbcommon/xkbcommon.h":
      xkb_keycode_t xkb_keymap_max_keycode(xkb_keymap *keymap)
 +    xkb_mod_index_t xkb_keymap_mod_get_index(xkb_keymap *keymap, const char *name)
      xkb_layout_index_t xkb_keymap_num_layouts(xkb_keymap *keymap)
-     xkb_layout_index_t xkb_keymap_num_layouts_for_key(xkb_keymap *keymap, xkb_keycode_t key)
-     xkb_level_index_t xkb_keymap_num_levels_for_key(xkb_keymap *keymap, xkb_keycode_t key, xkb_layout_index_t layout)
-@@ -92,6 +106,7 @@ cdef extern from "xkbcommon/xkbcommon.h":
-                                          xkb_layout_index_t layout, xkb_level_index_t level,
-                                          const xkb_keysym_t **syms_out)
+@@ -94,2 +108,3 @@ cdef extern from "xkbcommon/xkbcommon.h":
      xkb_keysym_t xkb_keysym_from_name(const char *name, xkb_keysym_flags flags)
 +    xkb_keysym_t xkb_utf32_to_keysym(uint32_t ucs)
  
- 
- cdef extern from "linux/input-event-codes.h":
-@@ -777,6 +792,7 @@ cdef extern from "wlr/types/wlr_seat.h":
-     void wlr_seat_keyboard_notify_modifiers(wlr_seat *seat, wlr_keyboard_modifiers *modifiers)
-     void wlr_seat_keyboard_notify_enter(wlr_seat *seat, wlr_surface *surface,
+@@ -795,2 +810,3 @@ cdef extern from "wlr/types/wlr_seat.h":
                                          uint32_t *keycodes, size_t num_keycodes, wlr_keyboard_modifiers *modifiers)
 +    void wlr_seat_keyboard_notify_clear_focus(wlr_seat *seat)
      void wlr_seat_set_keyboard(wlr_seat *seat, wlr_keyboard *dev)
-     void wlr_seat_keyboard_clear_focus(wlr_seat *seat)
- 
-@@ -926,7 +942,7 @@ cdef extern from "wlr/types/wlr_keyboard.h":
-         bint update_state       # if backend doesn't update modifiers on its own
-         wl_keyboard_key_state state
+@@ -944,3 +960,3 @@ cdef extern from "wlr/types/wlr_keyboard.h":
  
 -    void wlr_keyboard_set_keymap(wlr_keyboard *kb, xkb_keymap *keymap)
 +    bint wlr_keyboard_set_keymap(wlr_keyboard *kb, xkb_keymap *keymap)
      void wlr_keyboard_set_repeat_info(wlr_keyboard *kb, int32_t rate, int32_t delay)
- 
- 

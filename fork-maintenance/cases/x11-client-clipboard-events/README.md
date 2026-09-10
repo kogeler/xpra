@@ -26,11 +26,14 @@ the server-ordered `DestroyNotify`, after earlier queued events have drained.
 
 The applicable client-only installation therefore includes the regular
 `xpra.x11.gtk` Python package as well as its compiled extensions. Its initializer
-installs the error bridge and stable `get_pywindow` lookup delegate before
-`init_gdk_display_source()` binds Xpra to GDK's display. Importing an extension
+installs the error bridge before `init_gdk_display_source()` binds Xpra to
+GDK's display. Current selection routing uses `gtk_event_window` and the GTK
+adapter's `gtk_get_pywindow`; the native X11 event-loop path does not import GTK. Importing an extension
 through an implicit namespace package is not equivalent to executing that
 initializer. Package composition, shared filter ownership, and the event-XID
-handoff are distinct parts of the same client lifetime.
+handoff are distinct parts of the same client lifetime. Packaging, shared
+filter counting, wrapper retention and outbound flush are now supplied by
+upstream; this patch preserves them rather than reinstalling older APIs.
 
 On the server, `WaylandSelection` and `WaylandPrimarySelection` publish every
 successful `set_source`, `clear`, and `send_source` operation with an outbound
@@ -76,15 +79,15 @@ including a handoff away from and back to the same peer. Packet-ordered status
 changes instead serialize with the following data without invalidating fresh
 packets already queued behind an enable notification.
 
-The case has no other downstream production dependency. Its positive live
-gate installs the selected case at both endpoints because client event
-delivery and server publication/request ownership are both required to prove
-the complete transaction.
+The case has no other downstream production dependency. Every live run installs
+the complete `stacks/develop` queue at both endpoints. The clipboard fixture
+owns the cross-backend oracle, but acceptance requires all nine profiles through
+`live-all STACK=develop` and a current `live-suite-check`.
 
 ## Upstream provenance
 
 The case is based on the source commit embedded in the current `develop`
-history, `212038243d0067b6860ebe7d6953692179ef353f`.  It does not compare or
+history, `d95058b0916913fe6ae5296fb702f66d833898b0`.  It does not compare or
 follow moving master refs.  The relevant implementation is the result of a
 maintainer-authored 2025 refactor followed by the 2026 token-state work:
 
@@ -114,7 +117,26 @@ The failure is not evidence that the older GTK-owned clipboard-window design
 should be restored.  The current raw-X11 boundary is deliberate, and recent
 target-generation and backoff behavior is part of the surrounding maintainer
 design.  Adaptation after an upstream refresh must first re-read these current
-paths and commits; old diagnostic logs prove only this frozen source boundary.
+paths and commits; old diagnostic logs are not acceptance evidence for a new
+source boundary.
+
+Manual reassessment on this source keeps the case but narrows its ownership:
+
+| Current upstream change | Adaptation decision |
+| --- | --- |
+| `a33f4a64386` packages the GTK/X11 Python adapter whenever `gtk_x11_ENABLED` is enabled. | Remove our `setup.py` hunk; keep the installed client-only regression. |
+| `895b16ffcd5`, `8d07da54117`, `dcd3eab76c8` restore clipboard acquisition, shared filter counting and underflow protection. | Reuse the current lease API. Remove the filter implementation hunk; booleans describe installation/removal, not lease success. |
+| `04306b7315b`, `5f3e107262b` supply conditional `StructureNotifyMask` and the retained `gtk_event_window`. | Keep those fields/masks and add rollback around their actual owners. |
+| `af0d210f310`, `445e0412281` remove the lookup injection seam and separate native routing from GTK lookup. | Remove our common/GTK initializer hunks and migrate their controls. Do not resurrect the deleted delegate API. |
+| `5bbba04e93f` flushes all six native selection adapter operations. | Preserve both current flush methods and all six calls; retain only residual source/FD lifetime changes. |
+| `ff3f98f45d8` drains requests while records remain resolvable. | Extend existing `cancel_outstanding_requests` with exact callbacks and re-entry protection; no second reset/drain API. |
+
+The residual defects remain visible in code: unused root subscription and
+invalid selection mask, duplicate scheduling, incomplete constructor/teardown
+ownership, unbound native request completions and partial writes, peer/policy
+admission, and standard compositor selection service with forwarding off.
+Tests challenge this keep/adapt conclusion; they do not replace the call-path
+and ownership analysis.
 
 ## Surrounding ownership map
 
@@ -128,8 +150,8 @@ clipboard object:
 | `xpra/platform/posix/clipboard.py` | Chooses `X11Clipboard` when X11 bindings are active and otherwise falls back to the generic GTK helper. |
 | `xpra/x11/selection/clipboard.py` | Owns the raw event window, Xpra receiver registration, XFixes subscriptions, proxies, filter lease, and cleanup ordering. |
 | `xpra/x11/selection/proxy.py` | Implements local owner-change state, X selection conversions, target/data caches, token scheduling, generation invalidation, and remote-selection ownership. |
-| `setup.py` and `xpra/x11/gtk/__init__.py` | Make the GTK/X11 Python adapter present in every applicable client install and inject the GDK window lookup. |
-| `xpra/x11/common.py` | Provides a toolkit-neutral, stable lookup function used by early importers. |
+| Upstream `setup.py` and `xpra/x11/gtk/__init__.py` | Package the GTK/X11 adapter and install its GDK error bridge. Neither is modified by this candidate. |
+| Upstream `xpra/x11/selection/common.py` and `xpra/x11/gtk/__init__.py` | Select native event-loop routing or `gtk_get_pywindow` without injecting functions into early importers. |
 | `xpra/x11/gtk/display_source.pyx` | Binds Xpra's Xlib calls to GDK's X11 display connection. |
 | `xpra/x11/gtk/bindings.pyx` | Creates GDK foreign-window wrappers and owns the process-global raw X11 event filter. |
 | `xpra/x11/bindings/fixes.pyx` | Registers and parses the XFixes extension event and selects owner-change notifications. |
@@ -170,91 +192,58 @@ accept.
 ## Client initialization and package composition
 
 The GTK3 client calls `xpra.gtk.util.init_display_source(False)` during
-`client_base` import.  On X11 this imports
-`xpra.x11.gtk.display_source.init_gdk_display_source`.  A normal Python package
-import executes `xpra/x11/gtk/__init__.py` first; that initializer installs the
-GDK error bridge and the `get_pywindow` adapter before the display source binds
-the raw Xlib display to GDK's display.
+`client_base` import. On X11 this imports
+`xpra.x11.gtk.display_source.init_gdk_display_source`. A regular package import
+executes `xpra/x11/gtk/__init__.py` first, installing the GDK error bridge before
+the raw Xlib display is bound to GDK's display.
 
-The clean client-only build violated that assumption.  Its compiled
-`xpra.x11.gtk.*` extensions were present, but the `xpra.x11.gtk` Python package
-was enabled only by `server_ENABLED and gtk_x11_ENABLED`.  Python could load
-the extension from a namespace package without executing the omitted
-`__init__.py`.  This is why source-tree tests or a combined client/server build
-alone cannot prove the installed-client boundary.
+The former client-only package omitted that Python initializer while retaining
+its compiled extensions. An implicit namespace package could import those
+extensions without executing the initializer. Current upstream fixes this by
+sharing the extensions' `gtk_x11_ENABLED` package predicate. Do not restore
+the older downstream client/server predicate or make GTK mandatory for a
+deliberately non-GTK X11 consumer.
 
-The package condition must include a GTK X11 client as well as a server.  It
-must remain conditional on the existing GTK/X11 build feature; this case does
-not make GTK a dependency of a deliberately non-GTK X11 consumer.  A future
-package split is acceptable only if the client still receives the initializer
-and error bridge which its compiled GTK/X11 extensions require.
+The installed client-only image still verifies this inherited boundary. Under
+Xvfb it imports `client_base`, checks that `error.Xenter` is GDK's actual
+`error_trap_push`, constructs a disabled `X11Clipboard`, requires its filter
+lease and retained GDK wrapper to match the raw XID, resolves that XID through
+`gtk_get_pywindow`, and cleans up. A successful extension import alone is
+weaker. No removed lookup-registration API is an acceptance prerequisite.
 
-There is a packaging trap here which an import-only source test cannot expose.
-The Cython extensions `xpra.x11.gtk.display_source` and
-`xpra.x11.gtk.bindings` are enabled directly by `gtk_x11_ENABLED`.  Python can
-therefore resolve those extension modules below an implicit namespace package
-even when the regular package containing `xpra/x11/gtk/__init__.py` was omitted
-from the installed file set.  A successful import of either extension is not
-proof that the initializer ran.  The package predicate must remain
-`(server_ENABLED or client_ENABLED) and gtk_x11_ENABLED`, and acceptance must
-inspect or execute a real client-only installation where `server_ENABLED` is
-false.
+Display-bound tests have the inverse trap. `DisplayContext` starts Xvfb, sets
+`DISPLAY` and `GDK_BACKEND=x11`, opens GDK's display, and binds the display
+source; on exit it closes those resources before terminating Xvfb. Binding
+singletons and proxy imports stay inside that context. The filter count and
+one-time XFixes/core parser registration are C process state, not fresh Python
+state per test. Main client regressions use one module-level display context;
+the exact filter-return sequence uses a fresh interpreter and its own real
+display to avoid borrowing another test's live lease.
 
-Display-bound tests have the inverse trap.  `DisplayContext` starts Xvfb, sets
-`DISPLAY` and `GDK_BACKEND=x11`, opens or replaces GDK's default display, and
-then calls `init_gdk_display_source`; on exit it closes that display source and
-the GDK display before terminating Xvfb.  Imports which instantiate X11
-binding singletons or cache a display pointer must therefore remain inside the
-active context.  Toolkit-neutral `xpra.x11.common` may deliberately be
-imported earlier to exercise the stable delegate, but
-`xpra.x11.selection.proxy`, `xpra.x11.gtk.bindings`, and the XFixes singleton
-must not be initialized against the operator display or a display which the
-test later closes.
+## Toolkit routing and import boundaries
 
-The compiled bindings also carry process-global C state: the filter lease
-count and the one-time core and XFixes event registration do not become fresh
-Python objects for every test method.  A module-level single `DisplayContext`,
-lazy display-bound imports, and fully balanced leases are part of the test
-isolation contract.  Repeatedly opening unrelated Xvfb displays in one
-interpreter, or simulating an XFixes-missing display before the positive test,
-can poison one-time extension state and produce a result unrelated to this
-case.
+Upstream no longer mutates a `get_pywindow` function in `xpra.x11.common`.
+`xpra.x11.selection.common.gtk_event_window` first checks
+`x11_event_loop_running()`: a native X11 loop returns without loading GTK,
+while the GTK route lazily calls `xpra.x11.gtk.gtk_get_pywindow`.
 
-## Stable toolkit lookup and import order
+The clipboard helper uses the same native-loop decision in
+`init_gtk_filter`. It acquires a GDK filter only on the GTK route, records the
+lease after a non-raising call, and retains `gtk_event_window` for that route.
+Wrapper lookup must return a valid object for the raw XID before subscriptions
+can deliver events. Native routing keeps its existing event-loop authority and
+does not manufacture a GTK wrapper or lease.
 
-The original injection seam assigned a new function to
-`xpra.x11.common.get_pywindow`.  That works only for code which looks up the
-module attribute after injection.  Modules such as the selection manager use
-`from xpra.x11.common import get_pywindow`; an early import keeps the old
-function object forever, so later assignment silently fails to update that
-consumer.
-
-The correction keeps `get_pywindow` itself stable and changes a private
-delegate through `set_pywindow_lookup`.  Both early and late importers then call
-the active toolkit adapter.  `has_pywindow_lookup` distinguishes an installed
-toolkit adapter from the intentionally toolkit-neutral fallback; checking the
-return value of the fallback is insufficient because the historical fallback
-returns an opaque object rather than `None`.
-
-These properties are deliberate:
-
-- do not replace the public function object after another module may have
-  imported it;
-- reject a non-callable delegate without discarding the last valid delegate;
-- allow the pure-X11 path to exist without importing GTK bindings;
-- require a real GDK wrapper when the GTK adapter is installed;
-- retain `self.window` strongly for the event window's whole lifetime so the
-  GDK XID/display association is not garbage-collected early.
-
-The lookup is process-global because the GDK display source is process-global.
-This case does not attempt to support switching the active toolkit or X display
-inside one live client process.
+The common regression guards imports while taking the real native-routing
+branches, so accidentally importing GTK is a failure. This replaces the former
+early-import delegate test; absence of a deleted API is not a clean negative.
+Switching toolkits or displays inside one live client remains outside scope.
 
 ## Display connection and event route
 
 `init_gdk_display_source()` obtains the default `GdkDisplay`, extracts its
 `Display *`, and publishes that pointer through Xpra's X11 display source.
-`X11WindowBindings`, `XFixesBindings`, `get_pywindow`, and the global GDK filter
+`X11WindowBindings`, `XFixesBindings`, `gtk_get_pywindow`, and the global GDK filter
 therefore operate on the same effective X display connection in a GTK X11
 client.  A fix which opens a second private display would split the request,
 subscription, and GDK event queues and is out of scope.
@@ -281,7 +270,7 @@ repair which makes `CONTINUE` safe.
 ## Event-window and XFixes subscription ownership
 
 The clipboard event window is an X11 `InputOnly` child of the root with
-`PropertyChangeMask | StructureNotifyMask`.  The property mask is needed
+`PropertyChangeMask` and, on the GTK route, `StructureNotifyMask`.  The property mask is needed
 because local selection owners write converted data to properties on this
 requestor.  The structure mask makes the X server send `DestroyNotify` for the
 owned raw window, allowing GDK to retire its foreign-window XID mapping in
@@ -366,20 +355,22 @@ diagnostics.
 
 ## Filter lease and cleanup lifecycle
 
-The GDK raw-event filter is process-global shared state.  XSettings/display,
+The GDK raw-event filter is process-global shared state. XSettings/display,
 XI2, an X11 server subsystem, and the clipboard helper may all need it at the
-same time.  `init_x11_filter` is therefore an acquire operation, not a
-"first caller won" probe.  Every successful call owns one lease and must return
-success to its caller; only the zero-to-one transition installs the actual GDK
-filter.  Every owned cleanup releases one lease; only the one-to-zero transition
-removes the filter.  An unmatched cleanup is rejected without underflowing the
-counter or removing anything.
+same time. Every non-raising `init_x11_filter()` call acquires one count.
+Its boolean is True only when it installs the actual filter (zero-to-one),
+not whenever it successfully acquires a lease. Every owned cleanup releases
+one count; `cleanup_x11_filter()` is True only when it removes the filter
+(one-to-zero). False must not be interpreted as a failed lease operation or a
+reason to retry. Unmatched cleanup warns and returns False without underflow.
 
-The old implementation incremented the counter only for the first caller and
-returned true whenever the stored count happened to equal one.  Multiple
-callers could all believe they owned the same single count, allowing the first
-cleanup to remove the filter from every survivor.  The regression must cover a
-peer lease, clipboard acquisition, peer release, and a later clipboard event.
+Current upstream already owns this contract and is not modified here. The
+helper records acquisition independently of the return value, then releases
+exactly once even on constructor rollback. The regression covers peer
+acquisition, clipboard acquisition, peer release returning False, and a
+surviving clipboard event. A fresh-process control separately binds the
+sequence `(True, False, False, True, False, True, True)` for two acquires,
+two releases, an intentionally unmatched release, and a fresh acquire/release.
 
 The frozen source has these callers and lifetimes; an upstream adaptation must
 repeat this inventory rather than assuming the clipboard is the only user:
@@ -389,7 +380,7 @@ repeat this inventory rather than assuming the clipboard is the only user:
 | `GtkX11Server` in `xpra/x11/subsystem/gtk.py` | Unconditionally during GTK X11 server setup, after the GDK display source is initialized. | Releases in subsystem cleanup, before late cleanup closes the GDK display source. |
 | `X11DisplayPropsWatcher` in `xpra/platform/posix/display.py` | After handshake, only when XSettings, workarea, desktop, or stacking properties actually require an X11 watcher. | Stores its own boolean lease and releases it in watcher cleanup.  This is the optional path whose presence masked the clipboard omission. |
 | `XI2Client` in `xpra/client/subsystem/xi2.py` | After handshake and successful XI2 selection/injection; disabled by `input-devices=noxi2`. | Stores and releases its own lease in XI2 subsystem cleanup. |
-| `X11Clipboard` in `xpra/x11/selection/clipboard.py` | During helper construction when the GTK `get_pywindow` adapter is installed. | Releases only its own lease on normal cleanup or constructor rollback, after its receiver and event window are retired. |
+| `X11Clipboard` in `xpra/x11/selection/clipboard.py` | During helper construction when the native X11 loop is not the event owner. | Releases only its own lease on normal cleanup or constructor rollback, after its receiver and event window are retired. |
 | `ManagerSelection.main` | The standalone selection-manager utility acquires after initializing its GDK display source. | Process-lifetime one-shot; it has no shared in-process teardown path in this entry point. |
 | `gtk/examples/window_focus.py` | Diagnostic example setup on X11. | Process-lifetime example lease; not an owner on the normal client path. |
 
@@ -402,8 +393,8 @@ for another owner to perform a global reset.
 `X11Clipboard` initializes its XID, wrapper, and lease fields before any
 fallible setup.  Construction then follows this order:
 
-1. detect whether a real toolkit lookup is installed;
-2. acquire the clipboard's own filter lease when it is;
+1. check the current native-X11-loop routing decision;
+2. acquire and record the clipboard's own filter lease on the GTK route;
 3. create the raw event window under `xsync`;
 4. create and retain the GDK foreign wrapper;
 5. register the Xpra receiver;
@@ -414,9 +405,8 @@ The window factory destroys a just-created XID if its diagnostic property
 cannot be set.  A later constructor exception disconnects handlers and cleans
 every completed or in-flight proxy before removing the receiver/window and
 releasing the filter lease; rollback continues through all owned resources
-without replacing the original exception.  Proxy cleanup delegates to the
-shared core cleanup so token and unblock timers cannot survive a failed or
-normal helper lifecycle.  The X11 proxy additionally owns an `INCR` transfer
+without replacing the original exception.  Proxy cleanup uses existing token and unblock cancellation methods
+independently, so one removal exception cannot skip the other resources.  The X11 proxy additionally owns an `INCR` transfer
 timer and one `XConvertSelection` timeout for every entry in
 `local_requests`; neither belongs to the helper's network-timeout table.
 
@@ -425,7 +415,7 @@ merged or drained with one generic callback loop:
 
 | State | What it represents | Completion and teardown owner |
 | --- | --- | --- |
-| Proxy `_emit_token_timer` and `_block_owner_change` | Deferred local-owner announcement and the short loop-prevention embargo. | `ClipboardProxyCore.cleanup` removes both GLib sources. |
+| Proxy `_emit_token_timer` and `_block_owner_change` | Deferred local-owner announcement and the short loop-prevention embargo. | Existing cancellation methods retire both sources; X11 cleanup attempts each independently even after failure. |
 | Helper `_clipboard_outstanding_requests` | A `clipboard-request` already sent over the Xpra connection, keyed by wire request ID and guarded by `REMOTE_TIMEOUT`; a record may also own one request-specific completion callback. | `ClipboardTimeoutHelper` consumes `clipboard-contents` / `clipboard-contents-none`, removes the timer, and calls that exact callback when present or the legacy selected proxy otherwise.  Reset and cleanup drain each still-live ID once as empty while a guard makes re-entrant requests complete locally instead of recreating network work. |
 | Wayland proxy `pending_writes` and `pending_write_sources` | One native consumer FD waiting for one exact remote request or draining cached/replied bytes. Its unique key records source identity, remote generation, target, and FD; active output also owns a GLib write watch and deadline. | Ownership lasts through complete nonblocking delivery. Each readiness callback resolves its key and rechecks source/generation. Completion, source destruction, reset, cleanup, I/O failure, or deadline retires the key, FD, watch, and timer once; later callbacks cannot reach a reused FD. |
 | Wayland proxy `pending_reads` and `pending_read_timers` | One asynchronous native-source pipe read, keyed independently of its FD and bound to the source pointer and ownership generation, with a request deadline. | EOF returns data only for the current pointer/generation. Replacement, deadline, size failure, or I/O failure retires the watch, timer, and FD and empty-completes once; cleanup retires without starting replacement work. |
@@ -436,7 +426,8 @@ merged or drained with one generic callback loop:
 Proxy teardown cancels the `INCR` source before clearing its numeric source ID,
 then resets the accumulated size, type, and chunks.  It resolves every pending
 local-X11 request for remote data with an empty selection response while the
-live `remote_requests` table is still authoritative.  Local conversion
+detached records are still available for that exact cleanup pass; an
+individual requestor failure cannot skip later requestors.  Local conversion
 requests are different: cleanup first
 detaches the whole table and removes every saved GLib source without invoking
 the completion callbacks.  Calling those callbacks during teardown can run the
@@ -482,6 +473,21 @@ Direction policy remains layered rather than inferred from event presence:
 - `off` disables helper transport entirely;
 - an XFixes event can still be observed while the proxy correctly declines to
   send because `_can_send` is false.
+
+A non-claiming token, a receive-denied token, or an informational modern
+`token=False` packet is not evidence that the local owner changed. It must
+not advance the source generation, replace its cached targets/data or origin,
+or cancel its pending announcement. A data-only X11 claim can derive targets
+from its data keys even when no separate target list was sent.
+
+For a modern receiving claim the core provisionally supplies the incoming
+origin so a native source can advertise it. A backend's explicit False return
+declines the claim and restores the old origin; existing backends returning
+None retain their historical API. Pre-publication exceptions also restore the
+origin. Both native proxies return a concrete acceptance result. An empty
+native offer can retire our own active remote source, but cannot establish a
+new owner or replace independent native state. That decline preserves the
+native owner's cache, origin and pending token.
 
 The server uses the opposite send/receive orientation: `to-server` permits
 receiving and `to-client` permits sending. Runtime `clipboard-direction`
@@ -722,7 +728,8 @@ alone is not a generation and target equality is not request identity.
 
 For remote-token replacement the exact order is:
 
-1. allocate the replacement wrapper and MIME array;
+1. prepare the new targets/data without changing the old metadata, then allocate
+   the replacement wrapper and MIME array;
 2. increment `remote_generation` and publish the replacement object and
    pointer in the proxy;
 3. call `wlr_seat_set_selection` or its primary equivalent;
@@ -731,6 +738,19 @@ For remote-token replacement the exact order is:
    does not clear fields already pointing at the replacement;
 5. wlroots installs the replacement, emits/queues the selection state, and the
    adapter flushes clients after the setter returns.
+
+Both adapters refuse a missing display/seat before calling the native setter.
+That preflight failure restores the exact old proxy object, pointer, generation
+and target data and destroys only the unpublished candidate. Once the setter
+accepts a replacement, its old source may already be destroyed: post-commit
+token cancellation is contained and cannot report a failed claim or restore
+that obsolete state. Existing native flush is noexcept.
+
+MIME iteration/conversion may fail after the standard source has entered
+`DATA_SOURCE_OWNERS`, or after a primary source owns a Python reference through
+its native data field. Constructor rollback destroys that unpublished native
+source with its proxy notification detached. Primary destroy releases the
+native Python reference in finally even if a proxy notification raises.
 
 For an empty token, reset, or cleanup, `clear_remote_source` first retains the
 old object/pointer and increments the remote generation.  It may call the seat
@@ -742,7 +762,11 @@ selection signal and the adapter flushes after return.  Calling the wrapper's
 idempotent `destroy()` afterward is a no-op in that normal path and releases it
 only when the adapter had no live seat/display and therefore could not perform
 the clear.  This is not a fictional clear → flush → destroy sequence: the
-wlroots setter owns synchronous destruction.
+wlroots setter owns synchronous destruction. Wrapper retirement and exact
+pointer clearing remain in finally paths if the adapter raises; proxy cleanup
+also attempts reads, writes and compositor disconnection. Core helper cleanup
+detaches its proxy map first, attempts every proxy and then reports the first
+error. Partial helper construction records each proxy before fallible setup.
 
 Each remote source-send request receives its own local `write_key`; a request
 without cached bytes also receives its own helper completion. The pending
@@ -870,16 +894,14 @@ The following observations are controls, not proposed fixes:
 
 ## Patch-queue and integration traps
 
-This is one atomic end-to-end production case even though it touches packaging,
-common lookup state, Cython filter ownership, the X11 helper, token scheduling,
-and the Wayland compositor's selection adapters and listeners.  Applying only
-the apparent one-line X11 filter acquisition leaves the client crash;
-packaging only the initializer leaves the helper dependent on an unrelated
-filter owner; registering the GDK window without fixing lease cleanup leaves
-later events vulnerable to another subsystem's teardown.  Conversely, the
-Wayland offer and source-request delivery require the current X11 owner event
-to cross the wire, and the `off` listener control proves that a blocked transfer
-is policy rather than a broken native owner.
+This remains one end-to-end production case spanning the residual X11 helper,
+token scheduling, shared request completion and native source/listener lifetime.
+Packaging, toolkit routing, shared filter counting and outbound flush are
+inherited dependencies, not reasons to keep duplicate downstream hunks.
+Preserving one inherited layer cannot stand in for the remaining ones: the
+Wayland offer and source-request delivery still require the current X11 owner
+event to cross the wire, and the `off` listener control distinguishes blocked
+forwarding policy from a broken independent native owner.
 
 The owned behavior is one transaction: detect a new X11 client owner, publish
 its current offer to a native-Wayland server application, service current data,
@@ -898,8 +920,8 @@ Keep these maintenance constraints:
   digest, or `paths`;
 - preserve the package condition for both GTK X11 client-only and server
   builds, and verify an installed client rather than only a source checkout;
-- retain the stable delegate if any current consumer can import
-  `get_pywindow` before GTK injection;
+- preserve upstream native-loop/GTK routing and installed error-bridge setup;
+  do not resurrect the deleted lookup delegate or reinterpret lease booleans;
 - audit every current `init_x11_filter` and `cleanup_x11_filter` caller when
   adapting the lease contract;
 - do not turn a shared global filter into clipboard-private installation or
@@ -952,29 +974,26 @@ controls.  A patch which merely applies in reverse is not sufficient evidence.
 The patch owns the smallest coherent cross-backend clipboard lifecycle exposed
 by the X11-client failure:
 
-- explicit acquisition and release of the global X11 filter by
-  `X11Clipboard`;
-- inclusion of the GTK X11 Python package for client-only builds and a stable
-  lookup delegate which remains valid for early importers;
-- true shared lease/refcount semantics, including balanced and idempotent
-  cleanup;
-- an event-window and GDK handoff which handles Xpra's subscribed XFixes events
-  without crashing GTK or swallowing unrelated GDK selection notifications;
+- exception-complete rollback and cleanup around the current clipboard-owned
+  filter lease, raw XID, retained GDK wrapper, signals and proxy requests;
+- preservation of inherited packaging, native/GTK routing, filter counting and
+  GDK event-window lifetime, with migrated real installed/native controls;
 - removal of the unused root XFixes subscription and the invalid use of the
   numeric `SelectionNotify` event type as an `XSelectInput` mask;
 - one token schedule per owner transition under the existing proxy state
   machine;
-- immediate outbound Wayland display publication after ordinary and primary
-  `set_source`, `clear`, and `send_source` operations;
+- preservation of upstream's six outbound flushes while correcting native
+  borrowed-FD handoff and rejecting publication before an unavailable setter;
 - source- and generation-bound Wayland reads and writes, including exact
   per-wire-request completion and cancellation on replacement/reset/cleanup;
 - correct wlroots replacement/clear lifecycle: publish the new proxy identity
   before the setter, tolerate synchronous destruction inside it, flush after
   it returns, and idempotently destroy only as a fallback, while never clearing
   a newer native source;
-- balanced helper request draining and exact compositor callback
-  disconnection, so teardown cannot retain timers, FDs, or post-cleanup
-  selection entry;
+- balanced helper request draining, post-close admission refusal, exhaustive
+  cleanup and exact compositor callback disconnection;
+- refusal/nonclaim ownership preservation, source-constructor rollback and
+  pre-publication metadata restoration without reviving a destroyed source;
 - unconditional standard seat request/set-selection listeners paired with the
   compositor's unconditional standard data-device manager, while optional
   forwarding/data-control/primary facilities remain feature-gated;
@@ -1002,9 +1021,9 @@ One test constructs `X11Clipboard` without another filter owner, verifies that
 its event XID has a GDK wrapper, changes the real `CLIPBOARD` owner, and requires
 the corresponding clipboard packet.  It then performs a real `UTF8_STRING`
 conversion and requires exactly one packet after the event loop settles.  Its
-tests-only clean-source failure proves that the standalone helper does not
-receive the owner change; the exact-one assertion binds the adjacent scheduling
-correction.
+tests-only clean-source control now targets duplicate scheduling and residual
+ownership/teardown defects, not absence of the upstream-restored filter.
+The exact-one assertion binds the scheduling correction.
 
 A second test acquires a direct peer filter lease, creates the clipboard
 helper, proves one owner change, releases the peer lease, and proves a second
@@ -1031,9 +1050,14 @@ conversion and incremental watchdog.  Two cleanup calls must cancel both
 sources, clear all incremental state, answer the mocked X11 requestor exactly
 once, and never invoke the local conversion callback.  This is an exact
 teardown/idempotency test; it does not claim to perform an end-to-end INCR
-transfer or network round trip.  A common unit test separately binds stable
-early-import lookup delegation and the exact lease sequence, including
-harmless rejection of an unmatched cleanup.
+transfer or network round trip. Separate failure injection makes the first
+requestor response and first timer removal raise, and requires later resources
+still to be attempted. Nonclaim/receive-denied controls preserve local state;
+a data-only receiving claim retains its actual target.
+
+The common module guards native routing against GTK imports and binds the
+current exact lease-return sequence in a fresh process, including rejection
+of an unmatched cleanup. It no longer tests a removed lookup API.
 
 `unit.clipboard_core_test` binds the shared request-delivery seam independently
 of either platform.  Two same-target requests complete out of order by their
@@ -1044,6 +1068,21 @@ detached callback once, and prevent a callback from creating re-entrant wire
 work while the drain guard is active. A zero-dimensional ctypes memoryview
 also reaches both request-specific and legacy callbacks as its exact byte;
 empty views and absent replies retain their respective bytes/`None` behavior.
+Origin controls distinguish receiving claims, declined or failed claims,
+nonclaims and informational data. Timer/send admission failures must empty-
+complete the consumer; progress or timer-removal errors cannot strand a
+terminal result. A first proxy cleanup failure must not skip later proxies,
+and a closed helper cannot create a new network request or timer.
+
+The upstream `unit.clipboard_timeout_test` remains in the focused selection.
+Its four legacy request/reset/cleanup/reply/timeout controls construct the real
+`ClipboardTimeoutHelper` with an empty local selection, then attach only their
+recording `ClipboardProxyCore` subclass and timer adapter. The proxy uses the
+real constructor and cleanup/cancel-token lifecycle, including when the complete
+queue resets pending owner notifications. They no longer bypass initialization through
+`__new__` and hand-copy a partial set of private fields, which omitted the
+request-drain and terminal-closure state. Every original exact-once completion
+and timer assertion remains; registered cleanup also runs after failed checks.
 
 `unit.server.subsystem.clipboard_test` exercises the real server manager with
 controlled peers, deferred callbacks and a helper stand-in. Another peer's
@@ -1080,6 +1119,19 @@ destruction when the selection adapter cannot clear, and cleanup of both
 custom compositor event registrations.  A real uninitialized
 `WaylandCompositor` instance binds the exact connect/emit/disconnect API rather
 than substituting GObject signal IDs.
+
+These pipe controls use a selection-adapter stand-in which explicitly destroys
+old sources synchronously on set/clear. A NULL native adapter may no longer
+pretend publication succeeded. Separate controls call that actual unavailable
+adapter, require refusal without taking the source, and prove its send path
+still borrows the original FD. Actual compiled constructor/refcount controls
+inject MIME-iteration and destroy-notification failures. Failed publication
+preserves the prior source and metadata; empty and nonclaiming offers preserve
+an independent native owner, while an empty claim retires our own active offer.
+Partial second-proxy setup and a raising native clear still retire every
+constructed proxy/owned wrapper and disconnect all compositor callbacks.
+These are fault-boundary controls, not a claim to enumerate every allocation
+failure or to simulate actual native application delivery.
 
 Additional real-pipe tests exceed three pipe capacities on both cached and
 on-demand output paths for both selections, require an independent GLib idle
@@ -1154,7 +1206,7 @@ the owner of the affected contract rather than duplicating it in the runner:
 | `infra/live/job.py` | Owns durable start/wait/status/abort/remove state, freezes inputs, validates endpoint-selection provenance, and requires the complete production queue on both endpoints for every profile. |
 | `infra/live/run.py` | Resolves and freezes the two build contexts, constructs the three policy scenarios, drives the ordered cross-peer interaction, reconstructs evidence from collected artifacts, and publishes the aggregate oracle. |
 | `profiles.yml`, `live-cli.yml`, and `infra/live/live_config.py` | Own network quality and the exact role-specific `both`, `to-server`, and `off` Xpra arguments; Python orchestration does not duplicate those values. |
-| `infra/live/Containerfile` | Builds the Ubuntu native-Wayland server and Debian X11 client packages.  Every full-stack client receives both the ordinary GTK import preflight and the installed-package `has_pywindow_lookup`/X11 helper preflight, plus the mapped GL regressions. |
+| `infra/live/Containerfile` | Builds the Ubuntu native-Wayland server and Debian X11 client packages.  Every full-stack client receives both the ordinary GTK import preflight and the installed-package error-bridge/retained-wrapper/X11 helper preflight, plus the mapped GL regressions. |
 | `infra/live/clipboard_fixture_common.py` | Owns the fixed non-sensitive marker IDs, lengths, and digests shared by both fixtures and the oracle. |
 | `infra/live/x11_clipboard_fixture.py` | Implements the persistent GTK X11 owner, independent raw converter, and independent root XFixes monitor. |
 | `infra/live/wayland_clipboard_fixture.py` and `start_wayland_clipboard_fixture.sh` | Implement and launch the native-Wayland sink/source window, its input-serial-bound reverse claim, and its compositor-confirmed event stream. |
@@ -1305,8 +1357,9 @@ cycle ledger, not this architecture description.
   subscription, and global filter lease are separate owned resources.
 - Xpra bindings, GDK wrapper, and filter must refer to the same effective X
   display and event queue.
-- Every successful filter acquisition owns one count; only the final matching
-  release removes the process-global filter.
+- Every non-raising filter acquisition owns one count; only the final matching
+  release removes the process-global filter. Return booleans report the actual
+  install/remove transitions, not whether a lease was acquired or released.
 - Client survival across owner changes must be proved by equal bounded procfs
   identities and the published client PID, not copied from an in-memory result.
 - A failed or repeated cleanup must not remove a peer's filter, underflow the
@@ -1336,6 +1389,8 @@ cycle ledger, not this architecture description.
 - A clipboard publication flush must not dispatch Wayland input, iterate GLib,
   or re-enter the proxy.  Client observation is proved separately by the
   compositor/fixture/conversion event chain.
+- Nonclaiming, receive-denied and empty declined offers cannot overwrite an
+  independent native owner's data/origin or cancel its pending announcement.
 - A replacement Wayland source object/generation is published before the
   wlroots setter synchronously destroys the old source; the resulting new or
   NULL seat state is flushed after the setter returns.  Explicit wrapper
@@ -1384,18 +1439,20 @@ in for another. Schedule them with
 regression after each atomic edit, affected upstream/case/composed modules,
 relevant native/compiled/compatibility modes, and early clipboard live after
 focused/native prerequisites. The table lists final obligations, not an
-instruction to run full suites before every live iteration:
+instruction to run full suites before every live iteration. During an explicit
+refresh, first finish the queue-wide incremental manual review, implemented
+checkpoints and composed-review exit; no runtime gate starts before that exit:
 
 | Validation | Purpose |
 | --- | --- |
-| Clean tests-only case run | Applies the case-owned tests without the production correction to the frozen embedded source.  It must reach real Xvfb/XFixes assertions and fail for the missing event route or owned lifecycle, not because the image, import, or test discovery is broken. |
-| Patched focused modules `unit.clipboard_core_test`, `unit.client.subsystem.clipboard_test`, `unit.server.subsystem.clipboard_test`, `unit.x11.common_test`, and `unit.wayland.clipboard_test` | Prove wire-request completion/reset, peer admission and deferred lifetimes, the real X11 owner-change/conversion route, GDK XID lifetime, filter leases, token scheduling, lookup import order, Wayland source/generation isolation and backpressure, and bounded rollback/cleanup on the atomic case. |
+| Clean tests-only case run | Applies the case-owned tests without the production correction to the frozen embedded source.  It must reach real Xvfb/XFixes or native-pipe assertions and fail for duplicate work or the residual owned lifecycle, not because the image, import, or test discovery is broken. |
+| Patched focused modules `unit.clipboard_core_test`, `unit.clipboard_timeout_test`, `unit.client.subsystem.clipboard_test`, `unit.server.subsystem.clipboard_test`, `unit.x11.common_test`, and `unit.wayland.clipboard_test` | Prove wire-request completion/reset, peer admission and deferred lifetimes, the real X11 owner-change/conversion route, GDK XID lifetime, filter leases, token scheduling, native/GTK routing, Wayland source/generation isolation and backpressure, and bounded rollback/cleanup on the atomic case. |
 | Atomic `wayland` gate | Freshly compiles and linkage-checks the modified Wayland clipboard/compositor extensions and runs the native Wayland unit boundary, preventing a focused pass against absent or stale `.so` files. |
 | The same focused modules and `wayland` gate through `STACK=develop` | Prove that earlier and later queue cases do not change those semantics, take accidental ownership of the filter, or break the Wayland lifecycle contract. |
 | `patch-check`, `stack-check`, whitespace, lint, and fork-control units | Prove exact patch digest/path ownership, forward/reverse applicability, dependency order, and automation contracts; they do not prove runtime clipboard delivery. |
 | Clean quarantine reassessment | Separates currently assigned upstream failures from this case before patched results are interpreted. |
 | `full` | Runs the complete applied queue under the normal compatibility setting, including the legacy `clipboard-token` registration and default compiled-runtime behavior. |
-| `full-cython` | Rebuilds the modified X11 filter lease and Wayland selection/compositor `.pyx` implementations rather than trusting stale generated binaries or cached extensions, then runs the complete Cython-enabled author suite. |
+| `full-cython` | Rebuilds the current upstream X11 filter and modified Wayland selection/compositor `.pyx` implementations rather than trusting stale generated binaries or cached extensions, then runs the complete Cython-enabled author suite. |
 | `full-no-compat` | Sets the process-wide compatibility mode before imports and exercises the modern `clipboard-data` path without the legacy token handler. |
 | Full-stack `live-x11-clipboard` | Proves the installed Debian client-only package contains and executes `xpra.x11.gtk.__init__`, both endpoints use the complete queue, every permitted new offer and native source request is delivered without incidental input, `off` retains standard native ownership without a forwarding helper, and real X11 owner events cross to a native-Wayland compositor and back under the exact `both` / `to-server` / `off` oracle while rendering, input, stderr, process, privacy, and cleanup remain positive. |
 | Mandatory nine-profile live suite | Every patch validation runs all profiles, including clipboard and subsurface, with the full queue on both endpoints. A topical profile cannot replace complete-suite acceptance. |
@@ -1403,8 +1460,7 @@ instruction to run full suites before every live iteration:
 The client stage of the case live image is the essential package-composition
 control because it installs with client, GTK/X11, and clipboard enabled but
 without the server.  A source checkout, combined client/server installation,
-or successful Cython import cannot replace it.  Broader release or upstream
-refresh cycles may additionally require both real DEB builds under the
+or successful Cython import cannot replace it.  The full upstream refresh also requires both real DEB builds under the
 repository contract; those prove distribution packaging, but still do not
 replace this deliberately client-only composition boundary.
 
@@ -1415,5 +1471,6 @@ Clean and patched comparisons keep the frozen
 source, images, displays, fixtures, fixed marker set, and direction policy
 identical.  Any semantic change to the live fixture, monitor, pixel capture, or
 policy validator invalidates earlier live evidence and requires a fresh named
-case run for the affected boundary. Foreground and ad hoc diagnostic output
+complete-stack suite with current bound coverage under the canonical
+input-equivalence rules. Foreground and ad hoc diagnostic output
 never satisfies the table above.

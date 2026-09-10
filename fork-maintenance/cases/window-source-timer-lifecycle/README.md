@@ -31,7 +31,7 @@ leaving a direct assignment there would bypass the base lease contract.
 ## Embedded-source context
 
 The case resolves against source commit
-`212038243d0067b6860ebe7d6953692179ef353f`, embedded in the current `develop`
+`d95058b0916913fe6ae5296fb702f66d833898b0`, embedded in the current `develop`
 history. The resulting implementation keeps each public numeric timer slot for
 compatibility with adjacent scheduling and diagnostic code, while its named
 lease, retained source object, epoch, and terminal state are the ownership
@@ -44,8 +44,14 @@ source provides the policies this case preserves:
 - A/V synchronization computes its target and step independently of timer
   ownership;
 - the icon mixin may also be constructed outside a full `WindowSource`; and
-- non-optional encode work drains before the established `encode_ended`
+- every accepted encode item runs before the established `encode_ended`
   barrier releases encoder callables.
+
+Upstream already clears the icon timer in its UI callback, calls the icon
+superclass cleanup, clears a queued icon payload during cleanup, and guarantees
+execution of accepted encode items without an `optional` argument. This case
+preserves those corrections. They do not own an in-flight GLib attachment or
+wait for an already claimed timer callback before releasing window state.
 
 The patch changes ownership and terminal ordering, not any of those policies.
 On an upstream refresh, retirement requires equivalent protection for pending
@@ -67,7 +73,7 @@ subclass producer, GLib, and connection teardown:
 | `xpra/server/source/factory.py` | Constructs the dynamic connection type and invokes selected mixin cleanup in reverse order; VPC owns exhaustive error handling at that separate connection-composition boundary. |
 | `xpra/server/source/client_connection.py` | Owns the base connection close event and encode-queue tail; VPC extends exact sentinel ownership there, and this file does not own dynamic mixin traversal. |
 | GLib main context | Assigns numeric source IDs, invokes one-shot callbacks, and removes published sources. Its dispatch timing is not serialized with Python producer threads. |
-| Xpra encode queue | Receives work after some timer callbacks. Timer closure prevents new handoffs; the existing non-optional encode barrier remains the final ordered tail. |
+| Xpra encode queue | Receives work after some timer callbacks. Timer closure prevents new handoffs; the existing unconditional encode barrier remains the final ordered tail. |
 
 The steady-state path is:
 
@@ -220,11 +226,13 @@ Timer callback bodies no longer clear their integer slots directly. The lease
 wrapper clears the exact slot before dispatch, which is what makes stale
 callback and replacement ordering well-defined.
 
-`refresh_timer` remains covered even though the frozen source has no ordinary
-production caller of `schedule_auto_refresh()` at this boundary. The API and
-its timer callback are live inherited behavior, and keeping it inside the same
-registry keeps inherited and backend-specific callers within terminal
-ownership.
+The current `queue_damage_packet(packet, damage_time, process_damage_time,
+options)` calls `schedule_auto_refresh()` from the encode thread before handing
+off every draw packet. Lossy regions schedule refresh; lossless packets remove
+covered regions and cancel an unnecessary timer. The lease registry owns this
+real producer's attachment-versus-cleanup race without changing either policy
+or the current `options` argument. It does not pin unrelated encode-body
+statistics or change packet FIFO ownership.
 
 ## Window-icon handoff
 
@@ -244,9 +252,12 @@ is correctly zero while the callback body is running, but another icon update
 must not enqueue a second compression job before the first one reaches the
 worker.
 
-`WindowSource.cleanup()` now calls the icon mixin cleanup explicitly through
-`super()`. That call releases only the icon timer lease; it does not own the
-generic timers or the later encode barrier.
+`WindowSource.cleanup()` preserves the upstream icon mixin cleanup through
+`super()`, now within its exhaustive ordered tail. That call releases the icon
+timer lease and clears `window_icon_data`, so accepted but not yet executed
+compression work skips the payload. It does not own generic timers or the
+later encode barrier. The handoff keeps the current unconditional
+`call_in_encode_thread(callback, *args)` interface.
 
 ## Terminal cleanup ordering
 
@@ -277,7 +288,7 @@ no-ops. The owning call attempts all of these steps in order:
 6. log the final encoding totals;
 7. reset reusable policy fields without reopening the timer lifecycle;
 8. release mmap and batch configuration state; and
-9. enqueue the existing non-optional `encode_ended` barrier.
+9. enqueue the existing unconditional `encode_ended` barrier.
 
 After the packet-registry prerequisite succeeds, cleanup records the first
 exception but continues through every later owned step. Additional exceptions
@@ -424,6 +435,9 @@ than relying on source-text inspection:
 
 - a dynamically composed client connection closes while a worker is blocked
   between GLib source creation and Python ID publication;
+- the current draw-packet producer schedules refresh for lossy pixels and
+  cancels it when a lossless packet covers them; a producer paused during
+  attachment cannot publish a dead refresh ID after terminal cleanup;
 - a callback dispatched before `Source.attach()` returns remains alive only for
   the publication handshake and is removed after a concurrent close;
 - cancellation followed by replacement makes the retained old callback stale
@@ -454,7 +468,8 @@ than relying on source-text inspection:
 - the `WindowVideoSource` non-video-region path uses the inherited expiry
   lease;
 - icon timeout cancellation prevents a stale encode handoff, while the queued
-  state prevents duplicate compression work;
+  state prevents duplicate compression work and upstream cleanup cancels the
+  payload of already accepted work;
 - truthy legacy callback returns and callback exceptions remain one-shot and
   leave their slot reusable;
 - source registration failure rolls back its pending lease;
@@ -472,9 +487,20 @@ barriers are controlled: GLib owns the actual source, dispatch, automatic
 retirement, and destruction. Fake registries cannot prove this native
 ownership boundary by accepting removal of an already-completed ID.
 
-The tests-only clean control must reach these interleavings and fail because
-the lease API or terminal behavior is absent, not because imports, fixture
-construction, or unrelated modules fail. The patched standalone module then
+The tests-only clean control must expose wrong behavior through existing
+entry points before exercising new internal helpers. The module's ordered
+suite first calls the real `queue_damage_packet()` producer across cleanup,
+with the ready-source `_damage_cancelled` state established by the real
+constructor after `init_vars()`. It uses fail-fast identically in clean and
+patched modes: clean must fail on the dead refresh timer, while a passing
+patched run must execute the entire suite, including every private lease
+control. Missing new fields or failure to reach the blocked attachment are
+not accepted clean observations. The dynamic connection/A-V publication
+control and
+`test_packet_refresh_publication_cannot_cross_terminal_cleanup` reach the
+attachment race without calling a newly added helper. A missing private lease
+API in the additional implementation-specific tests is not negative proof;
+neither are import, fixture or unrelated-module errors. The patched standalone module then
 proves the atomic case, and the same module through `stacks/develop` proves its
 composition with the adjacent video and subsurface cases. WSSO's separate
 connection-owned idle/watchdog regressions belong to its focused module and do

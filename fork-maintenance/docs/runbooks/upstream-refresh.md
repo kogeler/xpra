@@ -1087,6 +1087,13 @@ cases can be reconstructed sequentially while earlier results remain dirty.
 
 ## Retire a fully replaced case
 
+This deletion procedure applies to production cases only. The reserved
+`upstream-test-quarantine` directory, manifest, README, empty patch and
+supporting gates/runbook are permanent infrastructure. When its last upstream
+failure is gone, follow [quarantine deactivation](test-quarantine.md) to retain
+an inactive draft with commented TOML queue/gate entries; never delete that
+scaffold or restore historical skips to keep it active.
+
 Make the retirement decision from the complete current-code analysis above,
 then implement the retirement candidate during manual review, before runtime
 validation. Final acceptance remains pending: later controls and the resulting
@@ -1185,6 +1192,19 @@ without allowing them to bypass it.
 
 ## Prepare the test image and plan quarantine reassessment
 
+Quarantine steps in this runbook are conditional on an active duty case in
+the current queue. If none exists, record that there are no assignments to
+reassess and omit the `CASE=upstream-test-quarantine` commands, including its
+patched focused check. Still perform image verification and every production,
+composed, full-suite, package and live gate. Do not activate the empty scaffold
+merely to run these commands. Preserve the permanent directory, manifest,
+README and zero-byte patch with `draft = true`
+and commented TOML queue/gate entries explaining their future quarantine use.
+Never delete this infrastructure because all tests pass. If this cycle proves
+all assignments obsolete and deactivates the duty, its exact completed
+clean/direct results remain the deactivation evidence while retained; do not
+test-select the inactive draft.
+
 Enter this section only after the recorded whole-queue manual-review exit
 gate. Verify the image before the first test which uses it. Reassess quarantine
 for the new source and actual image/module/gate inputs before using the duty
@@ -1197,9 +1217,9 @@ identity check now reports `diverged`, reopen manual review and use the isolated
 reconstruction flow above to preserve only the still-required declared
 test-module changes. Publish and re-review the candidate and update the review
 exit record before returning here. If new findings make the correct candidate
-empty, retire the duty case only through its documented semantic and clean-test
-decision; do not
-manufacture an empty patch or use an ad hoc diagnostic as acceptance.
+empty, deactivate the duty only through its documented semantic and clean-test
+decision, retaining its permanent empty draft scaffold. Do not publish an empty
+active patch or use an ad hoc diagnostic as acceptance.
 
 Now verify the input-keyed upstream-test image:
 
@@ -1292,10 +1312,10 @@ make -C fork-maintenance test-remove \
   RUN=<cycle>-quarantine-patched-focused-01
 ```
 
-If every declared upstream module is now green, retire the duty case as
+If every declared upstream module is now green, deactivate the duty case as
 required by [`test-quarantine.md`](test-quarantine.md) and omit this case-only
-patched command. The resulting stack-focused and full legs below remain
-mandatory.
+patched command. Keep its infrastructure, empty patch and commented TOML
+references; the resulting stack-focused and full legs below remain mandatory.
 
 The review gate and CI-layout repair precede source builds; clean quarantine
 proof precedes runtime use of the duty patch. Start the complete live suite

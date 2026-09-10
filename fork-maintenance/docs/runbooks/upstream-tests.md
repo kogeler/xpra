@@ -30,6 +30,18 @@ and queue are never bind-mounted, and the runner never uses `podman cp` or an
 artifact bind to retrieve results. The one named ccache volume is cache-only.
 Test containers return only their normal log; the entrypoint prints the exact
 selection-resolution digest into that log for collection and validation.
+Detached and hosted test containers explicitly use `k8s-file` logging. Before
+starting a detached test, the runner verifies its actual logging driver and
+unlimited size (`log_size_max=-1` in containers.conf). Podman's CLI size parser
+does not accept `--log-opt=max-size=-1`; do not substitute zero, which can leave
+the host's size limit in effect. Host journald rate limits and log rotation
+must not discard diagnostics. Collection still retrieves both streams through
+`podman logs`; no bind-mounted log path is introduced. Hosted foreground tests
+stream directly to the owning CI job's stdout/stderr.
+Review the selected modules and their actual result output, not just the
+container exit status. Missing expected diagnostics invalidate that evidence
+even when the runner's summary is green; preserve it and repeat the affected
+run after correcting the logging boundary.
 Detached and hosted test containers use
 `--userns=keep-id:uid=1000,gid=1000,size=2048` with runtime UID/GID 1000. The
 explicit bound is verified on the Ubuntu 26.04 test image and leaves the rest
@@ -113,6 +125,31 @@ or staging tree blocks cycle cleanup.
 
 ## Resolve before spending test time
 
+### Maintained unit-test toolchain
+
+The test image includes `rsync`, used by upstream's unit-test install-tree merge
+since `c1183c29edd`, and `xterm`, the real application in the position/color
+test. A missing application is an environment failure, not a quarantine
+assignment, even when the gate correctly reports the expected failing module.
+It pins Cython to **3.2.9** for every clean and patched
+mode. On embedded source `d95058b0916913fe6ae5296fb702f66d833898b0`, Cython
+3.3.0 rejects the duplicate local `size: int` annotations added to
+`xpra/opengl/backing.py` by `3be68afe1a8c3ddbe5a0d7511c2821a93f885053`, before
+any compiled-leg tests run. Cython 3.2.9 translates that exact unchanged module;
+this is a compiler compatibility boundary, not a quarantine test failure.
+
+The pin retains annotation typing, all compiled module selection and all test
+assertions. It neither repairs nor edits clean production. Its exact image
+input and immutable image ID bind every resulting job. Acceptance under this
+toolchain does not claim Cython 3.3 compatibility. Reassess the pin against the
+actual clean source at the next relevant upstream change; a source or compiler
+repair must first compile the unchanged clean boundary, then pass the affected
+clean and patched compiled gates before replacing it. The live and real DEB
+builders retain their separately bound toolchains; these unit-test results do
+not establish those build outcomes.
+
+### Patch applicability
+
 ```bash
 make -C fork-maintenance patch-check CASE=wayland-initial-window-state
 make -C fork-maintenance stack-check STACK=develop
@@ -188,8 +225,9 @@ make -C fork-maintenance test-wait RUN=wayland-master-regression-01
 ```
 
 This is the non-vacuous control for deciding whether upstream replaced a case.
-`PATCH_MODE=clean` applies nothing and therefore cannot run a newly introduced
-focused module; `PATCH_MODE=patched` applies the complete selected patch.
+`PATCH_MODE=clean` applies no case patch and therefore cannot supply a newly
+introduced case-owned focused module; the fixed neutral inventory below is
+independent of case patch mode. `PATCH_MODE=patched` applies the complete selected patch.
 When a production patch owns no test path, `PATCH_MODE=tests-only` fails closed
 instead of pretending to provide a regression. The focused runner also rejects
 `PATCH_MODE=clean`; do not classify either guard failure as a clean test. Perform
@@ -247,6 +285,33 @@ native Wayland server extension for any owning case; this is gate-driven and
 must not depend on the `wayland-initial-window-state` slug.
 
 ## Native boundaries
+
+The `wayland` gate builds the compositor and the GTK client modules, then
+executes every module in `unit/wayland`. Case-owned native GTK regressions must
+live in that discovered directory; merely declaring the gate beside a focused
+module in a different directory does not make the native runner execute it.
+The GTK scroll case owns `unit.wayland.gtk_scroll_test`, so both its focused and
+native tests-only controls must expose the retained input-admission/initial
+X11 sample failure. A green native run without that subject is incomplete,
+not proof of upstream replacement. This adds no skip or reduced test list.
+
+The current [neutral pointer protocol regression](../../infra/upstream-tests/neutral/README.md)
+is runner-owned after upstream absorbed its production fix. The image-bound
+helper installs/stages only its two declared test files in the private source
+copy after case application, in clean, tests-only and patched modes alike.
+It verifies the frozen source HEAD and rejects symlinks, missing inputs and
+target collisions before publication. It never replaces upstream tests or
+modifies host/installed production source. Logs retain exact neutral file
+digests, and their bytes participate in the image and host-runner identities.
+
+After the manual-review exit, compare `STACK=develop PATCH_MODE=clean
+TARGET=wayland` with the same image/source `STACK=develop PATCH_MODE=patched
+TARGET=wayland` using separate fresh named runs. Both must execute the actual
+version-5/version-8 native consumers; clean production is now expected to pass.
+The complete stack also declares the neutral module and adjacent pointer tests
+for its focused variants. This supported ownership survives case retirement
+without reviving historical verification selections or introducing a test-only
+production case. Full-stack live coverage remains mandatory and unchanged.
 
 The test image explicitly installs NumPy so PyOpenGL's array-returning path is
 available to the case-owned OpenGL regressions. Exercise both NumPy and ctypes
@@ -311,6 +376,15 @@ in the workflow YAML. See [`ci.md`](ci.md).
 
 ## Reassess quarantined upstream modules
 
+There is currently no active duty case. In that state record reassessment as
+not applicable and omit the case-specific commands below. Preserve its permanent
+`draft = true` scaffold, zero-byte patch, description and commented TOML queue
+and gate entries; never delete the infrastructure when all tests pass or
+restore historical skips. Production controls and the full three-leg upstream
+matrix remain mandatory. Deactivation retains its exact clean/direct results
+as evidence while available, without test-selecting an inactive draft. Follow
+[`test-quarantine.md`](test-quarantine.md) for both lifecycle transitions.
+
 Before applying `upstream-test-quarantine` after an explicitly selected upstream
 rebase, run its exact module set on the new clean source in all three modes:
 
@@ -332,7 +406,13 @@ ordered `[quarantine].modules` union, passes `--skip-fail` only for its exact
 the ordered ignored-failure set while every complement module passes. Any
 unignored failure, skipped module, or count mismatch fails closed. Follow
 [`test-quarantine.md`](test-quarantine.md) to remove stale assignments or admit
-a newly affected leg before the patched full matrix.
+a newly affected leg before the patched full matrix. If a structurally valid
+union result shows assigned modules passing, that same named gate repeats only
+those modules without `--skip-fail` in the identical build mode, using the
+upstream incremental build/install and test entry point. It checks the exact
+executed inventory and a wholly successful direct summary. The gate still
+fails as stale after confirmation; this is evidence for removing assignments,
+not acceptance of the old duty. No generic clean-module override is exposed.
 
 Reuse current reassessment results while the actual source, image/environment,
 module union, and gate expectations remain unchanged. Independent CASE

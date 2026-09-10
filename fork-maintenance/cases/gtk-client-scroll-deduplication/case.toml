@@ -3,16 +3,16 @@ slug = "gtk-client-scroll-deduplication"
 kind = "production"
 title = "Forward GTK scrolling without duplicate emulated wheel events"
 commit_subject = "Forward GTK scrolling without duplicate emulated wheel events"
-patch_sha256 = "0bac946e4dd2a688f2e406fc64b1235e5d03e34a9b3c86194a24636952aade24"
+patch_sha256 = "99f3f753f45b7268cf8d479a3f0bd29bbd7a95a5f3aef835692dfe17ad6352cf"
 dependencies = []
 paths = [
-  "tests/unittests/unit/client/gtk3/scroll_test.py",
+  "tests/unittests/unit/wayland/gtk_scroll_test.py",
   "xpra/client/gtk3/window/pointer.py",
 ]
 
 [tests]
 list = [
-  "unit.client.gtk3.scroll_test",
+  "unit.wayland.gtk_scroll_test",
   "unit.client.subsystem.pointer_test",
   "unit.pointer_loopback_test",
   "wayland",

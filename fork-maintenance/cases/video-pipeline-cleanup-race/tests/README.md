@@ -29,8 +29,17 @@ modules. VPC stops the connection's calculation producer; WSSO independently
 borrows each exact pixel source during calculation and bandwidth callouts so
 individual removal is safe while the connection stays live.
 
+Each module runs an existing-API control first, with identical fail-fast in
+all modes: native `add_video_refresh()` dispatch, then reinitialization after
+actual connection close in the other module. Clean failure must observe the
+claimed lifecycle defect, not a missing private helper. A patched pass must
+run every method. Logger observations replace the owning module reference,
+because native instance methods may be read-only. Registered post-assertion
+teardown recovers an otherwise stranded worker through its terminal API but
+still fails on the original leak; it never repairs state before an assertion.
+
 The case declares no atomic live gate. Real codec-lifetime acceptance belongs
 to the complete stack's Vulkan and OpenGL hardware-H.264 profiles, together
-with the remaining five stack profiles. Those gates require frame-state
+with the remaining seven stack profiles. Those gates require frame-state
 evidence owned by WIS and cannot honestly run with only VPC selected. Resource
 doubles prove Xpra ownership and ordering, not backend-private GPU completion.

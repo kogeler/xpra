@@ -70,6 +70,9 @@ RUNNER_INPUTS = (
     TOOLS_ROOT / "background_job.py",
     TOOLS_ROOT / "container_payload.py",
     TOOLS_ROOT / "podman_policy.py",
+    RUNNER_ROOT / "neutral_tests.py",
+    RUNNER_ROOT / "neutral" / "pointer_scroll_test.py",
+    RUNNER_ROOT / "neutral" / "pointer_scroll_client.c",
 )
 IMAGE_CONTEXT_INPUTS = {
     ".containerignore": RUNNER_ROOT / ".containerignore",
@@ -77,6 +80,9 @@ IMAGE_CONTEXT_INPUTS = {
     "container_payload.py": TOOLS_ROOT / "container_payload.py",
     "entrypoint.sh": RUNNER_ROOT / "entrypoint.sh",
     "selection.py": RUNNER_ROOT / "selection.py",
+    "neutral_tests.py": RUNNER_ROOT / "neutral_tests.py",
+    "neutral/pointer_scroll_test.py": RUNNER_ROOT / "neutral" / "pointer_scroll_test.py",
+    "neutral/pointer_scroll_client.c": RUNNER_ROOT / "neutral" / "pointer_scroll_client.c",
 }
 CONTAINER_RUNNER = "/opt/xpra-fork-maintenance/upstream-tests"
 CONTAINER_PAYLOAD = f"{CONTAINER_RUNNER}/container_payload.py"
@@ -726,6 +732,10 @@ def test_runtime_options(args: argparse.Namespace, selection_sha256: str) -> lis
         podman_policy.keep_id_userns(1000, 1000),
         "--user",
         "1000:1000",
+        # Acceptance needs the complete stdout/stderr, including noisy builds.
+        # Host journald rate limits or file rotation can silently discard it.
+        "--log-driver",
+        "k8s-file",
         *payload_environment(args, selection_sha256),
         "--volume",
         f"{CCACHE_VOLUME}:/home/ubuntu/.cache/ccache:U",
@@ -1199,7 +1209,19 @@ def matching_test_prelaunch(record: dict[str, str]) -> dict[str, Any] | None:
     return prelaunch
 
 
-def container_state(record: dict[str, str]) -> dict[str, Any]:
+def require_complete_test_logs(item: dict[str, Any]) -> None:
+    host = item.get("HostConfig")
+    log = host.get("LogConfig") if isinstance(host, dict) else None
+    size = log.get("Size") if isinstance(log, dict) else None
+    if (
+        not isinstance(log, dict)
+        or log.get("Type") != "k8s-file"
+        or not ((type(size) is int and size == -1) or (type(size) is str and size in ("-1", "-1B")))
+    ):
+        raise JobError("test logs require k8s-file with log_size_max=-1 in containers.conf")
+
+
+def container_state(record: dict[str, str], *, require_full_logs: bool = False) -> dict[str, Any]:
     item = inspect_json(["podman", "container", "inspect", record["container_id"]])
     config = item.get("Config")
     state = item.get("State")
@@ -1217,6 +1239,8 @@ def container_state(record: dict[str, str]) -> dict[str, Any]:
         raise JobError("owned container immutable identity does not match")
     if actual_name != record["name"]:
         raise JobError("owned container name does not match")
+    if require_full_logs:
+        require_complete_test_logs(item)
     return state
 
 
@@ -1375,7 +1399,9 @@ def _test_start_locked(args: argparse.Namespace) -> int:
             "image_id": image_id,
             "image_input_sha256": args.image_input_sha256,
         }
-        container_state({key: str(value) for key, value in record.items()})
+        container_state(
+            {key: str(value) for key, value in record.items()}, require_full_logs=True,
+        )
         publish_record(test_record_path(name), record)
         owner_published = True
         command(
@@ -1844,6 +1870,7 @@ def populate_image_context(destination: Path) -> None:
         if source.is_symlink() or not source.is_file():
             raise JobError(f"image input is unavailable: {source}")
         target = destination / input_name
+        target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
         target.chmod(
             0o755

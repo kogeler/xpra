@@ -171,6 +171,18 @@ class SourceBundleTest(unittest.TestCase):
 
 
 class CiImageTest(unittest.TestCase):
+    def test_image_supplies_upstream_runner_dependencies_and_reviewed_cython(self) -> None:
+        recipe = (job.RUNNER_ROOT / "Containerfile").read_text(encoding="utf-8")
+        commands = recipe.replace("\\\n", " ").split("&&")
+        install = next(command for command in commands if "apt-get -y install" in command)
+        self.assertIn("rsync", shlex.split(install, comments=True))
+        self.assertIn("xterm", shlex.split(install, comments=True))
+        compiler = next(command for command in commands if "-m pip install" in command)
+        self.assertEqual(
+            shlex.split(compiler, comments=True),
+            ["python3", "-m", "pip", "install", "--break-system-packages", "Cython==3.2.9"],
+        )
+
     def test_image_installs_numpy_for_native_opengl_array_regressions(self) -> None:
         recipe = (job.RUNNER_ROOT / "Containerfile").read_text(encoding="utf-8")
         install = recipe.replace("\\\n", " ").split("&& apt-get -y install", 1)[1].split("&&", 1)[0]
@@ -808,6 +820,41 @@ class CiImageTest(unittest.TestCase):
 
 
 class BackgroundContainerTest(unittest.TestCase):
+    def test_runtime_uses_file_logs_in_every_patch_mode(self) -> None:
+        for mode in ("clean", "tests-only", "patched"):
+            with self.subTest(mode=mode):
+                args = argparse.Namespace(
+                    patch_mode=mode,
+                    selection="stacks/develop",
+                    source="2" * 40,
+                    source_head="3" * 40,
+                    source_remote="origin",
+                    workflow_sha256="4" * 64,
+                )
+                options = job.test_runtime_options(args, "5" * 64)
+                self.assertEqual(options.count("--log-driver"), 1)
+                self.assertEqual(options[options.index("--log-driver") + 1], "k8s-file")
+
+    def test_log_config_accepts_only_unlimited_file_logging(self) -> None:
+        for size in (-1, "-1", "-1B"):
+            job.require_complete_test_logs({
+                "HostConfig": {"LogConfig": {"Type": "k8s-file", "Size": size}},
+            })
+        for config in (
+            {}, {"HostConfig": None}, {"HostConfig": {"LogConfig": []}},
+            *({"HostConfig": {"LogConfig": {"Type": driver, "Size": size}}}
+              for driver, size in (
+                  ("journald", "-1"), ("none", "-1"), ("k8s-file", "8192"),
+                  ("k8s-file", 8192), ("k8s-file", 0), ("k8s-file", None),
+                  ("k8s-file", []), ("k8s-file", False),
+                  ("k8s-file", -1.0),
+              )),
+        ):
+            with self.subTest(config=config), self.assertRaisesRegex(
+                job.JobError, "test logs require",
+            ):
+                job.require_complete_test_logs(config)
+
     def test_runtime_uses_the_bounded_upstream_user_namespace(self) -> None:
         args = argparse.Namespace(
             patch_mode="patched",
@@ -933,11 +980,12 @@ class BackgroundContainerTest(unittest.TestCase):
                     return_value=("R", str(os.getpgrp()), "42"),
                 ),
                 patch.object(job, "prelaunch_container_id", return_value=created),
-                patch.object(job, "container_state", return_value={}),
+                patch.object(job, "container_state", return_value={}) as inspect_state,
                 patch.object(job, "publish_record"),
                 patch.object(job, "send_test_payload") as send,
             ):
                 self.assertEqual(job.test_start(args), 0)
+                self.assertEqual(inspect_state.call_args.kwargs, {"require_full_logs": True})
 
         create_argv = next(argv for argv in calls if argv[:2] == ["podman", "create"])
         self.assertIn(job.CONTAINER_NOTIFY_FIFO, create_argv)
@@ -1902,7 +1950,29 @@ class QuarantineEntrypointTest(unittest.TestCase):
         *expected: str,
         module_count: int = 2,
         gate: str = "quarantine-cython",
+        direct_status: int = 0,
+        direct_summary: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        if direct_summary is None:
+            direct_summary = (
+                "running unit.client.broken_test from /source/unit/client/broken_test.py\n"
+                "test summary:\n  successful tests: 1\n  failed tests: 0\n"
+            )
+        # Execute the actual parser/decision/command builder. Only the nested
+        # Xpra process is replaced; offline checks must not build or run Xpra.
+        stub = f"""import json
+import subprocess
+from types import SimpleNamespace
+def direct_run(command, **kwargs):
+    env = kwargs['env']
+    print('direct_command=' + json.dumps(command))
+    print('direct_mode=' + json.dumps([env['CYTHONIZE_MORE'], env['XPRA_BACKWARDS_COMPATIBLE'], env['EXTRA_ARGS']]))
+    assert kwargs['timeout'] == 1800
+    assert kwargs['stderr'] == subprocess.STDOUT
+    assert kwargs['check'] is False
+    return SimpleNamespace(returncode={direct_status!r}, stdout={direct_summary!r})
+subprocess.run = direct_run
+"""
         with tempfile.TemporaryDirectory() as raw:
             summary_path = Path(raw) / "summary.log"
             summary_path.write_text(summary, encoding="utf-8")
@@ -1915,7 +1985,7 @@ class QuarantineEntrypointTest(unittest.TestCase):
                     str(module_count),
                     *expected,
                 ],
-                input=self.validator_source(),
+                input=stub + self.validator_source(),
                 capture_output=True,
                 text=True,
                 check=False,
@@ -1974,7 +2044,74 @@ test summary:
 """
         result = self.validate(summary, "unit.client.broken_test")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("expected 1 successful modules, observed 2", result.stderr)
+        self.assertIn("is stale", result.stderr)
+        self.assertIn("direct confirmation passed: unit.client.broken_test", result.stdout)
+        self.assertIn(
+            'direct_command=["dbus-run-session", "--", "python3", "setup.py", '
+            '"unittests", "unit/client/broken_test.py"]', result.stdout,
+        )
+        self.assertNotIn("--skip-fail", result.stdout)
+
+    def test_stale_confirmation_preserves_every_build_mode(self) -> None:
+        summary = "test summary:\n  successful tests: 2\n  failed tests: 0\n"
+        for gate, mode in (
+            ("quarantine", ["without", "1", "--with-terminal_client"]),
+            ("quarantine-cython", ["with", "1", "--with-terminal_client"]),
+            ("quarantine-no-compat", ["without", "0", "--with-terminal_client"]),
+        ):
+            with self.subTest(gate=gate):
+                result = self.validate(summary, "unit.client.broken_test", gate=gate)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("is stale", result.stderr)
+                self.assertIn("direct_mode=" + json.dumps(mode), result.stdout)
+
+    def test_stale_confirmation_excludes_the_still_failing_subset(self) -> None:
+        summary = (
+            "test summary:\n  successful tests: 1\n  failed tests: 0\n"
+            "  ignored failures: 1\n    - unit.client.still_broken_test (exit code=1)\n"
+        )
+        result = self.validate(summary, "unit.client.still_broken_test", "unit.client.broken_test")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is stale", result.stderr)
+        commands = [line for line in result.stdout.splitlines() if line.startswith("direct_command=")]
+        self.assertEqual(len(commands), 1)
+        self.assertNotIn("still_broken_test", commands[0])
+
+    def test_multiple_stale_modules_share_one_exact_direct_repeat(self) -> None:
+        summary = "test summary:\n  successful tests: 2\n  failed tests: 0\n"
+        result = self.validate(
+            summary, "unit.client.broken_test", "unit.client.fixed_test",
+            direct_summary=(
+                "running unit.client.broken_test from /source/broken_test.py\n"
+                "running unit.client.fixed_test from /source/fixed_test.py\n" + summary
+            ),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is stale", result.stderr)
+        self.assertIn("direct confirmation passed: unit.client.broken_test, unit.client.fixed_test", result.stdout)
+        commands = [line for line in result.stdout.splitlines() if line.startswith("direct_command=")]
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(
+            json.loads(commands[0].split("=", 1)[1])[-2:],
+            ["unit/client/broken_test.py", "unit/client/fixed_test.py"],
+        )
+
+    def test_direct_confirmation_cannot_hide_failure_skip_or_wrong_inventory(self) -> None:
+        summary = "test summary:\n  successful tests: 2\n  failed tests: 0\n"
+        for status, output in (
+            (1, "native test failed\n"),
+            (0, "test summary:\n  successful tests: 0\n  failed tests: 0\n  skipped tests: 1\n"),
+            (0, "test summary:\n  successful tests: 1\n  failed tests: 0\n"),
+            (0, "running unit.client.foreign_test from /foreign.py\n"
+                "test summary:\n  successful tests: 1\n  failed tests: 0\n"),
+        ):
+            with self.subTest(status=status, output=output):
+                result = self.validate(
+                    summary, "unit.client.broken_test", direct_status=status, direct_summary=output,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("direct confirmation failed", result.stderr)
+                self.assertNotIn("direct confirmation passed", result.stdout)
 
     def test_unignored_failure_or_skipped_module_is_contamination(self) -> None:
         summaries = (
@@ -1998,6 +2135,7 @@ test summary:
                 result = self.validate(summary, "unit.client.broken_test")
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("is contaminated", result.stderr)
+                self.assertNotIn("direct_command=", result.stdout)
 
     def test_ignored_failure_names_and_format_are_exact(self) -> None:
         summaries = (
@@ -2018,6 +2156,22 @@ test summary:
             with self.subTest(summary=summary):
                 result = self.validate(summary, "unit.client.broken_test")
                 self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("direct_command=", result.stdout)
+
+    def test_bad_accounting_cannot_select_a_direct_confirmation(self) -> None:
+        for tail in (
+            "  ignored failures: 1\n",
+            "  ignored failures: 0\n    - unit.client.broken_test (exit code=1)\n",
+            "  ignored failures: 2\n    - unit.client.broken_test (exit code=1)\n"
+            "    - unit.client.broken_test (exit code=1)\n",
+        ):
+            with self.subTest(tail=tail):
+                result = self.validate(
+                    "test summary:\n  successful tests: 2\n  failed tests: 0\n" + tail,
+                    "unit.client.broken_test",
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("direct_command=", result.stdout)
 
 
 class MainTest(unittest.TestCase):

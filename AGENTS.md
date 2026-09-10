@@ -194,8 +194,8 @@ only with an exact-SHA `--force-with-lease`; plain `--force` is forbidden.
 ## Patch queue contract
 
 `fork-maintenance/cases/<id>/fix.patch` is the source of truth for one atomic
-production behavior plus any case-owned focused tests, except for the single
-explicitly typed test-quarantine duty case. A production case may instead name
+production behavior plus any case-owned focused tests, except for the optional
+single, explicitly typed test-quarantine duty case. A production case may name
 an existing focused module only when its README binds the durable real boundary
 which proves the behavior. `case.toml` binds the exact patch digest, paths,
 dependencies, tests, and required gates. The complete active queue is
@@ -214,12 +214,25 @@ The currently retained active cases are:
 - `jph-parallel-build-objects`;
 - `debian-libva-codecs-package`;
 - `packet-handler-error-boundary`;
-- `wayland-pointer-scroll-normalization`;
 - `gtk-client-scroll-deduplication`;
 - `wayland-display-name-signal`;
 - `client-codec-startup-order`;
-- `x11-selection-refusal`;
-- `upstream-test-quarantine` (the single test-only duty case).
+- `x11-selection-refusal`.
+
+There is currently no active quarantine duty case, but
+`fork-maintenance/cases/upstream-test-quarantine/` is permanent infrastructure.
+Never delete its directory, manifest, README, empty patch, or supporting gates
+and runbook merely because no upstream tests are broken. With no assignments,
+keep `draft = true`, a zero-byte `fix.patch`, empty manifest inventories, and
+commented TOML queue
+and gate entries explaining that they are enabled only to disable currently
+broken upstream tests after clean-source proof. This reserved draft is not an
+active patch or a historical archive. Record reassessment as not applicable;
+do not test-select it or restore old skips. All production and final full-suite
+gates remain required. Follow the
+[quarantine runbook](fork-maintenance/docs/runbooks/test-quarantine.md) to
+activate the existing scaffold or deactivate its last assignment without
+deleting the infrastructure.
 
 The quarantine case is not a production fix. It may change only the exact
 upstream unit-test modules listed in its `[quarantine]` manifest union. After
@@ -235,6 +248,13 @@ here. Never carry quarantine forward merely because its patch still applies.
 Do not resurrect deleted historical cases, verifications, evidence, or stacks
 without an explicit new request and a current-source reassessment.
 
+The current runner-owned native pointer protocol tests are maintained under
+`fork-maintenance/infra/upstream-tests/neutral/` after their production fix was
+absorbed upstream. Their fixed image/runner-bound test inventory is installed
+only in isolated test source copies, including production-clean controls.
+Use the documented clean and complete-stack native gates; these are not a
+production case, a restored historical verification archive or a live bypass.
+
 Host `patch-apply`, `stack-apply`, `patch-update`, and unapply operations are
 retained for the exceptional explicit upstream-refresh/integration cycle. The
 default pre-commit cycle is
@@ -242,11 +262,13 @@ default pre-commit cycle is
 `workspace-remove`; it never stages or edits inherited Xpra source in
 `develop`.
 
-Never edit `patch_sha256` or `paths` manually. Never leave the applied source
-copy committed on `develop`; commit the maintained patch file and automation
-metadata only. A patch that is neither forward-applicable nor exactly
-reverse-applicable to the embedded source is divergent and must be reworked,
-not forced.
+Never edit active `patch_sha256` or `paths` manually. The only inactive reset
+exception is the permanent quarantine scaffold described in its runbook; blank
+draft fields are not an active patch digest or path inventory. Never leave the
+applied source copy committed on `develop`; commit the maintained patch file
+and automation metadata only. A patch that is neither forward-applicable nor
+exactly reverse-applicable to the embedded source is divergent and must be
+reworked, not forced.
 
 ## Implementation discipline
 

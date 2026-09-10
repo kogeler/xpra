@@ -1,89 +1,168 @@
-# Package Native libva Codecs In xpra-codecs
+# Native codec package dependency ownership
 
 ## Failure boundary
 
-The Debian build detects and compiles the native libva encoder and decoder,
-but `xpra-codecs.files` does not claim the resulting `xpra/codecs/libva`
-directory. `dh_movefiles` therefore leaves those modules in `debian/tmp`, and
-the published `xpra-codecs` package cannot provide native libva H.264 coding.
+Ordinary `xpra-codecs` must both contain its native codecs and declare the
+shared libraries needed to load those exact modules. Payload membership alone
+is insufficient: importing successfully in a builder with development packages
+installed can conceal a missing dependency on a user's machine.
 
-The upstream build route and the official repository build scripts use the same
-Debian packaging manifests. A signed-repository audit of official beta version
-`6.6-r42421-1` found libyuv in `xpra-codecs` but no packaged libva modules in any
-Xpra binary package. The downstream failure is therefore not caused by invoking
-a different Debian build entry point; it is an unclosed payload-ownership
-boundary in the shared packaging metadata.
+At the current embedded source, libva is packaged but excluded from the
+`codecs:Depends` ELF scan. The manual `libva2` dependency does not cover
+`libva-drm2`, whose `vaGetDisplayDRM` is called by the native bridge.
+Installing optional `xpra-codecs-extras` or vendor packages must not be needed
+to repair ordinary codec dependencies.
 
-## Patch boundary
+## Source provenance and current decision
 
-The patch assigns the complete `xpra/codecs/libva` directory to the ordinary
-`xpra-codecs` package. It does not move the modules into, or add a consumer
-dependency on, the AMD, NVIDIA, or extras codec packages.
+The manual reassessment is bound to source
+`d95058b0916913fe6ae5296fb702f66d833898b0`. Upstream
+`d346004a576` already assigns AOM, JPH, libva, VPL and de265 to their
+packages. `e66ae9be2f1` runs `dh_missing --fail-missing` immediately
+after installation. Other current upstream changes ship the Weston helper,
+integrate systemd units and install the Wireshark dissector at its valid path.
+Current `not-installed` deliberately excludes Python package metadata.
 
-The patch also enables `dh_missing --fail-missing`, so every file installed in
-`debian/tmp` must be assigned to a binary package rather than relying on a
-libva-specific omission check. The first real fail-closed build also exposed
-the other staged results that lacked explicit ownership. The patch assigns the
-compiled AOM, JPEG 2000, oneVPL, and de265 codec trees according to the existing
-upstream package split, assigns Python package metadata and the Weston helper,
-and records only the deliberately uninstalled service/dissector artifacts in
-`not-installed`.
+The decision is **adapt and narrow**. Remove the old file-list, service,
+dissector, egg-info and duplicate missing-file-check changes. Preserve the
+upstream payload split and lifecycle policy. No missing-file exception or
+package assignment remains owned by this patch.
 
-The `xpra/codecs/jph` assignment belongs to this package-ownership patch. The
-separate [JPH parallel-build case](../jph-parallel-build-objects/README.md) owns
-disjoint compiler-output paths for the encoder and decoder. Its setup/Cython
-correction neither assigns Debian payloads nor changes codec algorithms;
-conversely, this package patch does not change how JPH objects are compiled.
-The complete DEB gate exercises both responsibilities through actual packages.
+The residual dependency defect is visible in current rules: the ordinary codec
+scan excludes `aom/`, `jph/`, `libva/`, `vpl/` and other codec
+paths despite their current package ownership. Its companion extras scan also
+uses a manually maintained inverse list. Substitution variables are written for
+each scanned package; calculating a dependency under the wrong prefix does not
+make the consumer's `Depends` use it.
 
-The DEB runner then validates the whole package
-inventory twice: once inside the builder before output and again on the host
-after extraction from the returned tar. It rejects duplicate package names and
-overlapping payload ownership, resolves the required native Python modules from
-the actual package contents, and verifies that they belong to `xpra-codecs`.
+## Surrounding code and ownership
 
-The builder extracts the actual `xpra-common` and `xpra-codecs` DEBs into a
-private root and imports five ABI-matched native modules with the distro Python:
-the libva encoder/decoder, libyuv converter and JPH encoder/decoder. All five
-must belong to ordinary `xpra-codecs`, and the loaded paths must match that
-payload inventory. The extracted JPH pair must complete a deterministic
-32x32 quality-100 lossless RGB roundtrip. The decoded BGRX channels are compared
-with the input using the actual rowstride and ignoring X/row padding, without
-claiming alpha preservation. Both image owners are released even on failure.
+| Component | Responsibility |
+| --- | --- |
+| Setup and pkg-config | Select and link the enabled native extensions against the actual distribution libraries. |
+| Debian codec `.files` lists | Assign each staged module to its binary package. |
+| `dh_movefiles`, `dh_install`, `dh_missing` | Materialize package payloads and reject unassigned staged results. |
+| `dh_shlibdeps` | Select a package's actual ELF files and invoke library dependency analysis. |
+| `dpkg-shlibdeps` | Resolve those ELF requirements using the distribution's library/symbol metadata. |
+| `control` and `dh_gencontrol` | Consume the matching dependency substitution variables. |
+| Fork DEB builder and host validator | Inspect the returned real packages, enforce native ownership and reject missing required dependencies. |
 
-`dpkg-shlibdeps` on all five packaged ELF files must resolve only dependencies
-present in final `Depends`; OpenJPH's distribution-specific dependency is not
-guessed. The host independently parses ar/control/data archives and checks
-payload ownership, filename ABI and declared dependency names. Native imports,
-pixel execution and ELF dependency resolution remain container-side checks.
-This mandatory core capability applies to the supported Ubuntu 26.04 and
-Debian 13 complete-stack builds, not to a conditional JPH case-slug bypass.
+The libva encoder and decoder registrations request `libva,libva-drm` on
+Linux. Their shared bridge opens the DRM display with `vaGetDisplayDRM`.
+Neither Python codec discovery nor a successful build can make the omitted
+runtime library dependency optional.
 
-## Required validation
+## Patch mechanics
 
-Schedule checks with
-[development and final acceptance](../../docs/runbooks/validation.md). During
-development, run the affected codec helper and package-runner regressions
-first. Use a real distribution build early when the disputed boundary is the
-actual packaged output; do not rebuild both distributions after each edit.
-After candidate freeze, ensure the complete proof below, reusing only results
-whose final inputs remain valid:
+The patch changes only the two codec invocations in
+`packaging/debian/xpra/rules`:
 
-This case owns no test path, so `PATCH_MODE=tests-only` is intentionally
-unavailable, and the focused runner does not support `PATCH_MODE=clean`.
-During an upstream refresh, inspect the clean upstream packaging directly; do
-not count either guard failure as a control. Run the existing focused module on
-the patched or resulting stack. If current upstream appears to replace the
-packaging behavior completely, prepare the whole reviewed case-retirement
-candidate and run both package builds against the resulting `stacks/develop`;
-the DEB runner has no clean patch mode and must not be bypassed with a partial
-stack or ad hoc package probe.
+```make
+dh_shlibdeps -pxpra-codecs -Xpipewire/ -- -pcodecs
+dh_shlibdeps -pxpra-codecs-extras -- -pcodecsextras
+```
 
-- `unit.codecs.video_helper_test`;
-- `make -C fork-maintenance/infra/deb-packages check`;
-- the complete offline `make -C fork-maintenance check`;
-- one valid Ubuntu 26.04 and one valid Debian 13 package build on the final
-  candidate;
-- extraction and native import of the packaged libva encoder/decoder, libyuv
-  converter and JPH encoder/decoder in matching builder containers, including
-  the mandatory exact RGB JPH roundtrip and actual ELF dependency check.
+The argument positions are deliberate. Before `--`, debhelper's
+`-p<package>` selects the binary package whose payload is scanned.
+After `--`, `dpkg-shlibdeps -p<prefix>` selects the substitution-variable
+prefix, not a package. The prefixes match the existing `codecs:Depends`
+and `codecsextras:Depends` fields in `control`.
+See the official [debhelper package-selection options](https://manpages.debian.org/trixie/debhelper/debhelper.7.en.html#SHARED_DEBHELPER_OPTIONS),
+[dh_shlibdeps argument forwarding](https://manpages.debian.org/trixie/debhelper/dh_shlibdeps.1.en.html#OPTIONS)
+and [dpkg-shlibdeps substitution prefix](https://manpages.debian.org/trixie/dpkg-dev/dpkg-shlibdeps.1.en.html#OPTIONS).
+
+Package ownership replaces inverse codec-name exclusion lists. Each newly
+packaged ordinary or extras ELF participates in the correct scan without
+requiring every other scan to add its name to a blacklist. Ordinary scanning
+now includes libva, JPH, AOM, VPL and x264 where they were actually built.
+Extras scanning follows the current extras payload, including AVIF, de265 and
+FFmpeg, without pulling those libraries into ordinary codecs.
+
+PipeWire remains the one explicit exception in ordinary codecs: upstream
+deliberately places its library in `Recommends` and allows that codec to be
+unavailable without it. The patch keeps that policy. NVIDIA/AMD package payloads
+are not scanned into either codec prefix; no vendor dependency is introduced.
+
+The default non-codec and separate X11/compression/proc scans stay unchanged.
+Existing manual library declarations and distro-specific preprocessing remain
+upstream-owned. Actual ELF analysis supplies the missing dependencies and
+version bounds; this patch does not guess an OpenJPH SONAME, add loader tricks,
+or silence missing-library/symbol errors.
+
+## Failure paths and queue interactions
+
+An unresolved ELF library must fail the real dependency step, not be suppressed
+or compensated with the builder's installed environment. Absent optional codec
+outputs contribute no ELF input. Files assigned to an unexpected package remain
+a payload-ownership failure in the retained package validator.
+
+The [JPH build case](../jph-parallel-build-objects/README.md) now retains only
+shared-header incremental invalidation while preserving upstream's disjoint
+objects. It does not assign Debian files or dependencies. This case does not
+change setup, codec algorithms, parallelism or native buffer ownership.
+Both responsibilities are exercised together by complete-stack package builds.
+
+No test-only path is introduced into installed packages. There is no change to
+package publication, archive transfer, builder image ownership or the source
+freeze boundary.
+
+## Durable regression and package proof
+
+The case names existing `unit.codecs.video_helper_test` for adjacent codec
+discovery behavior; it is not a substitute for package output. The durable
+failure boundary is the real DEB runner under
+`fork-maintenance/infra/deb-packages/`, on both supported distributions.
+
+Before returning output, the builder inventories every actual DEB, rejects
+duplicate package identities and overlapping regular payload paths, and locates
+five ABI-matched native modules: libva encoder/decoder, libyuv converter and JPH
+encoder/decoder. All five must belong to ordinary `xpra-codecs`.
+
+It extracts actual `xpra-common` and `xpra-codecs` payloads into a private
+root, imports those exact files with distribution Python, and runs
+`dpkg-shlibdeps` on their actual ELF objects. Derived dependency names must
+be present in final `xpra-codecs Depends`; the checks explicitly require
+libva, libva-drm and libyuv dependencies and do not guess the OpenJPH package
+name. This comparison is necessary because native imports in a dependency-rich
+builder alone would miss the defect.
+
+The extracted JPH pair also performs a deterministic 32x32 quality-100 lossless
+RGB roundtrip. Comparison honors decoded BGRX rowstride and ignores X/row
+padding; it makes no alpha-preservation claim. Both image owners are released
+on failure as well as success.
+
+The host independently parses the returned ar/control/data archives and
+repeats package-set, payload-owner, ABI and required dependency-name checks.
+Native imports, pixel execution and actual ELF resolution remain container-side
+checks, not claims based on filenames or host emulation.
+
+## Clean control and validation
+
+This packaging-only case owns no test file, so `PATCH_MODE=tests-only` is
+unavailable; the focused runner does not support a `clean` patch mode either.
+A rejected invocation is not a negative control. The documented substitute is
+the current-source analysis above, paired with the supported complete-stack
+real-package oracle. The DEB runner has no clean/partial-stack package mode and
+must not be bypassed with an ad hoc package probe.
+
+During an upstream refresh, complete the manual-review/composed exit before
+runtime checks. Follow the
+[development and final-acceptance flow](../../docs/runbooks/validation.md).
+Run the affected helper and package-runner controls, and use a real distribution
+build when testing the disputed ELF/control boundary. Do not rebuild both
+distributions after every intermediate edit.
+
+The final frozen candidate requires:
+
+- the affected codec module and package-runner checks, plus complete offline
+  fork-control checks;
+- all three full upstream legs and required composed/native checks;
+- one valid Ubuntu 26.04 and one valid Debian 13 complete-stack DEB build,
+  including the actual five-module imports, dependency closure and JPH pixels;
+- all nine complete-stack live profiles through
+  `live-all STACK=develop RUN=<fresh-prefix>` and `live-suite-check`,
+  with the complete queue on both endpoints.
+
+Historical official-package audits explain the original omission but do not
+prove current failure or acceptance. Bind all current results to the exact
+source, queue, harness, immutable builder and returned package set.

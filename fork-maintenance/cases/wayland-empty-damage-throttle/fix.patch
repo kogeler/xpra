@@ -1,8 +1,8 @@
 diff --git a/tests/unittests/unit/wayland/window_test.py b/tests/unittests/unit/wayland/window_test.py
-index e047159aaf7649f342161a02c27840115be82ebd..5db4af9a24fd3c504a03b6e4d8adcbf25cd24146 100644
+index e1ce91fb1f72496d08d17da94552a6d99ca74b3b..dffa63599550afa380f5130ee766360b3a8f8a8e 100644
 --- a/tests/unittests/unit/wayland/window_test.py
 +++ b/tests/unittests/unit/wayland/window_test.py
-@@ -34,2 +34,23 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+@@ -38,2 +38,23 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
  
 +    @staticmethod
 +    def configure_window_frame_state(window):
@@ -26,7 +26,7 @@ index e047159aaf7649f342161a02c27840115be82ebd..5db4af9a24fd3c504a03b6e4d8adcbf2
 +        window.acknowledge_empty_changes.side_effect = acknowledge_empty_changes
 +
      @staticmethod
-@@ -41,5 +62,32 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+@@ -45,5 +66,34 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
          server.subsurface_facades = {}
 -        server.window_sources.return_value = ()
 +        source = Mock()
@@ -38,6 +38,8 @@ index e047159aaf7649f342161a02c27840115be82ebd..5db4af9a24fd3c504a03b6e4d8adcbf2
 +        source.subsurface_sources = {}
 +        server.window_sources.return_value = (source,)
 +        server._empty_damage_ack_timer = 0
++        server._empty_damage_ack_owner = None
++        server._empty_damage_ack_closed = False
 +        server._empty_damage_ack_windows = {}
 +        server.timeout_add.return_value = 101
 +        if window is not None:
@@ -60,7 +62,7 @@ index e047159aaf7649f342161a02c27840115be82ebd..5db4af9a24fd3c504a03b6e4d8adcbf2
 +        return callback()
 +
      def test_mapped_empty_damage_acknowledges_after_subsurface_updates(self):
-@@ -50,2 +98,7 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+@@ -54,2 +104,7 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
          source = Mock()
 +        source.is_closed.return_value = False
 +        source.suspended = False
@@ -68,19 +70,19 @@ index e047159aaf7649f342161a02c27840115be82ebd..5db4af9a24fd3c504a03b6e4d8adcbf2
 +        source.is_window_hidden.return_value = False
 +        source.get_window_source.return_value = None
          source.subsurface_sources = {2: subsource}
-@@ -67,2 +120,6 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+@@ -71,2 +126,6 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
  
 +        window.acknowledge_changes.assert_not_called()
 +        server.timeout_add.assert_called_once()
 +        self.assertEqual(server.timeout_add.call_args.args[0], 16)
 +        self.assertFalse(self.fire_empty_damage_timer(server))
          window.acknowledge_changes.assert_called_once_with()
-@@ -94,2 +151,4 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+@@ -186,2 +245,4 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
          window.acknowledge_changes.assert_not_called()
 +        window.clear_wayland_damage_frame_pending.assert_not_called()
 +        self.assertFalse(window.has_wayland_damage_frame_pending())
          server.refresh_window_area.assert_not_called()
-@@ -105,2 +164,359 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+@@ -197,2 +258,431 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
  
 +class WaylandWindowServerEmptyDamageTest(unittest.TestCase):
 +
@@ -122,6 +124,8 @@ index e047159aaf7649f342161a02c27840115be82ebd..5db4af9a24fd3c504a03b6e4d8adcbf2
 +        source.subsurface_sources = {}
 +        server.window_sources.return_value = (source,)
 +        server._empty_damage_ack_timer = 0
++        server._empty_damage_ack_owner = None
++        server._empty_damage_ack_closed = False
 +        server._empty_damage_ack_windows = {}
 +        server.timeout_add.return_value = 101
 +        if window is not None:
@@ -249,6 +253,76 @@ index e047159aaf7649f342161a02c27840115be82ebd..5db4af9a24fd3c504a03b6e4d8adcbf2
 +        self.assertFalse(self.fire_empty_damage_timer(server))
 +        window.acknowledge_changes.assert_called_once_with()
 +        self.assertEqual(server.timeout_add.call_count, 2)
++
++    def test_cancelled_callback_cannot_take_a_reused_timer_id(self):
++        window = Mock()
++        server = self.make_server(window)
++        WaylandWindowServer.commit(server, 7, True, (100, 80), (), [])
++        old_callback = server.timeout_add.call_args.args[1]
++        server.cancel_empty_damage_acks()
++        WaylandWindowServer.commit(server, 7, True, (100, 80), (), [])
++        current_callback = server.timeout_add.call_args.args[1]
++        self.assertIsNot(old_callback, current_callback)
++        self.assertEqual(server._empty_damage_ack_timer, 101)
++        self.assertFalse(old_callback())
++        self.assertEqual(server._empty_damage_ack_timer, 101)
++        window.acknowledge_changes.assert_not_called()
++        self.assertFalse(current_callback())
++        window.acknowledge_changes.assert_called_once_with()
++
++    def test_failed_timer_admission_releases_queued_window(self):
++        window = Mock()
++        server = self.make_server(window)
++        server.timeout_add.side_effect = RuntimeError("timer admission failed")
++        with self.assertRaisesRegex(RuntimeError, "timer admission failed"):
++            WaylandWindowServer.commit(server, 7, True, (100, 80), (), [])
++        self.assertEqual(server._empty_damage_ack_timer, 0)
++        self.assertIsNone(server._empty_damage_ack_owner)
++        self.assertEqual(server._empty_damage_ack_windows, {})
++        server.timeout_add.side_effect = None
++        WaylandWindowServer.commit(server, 7, True, (100, 80), (), [])
++        self.assertFalse(self.fire_empty_damage_timer(server))
++        window.acknowledge_changes.assert_called_once_with()
++
++    def test_cleanup_finishes_after_timer_removal_failure_and_closes_admission(self):
++        # The isolated loader restores sys.modules: a fresh import may return
++        # another class object, not the parent retained in this class's MRO.
++        parent = WaylandWindowServer.__mro__[1]
++
++        owner = Mock()
++        owner.timeout_add.return_value = 101
++        server = WaylandWindowServer(owner)
++        window = Mock()
++        window.has_wayland_damage_frame_pending.return_value = False
++        server._id_to_window[7] = window
++        server._window_to_id[window] = 7
++        with patch.object(WaylandWindowServer, "has_empty_damage_consumer", return_value=True):
++            server.schedule_empty_damage_ack(7, window)
++        old_callback = owner.timeout_add.call_args.args[1]
++        owner.source_remove.side_effect = RuntimeError("timer removal failed")
++        with patch.object(parent, "cleanup") as parent_cleanup:
++            WaylandWindowServer.cleanup(server)
++        parent_cleanup.assert_called_once_with()
++        self.assertEqual(server._empty_damage_ack_timer, 0)
++        self.assertIsNone(server._empty_damage_ack_owner)
++        self.assertEqual(server._empty_damage_ack_windows, {})
++        self.assertFalse(old_callback())
++        server.schedule_empty_damage_ack(7, window)
++        owner.timeout_add.assert_called_once()
++        window.acknowledge_changes.assert_not_called()
++
++    def test_one_acknowledgement_failure_does_not_skip_another_window(self):
++        first, second = Mock(), Mock()
++        server = self.make_server(first)
++        self.configure_window_frame_state(second)
++        server.get_window.side_effect = {7: first, 8: second}.get
++        first.acknowledge_empty_changes.side_effect = RuntimeError("frame failed")
++        WaylandWindowServer.commit(server, 7, True, (100, 80), (), [])
++        WaylandWindowServer.commit(server, 8, True, (100, 80), (), [])
++        self.assertFalse(self.fire_empty_damage_timer(server))
++        first.acknowledge_empty_changes.assert_called_once_with()
++        second.acknowledge_changes.assert_called_once_with()
++        self.assertEqual(server._empty_damage_ack_windows, {})
 +
 +    def test_damage_cancels_pending_empty_acknowledgement(self):
 +        window = Mock()
@@ -440,20 +514,20 @@ index e047159aaf7649f342161a02c27840115be82ebd..5db4af9a24fd3c504a03b6e4d8adcbf2
 +
 +
  class WaylandWindowServerConfigureTest(unittest.TestCase):
-@@ -126,2 +542,5 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
+@@ -218,2 +708,5 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
          server._set_client_properties.assert_called_once_with(proto, 7, window, properties)
 +        server.cancel_empty_damage_ack.assert_not_called()
 +        window.clear_wayland_damage_frame_pending.assert_not_called()
 +        window.queue_frame_done.assert_not_called()
          surface.resize.assert_not_called()
-@@ -138,4 +557,5 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
+@@ -230,4 +723,5 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
          server._set_client_properties.side_effect = lambda *_args: events.append("properties")
 +        server.cancel_empty_damage_ack.side_effect = lambda *_args: events.append("cancel-empty-ack")
 +        window.queue_frame_done.side_effect = lambda: events.append("queue-frame-done")
          surface.resize.side_effect = lambda *_args: events.append("resize")
 -        surface.frame_done.side_effect = lambda: events.append("frame-done")
          server.server.compositor.flush.side_effect = lambda: events.append("flush")
-@@ -152,6 +572,10 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
+@@ -244,6 +738,10 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
  
 -        self.assertEqual(events, ["properties", "resize", "frame-done", "flush"])
 +        self.assertEqual(events, [
@@ -466,14 +540,14 @@ index e047159aaf7649f342161a02c27840115be82ebd..5db4af9a24fd3c504a03b6e4d8adcbf2
 -        surface.frame_done.assert_called_once_with()
 +        surface.frame_done.assert_not_called()
          server.server.compositor.flush.assert_called_once_with()
-@@ -177,2 +601,6 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
+@@ -269,2 +767,6 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
                  server._set_client_properties.assert_not_called()
 +                server.cancel_empty_damage_ack.assert_not_called()
 +                if window is not None:
 +                    window.clear_wayland_damage_frame_pending.assert_not_called()
 +                    window.queue_frame_done.assert_not_called()
                  if surface is not None:
-@@ -183,2 +611,57 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
+@@ -275,4 +777,90 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
  
 +class WaylandWindowModelTest(unittest.TestCase):
 +
@@ -490,6 +564,19 @@ index e047159aaf7649f342161a02c27840115be82ebd..5db4af9a24fd3c504a03b6e4d8adcbf2
 +        window._gproperties.update({"surface": surface, "display": display})
 +        window.setup()
 +        return window, surface, display
++
++    def test_damage_guard_is_instance_local(self):
++        first, _first_surface, _first_display = self.make_window()
++        second, _second_surface, _second_display = self.make_window()
++        self.assertFalse(first.has_wayland_damage_frame_pending())
++        self.assertFalse(second.has_wayland_damage_frame_pending())
++        first.mark_wayland_damage_frame_pending()
++        self.assertTrue(first.has_wayland_damage_frame_pending())
++        self.assertFalse(second.has_wayland_damage_frame_pending())
++        second.mark_wayland_damage_frame_pending()
++        first.clear_wayland_damage_frame_pending()
++        self.assertFalse(first.has_wayland_damage_frame_pending())
++        self.assertTrue(second.has_wayland_damage_frame_pending())
 +
 +    def test_damage_guard_is_cleared_before_normal_frame_acknowledgement(self):
 +        window, surface, display = self.make_window()
@@ -530,20 +617,42 @@ index e047159aaf7649f342161a02c27840115be82ebd..5db4af9a24fd3c504a03b6e4d8adcbf2
 +        display.flush_clients.assert_called_once_with()
 +
 +
++def load_tests(_loader, tests, _pattern):
++    # Observe the existing commit path's premature frame acknowledgement before
++    # exercising new timer helpers. Every patch mode uses this same ordering;
++    # a successful candidate still runs every selected method exactly once.
++    first = WaylandWindowServerCommitTest(
++        "test_mapped_empty_damage_acknowledges_after_subsurface_updates",
++    )
++
++    def remaining(suite):
++        for test in suite:
++            if isinstance(test, unittest.TestSuite):
++                yield from remaining(test)
++            elif test.id() != first.id():
++                yield test
++
++    return unittest.TestSuite((first, *remaining(tests)))
++
++
  def main():
+-    unittest.main()
++    unittest.main(failfast=True)
+ 
 diff --git a/xpra/wayland/server/models/window.py b/xpra/wayland/server/models/window.py
-index 1b363f613037f00a13e5019c7d784a5fbaf18819..f2da0ff215745acc3cc3347c3ee95311cb8a3ab5 100644
+index a5b455bc2a1f651274a08d372b70648becfffe00..52b7d737553111b9354ad3bd6ea1cea5fb99cc58 100644
 --- a/xpra/wayland/server/models/window.py
 +++ b/xpra/wayland/server/models/window.py
-@@ -173,2 +173,3 @@ class Window(WindowModelStub):
-         super().__init__()
-+        self._wayland_damage_frame_pending = False
-         for key, prop in props.items():
-@@ -192,2 +193,3 @@ class Window(WindowModelStub):
+@@ -189,2 +189,4 @@ class Window(WindowModelStub):
+     _MODELTYPE = "Wayland"
++    # Immutable default; the first guard transition writes instance state.
++    _wayland_damage_frame_pending: bool = False
+ 
+@@ -211,2 +213,3 @@ class Window(WindowModelStub):
              return
 +        self._wayland_damage_frame_pending = False
          self._managed = False
-@@ -195,7 +197,32 @@ class Window(WindowModelStub):
+@@ -214,7 +217,32 @@ class Window(WindowModelStub):
  
 -    def acknowledge_changes(self) -> None:
 +    def mark_wayland_damage_frame_pending(self) -> None:
@@ -579,7 +688,7 @@ index 1b363f613037f00a13e5019c7d784a5fbaf18819..f2da0ff215745acc3cc3347c3ee95311
 +            return
          if display := self._gproperties.get("display"):
 diff --git a/xpra/wayland/server/subsystem/window.py b/xpra/wayland/server/subsystem/window.py
-index 991139776bcab9e4b2c80c50050424ab2a76eda4..da2f400e72bbb1517a062d66f10c0e372c8a3ce1 100644
+index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..28f3423b50008b6529cb056812450fdf381ec9f9 100644
 --- a/xpra/wayland/server/subsystem/window.py
 +++ b/xpra/wayland/server/subsystem/window.py
 @@ -28,2 +28,6 @@ focuslog = Logger("server", "wayland", "focus")
@@ -589,27 +698,33 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..da2f400e72bbb1517a062d66f10c0e37
 +EMPTY_DAMAGE_FRAME_DELAY: Final = 16
 +
  # Per-surface signals connected on each new Surface in `new_surface`.
-@@ -44,2 +48,3 @@ class WaylandWindowServer(WindowServer):
+@@ -44,2 +48,4 @@ class WaylandWindowServer(WindowServer):
      __slots__ = (
 +        "_empty_damage_ack_timer", "_empty_damage_ack_windows",
++        "_empty_damage_ack_owner", "_empty_damage_ack_closed",
          "focused", "pending_popups", "pointer_focus", "subsurface_facades", "subsurface_info",
-@@ -54,2 +59,4 @@ class WaylandWindowServer(WindowServer):
+@@ -54,2 +60,6 @@ class WaylandWindowServer(WindowServer):
          self.pending_popups: dict[int, tuple[int, Popup]] = {}
 +        self._empty_damage_ack_timer = 0
++        self._empty_damage_ack_owner = None
++        self._empty_damage_ack_closed = False
 +        self._empty_damage_ack_windows: dict[int, Window] = {}
          # subsurface wid -> (parent_wid, offset_x, offset_y, logical_w, logical_h, native_w, native_h)
-@@ -65,2 +72,6 @@ class WaylandWindowServer(WindowServer):
+@@ -65,2 +75,9 @@ class WaylandWindowServer(WindowServer):
  
 +    def cleanup(self) -> None:
-+        self.cancel_empty_damage_acks()
-+        super().cleanup()
++        self._empty_damage_ack_closed = True
++        try:
++            self.cancel_empty_damage_acks()
++        finally:
++            super().cleanup()
 +
      def get_surface(self, wid: int):
-@@ -212,2 +223,3 @@ class WaylandWindowServer(WindowServer):
+@@ -224,2 +241,3 @@ class WaylandWindowServer(WindowServer):
      def unmap(self, wid: int) -> None:
 +        self.cancel_empty_damage_ack(wid)
          window = self.get_window(wid)
-@@ -258,4 +270,7 @@ class WaylandWindowServer(WindowServer):
+@@ -272,4 +290,7 @@ class WaylandWindowServer(WindowServer):
          if mapped and not rects:
 -            window.acknowledge_changes()
 +            self.schedule_empty_damage_ack(wid, window)
@@ -618,9 +733,11 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..da2f400e72bbb1517a062d66f10c0e37
 +        if mapped and rects:
 +            window.mark_wayland_damage_frame_pending()
          options = {"damage": True}
-@@ -266,2 +281,53 @@ class WaylandWindowServer(WindowServer):
+@@ -280,2 +301,78 @@ class WaylandWindowServer(WindowServer):
  
 +    def schedule_empty_damage_ack(self, wid: int, window: Window) -> None:
++        if self._empty_damage_ack_closed:
++            return
 +        if (
 +            window.has_wayland_damage_frame_pending()
 +            or not self.has_empty_damage_consumer(wid, window)
@@ -629,10 +746,21 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..da2f400e72bbb1517a062d66f10c0e37
 +            return
 +        self._empty_damage_ack_windows[wid] = window
 +        if not self._empty_damage_ack_timer:
-+            self._empty_damage_ack_timer = self.timeout_add(
-+                EMPTY_DAMAGE_FRAME_DELAY,
-+                self.acknowledge_empty_damage,
-+            )
++            owner = object()
++
++            def acknowledge_current_batch() -> bool:
++                if self._empty_damage_ack_owner is not owner:
++                    return False
++                return self.acknowledge_empty_damage()
++
++            try:
++                timer = self.timeout_add(EMPTY_DAMAGE_FRAME_DELAY, acknowledge_current_batch)
++            except Exception:
++                # No timer accepted this batch: retain no strong model owners.
++                self._empty_damage_ack_windows.clear()
++                raise
++            self._empty_damage_ack_owner = owner
++            self._empty_damage_ack_timer = timer
 +
 +    def has_empty_damage_consumer(self, wid: int, window: Window) -> bool:
 +        for ss in self.window_sources():
@@ -649,15 +777,23 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..da2f400e72bbb1517a062d66f10c0e37
 +        return False
 +
 +    def acknowledge_empty_damage(self) -> bool:
++        self._empty_damage_ack_owner = None
 +        self._empty_damage_ack_timer = 0
 +        windows = tuple(self._empty_damage_ack_windows.items())
 +        self._empty_damage_ack_windows.clear()
 +        for wid, window in windows:
-+            if (
-+                self.get_window(wid) is window
-+                and self.has_empty_damage_consumer(wid, window)
-+            ):
-+                window.acknowledge_empty_changes()
++            if self._empty_damage_ack_closed:
++                break
++            try:
++                if (
++                    self.get_window(wid) is window
++                    and self.has_empty_damage_consumer(wid, window)
++                ):
++                    window.acknowledge_empty_changes()
++            except Exception:
++                # One damaged native/model boundary must not strand the other
++                # visible windows already admitted to this shared wake-up.
++                log.error("Error acknowledging empty Wayland frame for window %#x", wid, exc_info=True)
 +        return False
 +
 +    def cancel_empty_damage_ack(self, wid: int) -> None:
@@ -666,21 +802,25 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..da2f400e72bbb1517a062d66f10c0e37
 +            self.cancel_empty_damage_acks()
 +
 +    def cancel_empty_damage_acks(self) -> None:
++        self._empty_damage_ack_owner = None
 +        self._empty_damage_ack_windows.clear()
-+        if self._empty_damage_ack_timer:
-+            self.source_remove(self._empty_damage_ack_timer)
-+            self._empty_damage_ack_timer = 0
++        timer, self._empty_damage_ack_timer = self._empty_damage_ack_timer, 0
++        if timer:
++            try:
++                self.source_remove(timer)
++            except Exception:
++                log("failed to remove empty Wayland frame timer", exc_info=True)
 +
      def subsurface_image(self, wid: int, image: ImageWrapper,
-@@ -367,2 +433,3 @@ class WaylandWindowServer(WindowServer):
+@@ -394,2 +491,3 @@ class WaylandWindowServer(WindowServer):
      def destroy(self, wid: int) -> None:
 +        self.cancel_empty_damage_ack(wid)
          # The wlroots xdg surface is being freed. Drop every server-side
-@@ -376,2 +443,3 @@ class WaylandWindowServer(WindowServer):
+@@ -403,2 +501,3 @@ class WaylandWindowServer(WindowServer):
          if window is not None:
 +            window.clear_wayland_damage_frame_pending()
              surface = window.get_property("surface")
-@@ -459,4 +527,5 @@ class WaylandWindowServer(WindowServer):
+@@ -486,4 +585,5 @@ class WaylandWindowServer(WindowServer):
              w, h = geometry[2:4]
 +            self.cancel_empty_damage_ack(wid)
              surface.resize(w, h)

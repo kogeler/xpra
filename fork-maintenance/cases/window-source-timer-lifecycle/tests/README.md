@@ -17,6 +17,11 @@ destruction of an already-completed native source.
 
 Retain a non-vacuous tests-only clean-source control, run the complete patched
 standalone module, then repeat it through the resolved `stacks/develop` queue.
+The ordered suite starts with the existing `queue_damage_packet()` refresh
+producer across cleanup and uses fail-fast in both modes. Its ready-source
+fixture must clear the constructor's initial damage-cancelled sentinel. Clean
+failure must be the dead timer ID published after cleanup, before any new
+private helper is exercised; a patched pass must run every retained test.
 Fixtures must initialize the actual connection owners reached by the composed
 path; copying a partial set of locks or queue fields does not establish the
 connection lifecycle.

@@ -33,6 +33,22 @@ applicable.
 
 ## Embedded-source and upstream boundary
 
+The current embedded source is
+`d95058b0916913fe6ae5296fb702f66d833898b0`. Manual review retains the 16 ms
+ordinary-root pacing and pending-damage guard: upstream still acknowledges
+mapped empty commits synchronously. New metadata, content-type and frame-alpha
+bookkeeping must finish before classifying the commit; none replaces pacing.
+
+The model guard starts from an immutable False class default; each transition
+writes instance state. This avoids colliding with WIS pixel-format and WSSO
+snapshot initialization without taking ownership of either field. A two-model
+control proves independent guard transitions. This refresh also
+closes three timer-lifetime gaps: failed registration retained model references,
+failed removal left the old numeric ID authoritative, and one acknowledgement
+exception skipped the rest of a shared batch. Unique batch reservations,
+terminal admission closure and exception-complete dispatch address those gaps.
+The policy and normal damage/visibility ownership remain unchanged.
+
 The ordinary mapped-empty liveness branch entered upstream through
 [Xpra-org/xpra#5002](https://github.com/Xpra-org/xpra/pull/5002), authored by
 `kogeler` and squash-merged upstream as
@@ -169,14 +185,14 @@ approximated with a counter local to the Wayland subsystem.
 | Mapped commit with rectangles | Cancel only this WID's scheduled empty ack, mark its damage guard, then fan out the rectangles. Marking after `refresh_window_area()` is too late. |
 | Mapped commit without rectangles | After all normal commit bookkeeping, schedule only when the model guard is clear and an eligible consumer exists. Repeated commits replace the same WID entry. |
 | Unmapped commit | Cancel the WID's empty entry, do not acknowledge, and retain any existing damage guard. The native surface path reports no damage rectangles while unmapped. |
-| Shared timer fires | Set the timer ID to zero, snapshot and clear the WID-to-window queue, then acknowledge. This ordering permits a callback triggered by `frame_done` to re-arm the next one-shot timer without corrupting the old batch. |
+| Shared timer fires | Match the unique batch reservation, retire its identity and timer ID, snapshot and clear the WID-to-window queue, then acknowledge. Re-arming during dispatch creates a different reservation, even if the numeric ID is reused. |
 | Empty candidate is dispatched | Require `get_window(wid) is window`, recheck consumer eligibility, and call the model's atomic `acknowledge_empty_changes()`. The identity test rejects a stale strong reference after WID reuse. |
 | Normal `WindowSource` acknowledgement | `Window.acknowledge_changes()` calls `queue_frame_done()`, which clears the guard and synchronously sends `frame_done`, then flushes the Wayland display. |
 | Client geometry configure | Cancel the WID's empty entry, resize, call `queue_frame_done()`, then perform the existing single compositor flush. Configure completion remains outside the timer. |
 | Native unmap | Cancel the scheduled empty entry but retain the damage guard. The current unmap path only marks the model iconic and does not cancel delayed `WindowSource` work or settle wlroots callbacks. |
 | Server destroy | Cancel the entry, clear the guard, sever the surface reference, and finish the existing unmanage/removal path. |
 | Model `do_unmanaged()` | Clear the guard and managed state so every later empty acknowledgement is rejected. Timer cancellation remains the server lifecycle's responsibility. |
-| Server cleanup | Cancel the shared timer and release its strong window references before parent cleanup unmanages the models. |
+| Server cleanup | Close timer admission, retire the reservation/ID and release strong window references, then always reach parent cleanup. A late retained callback cannot claim a later batch. |
 
 Despite its name, `Window.queue_frame_done()` does not enqueue asynchronous
 work. It synchronously clears the guard and calls `surface.frame_done()`, but
@@ -213,6 +229,16 @@ candidate window. This distinction is important:
   empty;
 - clearing the queue before dispatch makes re-arming from a `frame_done`
   callback safe and keeps the feedback cycle paced.
+
+`_empty_damage_ack_owner` is an exact reservation object, not another numeric
+source ID. The closure checks it before calling the batch dispatcher. Timer
+registration publishes the reservation and ID only after the scheduler returns;
+on failure the unowned batch releases its model references. Cancellation retires
+the reservation and ID before removal, containing removal errors after that
+logical retirement. The terminal `_empty_damage_ack_closed` flag prevents
+cleanup callbacks or later events from creating new timers. A failed model
+acknowledgement is logged independently so other eligible windows in the same
+batch still progress; it does not manufacture a successful frame completion.
 
 The 16 ms delay mirrors wlroots' current native headless `frame_delay`, whose
 integer milliseconds are derived from the nominal 60,000 mHz refresh. This is
@@ -392,8 +418,24 @@ empty-to-damage and damage-to-empty ordering, independent windows, unmap,
 destroy, cleanup, WID reuse, configure ordering, the real production model,
 the exact 16 ms policy, and the rule that `queue_frame_done()` does not flush.
 
+Additional controls force the same numeric timer ID across cancellation and
+replacement, fail registration and removal, refuse post-cleanup admission, and
+make the first of two model acknowledgements raise. The real subsystem is
+constructed for parent-cleanup/MRO controls. Cleanup interception uses the
+actual retained MRO parent: the upstream fixture restores `sys.modules` after
+loading the native adapter, so a fresh import may produce a different class
+object. Both normal and failed-removal controls must observe the real parent
+call and keep all post-close admission assertions. Ordinary routing tests still bind
+the real methods to their explicit server/model fixtures. WSSO's topology
+fixture initializes the same new timer fields for composed ordinary-root tests
+without taking ownership of the scheduler.
+
 Tests-only mode must fail non-vacuously on the embedded clean source by exposing
-the synchronous feedback loop. Patched standalone tests establish case
+the synchronous feedback loop. The existing commit-path acknowledgement test
+runs first in every mode, with fail-fast reporting its premature frame
+acknowledgement before checks of new timer helpers. A successful patched run
+still executes every selected method exactly once; ordering is not a reduced
+test list or a clean-only branch. Patched standalone tests establish case
 ownership; the same focused test through `stacks/develop` establishes that the
 low-context patch still owns the intended classes and composes with adjacent
 Wayland changes. The native `wayland` gate then compiles and links the Cython
@@ -432,6 +474,8 @@ observation.
 - Do not acknowledge when no ordinary eligible Xpra consumer can see the
   window.
 - Do not cancel the shared timer while another WID remains queued.
+- Match the exact reservation before dispatch; retire it and the numeric ID
+  before removal, and never re-open timer admission after cleanup.
 - Do not retain only a WID without checking the exact window identity at fire
   time.
 - Do not extend the toplevel solution to popup or subsurface commits by name
@@ -446,6 +490,11 @@ observation.
   actual focused and native tests.
 
 ## Required validation
+
+An explicit upstream refresh first finishes the incremental manual review and
+implementation checkpoints for every case and records the composed-review exit.
+Runtime tests begin only after that exit; static checks cannot certify native
+callback pacing or application input fairness.
 
 Follow [development and final acceptance](../../docs/runbooks/validation.md)
 and the current isolated-workspace and upstream/live runbooks rather than

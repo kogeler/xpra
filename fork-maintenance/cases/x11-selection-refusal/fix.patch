@@ -1,9 +1,9 @@
 diff --git a/tests/unittests/unit/x11/selection_refusal_test.py b/tests/unittests/unit/x11/selection_refusal_test.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..38afe3b5c922b1dbbcad0f7368ca344bac22d701
+index 0000000000000000000000000000000000000000..d0b351b4cfd3fa69543f53e9a1fa225a95a564bb
 --- /dev/null
 +++ b/tests/unittests/unit/x11/selection_refusal_test.py
-@@ -0,0 +1,394 @@
+@@ -0,0 +1,765 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 kogeler
@@ -13,16 +13,20 @@ index 0000000000000000000000000000000000000000..38afe3b5c922b1dbbcad0f7368ca344b
 +"""Real X11 conversion replies through the compiled parser and GDK filter."""
 +
 +import ctypes as C
++import os
++import subprocess
++import sys
 +import time
 +import unittest
 +from unittest.mock import patch
 +
 +from xpra.os_util import gi_import
-+from unit.process_test_util import DisplayContext
++from unit.process_test_util import DisplayContext, ProcessTestUtil
 +
 +GLib = gi_import("GLib")
 +DISPLAY = C.c_void_p
 +XID = C.c_ulong
++RAW_NATIVE = sys.argv[1:] == ["--raw"]
 +
 +
 +class SelectionRequest(C.Structure):
@@ -113,6 +117,9 @@ index 0000000000000000000000000000000000000000..38afe3b5c922b1dbbcad0f7368ca344b
 +        self.requests = []
 +        self.errors = []
 +        self.incr = {}
++        self.incr_deletes = []
++        self.property_deletes = []
++        self.pause_incr = False
 +        self.mode = "hold"
 +        self.data = b"one clipboard line"
 +        self.error_handler = C.CFUNCTYPE(C.c_int, DISPLAY, C.POINTER(XErrorEvent))(self.xerror)
@@ -149,12 +156,11 @@ index 0000000000000000000000000000000000000000..38afe3b5c922b1dbbcad0f7368ca344b
 +                    self.incremental(request)
 +            elif event.type == 28 and event.property.state == 1:
 +                key = (event.property.window, event.property.atom)
++                self.property_deletes.append(key)
 +                if key in self.incr:
-+                    request, chunks = self.incr[key]
-+                    chunk = chunks.pop(0)
-+                    self.write(request, request.target, 8, chunk, len(chunk))
-+                    if not chunks:
-+                        del self.incr[key]
++                    self.incr_deletes.append(key)
++                    if not self.pause_incr:
++                        self.send_chunk(self.incr[key][0])
 +        return True
 +
 +    def write(self, request, dtype, dformat, data, count):
@@ -180,11 +186,21 @@ index 0000000000000000000000000000000000000000..38afe3b5c922b1dbbcad0f7368ca344b
 +            self.write(request, request.target, 8, self.data, len(self.data))
 +        self.notify(request, property=request.property)
 +
-+    def incremental(self, request):
++    def send_chunk(self, request):
++        key = (request.requestor, request.property)
++        _request, chunks = self.incr[key]
++        chunk = chunks.pop(0)
++        self.write(request, request.target, 8, chunk, len(chunk))
++        if not chunks:
++            del self.incr[key]
++
++    def incremental(self, request, data=None, size=None):
++        if data is None:
++            data = self.data
 +        self.lib.XSelectInput(self.display, request.requestor, 1 << 22)
-+        size = (XID * 1)(len(self.data))
-+        self.incr[(request.requestor, request.property)] = (request, [self.data[:5], self.data[5:], b""])
-+        self.write(request, self.atom("INCR"), 32, size, 1)
++        header = (XID * 1)(len(data) if size is None else size)
++        self.incr[(request.requestor, request.property)] = (request, [data[:5], data[5:], b""])
++        self.write(request, self.atom("INCR"), 32, header, 1)
 +        self.notify(request, property=request.property)
 +
 +    def close(self):
@@ -195,25 +211,37 @@ index 0000000000000000000000000000000000000000..38afe3b5c922b1dbbcad0f7368ca344b
 +        self.lib.XCloseDisplay(self.display)
 +
 +
-+class SelectionRefusalTest(unittest.TestCase):
++class NativeSelectionRefusalTest(unittest.TestCase):
 +    @classmethod
 +    def setUpClass(cls):
++        if RAW_NATIVE:
++            from xpra.scripts.main import no_gi_gtk_modules
++            from xpra.x11.bindings.display_source import init_display_source
++            from xpra.x11.bindings.loop import register_glib_source
++            init_display_source()
++            register_glib_source(GLib.MainContext.default())
++            no_gi_gtk_modules()
++            return
 +        cls.display = DisplayContext()
 +        cls.display.__enter__()
++        cls.addClassCleanup(cls.display.__exit__, None, None, None)
 +        from xpra.x11.gtk import bindings
-+        cls.bindings = bindings
-+        assert bindings.init_x11_filter()
++        # A non-raising call holds a reference even when the filter exists.
++        bindings.init_x11_filter()
++        cls.addClassCleanup(bindings.cleanup_x11_filter)
 +
 +    @classmethod
 +    def tearDownClass(cls):
-+        cls.bindings.cleanup_x11_filter()
-+        cls.display.__exit__(None, None, None)
++        if RAW_NATIVE:
++            assert "xpra.x11.gtk" not in sys.modules, "raw conversion imported GTK"
 +
 +    def setUp(self):
 +        from xpra.x11.selection import proxy
 +        from xpra.x11.selection.clipboard import X11Clipboard
 +        self.module = proxy
 +        self.owner = Owner()
++        self.addCleanup(lambda: self.assertFalse(self.owner.errors))
++        self.addCleanup(self.owner.close)
 +        # The real helper owns the legacy PropertyNotify route too. Without
 +        # it a clean positive control would fail for an unrelated missing
 +        # receiver, obscuring the actual SelectionNotify refusal boundary.
@@ -222,21 +250,26 @@ index 0000000000000000000000000000000000000000..38afe3b5c922b1dbbcad0f7368ca344b
 +            "clipboards.local": ("CLIPBOARD", "PRIMARY"),
 +            "clipboards.remote": ("CLIPBOARD", "PRIMARY"),
 +        })
++        self.addCleanup(self.cleanup_helper)
 +        self.xid = self.helper.event_window_xid
 +        self.proxies = {name: self.helper._get_proxy(name) for name in ("CLIPBOARD", "PRIMARY")}
 +        self.helper.enable_selections(tuple(self.proxies))
 +        self.logging = patch.object(proxy, "log", wraps=proxy.log)
 +        self.logger = self.logging.start()
++        self.addCleanup(self.logging.stop)
 +
-+    def tearDown(self):
-+        self.helper.cleanup()
-+        for proxy in self.proxies.values():
-+            proxy.cancel_incr_data_timer()
-+            proxy.reset_incr_data()
-+        spin_until(lambda: False, 0.12)
-+        self.owner.close()
-+        self.logging.stop()
-+        self.assertFalse(self.owner.errors)
++    def cleanup_helper(self):
++        self.owner.mode = "hold"
++        self.owner.incr.clear()
++        try:
++            self.helper.cleanup()
++        finally:
++            for proxy in getattr(self, "proxies", {}).values():
++                try:
++                    proxy.cancel_incr_data_timer()
++                finally:
++                    proxy.reset_incr_data()
++            spin_until(lambda: False, 0.12)
 +
 +    def request(self, selection="CLIPBOARD", target="UTF8_STRING"):
 +        result = []
@@ -250,6 +283,8 @@ index 0000000000000000000000000000000000000000..38afe3b5c922b1dbbcad0f7368ca344b
 +        from xpra.x11.dispatch import event_receivers_map
 +        for proxy in self.proxies.values():
 +            self.assertFalse(proxy.local_requests)
++            for name in ("_requestor_windows", "_requestor_xids", "_requestor_notified", "_requestor_incr"):
++                self.assertFalse(getattr(proxy, name, {}), name)
 +        for request in self.owner.requests:
 +            if request.requestor != self.xid:
 +                self.assertNotIn(request.requestor, event_receivers_map)
@@ -267,11 +302,14 @@ index 0000000000000000000000000000000000000000..38afe3b5c922b1dbbcad0f7368ca344b
 +        self.assert_drained()
 +
 +    def test_no_owner_is_a_server_refusal(self):
-+        for selection in self.proxies:
-+            self.owner.claim(selection, 0)
-+            result = self.request(selection)
-+            self.wait(lambda: bool(result))
-+            self.assertEqual(result, [("", 0, b"")])
++        with patch.object(self.module, "get_wininfo", wraps=self.module.get_wininfo) as owner_info:
++            for selection in self.proxies:
++                self.owner.claim(selection, 0)
++                result = self.request(selection)
++                self.wait(lambda: bool(result))
++                self.assertEqual(result, [("", 0, b"")])
++            for call in owner_info.call_args_list:
++                self.assertNotEqual(call.args[0], 0, "the absent owner is not a queryable window")
 +        self.assertFalse(self.owner.requests)
 +        self.logger.warn.assert_not_called()
 +        self.assert_drained()
@@ -290,6 +328,10 @@ index 0000000000000000000000000000000000000000..38afe3b5c922b1dbbcad0f7368ca344b
 +                        self.assertEqual(xatoms_to_strings(result[0][2]), ("UTF8_STRING", "text/plain;charset=utf-8"))
 +                    else:
 +                        self.assertEqual(bytes(result[0][2]), self.owner.data)
++                    if mode == "incr":
++                        request = self.owner.requests[-1]
++                        key = (request.requestor, request.property)
++                        self.wait(lambda: self.owner.property_deletes.count(key) == 4)
 +        self.assertFalse(self.owner.incr)
 +        self.logger.warn.assert_not_called()
 +        self.assert_drained()
@@ -322,6 +364,232 @@ index 0000000000000000000000000000000000000000..38afe3b5c922b1dbbcad0f7368ca344b
 +        self.logger.warn.assert_not_called()
 +        self.assert_drained()
 +
++    def test_parallel_incremental_conversions_keep_their_own_bytes(self):
++        for target in ("UTF8_STRING", "TEXT"):
++            with self.subTest(target=target), patch.object(self.module, "CONVERT_TIMEOUT", 2000):
++                before = len(self.owner.requests)
++                first = self.request(target="UTF8_STRING")
++                second = self.request(target=target)
++                self.wait(lambda: len(self.owner.requests) == before + 2)
++                old, new = self.owner.requests[-2:]
++                self.owner.incremental(old, b"first incremental payload")
++                self.owner.incremental(new, b"second independent payload")
++                self.wait(lambda: bool(first) and bool(second))
++                self.assertEqual([bytes(row[2]) for row in first], [b"first incremental payload"])
++                self.assertEqual([bytes(row[2]) for row in second], [b"second independent payload"])
++                self.assert_drained()
++        self.assertFalse(self.owner.incr)
++        self.logger.warn.assert_not_called()
++
++    def test_ordinary_reply_does_not_join_an_incremental_transfer(self):
++        with patch.object(self.module, "CONVERT_TIMEOUT", 2000):
++            first = self.request(target="TEXT")
++            self.wait(lambda: bool(self.owner.requests))
++            incremental = self.owner.requests[0]
++            self.owner.pause_incr = True
++            self.owner.incremental(incremental, b"long independent text")
++            self.wait(lambda: bool(self.owner.incr_deletes))
++            second = self.request()
++            self.wait(lambda: len(self.owner.requests) == 2)
++            self.owner.success(self.owner.requests[1])
++            self.wait(lambda: bool(second))
++            self.assertEqual([bytes(row[2]) for row in second], [self.owner.data])
++            self.assertFalse(first)
++            self.owner.pause_incr = False
++            self.owner.send_chunk(incremental)
++            self.wait(lambda: bool(first))
++            self.assertEqual([bytes(row[2]) for row in first], [b"long independent text"])
++        self.logger.warn.assert_not_called()
++        self.assert_drained()
++
++    def test_partial_incremental_timeout_cannot_contaminate_a_retry(self):
++        first = self.request()
++        self.wait(lambda: bool(self.owner.requests))
++        old = self.owner.requests[0]
++        self.owner.pause_incr = True
++        self.owner.incremental(old, b"old partial value")
++        self.wait(lambda: bool(self.owner.incr_deletes))
++        self.owner.send_chunk(old)
++        self.wait(lambda: len(self.owner.incr_deletes) == 2)
++        self.wait(lambda: bool(first))
++        self.assertEqual(first, [("", 0, b"")])
++        self.assertEqual(self.logger.warn.call_count, 2)
++        self.owner.incr.clear()
++        self.logger.warn.reset_mock()
++        self.owner.pause_incr = False
++        self.owner.mode = "success"
++        second = self.request()
++        self.wait(lambda: bool(second))
++        self.assertEqual([bytes(row[2]) for row in second], [self.owner.data])
++        self.logger.warn.assert_not_called()
++        self.assert_drained()
++
++    def test_incremental_deadline_retires_only_its_request(self):
++        with patch.object(self.module, "CONVERT_TIMEOUT", 3000):
++            result = self.request()
++        self.wait(lambda: bool(self.owner.requests))
++        self.owner.pause_incr = True
++        self.owner.incremental(self.owner.requests[0])
++        self.wait(lambda: bool(self.owner.incr_deletes))
++        self.assertTrue(spin_until(lambda: bool(result), 2))
++        self.assertEqual(result, [("", 0, b"")])
++        self.logger.warn.assert_called_once_with("Warning: incremental data timeout")
++        self.owner.incr.clear()
++        self.assert_drained()
++
++    def test_zero_lower_bound_incremental_header_still_transfers(self):
++        result = self.request()
++        self.wait(lambda: bool(self.owner.requests))
++        self.owner.incremental(self.owner.requests[0], size=0)
++        self.wait(lambda: bool(result))
++        self.assertEqual([bytes(row[2]) for row in result], [self.owner.data])
++        self.logger.warn.assert_not_called()
++        self.assert_drained()
++
++    def test_incremental_limit_and_format_failure_retire_the_request(self):
++        for failure in ("size", "format"):
++            with self.subTest(failure=failure):
++                before = len(self.owner.requests)
++                result = self.request()
++                self.wait(lambda: len(self.owner.requests) == before + 1)
++                request = self.owner.requests[-1]
++                self.owner.pause_incr = True
++                self.owner.incremental(request, b"test payload")
++                deletes = len(self.owner.incr_deletes)
++                self.wait(lambda: len(self.owner.incr_deletes) > deletes)
++                if failure == "size":
++                    with patch.object(self.module, "MAX_DATA_SIZE", 8):
++                        self.owner.write(request, request.target, 8, b"123456", 6)
++                        deletes = len(self.owner.incr_deletes)
++                        self.wait(lambda: len(self.owner.incr_deletes) > deletes)
++                        self.owner.write(request, request.target, 8, b"789", 3)
++                        self.wait(lambda: bool(result))
++                else:
++                    self.owner.send_chunk(request)
++                    deletes = len(self.owner.incr_deletes)
++                    self.wait(lambda: len(self.owner.incr_deletes) > deletes)
++                    values = (C.c_ushort * 1)(65)
++                    self.owner.write(request, request.target, 16, values, 1)
++                    self.wait(lambda: bool(result))
++                self.assertEqual(result, [("", 0, b"")])
++                self.owner.incr.clear()
++                self.assert_drained()
++        self.logger.warn.assert_not_called()
++
++    def test_failed_timer_removal_does_not_skip_other_requestors(self):
++        recorded = []
++        timeout_add = GLib.timeout_add
++        remove = GLib.source_remove
++
++        def schedule(delay, callback, *args):
++            timer = timeout_add(delay, callback, *args)
++            recorded.append((timer, callback, args))
++            return timer
++
++        with patch.object(GLib, "timeout_add", side_effect=schedule):
++            first = self.request()
++            second = self.request(target="TEXT")
++            self.wait(lambda: len(self.owner.requests) == 2)
++            self.owner.pause_incr = True
++            self.owner.incremental(self.owner.requests[0])
++            self.wait(lambda: bool(self.owner.incr_deletes))
++
++        def remove_then_fail(timer):
++            remove(timer)
++            raise RuntimeError("injected removal failure after cancellation")
++
++        with patch.object(GLib, "source_remove", side_effect=remove_then_fail):
++            self.proxies["CLIPBOARD"].cleanup()
++        context = GLib.MainContext.default()
++        self.assertTrue(all(context.find_source_by_id(row[0]) is None for row in recorded))
++        self.owner.incr.clear()
++        for _timer, callback, args in recorded:
++            callback(*args)
++        self.assertFalse(first)
++        self.assertFalse(second)
++        self.logger.warn.assert_not_called()
++        self.assert_drained()
++
++    def test_superseded_incremental_timer_cannot_retire_the_active_request(self):
++        recorded = []
++        timeout_add = GLib.timeout_add
++
++        def schedule(delay, callback, *args):
++            timer = timeout_add(delay, callback, *args)
++            if delay == 1000:
++                recorded.append((callback, args))
++            return timer
++
++        with patch.object(GLib, "timeout_add", side_effect=schedule):
++            result = self.request()
++            self.wait(lambda: bool(self.owner.requests))
++            request = self.owner.requests[0]
++            self.owner.pause_incr = True
++            self.owner.incremental(request)
++            self.wait(lambda: bool(self.owner.incr_deletes))
++            self.owner.send_chunk(request)
++            self.wait(lambda: len(self.owner.incr_deletes) == 2)
++            self.assertGreaterEqual(len(recorded), 2)
++            callback, args = recorded[0]
++            self.assertFalse(callback(*args))
++            self.assertFalse(result)
++            self.owner.pause_incr = False
++            self.owner.send_chunk(request)
++            self.wait(lambda: bool(result))
++        self.assertEqual([bytes(row[2]) for row in result], [self.owner.data])
++        self.logger.warn.assert_not_called()
++        self.assert_drained()
++
++    def test_revocation_completes_pending_reads_and_allows_later_reenable(self):
++        proxy = self.proxies["CLIPBOARD"]
++        for policy in ("enabled", "send"):
++            with self.subTest(policy=policy):
++                before = len(self.owner.requests)
++                result = self.request()
++                self.wait(lambda: len(self.owner.requests) == before + 1)
++                if policy == "enabled":
++                    proxy.set_enabled(False)
++                else:
++                    proxy.set_direction(False, True)
++                self.assertEqual(result, [("", 0, b"")])
++                self.assertEqual(self.request(target="TARGETS"), [("ATOM", 32, b"")])
++                self.assert_drained()
++                proxy.set_enabled(True)
++                proxy.set_direction(True, False)
++                retry = self.request()
++                self.wait(lambda: len(self.owner.requests) == before + 2)
++                self.owner.success(self.owner.requests[-1])
++                self.wait(lambda: bool(retry))
++                self.assertEqual([bytes(row[2]) for row in retry], [self.owner.data])
++                spin_until(lambda: False, 0.12)
++                self.logger.warn.assert_not_called()
++                self.assert_drained()
++
++    def test_gtk_wrapper_failure_rolls_back_requestor_registration(self):
++        from xpra.x11.dispatch import event_receivers_map
++        from xpra.x11.error import xsync
++        if RAW_NATIVE:
++            self.assertFalse(self.helper.gtk_filter)
++            self.assertNotIn("xpra.x11.gtk", sys.modules)
++            self.owner.mode = "success"
++            with patch.object(self.module, "gtk_event_window", create=True,
++                              side_effect=AssertionError("GTK lookup on raw X11")):
++                result = self.request()
++                self.wait(lambda: bool(result))
++            self.assertEqual([bytes(row[2]) for row in result], [self.owner.data])
++        else:
++            self.assertTrue(self.helper.gtk_filter)
++            with xsync:
++                before = tuple(self.module.X11Window.get_children(self.module.X11Window.get_root_xid()))
++            receivers = dict(event_receivers_map)
++            with patch.object(self.module, "gtk_event_window", return_value=None, create=True):
++                with self.assertRaisesRegex(RuntimeError, "requestor window with GDK"):
++                    self.request()
++            with xsync:
++                self.assertEqual(tuple(self.module.X11Window.get_children(self.module.X11Window.get_root_xid())), before)
++            self.assertEqual(event_receivers_map, receivers)
++        self.assert_drained()
++
 +    def test_deadline_setup_failure_retires_the_new_requestor(self):
 +        from xpra.x11.dispatch import event_receivers_map
 +        from xpra.x11.error import xsync
@@ -339,6 +607,69 @@ index 0000000000000000000000000000000000000000..38afe3b5c922b1dbbcad0f7368ca344b
 +        self.assertEqual(event_receivers_map, receivers)
 +        self.assertFalse(self.proxies["CLIPBOARD"].local_requests)
 +        self.logger.warn.assert_not_called()
++
++    def test_native_sync_exit_failure_retires_request_before_raising(self):
++        from xpra.x11.dispatch import event_receivers_map
++        native = self.module.X11Window
++        sync = self.module.xsync
++        converted = failed = False
++        observed = []
++        with sync:
++            before = tuple(native.get_children(native.get_root_xid()))
++        receivers = dict(event_receivers_map)
++
++        class Window:
++            def __getattr__(self, name):
++                return getattr(native, name)
++
++            def ConvertSelection(self, *args, **kwargs):
++                nonlocal converted
++                result = native.ConvertSelection(*args, **kwargs)
++                converted = True
++                return result
++
++        class SyncExit:
++            def __enter__(self):
++                return sync.__enter__()
++
++            def __exit__(self, *args):
++                nonlocal failed
++                result = sync.__exit__(*args)
++                if converted and not failed:
++                    failed = True
++                    raise RuntimeError("injected synchronized conversion failure")
++                return result
++
++        def callback(*args):
++            observed.append(args)
++            raise ValueError("consumer cannot replace the original setup failure")
++
++        with patch.object(self.module, "X11Window", Window()), patch.object(self.module, "xsync", SyncExit()):
++            with self.assertRaisesRegex(RuntimeError, "synchronized conversion failure"):
++                self.proxies["CLIPBOARD"].get_contents("UTF8_STRING", callback)
++        self.assertEqual(observed, [("", 0, b"")])
++        with sync:
++            self.assertEqual(tuple(native.get_children(native.get_root_xid())), before)
++        self.assertEqual(event_receivers_map, receivers)
++        self.assert_drained()
++
++    def test_legacy_batch_completion_retires_all_before_callback_failure(self):
++        proxy = self.proxies["CLIPBOARD"]
++        observed = []
++
++        def fail(*args):
++            observed.append(args)
++            self.assert_drained()
++            raise ValueError("injected consumer failure")
++
++        proxy.get_contents("UTF8_STRING", fail)
++        result = self.request()
++        self.wait(lambda: len(self.owner.requests) == 2)
++        with self.assertRaisesRegex(ValueError, "injected consumer failure"):
++            proxy.got_local_contents("UTF8_STRING", "UTF8_STRING", 8, b"shared result")
++        self.assertEqual(observed, [("UTF8_STRING", 8, b"shared result")])
++        self.assertEqual(result, observed)
++        self.assert_drained()
 +
 +    def test_mismatched_reply_does_not_cancel_request(self):
 +        result = self.request()
@@ -396,146 +727,281 @@ index 0000000000000000000000000000000000000000..38afe3b5c922b1dbbcad0f7368ca344b
 +        self.logger.warn.assert_not_called()
 +
 +
++class SelectionRefusalTest(unittest.TestCase):
++    """Keep process-global X11/GDK connections out of the surrounding suite."""
++
++    def run_native(self, mode, **env):
++        result = subprocess.run(
++            (sys.executable, __file__, mode), capture_output=True, text=True,
++            env=dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path), **env),
++            timeout=90, check=False,
++        )
++        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
++        self.assertIn("native-selection-refusal=passed", result.stdout)
++
++    def test_gtk_native_conversions(self):
++        self.run_native("--gtk")
++
++    def test_raw_x11_native_conversions_without_gtk(self):
++        ProcessTestUtil.setUpClass()
++        try:
++            runner = ProcessTestUtil()
++            xvfb = runner.start_Xvfb()
++            self.run_native("--raw", DISPLAY=xvfb.display, XPRA_GTK="0")
++        finally:
++            ProcessTestUtil.tearDownClass()
++
++
++def load_tests(_loader, _tests, _pattern):
++    return unittest.defaultTestLoader.loadTestsFromTestCase(SelectionRefusalTest)
++
++
 +if __name__ == "__main__":
++    if sys.argv[1:] in (["--gtk"], ["--raw"]):
++        suite = unittest.defaultTestLoader.loadTestsFromTestCase(NativeSelectionRefusalTest)
++        # Prove the original native refusal before exercising newer lifetime
++        # and INCR helpers. The same order and fail-fast apply to both sources;
++        # every one of the 21 methods still runs on a successful candidate.
++        first = NativeSelectionRefusalTest("test_refused_aliases_and_targets_complete_without_timeout")
++        suite = unittest.TestSuite((first, *(test for test in suite if test.id() != first.id())))
++        result = unittest.TextTestRunner(verbosity=2, failfast=True).run(suite)
++        if result.wasSuccessful():
++            print("native-selection-refusal=passed")
++        sys.exit(not result.wasSuccessful())
 +    unittest.main()
 diff --git a/xpra/x11/bindings/events.pyx b/xpra/x11/bindings/events.pyx
 index 6c09274567e47a82344768df87e21b140dbb1ec2..de9da56e9c6b0981495653bf8d570b2d364c7d58 100644
 --- a/xpra/x11/bindings/events.pyx
 +++ b/xpra/x11/bindings/events.pyx
-@@ -66,6 +66,7 @@ cdef void init_x11_events():
-         ConfigureRequest    : ("", "x11-child-configure-request-event"),
-         SelectionRequest    : ("x11-selection-request", ""),
+@@ -68,2 +68,3 @@ cdef void init_x11_events():
          SelectionClear      : ("x11-selection-clear", ""),
 +        SelectionNotify     : ("x11-selection-notify", ""),
          FocusIn             : ("x11-focus-in-event", ""),
-         FocusOut            : ("x11-focus-out-event", ""),
-         ClientMessage       : ("x11-client-message-event", ""),
-@@ -278,6 +279,7 @@ cdef dict parse_SelectionClear(Display *d, XEvent *e):
- cdef dict parse_SelectionNotify(Display *d, XEvent *e):
-     cdef XSelectionEvent * selection_e = <XSelectionEvent*> e
+@@ -280,2 +281,3 @@ cdef dict parse_SelectionNotify(Display *d, XEvent *e):
      return {
 +        "window": selection_e.requestor,
          "requestor": selection_e.requestor,
-         "selection": atom_str(d, selection_e.selection),
-         "target": atom_str(d, selection_e.target),
-@@ -455,7 +457,7 @@ cdef object parse_xevent(Display *d, XEvent *e):
-     cdef int etype = e.type
-     global x_event_type_names, x_event_signals
+@@ -457,3 +459,3 @@ cdef object parse_xevent(Display *d, XEvent *e):
      cdef str event_type = x_event_type_names.get(etype, "") or str(etype)
 -    if e.xany.send_event and etype not in (ClientMessage, UnmapNotify):
 +    if e.xany.send_event and etype not in (ClientMessage, UnmapNotify, SelectionNotify):
          log("parse_xevent ignoring %s send_event", event_type)
-         return None
- 
+diff --git a/xpra/x11/selection/clipboard.py b/xpra/x11/selection/clipboard.py
+index 152b902b155e580ba5308fc5826a3fd605ae9f8f..0087b884b96d8fc8a5fabaf600ea57f78522e64a 100644
+--- a/xpra/x11/selection/clipboard.py
++++ b/xpra/x11/selection/clipboard.py
+@@ -149,2 +149,3 @@ class X11Clipboard(ClipboardTimeoutHelper, GObject.GObject):
+         proxy.set_want_targets(self.proxy_want_targets(selection))
++        proxy.set_requestor_gtk(self.gtk_filter)
+         proxy.set_direction(self.can_send, self.can_receive)
 diff --git a/xpra/x11/selection/proxy.py b/xpra/x11/selection/proxy.py
-index 4680b52b3d51e4138968b053d8c0f890eb7b0205..0ae73ff9b05c115c73e41dbab29177598304c7f3 100644
+index bbc23ba019abb3feac583c48f2112e9f6f223f71..2ba8e8a1245c15e1c6078090259c7e2a19e0fe77 100644
 --- a/xpra/x11/selection/proxy.py
 +++ b/xpra/x11/selection/proxy.py
-@@ -20,7 +20,8 @@ from xpra.x11.selection.common import xatoms_to_strings, strings_to_xatoms
+@@ -7,2 +7,3 @@ import os
+ import struct
++from dataclasses import dataclass, field
+ from time import monotonic
+@@ -18,7 +19,8 @@ from xpra.util.gobject import one_arg_signal, n_arg_signal
+ from xpra.util.str_fn import Ellipsizer, bytestostr, csv, memoryview_to_bytes
+-from xpra.x11.selection.common import xatoms_to_strings, strings_to_xatoms
++from xpra.x11.selection.common import xatoms_to_strings, strings_to_xatoms, gtk_event_window
  from xpra.x11.bindings.core import constants
- from xpra.x11.bindings.window import PropertyError, X11WindowBindings
+-from xpra.x11.bindings.window import PropertyError, X11WindowBindings
++from xpra.x11.bindings.window import PropertyError, PropertyOverflow, X11WindowBindings
  from xpra.x11.common import X11Event
 -from xpra.x11.error import xsync, XError
 +from xpra.x11.dispatch import add_event_receiver, remove_event_receiver
 +from xpra.x11.error import xsync, xlog, XError
  from xpra.x11.info import get_wininfo
- from xpra.log import Logger
+@@ -88,2 +90,12 @@ log("TRANSLATED_TARGETS=%s", TRANSLATED_TARGETS)
  
-@@ -91,6 +92,7 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
-         "x11-client-message-event": one_arg_signal,
-         "x11-selection-request": one_arg_signal,
++@dataclass(slots=True)
++class IncrementalConversion:
++    chunks: list[bytes] = field(default_factory=list)
++    size: int = 0
++    dtype: str = ""
++    dformat: int = 0
++    timer: int = 0
++    timer_owner: object | None = None
++
++
+ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
+@@ -93,2 +105,3 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
          "x11-selection-clear": one_arg_signal,
 +        "x11-selection-notify": one_arg_signal,
          "x11-property-notify-event": one_arg_signal,
-         "x11-xfixes-selection-notify-event": one_arg_signal,
-         #
-@@ -107,6 +109,10 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
-         self.remote_requests: dict[str, list[tuple[int, str, str, float]]] = {}
-         self.local_requests: dict[str, dict[int, tuple[int, ClipboardCallback]]] = {}
+@@ -104,2 +117,3 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
+         self.xid: int = xid
++        self._requestor_gtk: bool = False
+         self.owned: bool = False
+@@ -109,2 +123,7 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
          self.local_request_counter: int = 0
 +        self._requestor_windows: dict[int, tuple[str, int, Any]] = {}
 +        self._requestor_xids: dict[int, int] = {}
 +        self._requestor_notified: set[int] = set()
++        self._requestor_incr: dict[int, IncrementalConversion] = {}
 +        self._requestors_closed: bool = False
          self.targets: Sequence[str] = ()
-         self.target_data: dict[str, tuple[str, int, Any]] = {}
-         self._targets_owner: int = 0
-@@ -128,6 +134,7 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
+@@ -128,4 +147,19 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
  
++    def set_requestor_gtk(self, gtk_filter: bool) -> None:
++        # The helper owns the route and its filter lease, not this proxy.
++        self._requestor_gtk = gtk_filter
++
++    def set_enabled(self, enabled: bool) -> None:
++        super().set_enabled(enabled)
++        if not enabled:
++            self.cancel_conversion_requests(closed=False, notify=True)
++
++    def set_direction(self, can_send: bool, can_receive: bool) -> None:
++        super().set_direction(can_send, can_receive)
++        if not can_send:
++            self.cancel_conversion_requests(closed=False, notify=True)
++
      def cleanup(self) -> None:
          log("%s.cleanup()", self)
 +        self.cancel_conversion_requests()
          # give up selection:
-         # (disabled because this crashes GTK3 on exit)
-         # if self.owned:
-@@ -504,6 +511,9 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
-     def get_contents(self, target: str, got_contents: ClipboardCallback) -> None:
-         log("get_contents(%s, %s) owned=%s, have-token=%s",
+@@ -514,2 +548,5 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
              target, got_contents, self.owned, self._have_token)
-+        if self._requestors_closed:
-+            got_contents("", 0, b"")
++        if self._requestors_closed or not self._enabled or not self._can_send:
++            got_contents("ATOM", 32, b"") if target == "TARGETS" else got_contents("", 0, b"")
 +            return
          with xsync:
-             owner = X11Window.XGetSelectionOwner(self._selection)
-         self.owned = owner == self.xid
-@@ -528,10 +538,93 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
+@@ -536,20 +573,158 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
                  return
-             request_id = self.local_request_counter
-             self.local_request_counter += 1
--            timer = GLib.timeout_add(CONVERT_TIMEOUT, self.timeout_get_contents, target, request_id)
--            self.local_requests.setdefault(target, {})[request_id] = (timer, got_contents)
+-            request_id = self.local_request_counter
+-            self.local_request_counter += 1
++        request_id = self.local_request_counter
++        self.local_request_counter += 1
++        requestor = self.create_requestor(target, request_id)
++        timer = 0
++        published = False
++        try:
+             timer = GLib.timeout_add(CONVERT_TIMEOUT, self.timeout_get_contents, target, request_id)
++            if not timer:
++                raise RuntimeError("failed to schedule the clipboard conversion deadline")
+             self.local_requests.setdefault(target, {})[request_id] = (timer, got_contents)
 -            log("requesting local XConvertSelection from %s as '%s' into '%s'", get_wininfo(owner), target, prop)
 -            X11Window.ConvertSelection(self._selection, target, prop, self.xid, time=CurrentTime)
-+            requestor = self.create_requestor(target, request_id)
-+            try:
-+                timer = GLib.timeout_add(CONVERT_TIMEOUT, self.timeout_get_contents, target, request_id)
-+                self.local_requests.setdefault(target, {})[request_id] = (timer, got_contents)
-+                log("requesting local XConvertSelection from %s as '%s' into '%s'", get_wininfo(owner), target, prop)
++            published = True
++            # The synchronizing exit must be inside rollback too: an X error
++            # need not be raised by ConvertSelection itself.
++            with xsync:
++                # None is a valid selection state, not a window to query for
++                # diagnostic properties. Still let X11 deliver its refusal.
++                owner_info = get_wininfo(owner) if owner else "no owner"
++                log("requesting local XConvertSelection from %s as '%s' into '%s'", owner_info, target, prop)
 +                X11Window.ConvertSelection(self._selection, target, prop, requestor, time=CurrentTime)
-+            except Exception:
++        except Exception:
++            if not published:
++                self.remove_conversion_timer(timer)
++            try:
 +                self.complete_refused_request(target, request_id)
-+                raise
-+
++            except Exception:
++                log("failed to notify clipboard conversion setup failure", exc_info=True)
++            raise
+ 
+-    def timeout_get_contents(self, target: str, request_id: int) -> None:
 +    def create_requestor(self, target: str, request_id: int) -> int:
 +        # A refused conversion has no property: a private requestor also binds
 +        # identical targets and CurrentTime requests across retries/timeouts.
-+        xid = X11Window.CreateWindow(
-+            X11Window.get_root_xid(), -1, -1,
-+            event_mask=constants["PropertyChangeMask"] | StructureNotifyMask,
-+            inputoutput=constants["InputOnly"],
-+        )
-+        try:
-+            from xpra.x11.common import get_pywindow
-+            window = get_pywindow(xid)
-+            if window is None:
-+                raise RuntimeError("failed to register the clipboard requestor window")
-+            add_event_receiver(xid, self)
-+            self._requestor_windows[xid] = (target, request_id, window)
-+            self._requestor_xids[request_id] = xid
++        xid = 0
++        window = None
+         try:
+-            target_requests = self.local_requests.get(target)
+-            if target_requests is None:
+-                return
+-            timer, got_contents = target_requests.pop(request_id)
+-            if not target_requests:
+-                del self.local_requests[target]
+-        except KeyError:
++            with xsync:
++                mask = constants["PropertyChangeMask"]
++                if self._requestor_gtk:
++                    mask |= StructureNotifyMask
++                xid = X11Window.CreateWindow(
++                    X11Window.get_root_xid(), -1, -1, event_mask=mask,
++                    inputoutput=constants["InputOnly"],
++                )
++                if not xid:
++                    raise RuntimeError("failed to allocate the clipboard requestor window")
++                if self._requestor_gtk:
++                    window = gtk_event_window(xid)
++                    if window is None:
++                        raise RuntimeError("failed to register the clipboard requestor window with GDK")
++                add_event_receiver(xid, self)
++                self._requestor_windows[xid] = (target, request_id, window)
++                self._requestor_xids[request_id] = xid
 +        except Exception:
-+            remove_event_receiver(xid, self)
-+            with xlog:
-+                X11Window.DestroyWindow(xid)
++            self._requestor_windows.pop(xid, None)
++            self._requestor_xids.pop(request_id, None)
++            if xid:
++                self.destroy_requestor(xid)
 +            raise
 +        return xid
 +
-+    def close_requestor(self, request_id: int) -> None:
-+        if xid := self._requestor_xids.pop(request_id, 0):
++    @staticmethod
++    def remove_conversion_timer(timer: int) -> None:
++        if timer:
++            try:
++                GLib.source_remove(timer)
++            except Exception:
++                # The request/lease must already be retired. A callback left
++                # queued by a failed removal can no longer complete anything.
++                log("failed to remove a clipboard conversion timer", exc_info=True)
++
++    def destroy_requestor(self, xid: int) -> None:
++        try:
 +            remove_event_receiver(xid, self)
-+            self._requestor_notified.discard(xid)
++        except Exception:
++            log("failed to unregister a clipboard requestor", exc_info=True)
++        try:
 +            with xlog:
 +                X11Window.DestroyWindow(xid)
-+            self._requestor_windows.pop(xid, None)
++        except Exception:
++            log("failed to destroy a clipboard requestor", exc_info=True)
 +
-+    def cancel_conversion_requests(self) -> None:
-+        self._requestors_closed = True
++    def close_requestor(self, request_id: int) -> None:
++        if xid := self._requestor_xids.pop(request_id, 0):
++            # Keep the GTK wrapper alive through native destruction, but retire
++            # all admission before any external cleanup can re-enter us.
++            request = self._requestor_windows.pop(xid, None)
++            self._requestor_notified.discard(xid)
++            if incr := self._requestor_incr.pop(xid, None):
++                timer, incr.timer = incr.timer, 0
++                incr.timer_owner = None
++                self.remove_conversion_timer(timer)
++            self.destroy_requestor(xid)
++            del request
++
++    def take_conversion_request(self, target: str, request_id: int):
++        pending = self.local_requests.get(target, {})
++        request = pending.pop(request_id, None)
++        if not pending:
++            self.local_requests.pop(target, None)
++        self.close_requestor(request_id)
++        if request:
++            self.remove_conversion_timer(request[0])
++        return request
++
++    def cancel_conversion_requests(self, *, closed: bool = True, notify: bool = False) -> None:
++        if closed:
++            self._requestors_closed = True
++        responses = []
 +        for target, request_id, _window in tuple(self._requestor_windows.values()):
-+            self.close_requestor(request_id)
-+            pending = self.local_requests.get(target, {})
-+            if request := pending.pop(request_id, None):
-+                GLib.source_remove(request[0])
-+            if not pending:
-+                self.local_requests.pop(target, None)
++            if response := self.take_conversion_request(target, request_id):
++                responses.append((target, response[1]))
++        if notify:
++            # Re-entrant consumers may re-enable the selection and start new
++            # reads. All old conversions have already been detached together.
++            for target, got_contents in responses:
++                with log.trap_error("Error completing a revoked clipboard conversion"):
++                    if target == "TARGETS":
++                        got_contents("ATOM", 32, b"")
++                    else:
++                        got_contents("", 0, b"")
 +
 +    def do_x11_selection_notify(self, event: X11Event) -> None:
 +        request = self._requestor_windows.get(event.requestor)
@@ -553,17 +1019,11 @@ index 4680b52b3d51e4138968b053d8c0f890eb7b0205..0ae73ff9b05c115c73e41dbab2917759
 +            # PropertyNotify can precede this acknowledgement. Do not retire
 +            # its requestor before the owner has finished sending the reply.
 +            self._requestor_notified.add(event.requestor)
-+            self.read_property(event.requestor, event.property)
++            self.read_requestor_property(event.requestor, event.property)
 +
 +    def complete_refused_request(self, target: str, request_id: int) -> None:
-+        pending = self.local_requests.get(target, {})
-+        request = pending.pop(request_id, None)
-+        if not pending:
-+            self.local_requests.pop(target, None)
-+        self.close_requestor(request_id)
-+        if request:
-+            timer, got_contents = request
-+            GLib.source_remove(timer)
++        if request := self.take_conversion_request(target, request_id):
++            _timer, got_contents = request
 +            if target == "TARGETS":
 +                got_contents("ATOM", 32, b"")
 +            else:
@@ -572,99 +1032,138 @@ index 4680b52b3d51e4138968b053d8c0f890eb7b0205..0ae73ff9b05c115c73e41dbab2917759
 +    def do_x11_property_notify_event(self, event: X11Event) -> None:
 +        request = self._requestor_windows.get(event.window)
 +        if request and event.window in self._requestor_notified and event.atom == f"{self._selection}-{request[0]}":
-+            self.do_property_notify(event)
- 
-     def timeout_get_contents(self, target: str, request_id: int) -> None:
-         try:
-@@ -544,6 +637,7 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
-         except KeyError:
++            self.read_requestor_property(event.window, event.atom)
++
++    def timeout_get_contents(self, target: str, request_id: int) -> None:
++        request = self.take_conversion_request(target, request_id)
++        if not request:
              return
-         GLib.source_remove(timer)
-+        self.close_requestor(request_id)
+-        GLib.source_remove(timer)
++        _timer, got_contents = request
          log.warn("Warning: %s selection request for '%s' timed out", self._selection, target)
-         log.warn(" request %i", request_id)
-         if target == "TARGETS":
-@@ -553,17 +647,20 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
+@@ -561,2 +736,78 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
  
-     def do_property_notify(self, event) -> None:
-         log("do_property_notify(%s)", event)
-+        self.read_property(event.window, event.atom)
-+
-+    def read_property(self, xid: int, atom: str) -> None:
-         if not self._enabled:
-             return
-         # ie: atom="PRIMARY-TARGETS", atom="PRIMARY-STRING"
--        parts = event.atom.split("-", 1)
-+        parts = atom.split("-", 1)
-         assert len(parts) == 2
-         # selection = parts[0]        # ie: PRIMARY
-         target = parts[1]  # ie: VALUE
-         try:
-             with xsync:
--                dtype, dformat = X11Window.GetWindowPropertyType(self.xid, event.atom, True)
--                data = X11Window.XGetWindowProperty(self.xid, event.atom, dtype, buffer_size=MAX_DATA_SIZE, incr=True)
++    def read_requestor_property(self, xid: int, atom: str) -> None:
++        request = self._requestor_windows.get(xid)
++        if not self._enabled or not request or xid not in self._requestor_notified:
++            return
++        target, request_id, _window = request
++        if atom != f"{self._selection}-{target}":
++            return
++        try:
++            with xsync:
 +                dtype, dformat = X11Window.GetWindowPropertyType(xid, atom, True)
-+                data = X11Window.XGetWindowProperty(xid, atom, dtype, buffer_size=MAX_DATA_SIZE, incr=True)
-                 # all the code below deals with INCRemental transfers:
-                 if dtype == "INCR" and not self.incr_data_size:
-                     # start of an incremental transfer, extract the size
-@@ -573,7 +670,7 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
-                     self.incr_data_type = ""
-                     log("incremental clipboard data of size %s", self.incr_data_size)
-                     self.reschedule_incr_data_timer()
--                    X11Window.XDeleteProperty(self.xid, event.atom)
-+                    X11Window.XDeleteProperty(xid, atom)
-                     return
-                 if self.incr_data_size > 0:
-                     # incremental is now in progress:
-@@ -589,26 +686,44 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
-                         log("got incremental data: %i bytes", len(data))
-                         self.incr_data_chunks.append(data)
-                         self.reschedule_incr_data_timer()
--                        X11Window.XDeleteProperty(self.xid, event.atom)
-+                        X11Window.XDeleteProperty(xid, atom)
-                         return
-                     self.cancel_incr_data_timer()
-                     data = b"".join(self.incr_data_chunks)
-                     log("got incremental data termination, total size=%i bytes", len(data))
-                     self.reset_incr_data()
--                    self.got_local_contents(target, dtype, dformat, data)
-+                    self.got_requestor_contents(xid, target, dtype, dformat, data)
-                     return
-         except PropertyError:
--            log("do_property_notify() property '%s' is gone?", event.atom, exc_info=True)
-+            log("do_property_notify() property '%s' is gone?", atom, exc_info=True)
-             return
--        log("%s=%s (%s : %s)", event.atom, Ellipsizer(data), dtype, dformat)
-+        log("%s=%s (%s : %s)", atom, Ellipsizer(data), dtype, dformat)
-         if target == "TARGETS":
-             self.targets = xatoms_to_strings(data or b"")
--        self.got_local_contents(target, dtype, dformat, data)
-+        self.got_requestor_contents(xid, target, dtype, dformat, data)
++                # Do not silently truncate a property larger than our bound.
++                data = X11Window.XGetWindowProperty(xid, atom, dtype, buffer_size=MAX_DATA_SIZE)
++            if data is None:
++                return
++            if len(data) > MAX_DATA_SIZE:
++                raise ValueError("clipboard conversion exceeds the size limit")
++            incr = self._requestor_incr.get(xid)
++            if dtype == "INCR":
++                if incr or dformat != 32 or len(data) != struct.calcsize("@L"):
++                    raise ValueError("invalid incremental clipboard header")
++                if struct.unpack("@L", data)[0] > MAX_DATA_SIZE:
++                    raise ValueError("incremental clipboard data exceeds the size limit")
++                incr = IncrementalConversion()
++                self._requestor_incr[xid] = incr
++            elif incr:
++                if incr.dtype and (incr.dtype != dtype or incr.dformat != dformat):
++                    raise ValueError("incremental clipboard data changed type or format")
++                incr.dtype, incr.dformat = dtype, dformat
++                if not data:
++                    self.got_requestor_contents(xid, target, dtype, dformat, b"".join(incr.chunks))
++                    return
++                if incr.size + len(data) > MAX_DATA_SIZE:
++                    raise ValueError("incremental clipboard data exceeds the size limit")
++                incr.chunks.append(data)
++                incr.size += len(data)
++            else:
++                self.got_requestor_contents(xid, target, dtype, dformat, data)
++                return
++            self.schedule_requestor_incr_timeout(xid, request, incr)
++            with xsync:
++                X11Window.XDeleteProperty(xid, atom)
++        except PropertyOverflow:
++            self.complete_refused_request(target, request_id)
++            raise
++        except PropertyError:
++            # An already queued PropertyNotify can outlive a deleted chunk.
++            # Only the existing conversion deadline may turn silence into a
++            # timeout; missing property is not a zero-length INCR terminator.
++            log("clipboard requestor property %r is gone", atom, exc_info=True)
++        except Exception:
++            try:
++                self.complete_refused_request(target, request_id)
++            except Exception:
++                log("failed to notify an invalid clipboard conversion", exc_info=True)
++            raise
 +
++    def schedule_requestor_incr_timeout(self, xid: int, request, incr: IncrementalConversion) -> None:
++        timer, incr.timer = incr.timer, 0
++        incr.timer_owner = None
++        self.remove_conversion_timer(timer)
++        owner = object()
++        incr.timer_owner = owner
++
++        def timed_out() -> bool:
++            if (self._requestor_windows.get(xid) is not request or self._requestor_incr.get(xid) is not incr
++                    or incr.timer_owner is not owner):
++                return False
++            incr.timer, incr.timer_owner = 0, None
++            log.warn("Warning: incremental data timeout")
++            self.complete_refused_request(request[0], request[1])
++            return False
++
++        incr.timer = GLib.timeout_add(1000, timed_out)
++        if not incr.timer:
++            raise RuntimeError("failed to schedule the incremental clipboard deadline")
++
+     def do_property_notify(self, event) -> None:
+@@ -615,2 +866,23 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
+ 
 +    def got_requestor_contents(self, xid: int, target: str, dtype: str, dformat: int, data) -> None:
 +        request = self._requestor_windows.get(xid)
 +        if not request:
 +            if xid == self.xid:
 +                self.got_local_contents(target, dtype, dformat, data)
 +            return
-+        _target, request_id, _window = request
-+        pending = self.local_requests.get(target, {})
-+        response = pending.pop(request_id, None)
-+        if not pending:
-+            self.local_requests.pop(target, None)
-+        self.close_requestor(request_id)
++        if request[0] != target:
++            return
++        data = filter_data(dtype, dformat, data)
++        if target == "TARGETS":
++            self.targets = xatoms_to_strings(data or b"")
++        # Owners may wait for the final property deletion as confirmation,
++        # including the zero-length INCR terminator. Window destruction alone
++        # does not supply that PropertyNotify acknowledgement.
++        with xsync:
++            X11Window.XDeleteProperty(xid, f"{self._selection}-{target}")
++        response = self.take_conversion_request(target, request[1])
 +        if response:
-+            timer, got_contents = response
-+            GLib.source_remove(timer)
-+            got_contents(dtype, dformat, filter_data(dtype, dformat, data))
- 
++            _timer, got_contents = response
++            got_contents(dtype, dformat, data)
++
      def got_local_contents(self, target: str, dtype="", dformat: int = 8, data=b"") -> None:
-         data = filter_data(dtype, dformat, data)
+@@ -618,3 +890,9 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
          target_requests = self.local_requests.pop(target, {})
 -        for timer, got_contents in target_requests.values():
-+        for request_id, (timer, got_contents) in target_requests.items():
++        # Detach the entire batch before calling any consumer, including a
++        # consumer which raises or starts another conversion for this target.
++        for request_id, (timer, _got_contents) in target_requests.items():
 +            self.close_requestor(request_id)
++            self.remove_conversion_timer(timer)
++        error = None
++        for _timer, got_contents in target_requests.values():
              if log.is_debug_enabled():
-                 log("got_local_contents: calling %s%s",
+@@ -622,4 +900,9 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
                      got_contents, (dtype, dformat, Ellipsizer(data)))
+-            GLib.source_remove(timer)
+-            got_contents(dtype, dformat, data)
++            try:
++                got_contents(dtype, dformat, data)
++            except Exception as e:
++                if error is None:
++                    error = e
++        if error is not None:
++            raise error
+ 

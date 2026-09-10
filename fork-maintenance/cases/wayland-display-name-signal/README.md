@@ -26,7 +26,7 @@ available. Unknown signals must remain visible as programming errors.
 ## Embedded-source context
 
 The case resolves against source commit
-`212038243d0067b6860ebe7d6953692179ef353f`, embedded in current `develop`.
+`d95058b0916913fe6ae5296fb702f66d833898b0`, embedded in current `develop`.
 Upstream commit `1f5f73ee619` separated the native Wayland manager from the
 server implementation. The manager already contains the socket-binding and
 `display-name` emission path; the missing part is its declaration.
@@ -36,6 +36,13 @@ Signal declaration checking was introduced in `28ab373efe0`. Its current
 The neighboring `XvfbManager` already declares `["display-name"]` for the same
 session-files consumer. Neither the checker nor the consumer needs a Wayland
 exception.
+
+Current-code reassessment retains the patch unchanged. The manager, generic
+emitter and session-files startup wiring still have the same omission and
+contract; no upstream replacement declares the signal. Callback scheduling,
+socket and backend lifetimes remain owned by their existing implementations.
+The narrow declaration does not attempt rollback of a failed consumer's
+filesystem operations or make a cleaned manager reusable.
 
 On an upstream refresh, inspect the current manager, emitter and startup
 wiring together. An equivalent replacement must declare the producer's real
@@ -276,7 +283,9 @@ its separate physical hardware profiles.
 ## Required validation
 
 Follow [development and final acceptance](../../docs/runbooks/validation.md).
-After a behavior change, run the tests-only clean control and the manifest's
+During an upstream refresh, finish and record the incremental manual review
+and resulting-stack exit gate before starting runtime validation. Then run
+the tests-only clean control and the manifest's
 patched focused inventory against the same frozen source/image. Include the
 native `wayland` gate, compiled/no-compat focused modes and the composed
 complete-stack inventory. A Python-only declaration inspection cannot replace

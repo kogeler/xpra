@@ -32,6 +32,11 @@ RUN test -n "$XPRA_COMMIT" \
            git apply --whitespace=error-all "/tmp/xpra-fork-maintenance-patches/$patch_name"; \
        done < /tmp/xpra-fork-maintenance-patches/series
 
+# Transport artifacts stay private on the host. The builder's public source
+# copy must regain read/traverse permissions before install_data preserves them
+# in resources consumed by the unprivileged runtime user. Keep executable bits.
+RUN chmod -R go+rX /src/xpra
+
 
 FROM xpra-source-base AS xpra-source
 
@@ -276,6 +281,8 @@ WORKDIR /home/lab
 
 RUN test -r /opt/xpra-fork-maintenance/interaction_fixture.py \
     && python3 -c "open('/opt/xpra-fork-maintenance/interaction_fixture.py', 'rb').read(1)" \
+    && test -r /usr/local/share/xpra/css/10_header_bar.css \
+    && test -r /usr/local/share/xpra/icons/xpra.png \
     && test -r /opt/xpra-fork-maintenance/wayland_keyboard_fixture.py \
     && test -r /opt/xpra-fork-maintenance/wayland_clipboard_fixture.py \
     && test -x /opt/xpra-fork-maintenance/start_wayland_clipboard_fixture.sh \
@@ -501,7 +508,7 @@ RUN test -d /usr/local/share/xpra/css \
     && test "$XPRA_SELECTION" = stacks/develop \
     && XPRA_RESOURCES_DIR=/usr/local/share/xpra \
             xvfb-run --auto-servernum python3 -c \
-            'from xpra.client.gtk3 import client_base; from xpra.x11.common import has_pywindow_lookup; from xpra.x11.gtk import bindings, display_source; from xpra.x11.selection.clipboard import X11Clipboard; assert has_pywindow_lookup()' \
+            'from xpra.client.gtk3 import client_base; from xpra.os_util import gi_import; from xpra.x11 import error; from xpra.x11.gtk import bindings, display_source, gtk_get_pywindow; from xpra.x11.selection.clipboard import X11Clipboard; assert error.Xenter == gi_import("Gdk").error_trap_push; helper = X11Clipboard(lambda *packet: None, **{"can-send": False, "can-receive": False, "clipboards.local": ("CLIPBOARD",)}); assert helper.gtk_filter; assert helper.gtk_event_window.get_xid() == helper.event_window_xid; assert gtk_get_pywindow(helper.event_window_xid).get_xid() == helper.event_window_xid; helper.cleanup()' \
     && test -x /usr/local/bin/xpra-xkb-xtest-driver \
     && test -x /usr/local/bin/xpra-virtual-pointer-device
 
@@ -514,5 +521,8 @@ ENV PYTHONUNBUFFERED=1
 
 USER lab
 WORKDIR /home/lab
+
+RUN test -r /usr/local/share/xpra/css/10_header_bar.css \
+    && test -r /usr/local/share/xpra/icons/xpra.png
 
 CMD ["sleep", "infinity"]

@@ -1,14 +1,16 @@
-diff --git a/tests/unittests/unit/client/gtk3/scroll_test.py b/tests/unittests/unit/client/gtk3/scroll_test.py
+diff --git a/tests/unittests/unit/wayland/gtk_scroll_test.py b/tests/unittests/unit/wayland/gtk_scroll_test.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..3167cc1207da6048f49ddf2a60e849ed87abd4b5
+index 0000000000000000000000000000000000000000..3ec3c1d95d09d0b05d2edf93a0ead4551ff53a02
 --- /dev/null
-+++ b/tests/unittests/unit/client/gtk3/scroll_test.py
-@@ -0,0 +1,397 @@
++++ b/tests/unittests/unit/wayland/gtk_scroll_test.py
+@@ -0,0 +1,436 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 kogeler
 +# Xpra is released under the terms of the GNU GPL v2, or, at your option, any
 +# later version. See the file COPYING for details.
++
++# This real-compositor GTK regression also belongs to the native Wayland gate.
 +
 +import json
 +import os
@@ -21,10 +23,12 @@ index 0000000000000000000000000000000000000000..3167cc1207da6048f49ddf2a60e849ed
 +import traceback
 +from types import SimpleNamespace
 +import unittest
++from unittest.mock import patch
 +
 +
 +def gtk_consumer() -> None:
 +    from xpra.os_util import gi_import
++    from xpra.client.gtk3.window import pointer as pointer_window
 +    from xpra.client.gtk3.window.pointer import PointerWindow
 +    from xpra.client.subsystem.pointer import PointerClient
 +    from xpra.net.packet_type import POINTER_BUTTON, POINTER_WHEEL
@@ -69,7 +73,12 @@ index 0000000000000000000000000000000000000000..3167cc1207da6048f49ddf2a60e849ed
 +            target = area
 +            device, source = discrete.get_device(), discrete.get_source_device()
 +
-+            def replay(policy, steps, *, admission="enabled"):
++            def replay(policy, steps, *, admission="enabled", deduplicate=True):
++                # Control the public policy, never fabricate the native GDK flag.
++                with patch.object(pointer_window, "SKIP_DUPLICATE_SCROLL_EVENTS", deduplicate):
++                    return dispatch_sequence(policy, steps, admission=admission)
++
++            def dispatch_sequence(policy, steps, *, admission="enabled"):
 +                client = SimpleNamespace(
 +                    readonly=admission == "readonly", server_readonly=admission == "server-readonly",
 +                    idle_add=GLib.idle_add, timeout_add=GLib.timeout_add, source_remove=GLib.source_remove,
@@ -108,8 +117,8 @@ index 0000000000000000000000000000000000000000..3167cc1207da6048f49ddf2a60e849ed
 +                    event.set_device(changes.get("device", device))
 +                    event.set_source_device(changes.get("source-device", source))
 +                    event.time = changes.get("time", 100)
-+                    event.x = event.y = event.x_root = event.y_root = 10
-+                    event.x_root = changes.get("x_root", 10)
++                    for field in ("x", "y", "x_root", "y_root"):
++                        setattr(event, field, changes.get(field, 10))
 +                    event.direction = direction
 +                    event.delta_x, event.delta_y = dx, dy
 +                    event.state = changes.get("state", 0)
@@ -135,15 +144,21 @@ index 0000000000000000000000000000000000000000..3167cc1207da6048f49ddf2a60e849ed
 +                          ("left", Gdk.ScrollDirection.LEFT, -1, 0),
 +                          ("right", Gdk.ScrollDirection.RIGHT, 1, 0))
 +            observations["native-discrete-emulated"] = discrete.get_pointer_emulated()
++            observations["default-skip-duplicates"] = pointer_window.SKIP_DUPLICATE_SCROLL_EVENTS
 +            for name, direction, dx, dy in directions:
 +                pair = [("emulated", direction, 0, 0), ("smooth", Gdk.ScrollDirection.SMOOTH, dx, dy)]
 +                for policy in ("on", "coarse", "invert-x", "invert-y", "off"):
 +                    observations[f"{policy}-{name}"] = replay(policy, pair)
 +                observations[f"reversed-{name}"] = replay("on", list(reversed(pair)))
 +                observations[f"repeated-{name}"] = replay("on", pair * 2)
++                observations[f"dedup-disabled-{name}"] = replay("on", pair, deduplicate=False)
++                observations[f"dedup-disabled-reversed-{name}"] = replay("on", list(reversed(pair)), deduplicate=False)
 +                observations[f"genuine-{name}"] = replay("on", [("genuine", direction, 0, 0)])
 +                for admission in ("readonly", "server-readonly", "server-pointer-off", "missing-pointer"):
 +                    observations[f"{admission}-{name}"] = replay("on", pair, admission=admission)
++                    observations[f"dedup-disabled-{admission}-{name}"] = replay(
++                        "on", pair, admission=admission, deduplicate=False,
++                    )
 +            observations["fractional"] = replay("on", [("smooth", Gdk.ScrollDirection.SMOOTH, 0.25, -0.5)])
 +            observations["zero"] = replay("on", [("smooth", Gdk.ScrollDirection.SMOOTH, 0, 0)])
 +            observations["mixed"] = replay("on", [
@@ -190,13 +205,15 @@ index 0000000000000000000000000000000000000000..3167cc1207da6048f49ddf2a60e849ed
 +                observations[f"x11-following-{name}"] = replay("on", first + following * 2)
 +                observations[f"x11-reset-{name}"] = replay("on", first + following + first)
 +                observations[f"x11-multiple-first-{name}"] = replay("on", first + first[1:])
++                observations[f"x11-dedup-disabled-{name}"] = replay("on", following, deduplicate=False)
 +                for axis in ("x", "y"):
 +                    observations[f"x11-invert-{axis}-{name}"] = replay(f"invert-{axis}", first)
 +            observations["x11-diagonal"] = replay("on", [motion, down,
 +                ("emulated", Gdk.ScrollDirection.RIGHT, 0, 0)])
 +            observations["x11-fractional"] = replay("on", [baseline, down,
 +                ("smooth", Gdk.ScrollDirection.SMOOTH, 0, 0.25), down])
-+            for field, value in (("time", 101), ("x_root", 11), ("state", Gdk.ModifierType.SHIFT_MASK),
++            for field, value in (("time", 101), ("x", 11), ("y", 11), ("x_root", 11), ("y_root", 11),
++                                 ("state", Gdk.ModifierType.SHIFT_MASK),
 +                                 ("window", xwindows[1].get_child().get_window()),
 +                                 ("device", other_device), ("source-device", other_device)):
 +                observations[f"x11-mismatch-{field}"] = replay("on", [baseline, (*down, {field: value})])
@@ -269,7 +286,8 @@ index 0000000000000000000000000000000000000000..3167cc1207da6048f49ddf2a60e849ed
 +            (sys.executable, __file__, "--gtk-consumer"), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
 +            env=dict(os.environ, WAYLAND_DISPLAY=socket, GDK_BACKEND="wayland,x11",
 +                     DISPLAY=":" + display_number.decode("ascii"),
-+                     XPRA_SMOOTH_SCROLL_NORM="100", XPRA_MOUSE_SCROLL_MULTIPLIER="100"),
++                     XPRA_SMOOTH_SCROLL_NORM="100", XPRA_MOUSE_SCROLL_MULTIPLIER="100",
++                     XPRA_SKIP_DUPLICATE_SCROLL_EVENTS="1", PYTHONPATH=os.pathsep.join(sys.path)),
 +        )
 +        data = bytearray()
 +        with selectors.DefaultSelector() as selector:
@@ -299,17 +317,23 @@ index 0000000000000000000000000000000000000000..3167cc1207da6048f49ddf2a60e849ed
 +            assert process.returncode == 0, stderr.decode("utf-8", "replace")
 +            print(data.decode("utf-8"), end="")
 +    finally:
-+        if process is not None:
-+            if process.poll() is None:
-+                process.kill()
-+            process.communicate(timeout=5)
-+        if device is not None:
-+            device.cleanup()
-+        compositor.cleanup()
-+        if xvfb is not None:
-+            if xvfb.poll() is None:
-+                xvfb.kill()
-+            xvfb.communicate(timeout=5)
++        try:
++            if process is not None:
++                if process.poll() is None:
++                    process.kill()
++                process.communicate(timeout=5)
++        finally:
++            try:
++                if device is not None:
++                    device.cleanup()
++            finally:
++                try:
++                    compositor.cleanup()
++                finally:
++                    if xvfb is not None:
++                        if xvfb.poll() is None:
++                            xvfb.kill()
++                        xvfb.communicate(timeout=5)
 +
 +
 +class GtkScrollTest(unittest.TestCase):
@@ -320,6 +344,7 @@ index 0000000000000000000000000000000000000000..3167cc1207da6048f49ddf2a60e849ed
 +            completed = subprocess.run(
 +                (sys.executable, __file__, "--native-probe", directory),
 +                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=25, check=False,
++                env=dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path)),
 +            )
 +        if completed.returncode:
 +            raise AssertionError(completed.stdout)
@@ -330,6 +355,7 @@ index 0000000000000000000000000000000000000000..3167cc1207da6048f49ddf2a60e849ed
 +        cls.observations = json.loads(lines[0])
 +
 +    def test_single_owner_for_each_axis_and_order(self):
++        self.assertTrue(self.observations["default-skip-duplicates"])
 +        self.assertTrue(self.observations["native-discrete-emulated"])
 +        self.assertFalse(self.observations["native-smooth-emulated"])
 +        for name, button, distance in (("down", 5, -1000), ("up", 4, 1000),
@@ -343,6 +369,19 @@ index 0000000000000000000000000000000000000000..3167cc1207da6048f49ddf2a60e849ed
 +                inverted = (axis == "x") == (name in ("left", "right"))
 +                mapped = button + (1 if button % 2 == 0 else -1) if inverted else button
 +                self.assertEqual(self.observations[f"invert-{axis}-{name}"], [["wheel", mapped, distance]])
++
++    def test_upstream_duplicate_suppression_opt_out(self):
++        for name, button, distance in (("down", 5, -1000), ("up", 4, 1000),
++                                       ("left", 6, -1000), ("right", 7, 1000)):
++            discrete = [["button", button, True], ["button", button, False]]
++            smooth = [["wheel", button, distance]]
++            with self.subTest(direction=name):
++                self.assertEqual(self.observations[f"dedup-disabled-{name}"], discrete + smooth)
++                self.assertEqual(self.observations[f"dedup-disabled-reversed-{name}"], smooth + discrete)
++                self.assertEqual(self.observations[f"x11-dedup-disabled-{name}"], smooth + discrete)
++            for admission in ("readonly", "server-readonly", "server-pointer-off", "missing-pointer"):
++                with self.subTest(direction=name, admission=admission):
++                    self.assertEqual(self.observations[f"dedup-disabled-{admission}-{name}"], [])
 +
 +    def test_genuine_discrete_and_coarse_policy(self):
 +        for name, button in (("down", 5), ("up", 4), ("left", 6), ("right", 7)):
@@ -385,7 +424,7 @@ index 0000000000000000000000000000000000000000..3167cc1207da6048f49ddf2a60e849ed
 +                         [["wheel", 5, -1000], ["button", 7, True], ["button", 7, False]])
 +        self.assertEqual(self.observations["x11-fractional"],
 +                         [["button", 5, True], ["button", 5, False], ["wheel", 5, -250]])
-+        for field in ("time", "x_root", "state", "window", "device", "source-device"):
++        for field in ("time", "x", "y", "x_root", "y_root", "state", "window", "device", "source-device"):
 +            with self.subTest(field=field):
 +                self.assertEqual(self.observations[f"x11-mismatch-{field}"], [])
 +        for disabled in ("readonly", "server-readonly", "server-pointer-off", "missing-pointer", "off", "coarse", "cleanup"):
@@ -402,12 +441,10 @@ index 0000000000000000000000000000000000000000..3167cc1207da6048f49ddf2a60e849ed
 +    else:
 +        unittest.main()
 diff --git a/xpra/client/gtk3/window/pointer.py b/xpra/client/gtk3/window/pointer.py
-index f37ef24c91900ca33c15aa7c7b984956ebe36b45..f225024256d6251615742fb0a0d8471df26c7c8c 100644
+index 3018e08515e90863b75cb5e267a4003dfda47617..12488384bc1828af9608ea9a707cefa2ea2940d1 100644
 --- a/xpra/client/gtk3/window/pointer.py
 +++ b/xpra/client/gtk3/window/pointer.py
-@@ -61,6 +61,18 @@ def _get_relative_pointer(event) -> tuple[int, int]:
-     return round(event.x), round(event.y)
- 
+@@ -64,2 +64,14 @@ def _get_relative_pointer(event) -> tuple[int, int]:
  
 +def _x11_scroll_key(event) -> tuple:
 +    window = event.window
@@ -422,11 +459,7 @@ index f37ef24c91900ca33c15aa7c7b984956ebe36b45..f225024256d6251615742fb0a0d8471d
 +
 +
  def norm_scroll(value: float):
-     if SMOOTH_SCROLL_NORM == 100:
-         return value
-@@ -77,8 +89,12 @@ class PointerWindow(GtkStubWindow):
-         self.button_pressed: dict[int, int] = {}
-         self.button_polling_timer = 0
+@@ -80,4 +92,8 @@ class PointerWindow(GtkStubWindow):
          self.motion_cancels_pointer_overlay = True
 +        self._smooth_scroll_key = ()
 +        self._smooth_scroll_zero_axes = 0
@@ -435,52 +468,49 @@ index f37ef24c91900ca33c15aa7c7b984956ebe36b45..f225024256d6251615742fb0a0d8471d
 +        self._smooth_scroll_key = ()
 +        self._smooth_scroll_zero_axes = 0
          self.cancel_show_pointer_overlay_timer()
-         self.cancel_remove_pointer_overlay_timer()
- 
-@@ -267,18 +283,43 @@ class PointerWindow(GtkStubWindow):
-         return v
- 
+@@ -270,5 +286,21 @@ class PointerWindow(GtkStubWindow):
      def _do_scroll_event(self, event) -> bool:
 -        if self._client.readonly:
 +        pointer_sub = self.get_subsystem("pointer")
 +        if (not pointer_sub or self._client.readonly or self._client.server_readonly
 +                or not pointer_sub.server_pointer or not pointer_sub.wheel_map):
 +            self._smooth_scroll_key = ()
++            self._smooth_scroll_zero_axes = 0
              return True
-+        if not pointer_sub.wheel_smooth:
++        if not pointer_sub.wheel_smooth or not SKIP_DUPLICATE_SCROLL_EVENTS:
 +            self._smooth_scroll_key = ()
++            self._smooth_scroll_zero_axes = 0
          if event.direction == Gdk.ScrollDirection.SMOOTH:
 +            if not pointer_sub.wheel_smooth:
 +                return True
 +            # X11 delivers the valuator before its emulated buttons. GDK's
-+            # first sample after a valuator reset has a zero delta: only the
-+            # following discrete events retain that axis's initial movement.
-+            # Replace on EVERY smooth event, even with the same timestamp.
-+            self._smooth_scroll_key = _x11_scroll_key(event)
-+            self._smooth_scroll_zero_axes = (int(event.delta_x == 0)
-+                                            | (int(event.delta_y == 0) << 1))
++            # first/reset sample may have zero deltas; only those buttons
++            # retain the missing whole steps. Replace even at the same time.
++            self._smooth_scroll_key = _x11_scroll_key(event) if SKIP_DUPLICATE_SCROLL_EVENTS else ()
++            self._smooth_scroll_zero_axes = (
++                int(event.delta_x == 0) | (int(event.delta_y == 0) << 1)
++            ) if self._smooth_scroll_key else 0
              log("smooth scroll event: %s, raw delta: %s,%s", event, event.delta_x, event.delta_y)
-             pointer = self.get_pointer_data(event)
-             device_id = -1
-             norm_x = norm_scroll(event.delta_x)
+@@ -278,10 +310,16 @@ class PointerWindow(GtkStubWindow):
              norm_y = norm_scroll(event.delta_y)
 -            if pointer_sub := self.get_subsystem("pointer"):
 -                pointer_sub.wheel_event(device_id, self.wid, norm_x, -norm_y, pointer)
+-            return True
+-        pointer_sub = self.get_subsystem("pointer")
+-        if SKIP_DUPLICATE_SCROLL_EVENTS and pointer_sub and pointer_sub.wheel_smooth and event.get_pointer_emulated():
+-            log("ignoring emulated scroll event: direction=%i", event.direction)
 +            pointer_sub.wheel_event(device_id, self.wid, norm_x, -norm_y, pointer)
              return True
          button_mapping = GDK_SCROLL_MAP.get(event.direction, -1)
-+        # Native Wayland emits the discrete copy FIRST; it has no X11
-+        # valuator baseline to recover. Never borrow preceding Wayland deltas.
-+        # Genuine discrete-only input and the coarse policy remain unchanged.
-+        if pointer_sub.wheel_smooth and event.get_pointer_emulated():
++        # Preserve upstream's opt-out. Wayland has no X11 valuator baseline:
++        # its discrete copy comes first and never borrows an earlier zero.
++        if SKIP_DUPLICATE_SCROLL_EVENTS and pointer_sub.wheel_smooth and event.get_pointer_emulated():
 +            axis = 2 if button_mapping in (4, 5) else 1 if button_mapping in (6, 7) else 0
 +            if not (self._smooth_scroll_key and self._smooth_scroll_zero_axes & axis
 +                    and self._smooth_scroll_key == _x11_scroll_key(event)):
 +                log("ignoring emulated scroll event: direction=%i", event.direction)
 +                return True
-+            # One initial valuator sample may emulate several whole steps.
-+            # Keep its zero-axis allowance until the next smooth event.
++            # One initial sample may emulate several whole steps. The next
++            # smooth sample replaces this bounded allowance, not this event.
 +            log("using discrete scroll for zero X11 valuator: direction=%i", event.direction)
          log("do_scroll_event device=%s, direction=%s, button_mapping=%s",
-             _device_info(event), event.direction, button_mapping)
-         if button_mapping >= 0:

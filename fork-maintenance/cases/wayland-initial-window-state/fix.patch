@@ -1,9 +1,9 @@
 diff --git a/tests/unittests/unit/server/window/initial_damage_test.py b/tests/unittests/unit/server/window/initial_damage_test.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f97252e31c86
+index 0000000000000000000000000000000000000000..8580950cbcc08e1dc8e701ceca77c0562f0428e5
 --- /dev/null
 +++ b/tests/unittests/unit/server/window/initial_damage_test.py
-@@ -0,0 +1,658 @@
+@@ -0,0 +1,755 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 kogeler
@@ -16,11 +16,14 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +
 +from xpra.codecs.image import ImageWrapper
 +from xpra.server.window import compress, video_compress
++from xpra.server.window.batch_config import DamageBatchConfig
 +from xpra.server.window.compress import WindowSource
++from xpra.server.window.perfstats import WindowPerformanceStatistics
 +from xpra.server.window.subsurface_source import SubsurfaceWindowSource
 +from xpra.server.window.video_compress import WindowVideoSource
 +from xpra.util.objects import typedict
 +from xpra.util.rectangle import rectangle
++from xpra.wayland.server.models.subsurface_window import SubsurfaceWindow
 +
 +
 +class InitialDamageTest(unittest.TestCase):
@@ -31,7 +34,12 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +        source.wid = 1
 +        source.window = Mock()
 +        source.window.get.return_value = ""
-+        source.window.get_internal_property_names.return_value = ("pixel-format",)
++        source.window.get_internal_property_names.return_value = ("frame-has-alpha", "pixel-format")
++        source.window.get_property.return_value = None
++        source.window.has_alpha.return_value = True
++        source._current_frame_has_alpha = None
++        source._alpha_capable = True
++        source._client_csc_modes_resolved = False
 +        source.window.connect.return_value = 41
 +        source.window_signal_handlers = []
 +        source.window_dimensions = (800, 600)
@@ -56,6 +64,18 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +        source.content_types = ()
 +        source.supports_scrolling = False
 +        source.full_csc_modes = typedict()
++        source.encoding_options = typedict()
++        source.global_statistics = SimpleNamespace(congestion_value=0)
++        source.statistics = SimpleNamespace(packet_count=0)
++        source._current_speed = 50
++        source._current_quality = 100
++        source.bandwidth_limit = 0
++        source.client_render_size = (0, 0)
++        source.has_shape = False
++        source.client_bit_depth = 24
++        source.update_encoding_video_subregion = Mock()
++        source.update_pipeline_scores = Mock()
++        source.verify_csc_and_encoder = Mock(return_value=True)
 +        return source
 +
 +    @staticmethod
@@ -72,7 +92,12 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +    @staticmethod
 +    def set_pixel_format(source: WindowVideoSource, pixel_format: str) -> None:
 +        source.window.get.return_value = pixel_format
-+        source.update_frame_alpha_state()
++        source.window.get_property.return_value = {
++            "RGBA": True, "BGRA": True, "RGBX": False, "BGRX": False,
++        }.get(pixel_format)
++        # This upstream signal callback exists on the tests-only clean control.
++        # Observe behavior, not the presence of a new private WIS helper.
++        source.frame_has_alpha_changed(source.window)
 +
 +    @staticmethod
 +    def configure_mixed_encodings(source: WindowVideoSource) -> None:
@@ -88,49 +113,62 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +        source._fixed_max_quality = 100
 +        source._rgb_auto_threshold = 2048
 +
-+    def test_pixel_format_notification_is_owned_by_window_source(self):
-+        source = self.make_source()
-+        source.non_video_encodings = ("rgb24",)
-+        window = source.window
-+
-+        window.connect.assert_not_called()
-+        self.assertTrue(self.damage(source))
-+        window.connect.assert_called_once_with(
-+            "notify::pixel-format", source.update_frame_alpha_state,
++    @staticmethod
++    def make_constructed_source(window: SubsurfaceWindow) -> WindowVideoSource:
++        return WindowVideoSource(
++            64, 64, Mock(), Mock(return_value=0), Mock(), Mock(),
++            SimpleNamespace(congestion_value=0), 1, window, DamageBatchConfig(),
++            0, False, 0, None, None, ("h264", "rgb32"), ("h264", "rgb32"),
++            "h264", ("h264", "rgb32"), ("h264", "rgb32"), (),
++            typedict(), typedict(), ("RGBA", "RGB"), typedict(), None, 0, 0,
 +        )
-+        self.assertEqual(source.window_signal_handlers, [41])
 +
-+        self.assertTrue(self.damage(source))
-+        window.connect.assert_called_once()
++    def test_constructor_owns_one_real_frame_signal_per_source(self):
++        window = SubsurfaceWindow(64, 64)
++        sources = [self.make_constructed_source(window) for _ in range(2)]
++        image = ImageWrapper(0, 0, 64, 64, b"\\0" * (64 * 64 * 4), "BGRA", 32, 256, 4)
++        self.addCleanup(image.free)
++        for source in sources:
++            self.addCleanup(WindowSource.ui_cleanup, source)
++            self.configure_mixed_encodings(source)
++            source.full_csc_modes = typedict({"h264": ("YUV420P",)})
++            source.update_encoding_video_subregion = Mock()
++            source.update_pipeline_scores = Mock()
++            source.verify_csc_and_encoder = Mock(return_value=True)
++            self.assertEqual(len(source.window_signal_handlers), 1)
++            self.assertTrue(window.handler_is_connected(source.window_signal_handlers[0]))
 +
-+        with patch.object(source, "assign_encoding_getter") as assign_encoding_getter:
-+            self.assertTrue(self.damage(source))
-+        assign_encoding_getter.assert_not_called()
++        for pixel_format, alpha in (("BGRX", False), ("BGRA", True), ("RGBX", False)):
++            image.set_pixel_format(pixel_format)
++            window.set_image(image)  # real GObject notify, original constructor-owned callback
++            for source in sources:
++                self.assertEqual(source.has_alpha, alpha)
++                self.assertEqual(source._want_alpha, alpha)
++                self.assertEqual(source.get_best_encoding(800, 600, {}, "h264"), "webp" if alpha else "h264")
++                self.assertTrue(self.damage(source))
++                self.assertEqual(len(source.window_signal_handlers), 1)
 +
-+        WindowSource.ui_cleanup(source)
-+        window.disconnect.assert_called_once_with(41)
-+        self.assertIsNone(source.window)
-+
-+        other = self.make_source()
-+        other.non_video_encodings = ("rgb24",)
-+        other_window = other.window
-+        self.assertTrue(self.damage(other))
-+        other_window.connect.assert_called_once_with(
-+            "notify::pixel-format", other.update_frame_alpha_state,
-+        )
-+        WindowSource.ui_cleanup(other)
-+        other_window.disconnect.assert_called_once_with(41)
++        first, other = sources
++        first_handler = first.window_signal_handlers[0]
++        WindowSource.ui_cleanup(first)
++        self.assertFalse(window.handler_is_connected(first_handler))
++        other.update_encoding_options = Mock(wraps=other.update_encoding_options)
++        image.set_pixel_format("BGRA")
++        window.set_image(image)
++        other.update_encoding_options.assert_called_once()
++        self.assertTrue(other.has_alpha)
++        self.assertIsNone(first.window)
 +
 +    def test_encoder_reinit_does_not_read_window_model(self):
 +        source = self.make_source()
 +        with (
 +            patch.object(WindowSource, "init_encoders") as inherited_init,
 +            patch.object(source, "video_context_clean"),
-+            patch.object(source, "update_frame_alpha_state") as update_frame_alpha_state,
++            patch.object(source.window, "get_property") as get_property,
 +        ):
 +            source.init_encoders()
 +        inherited_init.assert_called_once_with()
-+        update_frame_alpha_state.assert_not_called()
++        get_property.assert_not_called()
 +
 +    def test_csc_wait_uses_selected_video_candidates(self):
 +        cases = (
@@ -210,6 +248,8 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +            patch.object(video_compress, "videolog") as video_log,
 +        ):
 +            self.set_pixel_format(source, "BGRA")
++            self.damage(source)
++            self.damage(source)  # unchanged state must not repeat the diagnostic
 +
 +        encoding_log.assert_called_once_with(
 +            "window %#x frame pixel format=%s, want-alpha=%s",
@@ -287,6 +327,28 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +        with self.assertRaisesRegex(ValueError, "no transparency encoding"):
 +            source.get_best_encoding(800, 600, {}, "h264")
 +
++    def test_alpha_admission_outranks_opaque_selectors_but_keeps_mmap(self):
++        for policy in ("strict", "hint", "hardcoded"):
++            with self.subTest(policy=policy):
++                source = self.make_source()
++                self.configure_mixed_encodings(source)
++                source.strict = policy == "strict"
++                source._encoding_hint = "h264" if policy == "hint" else ""
++                source._encoders = {"h264": Mock()}
++                with patch.object(compress, "HARDCODED_ENCODING", "h264" if policy == "hardcoded" else ""):
++                    self.set_pixel_format(source, "BGRA")
++                    self.assertEqual(source.get_best_encoding(800, 600, {}, "h264"), "webp")
++                    source._mmap = object()
++                    source.assign_encoding_getter()
++                    self.assertEqual(source.get_best_encoding(800, 600, {}, "h264"), "mmap")
++
++    def test_malformed_csc_properties_do_not_release_initial_wait(self):
++        for value in (None, [], "h264", 1):
++            with self.subTest(value=value):
++                source = self.make_source()
++                self.set_properties(source, {"encoding.full_csc_modes": value})
++                self.assertFalse(self.damage(source))
++
 +    def test_alpha_frame_with_unusable_alpha_encoding_fails_closed(self):
 +        cases = (
 +            ("webp dimensions", ("h264", "webp"), 1, 1, {"quality": 50}),
@@ -345,6 +407,7 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +        source.common_encodings = ("h264", "png")
 +        source._encoding_hint = "png"
 +        source._encoders = {"png": Mock()}
++        source._mmap = object()  # opaque policy keeps upstream hint/hardcode precedence
 +        self.set_pixel_format(source, "BGRX")
 +        self.assertEqual(source.get_best_encoding(800, 600, {}, "h264"), "png")
 +
@@ -399,27 +462,29 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +        self.assertEqual(source.get_best_encoding(800, 600, {}, "h264"), "h264")
 +        self.assertEqual(source.get_best_encoding_video.call_count, 2)
 +
-+    def test_reconfigure_preserves_opaque_frame_selection(self):
++    def test_reconfigure_preserves_opaque_frame_selection_without_model_reads(self):
 +        source = self.make_source()
-+        source.common_encodings = ("h264", "webp", "rgb32")
-+        source.non_video_encodings = ("webp", "rgb32")
-+        source.get_best_encoding_video = Mock(return_value="h264")
++        self.configure_mixed_encodings(source)
 +        self.set_pixel_format(source, "BGRX")
-+
-+        def reset_metadata_alpha(_force_reload=False):
-+            source._want_alpha = True
-+            source.assign_encoding_getter()
-+
-+        with patch.object(
-+            WindowSource, "update_encoding_options", side_effect=reset_metadata_alpha,
-+        ), patch.object(source, "update_encoding_video_subregion"), \
-+                patch.object(source, "update_pipeline_scores"), \
-+                patch.object(source, "verify_csc_and_encoder", return_value=True):
++        source.encoding_options = typedict()
++        source.global_statistics = SimpleNamespace(congestion_value=0)
++        source.statistics = SimpleNamespace(packet_count=0)
++        source._current_speed = 50
++        source.bandwidth_limit = 0
++        source.client_render_size = (0, 0)
++        source.window.reset_mock()
++        with (
++            patch.object(source, "update_encoding_video_subregion"),
++            patch.object(source, "update_pipeline_scores"),
++            patch.object(source, "verify_csc_and_encoder", return_value=True),
++        ):
 +            source.update_encoding_options()
 +
 +        self.assertFalse(source._want_alpha)
 +        self.assertEqual(source.get_best_encoding(800, 600, {}, "h264"), "h264")
-+        source.get_best_encoding_video.assert_called_once_with(800, 600, {}, "h264")
++        source.window.get.assert_not_called()
++        source.window.get_property.assert_not_called()
++        source.window.has_alpha.assert_not_called()
 +
 +    def test_opaque_region_reconfiguration_updates_frame_selector(self):
 +        source = self.make_source()
@@ -464,11 +529,11 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +        self.configure_mixed_encodings(source)
 +        source.window_dimensions = (800, 600)
 +        source._opaque_region = ((0, 0, 800, 600),)
-+        source.statistics = Mock()
++        source.statistics = WindowPerformanceStatistics()
 +        source.window_dimensions_updated = Mock()
 +        self.set_pixel_format(source, "BGRA")
 +        source.update_discard_alpha()
-+        source.apply_frame_alpha_state()
++        source.update_encoding_options()
 +        self.assertTrue(source.discard_alpha)
 +        self.assertFalse(source._want_alpha)
 +        source.window.reset_mock()
@@ -485,7 +550,7 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +        self.assertFalse(source._want_alpha)
 +        self.assertEqual(source.get_best_encoding(800, 600, {}, "h264"), "h264")
 +        self.assertEqual(source.window_dimensions_updated.call_count, 2)
-+        self.assertEqual(source.window.get.call_count, 2)
++        self.assertEqual(source.window.get.call_count, 4)
 +
 +    def test_damage_discovered_resize_rebinds_before_batching(self):
 +        for old_width, new_width in ((800, 801), (801, 800)):
@@ -494,7 +559,7 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +                self.configure_mixed_encodings(source)
 +                source.window_dimensions = (old_width, 600)
 +                source._opaque_region = ((0, 0, 800, 600),)
-+                source.statistics = Mock()
++                source.statistics = WindowPerformanceStatistics()
 +                source.window_dimensions_updated = Mock()
 +                source.suspended = False
 +                source.full_frames_only = False
@@ -542,7 +607,7 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +            pixel_format, 32, width * 4, 4,
 +        )
 +        source.make_data_packet_cb = Mock()
-+        source.call_in_encode_thread = lambda _optional, callback, *args: callback(*args)
++        source.call_in_encode_thread = lambda callback, *args: callback(*args)
 +        self.set_pixel_format(source, pixel_format)
 +        return source, image
 +
@@ -576,12 +641,12 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +            "scaled-width": 32,
 +            "scaled-height": 32,
 +        })
-+        source.get_frame_transparent_encoding = Mock(wraps=source.get_frame_transparent_encoding)
++        source.get_transparent_encoding = Mock(wraps=source.get_transparent_encoding)
 +
 +        source.do_process_damage_image(0, 0, image, "h264", 1, options)
 +
-+        source.get_frame_transparent_encoding.assert_called_once()
-+        planner_options = source.get_frame_transparent_encoding.call_args.args[2]
++        source.get_transparent_encoding.assert_called_once()
++        planner_options = source.get_transparent_encoding.call_args.args[2]
 +        self.assertIs(type(planner_options), dict)
 +        self.assertIsNot(planner_options, options)
 +        self.assertEqual(planner_options, options)
@@ -597,6 +662,7 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +            with self.subTest(image_format=image_format, model_format=model_format):
 +                source, image = self.make_image_source(pixel_format=image_format)
 +                self.set_pixel_format(source, model_format)
++                self.assertEqual(source.has_alpha, model_format == "BGRA")
 +                source.window.reset_mock()
 +
 +                source.do_process_damage_image(0, 0, image, "h264", 1, typedict())
@@ -604,6 +670,8 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +                source.make_data_packet_cb.assert_called_once()
 +                self.assertEqual(source.make_data_packet_cb.call_args.args[5], expected)
 +                source.window.get.assert_not_called()
++                source.window.get_property.assert_not_called()
++                source.window.has_alpha.assert_not_called()
 +                image.free()
 +
 +    def test_captured_alpha_retains_mmap_without_picture_candidates(self):
@@ -618,6 +686,35 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +        self.assertEqual(source.make_data_packet_cb.call_args.args[:2], (1, 1))
 +        self.assertEqual(source.make_data_packet_cb.call_args.args[5], "mmap")
 +        image.free()
++
++    def test_captured_alpha_respects_stable_feature_browser_and_client_policy(self):
++        for policy in ("feature", "window", "browser", "client"):
++            with self.subTest(policy=policy):
++                source, image = self.make_image_source()
++                self.addCleanup(image.free)
++                source.window.has_alpha.return_value = policy != "window"
++                source.content_types = ("browser",) if policy == "browser" else ()
++                source.window_type = {"NORMAL"}
++                source.window_dimensions = (800, 600)
++                source.supports_transparency = policy != "client"
++                with patch.object(compress, "HAS_ALPHA", policy != "feature"), \
++                        patch.object(compress, "BROWSER_ALPHA_FIX", True):
++                    self.set_pixel_format(source, "BGRX")
++                source.window.reset_mock()
++                source.do_process_damage_image(0, 0, image, "h264", 1, typedict())
++                source.make_data_packet_cb.assert_called_once()
++                self.assertEqual(source.make_data_packet_cb.call_args.args[5], "h264")
++                source.window.get_property.assert_not_called()
++
++    def test_grayscale_disables_mmap_and_keeps_transparent_picture_admission(self):
++        source, image = self.make_image_source()
++        self.addCleanup(image.free)
++        source.encoding = "grayscale"
++        source._mmap = object()
++        source.do_process_damage_image(0, 0, image, "h264", 1, typedict({"grayscale": True}))
++        source.make_data_packet_cb.assert_called_once()
++        self.assertEqual(source.make_data_packet_cb.call_args.args[5], "rgb32")
++        self.assertTrue(source.make_data_packet_cb.call_args.args[7]["grayscale"])
 +
 +    def test_captured_alpha_without_usable_candidate_releases_image(self):
 +        for candidates in (("h264",), ("h264", "webp")):
@@ -663,14 +760,14 @@ index 0000000000000000000000000000000000000000..050ac2c775b1d1d13fc0a0bc47a2f972
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/tests/unittests/unit/server/window/make_metadata_test.py b/tests/unittests/unit/server/window/make_metadata_test.py
-index 1cf16be428949d220871a757cc968823cec12088..5d6a44218eab91f654b0622085fd9bbff2bfddde 100755
+index 1cf16be428949d220871a757cc968823cec12088..bd5d011c74ffbf7d49a1f18da4d4facb00c17eb7 100755
 --- a/tests/unittests/unit/server/window/make_metadata_test.py
 +++ b/tests/unittests/unit/server/window/make_metadata_test.py
 @@ -12,2 +12,3 @@ import os
  import unittest
 +from unittest.mock import patch
  
-@@ -88,2 +89,22 @@ class TestMakeWindowMetadata(unittest.TestCase):
+@@ -88,2 +89,32 @@ class TestMakeWindowMetadata(unittest.TestCase):
  
 +    def test_pixel_format(self):
 +        for pixel_format in ("BGRX", "BGRA", "RGBX", "RGBA", "future-format"):
@@ -692,13 +789,23 @@ index 1cf16be428949d220871a757cc968823cec12088..5d6a44218eab91f654b0622085fd9bbf
 +        with patch("xpra.server.window.metadata.SKIP_METADATA", ["pixel-format"]):
 +            self.assertEqual(make_window_metadata(w, "pixel-format"), {})
 +
++    def test_internal_frame_alpha(self):
++        for value in (True, False, None):
++            with self.subTest(value=value):
++                w = _Window(**{"frame-has-alpha": value})
++                self.assertEqual(make_window_metadata(w, "frame-has-alpha"), {"frame-has-alpha": value})
++                expected = {"frame-has-alpha": False} if value is False else {}
++                self.assertEqual(make_window_metadata(w, "frame-has-alpha", skip_defaults=True), expected)
++                with patch("xpra.server.window.metadata.SKIP_METADATA", ["frame-has-alpha"]):
++                    self.assertEqual(make_window_metadata(w, "frame-has-alpha"), {})
++
      def test_legacy_content_type_is_compatibility_only(self):
 diff --git a/tests/unittests/unit/wayland/window_metadata_test.py b/tests/unittests/unit/wayland/window_metadata_test.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..18109a9033c76675ec60ba58cbd762c61e40ca97
+index 0000000000000000000000000000000000000000..eeebba9d831be68816d443799175ef5c74e6b292
 --- /dev/null
 +++ b/tests/unittests/unit/wayland/window_metadata_test.py
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,46 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 kogeler
@@ -726,12 +833,18 @@ index 0000000000000000000000000000000000000000..18109a9033c76675ec60ba58cbd762c6
 +                self.assertIn("pixel-format", window.get_internal_property_names())
 +                self.assertNotIn("pixel-format", window.get_property_names())
 +                self.assertNotIn("pixel-format", window.get_dynamic_property_names())
++                self.assertIn("frame-has-alpha", window.get_internal_property_names())
++                self.assertNotIn("frame-has-alpha", window.get_property_names())
++                self.assertNotIn("frame-has-alpha", window.get_dynamic_property_names())
 +                for pixel_format in ("", "BGRX", "BGRA", "RGBX", "RGBA", ""):
 +                    with self.subTest(pixel_format=pixel_format):
 +                        window._updateprop("pixel-format", pixel_format)
++                        alpha = not pixel_format or "A" in pixel_format
++                        window._updateprop("frame-has-alpha", alpha)
 +                        with patch("xpra.server.window.metadata.get_util_logger") as get_logger:
 +                            info = server.get_window_info(window)
 +                        self.assertEqual(info.get("pixel-format"), pixel_format)
++                        self.assertEqual(info.get("frame-has-alpha"), alpha)
 +                        self.assertEqual(info["size"], (64, 32))
 +                        self.assertTrue(info["has-alpha"])
 +                        get_logger.assert_not_called()
@@ -740,7 +853,7 @@ index 0000000000000000000000000000000000000000..18109a9033c76675ec60ba58cbd762c6
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/tests/unittests/unit/wayland/window_test.py b/tests/unittests/unit/wayland/window_test.py
-index e047159aaf7649f342161a02c27840115be82ebd..d81bf2c582b2548b163eb3604cdbeac361f25915 100644
+index e1ce91fb1f72496d08d17da94552a6d99ca74b3b..d4e7fa08e577aac7719bfb718f6d4434bc361ba9 100644
 --- a/tests/unittests/unit/wayland/window_test.py
 +++ b/tests/unittests/unit/wayland/window_test.py
 @@ -9,3 +9,3 @@ import unittest
@@ -748,7 +861,7 @@ index e047159aaf7649f342161a02c27840115be82ebd..d81bf2c582b2548b163eb3604cdbeac3
 -from unittest.mock import Mock, patch
 +from unittest.mock import ANY, Mock, call, patch
  
-@@ -32,2 +32,75 @@ WaylandWindowServer = load_window_server_class()
+@@ -36,2 +36,79 @@ WaylandWindowServer = load_window_server_class()
  
 +class WaylandWindowServerFrameStateTest(unittest.TestCase):
 +
@@ -769,14 +882,18 @@ index e047159aaf7649f342161a02c27840115be82ebd..d81bf2c582b2548b163eb3604cdbeac3
 +        source.window = Mock()
 +        source.window.get.return_value = ""
 +        source.window.get_internal_property_names.return_value = ()
++        source.window.has_alpha.return_value = True
 +        source.window_signal_handlers = []
 +        source._client_csc_modes_resolved = False
 +        source._current_frame_has_alpha = None
-+        source._frame_alpha_signal_initialized = False
++        source._alpha_capable = True
 +        source.has_alpha = True
 +        source.supports_transparency = True
 +        source.discard_alpha = False
 +        source._want_alpha = True
++        source.window_dimensions = (800, 600)
++        source.window_type = set()
++        source.content_types = ()
 +        source.encoding = "h264"
 +        source.is_OR = False
 +        source.is_tray = False
@@ -824,7 +941,7 @@ index e047159aaf7649f342161a02c27840115be82ebd..d81bf2c582b2548b163eb3604cdbeac3
 +
 +
  class WaylandWindowServerCommitTest(unittest.TestCase):
-@@ -70,2 +143,92 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+@@ -74,2 +151,95 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
  
 +    def test_surface_image_publishes_current_pixel_format(self):
 +        window = Mock()
@@ -836,6 +953,7 @@ index e047159aaf7649f342161a02c27840115be82ebd..d81bf2c582b2548b163eb3604cdbeac3
 +
 +        self.assertEqual(window._updateprop.call_args_list, [
 +            call("pixel-format", "BGRX"),
++            call("frame-has-alpha", False),
 +            call("image", image),
 +        ])
 +
@@ -874,9 +992,11 @@ index e047159aaf7649f342161a02c27840115be82ebd..d81bf2c582b2548b163eb3604cdbeac3
 +
 +        self.assertEqual(events, [
 +            ("pixel-format", "BGRX"),
++            ("frame-has-alpha", False),
 +            ("image", ANY),
 +            ("damage", "BGRX"),
 +            ("pixel-format", "BGRA"),
++            ("frame-has-alpha", True),
 +            ("image", ANY),
 +            ("damage", "BGRA"),
 +        ])
@@ -917,17 +1037,57 @@ index e047159aaf7649f342161a02c27840115be82ebd..d81bf2c582b2548b163eb3604cdbeac3
 +        subsource.damage.assert_called_once_with(0, 0, 100, 80, {})
 +
      def test_mapped_damage_refreshes_without_immediate_acknowledgement(self):
+@@ -157,2 +327,3 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
+             self.assertEqual(window._updateprop.call_args_list, [
++                (("pixel-format", pixel_format), ),
+                 (("frame-has-alpha", has_alpha), ),
+diff --git a/xpra/server/window/compress.py b/xpra/server/window/compress.py
+index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..7223acf6e9123e66a8dc5abc43ac2ca24db19247 100644
+--- a/xpra/server/window/compress.py
++++ b/xpra/server/window/compress.py
+@@ -499,2 +499,4 @@ class WindowSource(WindowIconSource):
+         self.has_alpha = False
++        self._alpha_capable = False
++        self._current_frame_has_alpha: bool | None = None
+         self.window_dimensions = 0, 0
+@@ -831,4 +833,2 @@ class WindowSource(WindowIconSource):
+         has_alpha = HAS_ALPHA and window.has_alpha()
+-        if has_alpha and "frame-has-alpha" in window.get_internal_property_names():
+-            has_alpha = bool(window.get_property("frame-has-alpha"))
+         if has_alpha and BROWSER_ALPHA_FIX and not self.is_OR:
+@@ -839,3 +839,13 @@ class WindowSource(WindowIconSource):
+                 has_alpha = False
+-        self.has_alpha = has_alpha
++        # A captured wrapper can outlive the newest model frame. Keep the
++        # stable policy separately: a later XRGB buffer must not authorize
++        # losing an earlier captured ARGB buffer's alpha.
++        self._alpha_capable = has_alpha
++        frame_has_alpha = None
++        if "frame-has-alpha" in window.get_internal_property_names():
++            frame_has_alpha = window.get_property("frame-has-alpha")
++            if frame_has_alpha is not None:
++                frame_has_alpha = bool(frame_has_alpha)
++        self._current_frame_has_alpha = frame_has_alpha
++        self.has_alpha = has_alpha and frame_has_alpha is not False
+ 
+@@ -851,4 +861,4 @@ class WindowSource(WindowIconSource):
+         log("window_opaque_region_changed(%s, %s) opaque-region=%s", window, args, self._opaque_region)
+-        self.update_encoding_options()
+         self.update_discard_alpha()
++        self.update_encoding_options()
+         return True
 diff --git a/xpra/server/window/metadata.py b/xpra/server/window/metadata.py
-index e6c44e68435606bbc849af4c93f163d888725147..70de653c02632495ab59e518555a8ecb7444207c 100644
+index e6c44e68435606bbc849af4c93f163d888725147..6c36a60f2e99edbf707a9c04cad8a390ddd34509 100644
 --- a/xpra/server/window/metadata.py
 +++ b/xpra/server/window/metadata.py
-@@ -43,2 +43,4 @@ DEFAULT_VALUES: dict[str, int | str | bool | tuple | dict] = {
+@@ -43,2 +43,5 @@ DEFAULT_VALUES: dict[str, int | str | bool | tuple | dict] = {
      "depth": 24,
-+    # internal current-frame state exposed by xpra info:
++    # Internal current-frame state exposed by xpra info, not client metadata:
 +    "pixel-format": "",
++    "frame-has-alpha": True,
      # the colourspace this window's pixels are in:
 diff --git a/xpra/server/window/video_compress.py b/xpra/server/window/video_compress.py
-index 8c70c4ecaf4ac1e6f34577b2a973b943aef6b8ab..49c870c572c89fbcca063bad3368cc416fb04b41 100644
+index 8aac38e996f354d3015988f7beac347fcbd3603d..01c13e8219a7464465123fcdf0e9109e6e42f1da 100644
 --- a/xpra/server/window/video_compress.py
 +++ b/xpra/server/window/video_compress.py
 @@ -25,3 +25,3 @@ from xpra.server.window.compress import (
@@ -935,58 +1095,40 @@ index 8c70c4ecaf4ac1e6f34577b2a973b943aef6b8ab..49c870c572c89fbcca063bad3368cc41
 -    STRICT_MODE, LOSSLESS_WINDOW_TYPES,
 +    STRICT_MODE, LOSSLESS_WINDOW_TYPES, TRANSPARENCY_ENCODINGS,
      DOWNSCALE_THRESHOLD, DOWNSCALE, TEXT_QUALITY,
-@@ -283,2 +283,126 @@ class WindowVideoSource(WindowSource):
+@@ -283,2 +283,107 @@ class WindowVideoSource(WindowSource):
  
-+    # These policy values are specialized lazily on each instance.  Keeping
-+    # them out of init_vars() also prevents a terminal source reset from
-+    # pretending to acquire a second model-signal lifetime.
++    # Map completion and an explicit (even empty) CSC dictionary are terminal.
 +    _client_csc_modes_resolved = False
-+    _current_frame_has_alpha: bool | None = None
-+    _frame_alpha_signal_initialized = False
-+
-+    def _ensure_frame_alpha_signal(self) -> None:
-+        if self._frame_alpha_signal_initialized:
-+            return
-+        if "pixel-format" in self.window.get_internal_property_names():
-+            sid = self.window.connect("notify::pixel-format", self.update_frame_alpha_state)
-+            self.window_signal_handlers.append(sid)
-+        self._frame_alpha_signal_initialized = True
++    # Diagnostic state only; alpha classification belongs to WindowSource.
++    _last_frame_alpha_log: tuple[str, bool] | None = None
 +
 +    def set_client_properties(self, properties: typedict) -> None:
 +        if properties.strget("event") == "map" or isinstance(properties.get("encoding.full_csc_modes"), dict):
 +            self._client_csc_modes_resolved = True
 +        super().set_client_properties(properties)
 +
-+    def update_frame_alpha_state(self, *_args) -> None:
-+        pixel_format = self.window.get("pixel-format", "")
-+        frame_has_alpha = {
-+            "RGBA": True,
-+            "BGRA": True,
-+            "RGBX": False,
-+            "BGRX": False,
-+        }.get(pixel_format)
-+        changed = frame_has_alpha != self._current_frame_has_alpha
-+        want_alpha = self.frame_wants_alpha(frame_has_alpha)
-+        policy_changed = want_alpha != self._want_alpha
-+        if changed:
-+            self._current_frame_has_alpha = frame_has_alpha
-+        if changed or policy_changed:
-+            self.apply_frame_alpha_state()
-+        if changed:
-+            log(
-+                "window %#x frame pixel format=%s, want-alpha=%s",
-+                self.wid, pixel_format, self._want_alpha,
-+            )
-+
-+    def frame_wants_alpha(self, frame_has_alpha: bool | None) -> bool:
-+        return bool(
++    def update_frame_alpha_state(self) -> None:
++        # UI only. Reuse the constructor-owned upstream frame signal/cache,
++        # and sample before damage (including before the first notification).
++        previous = self._current_frame_has_alpha
++        self.update_has_alpha()
++        want_alpha = bool(
 +            (self.is_tray or (self.has_alpha and self.supports_transparency))
 +            and not self.discard_alpha
-+            and frame_has_alpha is not False
 +        )
++        if previous != self._current_frame_has_alpha or want_alpha != self._want_alpha:
++            self.apply_frame_alpha_state()
++        state = (self.window.get("pixel-format", ""), self._want_alpha)
++        if state != self._last_frame_alpha_log:
++            self._last_frame_alpha_log = state
++            log("window %#x frame pixel format=%s, want-alpha=%s", self.wid, *state)
 +
 +    def apply_frame_alpha_state(self) -> None:
-+        self._want_alpha = self.frame_wants_alpha(self._current_frame_has_alpha)
++        # Cached values only: encoder reconfiguration can run off the UI thread.
++        self._want_alpha = bool(
++            (self.is_tray or (self.has_alpha and self.supports_transparency))
++            and not self.discard_alpha
++        )
 +        self.assign_encoding_getter()
 +
 +    def get_frame_transparent_encoding(self, w: int, h: int, options: dict,
@@ -1014,9 +1156,9 @@ index 8c70c4ecaf4ac1e6f34577b2a973b943aef6b8ab..49c870c572c89fbcca063bad3368cc41
 +        return encoding
 +
 +    def get_best_encoding_impl(self) -> Callable[..., str]:
-+        if self._mmap and self.encoding != "grayscale":
-+            return super().get_best_encoding_impl()
 +        if self._current_frame_has_alpha is not None and self._want_alpha:
++            if self._mmap and self.encoding != "grayscale":
++                return self.encoding_is_mmap
 +            # The current buffer is authoritative when an explicit opaque
 +            # encoding hint or override conflicts with its alpha channel.
 +            return self.get_frame_transparent_encoding
@@ -1054,7 +1196,6 @@ index 8c70c4ecaf4ac1e6f34577b2a973b943aef6b8ab..49c870c572c89fbcca063bad3368cc41
 +        ))
 +
 +    def damage(self, x: int, y: int, w: int, h: int, options=None) -> None:
-+        self._ensure_frame_alpha_signal()
 +        self.update_frame_alpha_state()
 +        if self.waiting_for_client_csc_modes():
 +            videolog("dropping damage for window %#x until client CSC modes are known", self.wid)
@@ -1062,35 +1203,33 @@ index 8c70c4ecaf4ac1e6f34577b2a973b943aef6b8ab..49c870c572c89fbcca063bad3368cc41
 +        super().damage(x, y, w, h, options)
 +
      def update_av_sync_frame_delay(self) -> None:
-@@ -658,2 +782,5 @@ class WindowVideoSource(WindowSource):
+@@ -658,2 +763,5 @@ class WindowVideoSource(WindowSource):
          super().update_window_dimensions(ww, wh)
-+        # Generic damage discovers model resizes after our damage wrapper
-+        # sampled the format. Rebind before that same damage can be batched.
-+        self.apply_frame_alpha_state()
++        # Generic damage discovers resizes after our outer damage wrapper.
++        # Refresh browser/size policy and rebind before the same batch.
++        self.update_frame_alpha_state()
  
-@@ -958,2 +1085,21 @@ class WindowVideoSource(WindowSource):
+@@ -961,2 +1069,19 @@ class WindowVideoSource(WindowSource):
  
 +        if (self._current_frame_has_alpha is not None
 +                and image.get_pixel_format() in ("RGBA", "BGRA")
-+                and (self.is_tray or (self.has_alpha and self.supports_transparency))):
-+            # Video regions and refresh routes can choose their coding without
-+            # the ordinary selector. The extracted image is the final alpha
-+            # authority; generic processing already stripped alpha where the
-+            # opaque-region policy permits it. Never use a newer model format
-+            # or discard decision to reinterpret this captured wrapper.
++                and (self.is_tray or (self._alpha_capable and self.supports_transparency))):
++            # The wrapper is the final alpha authority, not a newer model or
++            # discard state. Generic processing already stripped authorized
++            # opaque regions before reaching this boundary.
 +            if self._mmap and self.encoding != "grayscale":
 +                coding = "mmap"
 +            else:
 +                try:
-+                    # The planner accepts a plain dict, including in Cython
-+                    # builds. Keep typed codec options on the encode handoff.
++                    # Cython requires an actual dict for the planner; retain
++                    # the original typed codec options at the worker handoff.
 +                    coding = self.get_frame_transparent_encoding(w, h, dict(eoptions), coding)
 +                except ValueError:
 +                    free_image_wrapper(image)
 +                    raise
 +
          # freeze if:
-@@ -991,4 +1137,5 @@ class WindowVideoSource(WindowSource):
+@@ -995,4 +1120,5 @@ class WindowVideoSource(WindowSource):
          oh = h
 -        w = w & self.width_mask
 -        h = h & self.height_mask
@@ -1098,75 +1237,64 @@ index 8c70c4ecaf4ac1e6f34577b2a973b943aef6b8ab..49c870c572c89fbcca063bad3368cc41
 +            w = w & self.width_mask
 +            h = h & self.height_mask
          regions = []
-@@ -1214,3 +1361,8 @@ class WindowVideoSource(WindowSource):
-         """
-+        # The generic opaque-region callback updates this method before its
-+        # final discard-alpha refresh.  Keep the cached value coherent with
-+        # the already-published region before frame policy is reapplied.
-+        self.update_discard_alpha()
-         super().update_encoding_options(force_reload)
-+        self.apply_frame_alpha_state()
-         self.update_encoding_video_subregion()
 diff --git a/xpra/wayland/server/models/subsurface_window.py b/xpra/wayland/server/models/subsurface_window.py
-index eb78ba5d1a15f400bc9c832ada11091d7b3cd592..7e6b13b7010e108d0732b786f588527b4103d261 100644
+index 8ab788fca671acfb00881ffe901432b633226e62..421fc1b5216a7ddd51329f6e908f2ab7d34b4aaa 100644
 --- a/xpra/wayland/server/models/subsurface_window.py
 +++ b/xpra/wayland/server/models/subsurface_window.py
 @@ -26,2 +26,3 @@ class SubsurfaceWindow(WindowModelStub):
          "has-alpha": (GObject.TYPE_BOOLEAN, "alpha channel", "", False, GObject.ParamFlags.READABLE),
 +        "pixel-format": (GObject.TYPE_PYOBJECT, "current pixel format", "", GObject.ParamFlags.READABLE),
-     }
-@@ -30,3 +31,3 @@ class SubsurfaceWindow(WindowModelStub):
-     _dynamic_property_names: list[str] = []
--    _internal_property_names: list[str] = []
-+    _internal_property_names = ["pixel-format"]
+         "frame-has-alpha": (GObject.TYPE_BOOLEAN, "alpha channel of the current buffer", "",
+@@ -35,3 +36,3 @@ class SubsurfaceWindow(WindowModelStub):
+     # which is only translucent for its shadow and rounded corners
+-    _internal_property_names: list[str] = ["frame-has-alpha"]
++    _internal_property_names: list[str] = ["frame-has-alpha", "pixel-format"]
      _MODELTYPE = "WaylandSubsurface"
-@@ -40,2 +41,3 @@ class SubsurfaceWindow(WindowModelStub):
+@@ -45,2 +46,3 @@ class SubsurfaceWindow(WindowModelStub):
          self._internal_set_property("has-alpha", has_alpha)
 +        self._internal_set_property("pixel-format", "")
          self._setup_done = True
-@@ -45,2 +47,3 @@ class SubsurfaceWindow(WindowModelStub):
+@@ -50,2 +52,3 @@ class SubsurfaceWindow(WindowModelStub):
          self._image = image
 +        self._updateprop("pixel-format", image.get_pixel_format())
- 
+         # publish the alpha the buffer really has, so that an opaque subsurface
 diff --git a/xpra/wayland/server/models/window.py b/xpra/wayland/server/models/window.py
-index 1b363f613037f00a13e5019c7d784a5fbaf18819..85540a2cb6d6d9286975d505fc68d7b387ed3645 100644
+index a5b455bc2a1f651274a08d372b70648becfffe00..6257028ddf4bd01138aa9595ba0617e893a0e99e 100644
 --- a/xpra/wayland/server/models/window.py
 +++ b/xpra/wayland/server/models/window.py
-@@ -138,2 +138,7 @@ class Window(WindowModelStub):
+@@ -69,2 +69,7 @@ class Window(WindowModelStub):
          ),
 +        "pixel-format": (
 +            GObject.TYPE_PYOBJECT,
 +            "pixel format of the current surface buffer", "",
 +            GObject.ParamFlags.READABLE,
 +        ),
-     }
-@@ -168,3 +173,3 @@ class Window(WindowModelStub):
-     # should not be exported to the clients:
--    _internal_property_names = []
-+    _internal_property_names = ["pixel-format"]
+         "opaque-region": (
+@@ -187,3 +192,3 @@ class Window(WindowModelStub):
+     # gain a translucent subsurface later, which the client paints into that backing
+-    _internal_property_names = ["frame-has-alpha"]
++    _internal_property_names = ["frame-has-alpha", "pixel-format"]
      _MODELTYPE = "Wayland"
+@@ -192,2 +197,3 @@ class Window(WindowModelStub):
+         super().__init__()
++        self._internal_set_property("pixel-format", "")
+         for key, prop in props.items():
 diff --git a/xpra/wayland/server/subsystem/window.py b/xpra/wayland/server/subsystem/window.py
-index 991139776bcab9e4b2c80c50050424ab2a76eda4..80178541838a336233ff421de3610ef90778514a 100644
+index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..5aa0c2533acc969b2f5fdf739011537385e8e5ee 100644
 --- a/xpra/wayland/server/subsystem/window.py
 +++ b/xpra/wayland/server/subsystem/window.py
-@@ -95,2 +95,3 @@ class WaylandWindowServer(WindowServer):
-             "image": None,
-+            "pixel-format": "",
-             "depth": 32,
-@@ -144,2 +145,3 @@ class WaylandWindowServer(WindowServer):
-             "image": None,
-+            "pixel-format": "",
-             "depth": 32,
-@@ -200,3 +202,8 @@ class WaylandWindowServer(WindowServer):
+@@ -205,2 +205,3 @@ class WaylandWindowServer(WindowServer):
          image.free = noop
 +        window._updateprop("pixel-format", image.get_pixel_format())
+         # The buffer the client has committed tells us whether these pixels really have
+@@ -213,2 +214,6 @@ class WaylandWindowServer(WindowServer):
          window._updateprop("image", image)
 +        if window.get_property("role") == "popup":
 +            _x, _y, w, h = window.get_property("geometry")
 +            if w > 0 and h > 0:
 +                self.refresh_window_area(window, 0, 0, w, h, options={"damage": True})
  
-@@ -352,6 +359,2 @@ class WaylandWindowServer(WindowServer):
+@@ -379,6 +384,2 @@ class WaylandWindowServer(WindowServer):
          self.update_geometry(window, position, size)
 -        if mapped and has_image:
 -            w, h = size

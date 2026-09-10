@@ -159,7 +159,7 @@ outside the supported model.
 
 ## Patch case contract
 
-Each completed `cases/<slug>/` is either a production case or the single
+Each completed `cases/<slug>/` is either a production case or the single active
 `kind = "test-quarantine"` duty case. It contains:
 
 - `case.toml`: stable identity, title, commit subject, patch digest,
@@ -184,7 +184,7 @@ Shared boundaries may be described by multiple cases without duplicating live
 runs: every scenario uses all active patches on both endpoints. Declaration
 alone is not evidence that a gate passed and does not authorize tracked results.
 
-Every patch must satisfy all of these conditions:
+Every active patch must satisfy all of these conditions:
 
 - SHA-256 equals `patch_sha256`;
 - changed paths equal the manifest `paths` exactly;
@@ -206,7 +206,26 @@ Every patch must satisfy all of these conditions:
 - the test-quarantine case requires all three clean `quarantine`,
   `quarantine-cython`, and `quarantine-no-compat` gates.
 
-There is exactly one active test-quarantine case. It is an explicit temporary
+There may be at most one active test-quarantine case; currently there is none.
+Its directory is nevertheless permanent: never delete
+`cases/upstream-test-quarantine/`, its manifest, README, empty patch, or the
+supporting quarantine gates and runbook because all upstream tests pass.
+When no assignments remain, keep the reserved case as `draft = true`, with a
+zero-byte `fix.patch`, `patch_sha256 = ""`, and empty `dependencies`, `paths`,
+`tests.list`, `quarantine.modules`, all three `quarantine.gates` arrays, and
+`evidence.required_gates`. Retain commented queue and test-gate entries in TOML
+with an explanation to enable them only for newly justified broken upstream
+tests. The inactive scaffold is excluded from completed cases, test selection
+and stack snapshots. It is not an empty active patch or a historical archive.
+
+Record inactive reassessment as not applicable; do not invoke its case gates
+or restore historical skips. Activation uses the existing clean draft-workspace
+promotion and automated patch export. Deactivation follows
+[`test-quarantine.md`](docs/runbooks/test-quarantine.md), preserving the
+scaffold rather than the production-case deletion procedure. Only this inactive
+reset may restore the blank derived-field placeholders; never hand-edit a real
+patch digest or active path inventory. The full three-leg matrix and every
+production gate still apply. An active assignment is an explicit temporary
 exception, never a production fix or a place for unrelated test repair. Each
 entry requires a current embedded-clean-source failure in the frozen matrix.
 After every explicitly selected upstream rebase and the whole-queue manual
@@ -224,7 +243,8 @@ not test-selectable. Complete the human-authored fields, create a clean draft
 workspace, and stage the whole candidate there; `workspace-update` removes the
 draft marker and derives the digest and paths atomically without changing host
 source. The clean host `patch-update` fallback can also promote a draft after
-its publication start gate. Derived fields are never edited by hand.
+its publication start gate. Active derived fields are never edited by hand;
+the reserved inactive quarantine reset above does not publish an active patch.
 
 Only these active cases are retained:
 
@@ -239,12 +259,10 @@ Only these active cases are retained:
 9. `jph-parallel-build-objects`;
 10. `debian-libva-codecs-package`;
 11. `packet-handler-error-boundary`;
-12. `wayland-pointer-scroll-normalization`;
-13. `gtk-client-scroll-deduplication`;
-14. `wayland-display-name-signal`;
-15. `client-codec-startup-order`;
-16. `x11-selection-refusal`;
-17. `upstream-test-quarantine`.
+12. `gtk-client-scroll-deduplication`;
+13. `wayland-display-name-signal`;
+14. `client-codec-startup-order`;
+15. `x11-selection-refusal`.
 
 ## Stack contract
 
@@ -263,6 +281,18 @@ The resolver evaluates each patch against an isolated snapshot in sequence:
 An already-present patch remains named in resolution provenance until its case
 is deliberately retired. A divergent patch is refreshed; it is never applied
 with rejects, fuzz workarounds, source rewriting, or whitespace relaxation.
+
+Current neutral regressions under `infra/upstream-tests/neutral/` are separate
+runner inputs, not cases or historical verification archives. Their explicit
+installer inventory is limited to test paths in the private container source,
+binds its frozen HEAD, rejects existing targets/symlinks before writing, and
+stages/logs exact bytes. Helper and fixture inputs belong to the image key,
+streamed context inventory and host runner digest. All case patch modes install
+the same neutral inputs; `clean` means no case patch or production change.
+The native pointer protocol regression has both clean-source and resulting-
+stack `wayland` gates plus complete-stack focused selection after its upstream
+replacement. A neutral test cannot introduce a production delta, waive live
+coverage, overwrite an upstream test, or satisfy acceptance without execution.
 
 ## Isolated patch lifecycle
 
@@ -513,8 +543,8 @@ exact valid new-base controls instead of repeating them at each numbered phase.
    the owning iteration; finish all initial adaptations, removals and regression
    migrations, review the composed code, resolve the resulting stack and record
    the manual-review exit gate;
-7. run every clean quarantine gate and remove or narrow entries that no longer
-   fail on this exact master;
+7. when a duty case is active, run every clean quarantine gate and remove or
+   narrow entries that no longer fail on this exact master;
 8. run the complete offline fork-control suite and a tests-only clean control
    for every production case which owns retained test paths; when a case owns no
    test path, record that the control is unavailable and perform the

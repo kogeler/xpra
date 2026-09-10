@@ -2,15 +2,15 @@ schema = 1
 slug = "video-pipeline-cleanup-race"
 title = "Own video pipeline resources through terminal cleanup"
 commit_subject = "Own video pipeline resources through terminal cleanup"
-patch_sha256 = "2653bc90c5e6d6570b53caf8ea1290bbec4f832d94441c4a8ef8fa0608cb589a"
+patch_sha256 = "f9a697da8b09b544a7df5363060c5684a0a62210225c68d08a226af43c71a1e6"
 dependencies = []
 paths = [
+  "tests/unittests/unit/server/encoder_server_test.py",
   "tests/unittests/unit/server/source/encoding_lifecycle_test.py",
   "tests/unittests/unit/server/window/video_compress_test.py",
   "xpra/server/source/client_connection.py",
   "xpra/server/source/encoding.py",
   "xpra/server/source/factory.py",
-  "xpra/server/source/mmap.py",
   "xpra/server/window/video_compress.py",
   "xpra/server/window/video_subregion.py",
 ]
@@ -19,6 +19,7 @@ paths = [
 list = [
   "unit.server.window.video_compress_test",
   "unit.server.source.encoding_lifecycle_test",
+  "unit.server.encoder_server_test",
   "full",
   "full-cython",
   "full-no-compat",

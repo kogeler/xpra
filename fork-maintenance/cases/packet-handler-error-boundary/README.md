@@ -26,7 +26,7 @@ packet into a valid event.
 ## Embedded-source context
 
 The case resolves against embedded source commit
-`212038243d0067b6860ebe7d6953692179ef353f`. Upstream commit
+`d95058b0916913fe6ae5296fb702f66d833898b0`. Upstream commit
 `b0bd1265eb7f206c3583fabe63b5f8bd1aec019b` moved namespaced handler lookup into
 the owning subsystems while retaining flat-registry precedence, legacy aliases
 and default handlers. Commit `457e7598d3fb925e9e51cd94615b1abe61cbaf1c` also
@@ -47,6 +47,15 @@ and bound reporting across packet types and peers. A nearby `try/except` or a
 fix for one malformed pointer packet is not equivalent protection. Upstream
 history is technical provenance; fork workflow remains governed by the
 [validation runbook](../../docs/runbooks/validation.md).
+
+The current manual decision is **keep unchanged**. The selected-callable
+guard is still absent in clean source; the current server/client adapters
+retain their deferred execution and argument conventions. Review of routing,
+closed-protocol defaults, reporting interleavings and the existing native
+regression identifies no production adjustment required by this rebase.
+Other queue changes keep their own resource and stale-owner checks; this
+wrapper cannot replace them. That conclusion is code review, not a claim of
+new-base test acceptance.
 
 ## Surrounding code and ownership map
 
@@ -350,6 +359,8 @@ clipboard ownership, hardware presentation or connection teardown.
 ## Required validation
 
 Follow [development and final acceptance](../../docs/runbooks/validation.md).
+During an upstream refresh, first close the incremental whole-queue and
+composed manual-review gate; runtime regression execution starts afterward.
 After an atomic behavior change, run the manifest's focused modules and a
 non-vacuous tests-only clean control in the same frozen image. Exercise the
 real GLib boundary in interpreted, Cythonized and no-compat modes; bytecode
