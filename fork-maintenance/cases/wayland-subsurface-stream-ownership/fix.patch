@@ -1,5 +1,5 @@
 diff --git a/tests/unittests/unit/client/cairo_backing_test.py b/tests/unittests/unit/client/cairo_backing_test.py
-index 0bda1da8325dc895a7dcfddb7a0ff1bdd8b02a2d..18dac56c2585183f91a6d2cc2bc0631786379dc6 100755
+index 0bda1da8325dc895a7dcfddb7a0ff1bdd8b02a2d..a46d8579af590384f41c701f18ba6bb2b93979f1 100755
 --- a/tests/unittests/unit/client/cairo_backing_test.py
 +++ b/tests/unittests/unit/client/cairo_backing_test.py
 @@ -7,6 +7,22 @@
@@ -757,6 +757,34 @@ index 0bda1da8325dc895a7dcfddb7a0ff1bdd8b02a2d..18dac56c2585183f91a6d2cc2bc06317
  
  # ---------------------------------------------------------------------------
  # do_paint_scroll
+@@ -835,8 +1558,26 @@ class TestCairoDrawAlert(unittest.TestCase):
+             backing_mod.ALERT_MODE = orig
+ 
+ 
++def load_tests(_loader, tests, _pattern):
++    # Establish the actual visible-pixel failure on clean source before tests
++    # of newly introduced transaction helpers. All remaining methods still run
++    # on a successful candidate, with identical ordering in every patch mode.
++    first = TestPremultipliedSubsurfaceComposite(
++        "test_failed_final_stage_discards_modified_surface_before_callback",
++    )
++
++    def remaining(suite):
++        for test in suite:
++            if isinstance(test, unittest.TestSuite):
++                yield from remaining(test)
++            elif test.id() != first.id():
++                yield test
++
++    return unittest.TestSuite((first, *remaining(tests)))
++
++
+ def main():
+-    unittest.main()
++    unittest.main(failfast=True)
+ 
+ 
+ if __name__ == '__main__':
 diff --git a/tests/unittests/unit/client/gtk3/subsystem/display_test.py b/tests/unittests/unit/client/gtk3/subsystem/display_test.py
 index 3d41b65a33e26cbe4ae012f5d8b99b7d7c9c8e81..ce3da596b4c3ebcb9e44c115b50177d9c5b49b80 100644
 --- a/tests/unittests/unit/client/gtk3/subsystem/display_test.py
@@ -1933,14 +1961,13 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..5f7272d778090833ee9910c1761b3df2
      # Helper
      # ------------------------------------------------------------------
 diff --git a/tests/unittests/unit/client/subsystem/window_test.py b/tests/unittests/unit/client/subsystem/window_test.py
-index 56f7b28d15a1c0dbe16dc5caf55044fe441ad6eb..02e646b114c8a5eb53190abe7fb8d12393c2f2c3 100755
+index 56f7b28d15a1c0dbe16dc5caf55044fe441ad6eb..af144e37a307fe810374eb1eb7f6a49669816e2e 100755
 --- a/tests/unittests/unit/client/subsystem/window_test.py
 +++ b/tests/unittests/unit/client/subsystem/window_test.py
-@@ -8,8 +8,10 @@ import unittest
+@@ -8,11 +8,16 @@ import unittest
  from unittest.mock import Mock, patch
  
  from xpra.os_util import WIN32, OSX
-+from xpra.common import SUBSURFACE_CLIENT_BACKING_STATE
 +from xpra.net.common import Packet
  from xpra.net.packet_type import WINDOW_STACKING
 -from xpra.util.objects import AdHocStruct
@@ -1948,7 +1975,14 @@ index 56f7b28d15a1c0dbe16dc5caf55044fe441ad6eb..02e646b114c8a5eb53190abe7fb8d123
  from unit.process_test_util import DisplayContext
  from unit.client.subsystem.clientmixintest_util import ClientMixinTest
  
-@@ -174,6 +176,7 @@ class WindowManagerTest(ClientMixinTest):
++# Tests-only clean controls must reach existing packet delivery, not fail while
++# importing a production constant which only the candidate introduces.
++SUBSURFACE_CLIENT_BACKING_STATE = "_client-subsurface-backing-state"
++
+ 
+ class WindowManagerTest(ClientMixinTest):
+ 
+@@ -174,6 +179,7 @@ class WindowManagerTest(ClientMixinTest):
              opts.tray_icon = "yes"
              self._test_mixin_class(WindowClient, opts, {"window": {"stacking": True}})
              self.assertNotIn("sync-stacking", self.mixin.get_window_caps())
@@ -1956,7 +1990,7 @@ index 56f7b28d15a1c0dbe16dc5caf55044fe441ad6eb..02e646b114c8a5eb53190abe7fb8d123
              self.mixin.send_window_stacking((3, 1, 3, 2))
              self.verify_packet(-1, (WINDOW_STACKING, [3, 1, 2]))
              packet_count = len(self.packets)
-@@ -184,6 +187,412 @@ class WindowManagerTest(ClientMixinTest):
+@@ -184,6 +190,471 @@ class WindowManagerTest(ClientMixinTest):
              self.assertEqual(len(self.packets), packet_count)
  
  
@@ -2039,6 +2073,65 @@ index 56f7b28d15a1c0dbe16dc5caf55044fe441ad6eb..02e646b114c8a5eb53190abe7fb8d123
 +        fn(*args)
 +        self.assertEqual(calls, [])
 +        self.assertIn("stale subsurface draw target", sent[-1][-1])
++
++    def test_stale_mmap_composite_drains_exact_descriptor_once_before_ack(self):
++        import mmap
++        from xpra.client.subsystem import mmap as mmap_module
++        from xpra.client.subsystem.window import draw as draw_module
++        from xpra.net.mmap.io import int_from_buffer
++
++        class CountedMmap(mmap_module.MmapClient):
++            __slots__ = ("release_count",)
++
++            def free_packet_chunks(self, data, options):
++                self.release_count += 1
++                super().free_packet_chunks(data, options)
++
++        for compatible, legacy in ((True, True), (True, False), (False, False)):
++            for transition in ("replace", "window-generation", "backing-epoch"):
++                with self.subTest(compatible=compatible, legacy=legacy, transition=transition):
++                    draw, window, backing, calls, sent = self.make_draw()
++                    pending_ui = []
++                    draw.idle_add = lambda callback, *args: pending_ui.append((callback, args))
++                    mmap_client = CountedMmap(draw.client)
++                    mmap_client.release_count = 0
++                    area = AdHocStruct()
++                    mmap_client.mmap_read_area = area
++                    draw.client.subsystems["mmap"] = mmap_client
++                    with mmap.mmap(-1, 4096) as memory, \
++                            patch.object(draw_module, "BACKWARDS_COMPATIBLE", compatible), \
++                            patch.object(mmap_module, "BACKWARDS_COMPATIBLE", compatible):
++                        area.mmap = memory
++                        int_from_buffer(memory, 0).value = 8
++                        chunks = ((16, 8),)
++                        fields = list(self.packet(coding="mmap"))
++                        fields[7] = chunks if legacy else b""
++                        if not legacy:
++                            fields[10]["chunks"] = chunks
++                        draw._process_draw(Packet(*fields))
++                        if transition == "replace":
++                            replacement = AdHocStruct()
++                            replacement._subsurface_local_backing_epoch = 1
++                            window._backing = replacement
++                        elif transition == "window-generation":
++                            window._subsurface_backing_generation += 1
++                        else:
++                            backing._subsurface_local_backing_epoch += 1
++                        fn, args = draw.decode_work.pop()
++                        fn(*args)
++                        self.assertEqual(calls, [])
++                        self.assertEqual(sent, [])
++                        self.assertEqual(len(pending_ui), 1)
++                        self.assertEqual(int_from_buffer(memory, 0).value, 8)
++                        fn, args = pending_ui.pop()
++                        fn(*args)
++                        self.assertEqual(mmap_client.release_count, 1)
++                        self.assertEqual(int_from_buffer(memory, 0).value, 24)
++                        self.assertEqual(len(sent), 1)
++                        self.assertIn("stale subsurface draw target", sent[0][-1])
++                        self.assertEqual(backing.rejects, [])
++                        self.assertTrue(backing.composite_active)
++                    mmap_client.mmap_read_area = None
 +
 +    def test_dequeued_composite_rejects_reconfigured_same_backing(self):
 +        draw, _window, backing, calls, sent = self.make_draw()
@@ -2423,12 +2516,51 @@ index 4ae7adad457736781ea9f61f65e63aac5f8ea248..ecac254e5a35666b5825b8f83ab1b6d3
      def test_nothing_written_before_mapping(self):
          client, window = self.make_window()
          self.assertEqual(client.drain(), b"")
+diff --git a/tests/unittests/unit/client/x11_client_paint_test.py b/tests/unittests/unit/client/x11_client_paint_test.py
+index 43e74f1b409f6fce3dfc155db40ea054ff722630..37df1d4c6bfdc5d29d66ccc609c9b738ee9f7039 100644
+--- a/tests/unittests/unit/client/x11_client_paint_test.py
++++ b/tests/unittests/unit/client/x11_client_paint_test.py
+@@ -34,6 +34,14 @@ GREY = (128, 128, 128)
+ 
+ class X11ClientPaintTest(X11ClientTestUtil):
+ 
++    def _report_paint_failure(self, *processes):
++        # Preserve the first pixel failure and its real peers' diagnostics before
++        # teardown or a later native X11 failure can hide unittest's summary.
++        log.error("X11 client paint check failed", exc_info=True)
++        for proc in processes:
++            if proc is not None:
++                self.show_proc_pipes(proc)
++
+     def _quadrant_centers(self, cw, ch):
+         # sample near a corner of each quadrant, away from the "R"/"G"/"B"
+         # text labels colors-plain draws at the center of the red/green/blue
+@@ -68,6 +76,9 @@ class X11ClientPaintTest(X11ClientTestUtil):
+                 x, y = point
+                 self.wait_for_client_pixel(xvfb.display, xid, x, y, expected, tolerance=tolerance)
+                 log("colors-plain %s quadrant OK at (%i, %i)", name, x, y)
++        except Exception:
++            self._report_paint_failure(client, server, xvfb)
++            raise
+         finally:
+             if client:
+                 self.terminate_and_wait(client)
+@@ -122,6 +133,9 @@ class X11ClientPaintTest(X11ClientTestUtil):
+                     x, y = point
+                     self.wait_for_client_pixel(client_display, xid, x, y, expected, tolerance=4)
+                     log("colors-plain %s quadrant OK at (%i, %i)", name, x, y)
++            except Exception:
++                self._report_paint_failure(client, server, xvfb)
++                raise
+             finally:
+                 if client:
+                     self.terminate_and_wait(client)
 diff --git a/tests/unittests/unit/server/window/subsurface_source_test.py b/tests/unittests/unit/server/window/subsurface_source_test.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc4a03af78
+index 0000000000000000000000000000000000000000..fe80c42f44b0297c138fb8e4ad333e0fca945a01
 --- /dev/null
 +++ b/tests/unittests/unit/server/window/subsurface_source_test.py
-@@ -0,0 +1,3459 @@
+@@ -0,0 +1,3633 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 kogeler
@@ -2438,10 +2570,10 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +import threading
 +import unittest
 +from collections import deque
-+from types import SimpleNamespace
++from contextlib import contextmanager
++from types import MappingProxyType, SimpleNamespace
 +from unittest.mock import Mock, patch
 +
-+from xpra.common import SUBSURFACE_COMPOSITE_FORMATS, SUBSURFACE_COMPOSITE_MODE
 +from xpra.net.common import BACKWARDS_COMPATIBLE, Packet
 +from xpra.net.packet_type import WINDOW_CREATE, WINDOW_DESTROY, WINDOW_DRAW, WINDOW_EOS, WINDOW_ICON
 +from xpra.server.source.avsync import AVSyncConnection
@@ -2458,10 +2590,46 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +from xpra.util.objects import typedict
 +
 +MMAP_DRAIN_DATA = "_mmap-drain-data"
++SUBSURFACE_COMPOSITE_MODE = "premultiplied-source-over-v1"
++SUBSURFACE_COMPOSITE_FORMATS = ("BGRA", "RGBA", "BGRX", "RGBX")
 +
 +
-+class _CalculationConnection(WindowsConnection, EncodingsConnection):
-+    """Compose the real source and calculator owners without a transport."""
++@contextmanager
++def source_scheduler(kind="idle", **kwargs):
++    """Control Source attachment without replacing the ownership algorithm."""
++    from xpra.server.source.window import GLib
++
++    schedule = Mock(return_value=1, **{k: v for k, v in kwargs.items() if k != "return_value"})
++    if "return_value" in kwargs:
++        schedule.return_value = kwargs["return_value"]
++    schedule.sources = []
++    schedule.destroyed = Mock()
++
++    class TestSource:
++        def __init__(self, create_args):
++            self.create_args = create_args
++            self.callback = None
++            self.destroy_count = 0
++
++        def set_callback(self, callback):
++            self.callback = callback
++
++        def attach(self, context):
++            assert context is None
++            return schedule(*self.create_args, self.callback)
++
++        def destroy(self):
++            if not self.destroy_count:
++                self.destroy_count = 1
++                schedule.destroyed(self)
++
++    def create(*args):
++        source = TestSource(args)
++        schedule.sources.append(source)
++        return source
++
++    with patch.object(GLib, kind + "_source_new", side_effect=create):
++        yield schedule
 +
 +
 +class _ClipboardTransport(ClientConnection, ClipboardConnection):
@@ -2678,6 +2846,19 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +class WindowSourceCompletionTest(unittest.TestCase):
 +
++    def test_standalone_snapshot_accepts_mapping_subclasses_without_mutation(self) -> None:
++        source = WindowSource.__new__(WindowSource)
++        for mapping_type in (dict, typedict, MappingProxyType):
++            with self.subTest(mapping_type=mapping_type.__name__):
++                original = {"window-size": (100, 80), "backing-epoch": 7}
++                options = mapping_type(dict(original))
++                snapshot = source.snapshot_damage_options(source, options)
++                self.assertIs(type(snapshot), dict)
++                self.assertIsNot(snapshot, options)
++                self.assertEqual(snapshot, original)
++                snapshot["backing-epoch"] = 8
++                self.assertEqual(options, original)
++
 +    @staticmethod
 +    def make_image():
 +        image = Mock()
@@ -2686,6 +2867,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +    def test_zero_size_filtered_image_is_freed_and_completes_failure(self) -> None:
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.wid = 0x20
 +        source.window = Mock()
 +        source.window.is_managed.return_value = True
@@ -2712,6 +2894,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +    def test_capture_callback_failure_frees_filtered_image_and_completes_once(self) -> None:
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.wid = 0x20
 +        source.window = Mock()
 +        source.window.is_managed.return_value = True
@@ -2742,6 +2925,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +    def test_supplied_capture_is_consumed_without_reading_the_live_model(self) -> None:
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.wid = 0x20
 +        source.window = Mock()
 +        source.window.is_managed.return_value = True
@@ -2771,6 +2955,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +    def test_supplied_capture_is_freed_on_pre_encode_abort(self) -> None:
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.wid = 0x20
 +        source.window = Mock()
 +        source.window.is_managed.return_value = False
@@ -3002,12 +3187,38 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +class SubsurfaceOwnershipTest(unittest.TestCase):
 +
++    def test_connection_snapshot_accepts_mapping_subclasses_and_preserves_epochs(self) -> None:
++        connection = self.make_connection()
++        parent = _FakePixelSource(0x10)
++        child = _FakePixelSource(0x20, parent_wid=parent.wid)
++        connection.subsurface_sources[child.wid] = child
++        connection._backing_epochs[parent.wid] = 7
++        for source in (parent, child):
++            connection.configure_pixel_source(source)
++            epoch_key = "subsurface-backing-epoch" if source is child else "backing-epoch"
++            for mapping_type in (dict, typedict, MappingProxyType):
++                for explicit_epoch in (None, 5):
++                    with self.subTest(source=source.wid, mapping_type=mapping_type.__name__,
++                                      explicit_epoch=explicit_epoch):
++                        original = {"window-size": (100, 80)}
++                        if source is child:
++                            original["subsurface-composite"] = SUBSURFACE_COMPOSITE_MODE
++                        if explicit_epoch is not None:
++                            original[epoch_key] = explicit_epoch
++                        options = mapping_type(dict(original))
++                        snapshot = source.snapshot_damage_options(source, options)
++                        self.assertIs(type(snapshot), dict)
++                        self.assertIsNot(snapshot, options)
++                        expected = dict(original)
++                        expected.setdefault(epoch_key, 7)
++                        self.assertEqual(snapshot, expected)
++                        snapshot[epoch_key] = 8
++                        self.assertEqual(options, original)
++
 +    @staticmethod
 +    def make_connection(connection_class=WindowsConnection):
 +        connection = connection_class()
 +        WindowsConnection.init_state(connection)
-+        if isinstance(connection, EncodingsConnection):
-+            EncodingsConnection.init_state(connection)
 +        connection.window_enabled = True
 +        connection.statistics = SimpleNamespace(client_decode_time=[])
 +        connection.may_recalculate = Mock()
@@ -3091,12 +3302,12 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +                    self.assertEqual(tuple(drain[2:]), parts[2:])
 +                    self.assertEqual((wid, pixels, more), (0, 0, False))
 +
-+    def test_background_calculation_retains_exact_source_until_callout_finishes(self) -> None:
-+        for phase, child in (("recalculate", False), ("recalculate", True),
++    def test_source_borrows_retain_statistics_and_batch_until_callout_finishes(self) -> None:
++        for phase, child in (("statistics", False), ("statistics", True),
 +                             ("weighted-average", False), ("bandwidth", False),
 +                             ("bandwidth-assign", False)):
 +            with self.subTest(phase=phase, child=child):
-+                connection = self.make_connection(_CalculationConnection)
++                connection = self.make_connection()
 +                source = _FakePixelSource(0x20, 0x10 if child else 0)
 +                sources = connection.subsurface_sources if child else connection.window_sources
 +                sources[source.wid] = source
@@ -3130,7 +3341,6 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +                connection.is_closed = lambda: False
 +                connection.get_focus = lambda: 0
 +                connection.statistics = None
-+                connection.calculate_window_ids = {source.wid} if phase == "recalculate" else set()
 +                connection.global_batch_config = SimpleNamespace(last_delays=[])
 +                if phase == "weighted-average":
 +                    class DelayedBatch:
@@ -3160,7 +3370,14 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +                    if phase.startswith("bandwidth"):
 +                        BandwidthConnection.update_bandwidth_limits(connection)
 +                    else:
-+                        EncodingsConnection.recalculate_delays(connection)
++                        with connection.pixel_source_operation(source) as owner:
++                            self.assertIs(owner, source)
++                            if phase == "weighted-average":
++                                self.assertEqual(owner.batch_config.last_updated, 1)
++                            else:
++                                owner.statistics.update_averages()
++                                owner.calculate_batch_delay()
++                                owner.reconfigure()
 +
 +                def run(callback):
 +                    try:
@@ -3199,39 +3416,22 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +                self.assertTrue(source.cleanup_finished.is_set())
 +                self.assertEqual(connection._damage_packet_active_ops, {})
 +
-+    def test_recalculation_rejects_source_replaced_after_lookup(self) -> None:
-+        connection = self.make_connection(_CalculationConnection)
++    def test_borrow_rejects_exact_source_replaced_after_lookup(self) -> None:
++        connection = self.make_connection()
 +        old = _FakePixelSource(0x20)
 +        replacement = _FakePixelSource(old.wid)
-+        for source in (old, replacement):
-+            source.maximized = source.fullscreen = False
-+            source.batch_config.last_updated = 0
-+            source.statistics.update_averages = Mock()
-+            source.calculate_batch_delay = Mock()
-+            source.reconfigure = Mock()
 +        connection.window_sources[old.wid] = old
 +        connection.configure_pixel_source(old)
-+        connection.protocol = SimpleNamespace(
-+            is_closed=lambda: False, _conn=SimpleNamespace(output_bytecount=0, socktype_wrapped=""),
-+        )
-+        connection.is_closed = lambda: False
-+        connection.get_focus = lambda: 0
-+        connection.statistics = None
-+        connection.calculate_window_ids = {old.wid}
-+
-+        def replace_after_lookup(_wid):
-+            connection.window_sources[old.wid] = replacement
-+            connection.configure_pixel_source(replacement)
-+            connection.unregister_damage_packets(old)
-+            return old
-+
-+        with patch.object(connection, "get_pixel_source", side_effect=replace_after_lookup), \
-+                patch("xpra.server.source.encoding.may_update_bandwidth_limits"):
-+            EncodingsConnection.recalculate_delays(connection)
-+        old.statistics.update_averages.assert_not_called()
-+        old.calculate_batch_delay.assert_not_called()
-+        old.reconfigure.assert_not_called()
-+        replacement.reconfigure.assert_not_called()
++        borrowed = connection.get_pixel_source(old.wid)
++        self.assertIs(borrowed, old)
++        connection.window_sources[old.wid] = replacement
++        connection.configure_pixel_source(replacement)
++        connection.unregister_damage_packets(old)
++        with connection.pixel_source_operation(borrowed) as owner:
++            self.assertIsNone(owner)
++        with connection.pixel_source_operation(replacement) as owner:
++            self.assertIs(owner, replacement)
++        self.assertEqual(connection._damage_packet_active_ops, {})
 +
 +    def test_source_operation_rejects_detached_replaced_and_closing_sources(self) -> None:
 +        connection = self.make_connection()
@@ -3655,7 +3855,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +        connection.window_sources[parent.wid] = parent
 +        connection.configure_pixel_source(parent)
 +
-+        with patch("xpra.server.source.window.GLib.idle_add") as idle_add:
++        with source_scheduler("idle") as idle_add:
 +            connection.update_subsurface_geometries(parent.wid, (), (parent.wid,))
 +
 +        self.assertEqual(connection.subsurface_stacking[parent.wid], (parent.wid,))
@@ -3673,7 +3873,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +        connection.configure_pixel_source(parent)
 +        connection.configure_pixel_source(child)
 +
-+        with patch("xpra.server.source.window.GLib.idle_add") as idle_add:
++        with source_scheduler("idle") as idle_add:
 +            connection.cleanup_subsurface_source(child.wid)
 +
 +        self.assertEqual(connection.subsurface_stacking[parent.wid], (parent.wid,))
@@ -3754,7 +3954,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +        connection.configure_pixel_source(parent)
 +        connection.configure_pixel_source(child)
 +
-+        with patch("xpra.server.source.window.GLib.idle_add", side_effect=RuntimeError("idle failed")):
++        with source_scheduler("idle", side_effect=RuntimeError("idle failed")):
 +            connection.request_subsurface_composite(parent.wid, parent_region=(2, 3, 10, 11))
 +
 +        state = connection._subsurface_composites[parent.wid]
@@ -3767,7 +3967,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            callback(*args)
 +            return 1
 +
-+        with patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now):
++        with source_scheduler("idle", side_effect=run_now):
 +            connection.request_subsurface_composite(parent.wid, parent_region=(4, 5, 2, 2))
 +
 +        self.assertNotIn(parent.wid, connection._subsurface_composites)
@@ -3789,7 +3989,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            return 41
 +
 +        with (
-+            patch("xpra.server.source.window.GLib.idle_add", side_effect=retain),
++            source_scheduler("idle", side_effect=retain) as idle_sources,
 +            patch("xpra.server.source.window.GLib.source_remove") as source_remove,
 +        ):
 +            connection.request_subsurface_composite(
@@ -3799,7 +3999,8 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +            connection.remove_window(parent.wid, parent.window)
 +
-+            source_remove.assert_called_once_with(41)
++            source_remove.assert_not_called()
++            idle_sources.destroyed.assert_called_once_with(idle_sources.sources[0])
 +            self.assertEqual(connection._subsurface_glib_sources, {})
 +            callback, args = scheduled[0]
 +            self.assertFalse(callback(*args))
@@ -3831,7 +4032,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            daemon=True,
 +        )
 +        with (
-+            patch("xpra.server.source.window.GLib.idle_add", side_effect=delayed_registration),
++            source_scheduler("idle", side_effect=delayed_registration) as idle_sources,
 +            patch("xpra.server.source.window.GLib.source_remove") as source_remove,
 +        ):
 +            request.start()
@@ -3841,10 +4042,91 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            request.join(2)
 +
 +            self.assertFalse(request.is_alive())
-+            source_remove.assert_called_once_with(42)
++            source_remove.assert_not_called()
++            idle_sources.destroyed.assert_called_once_with(idle_sources.sources[0])
 +            self.assertEqual(connection._subsurface_glib_sources, {})
 +            callback, args = scheduled[0]
 +            self.assertFalse(callback(*args))
++
++    def test_real_glib_sources_survive_early_dispatch_and_late_attachment(self) -> None:
++        from xpra.server.source.window import GLib
++
++        for kind in ("idle", "watchdog"):
++            for cancel in (False, True):
++                with self.subTest(kind=kind, cancel=cancel):
++                    connection = self.make_connection()
++                    token = object()
++                    connection._subsurface_composites[0x10] = {"token": token}
++                    context = GLib.MainContext.new()
++                    callback = Mock()
++                    real_source = (
++                        GLib.idle_source_new() if kind == "idle" else GLib.timeout_source_new(0)
++                    )
++                    successor = GLib.idle_source_new()
++
++                    class EarlySource:
++                        def set_callback(self, dispatch):
++                            real_source.set_callback(dispatch)
++
++                        def attach(self, _context):
++                            source_id = real_source.attach(context)
++                            if cancel:
++                                connection._cancel_subsurface_glib_sources(0x10)
++                            else:
++                                self_test.assertTrue(context.iteration(False))
++                                self_test.assertTrue(real_source.is_destroyed())
++                            successor.set_callback(lambda *_args: False)
++                            successor.attach(context)
++                            return source_id
++
++                        def destroy(self):
++                            real_source.destroy()
++
++                    self_test = self
++                    owner = EarlySource()
++                    try:
++                        with patch.object(GLib, "source_remove") as numeric_remove:
++                            result = connection._register_subsurface_glib_source(
++                                0x10, token, kind, lambda: owner, callback,
++                            )
++                            self.assertIs(result, None if cancel else owner)
++                            self.assertEqual(callback.call_count, 0 if cancel else 1)
++                            self.assertTrue(real_source.is_destroyed())
++                            self.assertFalse(successor.is_destroyed())
++                            self.assertEqual(connection._subsurface_glib_sources, {})
++                            self.assertFalse(connection._remove_subsurface_glib_source(
++                                owner, 0x10, token, kind,
++                            ))
++                            self.assertFalse(successor.is_destroyed())
++                            numeric_remove.assert_not_called()
++                            self.assertTrue(context.iteration(False))
++                            self.assertTrue(successor.is_destroyed())
++                    finally:
++                        real_source.destroy()
++                        successor.destroy()
++
++    def test_source_registration_failure_releases_only_its_reservation(self) -> None:
++        for phase in ("construct", "callback", "attach"):
++            with self.subTest(phase=phase):
++                connection = self.make_connection()
++                token = object()
++                connection._subsurface_composites[0x10] = {"token": token}
++                source = Mock()
++                source.attach.return_value = 1
++                failure = RuntimeError("source " + phase + " failed")
++                if phase == "callback":
++                    source.set_callback.side_effect = failure
++                elif phase == "attach":
++                    source.attach.side_effect = failure
++                create = Mock(return_value=source)
++                if phase == "construct":
++                    create.side_effect = failure
++                with self.assertRaisesRegex(RuntimeError, "source .* failed"):
++                    connection._register_subsurface_glib_source(
++                        0x10, token, "idle", create, Mock(),
++                    )
++                self.assertEqual(connection._subsurface_glib_sources, {})
++                self.assertEqual(source.destroy.call_count, 0 if phase == "construct" else 1)
 +
 +    def test_refusal_cancels_watchdog_and_late_stage_completion(self) -> None:
 +        connection = self.make_connection()
@@ -3872,8 +4154,8 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            return 77
 +
 +        with (
-+            patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now),
-+            patch("xpra.server.source.window.GLib.timeout_add", side_effect=retain_watchdog),
++            source_scheduler("idle", side_effect=run_now),
++            source_scheduler("timeout", side_effect=retain_watchdog) as watchdog_sources,
 +            patch("xpra.server.source.window.GLib.source_remove") as source_remove,
 +        ):
 +            connection.request_subsurface_composite(
@@ -3887,7 +4169,8 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +            self.assertTrue(connection.refuse_window(parent.wid, model, "unsupported composition"))
 +
-+            source_remove.assert_called_once_with(77)
++            source_remove.assert_not_called()
++            watchdog_sources.destroyed.assert_called_once_with(watchdog_sources.sources[0])
 +            self.assertEqual(connection._subsurface_glib_sources, {})
 +            # Teardown owns the untouched child snapshot, while the encode
 +            # completion retains the already-handed root snapshot.
@@ -3915,8 +4198,8 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            return 1
 +
 +        with (
-+            patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now),
-+            patch("xpra.server.source.window.GLib.timeout_add", return_value=78),
++            source_scheduler("idle", side_effect=run_now),
++            source_scheduler("timeout", return_value=78) as watchdog_sources,
 +            patch("xpra.server.source.window.GLib.source_remove") as source_remove,
 +        ):
 +            connection.request_subsurface_composite(
@@ -3930,7 +4213,8 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            late_completion = parent.packet_completions.pop(0)
 +            connection.cleanup()
 +
-+            source_remove.assert_called_once_with(78)
++            source_remove.assert_not_called()
++            watchdog_sources.destroyed.assert_called_once_with(watchdog_sources.sources[0])
 +            self.assertEqual((parent_image.free_count, child_image.free_count), (0, 1))
 +            self.assertEqual(connection._subsurface_composites, {})
 +            self.assertEqual(connection._subsurface_glib_sources, {})
@@ -3943,7 +4227,8 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            self.assertEqual((parent_image.free_count, child_image.free_count), (1, 1))
 +            self.assertEqual(connection._subsurface_composites, {})
 +            self.assertEqual(connection._subsurface_glib_sources, {})
-+            source_remove.assert_called_once_with(78)
++            source_remove.assert_not_called()
++            watchdog_sources.destroyed.assert_called_once_with(watchdog_sources.sources[0])
 +
 +    def test_connection_cleanup_cancels_owned_idle_callback(self) -> None:
 +        connection = self.make_connection()
@@ -3958,7 +4243,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            return 43
 +
 +        with (
-+            patch("xpra.server.source.window.GLib.idle_add", side_effect=retain),
++            source_scheduler("idle", side_effect=retain) as idle_sources,
 +            patch("xpra.server.source.window.GLib.source_remove") as source_remove,
 +        ):
 +            connection.request_subsurface_composite(
@@ -3966,7 +4251,8 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            )
 +            connection.cleanup()
 +
-+            source_remove.assert_called_once_with(43)
++            source_remove.assert_not_called()
++            idle_sources.destroyed.assert_called_once_with(idle_sources.sources[0])
 +            self.assertEqual(connection._subsurface_glib_sources, {})
 +            callback, args = scheduled[0]
 +            self.assertFalse(callback(*args))
@@ -3998,20 +4284,23 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            return len(scheduled)
 +
 +        with (
-+            patch("xpra.server.source.window.GLib.idle_add", side_effect=retain),
++            source_scheduler("idle", side_effect=retain),
 +            self.assertRaisesRegex(RuntimeError, "property replay failed"),
 +        ):
 +            connection.update_subsurface_geometry(
 +                child.wid, new_parent.wid, 7, 8, 20, 10, 20, 10,
 +            )
 +
-+        self.assertEqual({args[0] for _callback, args in scheduled}, {old_parent.wid, new_parent.wid})
++        self.assertEqual(
++            {record["parent-wid"] for record in connection._subsurface_glib_sources.values()},
++            {old_parent.wid, new_parent.wid},
++        )
 +        self.assertTrue(connection._subsurface_composites[old_parent.wid]["running"])
 +        self.assertTrue(connection._subsurface_composites[new_parent.wid]["running"])
 +
 +        # The already-published repair schedules remain usable even though
 +        # client-property replay reported its independent failure.
-+        with patch("xpra.server.source.window.GLib.idle_add", side_effect=retain):
++        with source_scheduler("idle", side_effect=retain):
 +            while scheduled:
 +                callback, args = scheduled.pop(0)
 +                callback(*args)
@@ -4062,7 +4351,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +        connection.configure_pixel_source(child)
 +        completed = Mock()
 +
-+        with patch("xpra.server.source.window.GLib.idle_add", return_value=1) as idle_add:
++        with source_scheduler("idle", return_value=1) as idle_add:
 +            queued = WindowSource.process_damage_region(
 +                child, 1.0, 2, 3, 11, 13, "rgb32", {}, packet_complete=completed,
 +            )
@@ -4089,6 +4378,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +        from xpra.os_util import gi_import
 +
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.wid = 0x10
 +        source.window = Mock()
 +        source.window.is_managed.return_value = True
@@ -4232,6 +4522,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +    def test_damage_logs_bind_child_publish_and_ack_to_wire_parent(self) -> None:
 +        connection = self.make_connection()
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.wid = 0x20
 +        source.statistics = SimpleNamespace(
 +            damage_ack_pending={}, damage_in_latency=[], last_packet_time=0,
@@ -4252,7 +4543,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            patch("xpra.server.window.compress.damagelog") as publish_log,
 +            patch("xpra.server.source.window.damagelog") as ack_log,
 +        ):
-+            WindowSource.queue_damage_packet(source, packet, 1.0, 1.0)
++            WindowSource.queue_damage_packet(source, packet, 1.0, 1.0, typedict())
 +            connection.client_ack_damage(sequence, 0x10, 1, 1, 1, "ok")
 +
 +        publish_log.assert_called_once_with(
@@ -4291,6 +4582,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +    def test_source_ack_clears_pending_before_optional_statistics(self) -> None:
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.wid = 0x20
 +        decode_times = Mock()
 +        decode_times.append.side_effect = RuntimeError("decode statistics failed")
@@ -4331,7 +4623,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            callback(*args)
 +            return 1
 +
-+        with patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now):
++        with source_scheduler("idle", side_effect=run_now):
 +            connection.request_subsurface_composite(
 +                parent.wid, parent_region=(10, 5, 50, 45),
 +            )
@@ -4386,7 +4678,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            callback(*args)
 +            return 1
 +
-+        with patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now):
++        with source_scheduler("idle", side_effect=run_now):
 +            connection.request_subsurface_composite(
 +                parent.wid, parent_region=(0, 0, 20, 20),
 +            )
@@ -4417,7 +4709,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +                    callback(*args)
 +                    return 1
 +
-+                with patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now):
++                with source_scheduler("idle", side_effect=run_now):
 +                    connection.request_subsurface_composite(
 +                        parent.wid, parent_region=(0, 0, 20, 20),
 +                    )
@@ -4449,7 +4741,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            callback(*args)
 +            return 1
 +
-+        with patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now):
++        with source_scheduler("idle", side_effect=run_now):
 +            connection.request_subsurface_composite(
 +                parent.wid, parent_region=(0, 0, 20, 20),
 +            )
@@ -4478,7 +4770,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            callback(*args)
 +            return 1
 +
-+        with patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now):
++        with source_scheduler("idle", side_effect=run_now):
 +            connection.request_subsurface_composite(
 +                parent.wid, parent_region=(0, 0, 20, 20),
 +            )
@@ -4521,7 +4813,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            callback(*args)
 +            return 1
 +
-+        with patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now):
++        with source_scheduler("idle", side_effect=run_now):
 +            connection.update_subsurface_geometries(
 +                parent.wid,
 +                ((child.wid, 20, 10, 30, 20, 30, 20),),
@@ -4557,7 +4849,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            callback(*args)
 +            return 1
 +
-+        with patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now):
++        with source_scheduler("idle", side_effect=run_now):
 +            connection.request_subsurface_composite(
 +                parent.wid, parent_region=(0, 0, 20, 20),
 +            )
@@ -4611,7 +4903,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            callback(*args)
 +            return 1
 +
-+        with patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now):
++        with source_scheduler("idle", side_effect=run_now):
 +            connection.request_subsurface_composite(
 +                parent.wid, parent_region=(0, 0, 20, 20),
 +            )
@@ -4680,8 +4972,8 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            self.assertFalse(callback(*args))
 +
 +        with (
-+            patch("xpra.server.source.window.GLib.idle_add", side_effect=retain),
-+            patch("xpra.server.source.window.GLib.timeout_add", return_value=99),
++            source_scheduler("idle", side_effect=retain),
++            source_scheduler("timeout", return_value=99),
 +            patch("xpra.server.source.window.GLib.source_remove"),
 +        ):
 +            connection.request_subsurface_composite(
@@ -4748,7 +5040,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            callback(*args)
 +            return 1
 +
-+        with patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now):
++        with source_scheduler("idle", side_effect=run_now):
 +            connection.request_subsurface_composite(
 +                parent.wid, parent_region=(2, 3, 10, 11),
 +            )
@@ -4795,8 +5087,8 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            return len(timers)
 +
 +        with (
-+            patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now),
-+            patch("xpra.server.source.window.GLib.timeout_add", side_effect=add_timeout),
++            source_scheduler("idle", side_effect=run_now),
++            source_scheduler("timeout", side_effect=add_timeout),
 +            patch("xpra.server.source.window.GLib.source_remove"),
 +        ):
 +            connection.request_subsurface_composite(
@@ -4857,9 +5149,8 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            return 1
 +
 +        with (
-+            patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now),
-+            patch(
-+                "xpra.server.source.window.GLib.timeout_add",
++            source_scheduler("idle", side_effect=run_now),
++            source_scheduler("timeout",
 +                side_effect=RuntimeError("watchdog schedule failed"),
 +            ) as timeout_add,
 +        ):
@@ -4899,8 +5190,8 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            return 1
 +
 +        with (
-+            patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now),
-+            patch("xpra.server.source.window.GLib.timeout_add", return_value=99),
++            source_scheduler("idle", side_effect=run_now),
++            source_scheduler("timeout", return_value=99),
 +            patch("xpra.server.source.window.GLib.source_remove"),
 +        ):
 +            connection.request_subsurface_composite(
@@ -4989,8 +5280,8 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            return 1
 +
 +        with (
-+            patch("xpra.server.source.window.GLib.idle_add", side_effect=run_now),
-+            patch("xpra.server.source.window.GLib.timeout_add", return_value=99),
++            source_scheduler("idle", side_effect=run_now),
++            source_scheduler("timeout", return_value=99),
 +            patch("xpra.server.source.window.GLib.source_remove"),
 +        ):
 +            connection.resize_window(parent.wid, window, 80, 60, 7)
@@ -5012,6 +5303,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +    def test_packet_completion_reports_the_queue_publication_result_once(self) -> None:
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.statistics = SimpleNamespace(encoding_pending={})
 +        source.claim_damage_packet_publication = Mock()
 +        source.release_damage_packet_publication = Mock()
@@ -5036,6 +5328,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +                raise RuntimeError("pending registration failed")
 +
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.statistics = SimpleNamespace(encoding_pending=BrokenPending())
 +        source.is_cancelled = Mock(return_value=False)
 +        source.make_data_packet = Mock()
@@ -5054,6 +5347,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +    def test_completion_runs_even_when_mmap_lease_release_fails(self) -> None:
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.statistics = SimpleNamespace(encoding_pending={})
 +        lease = object()
 +        source.claim_damage_packet_publication = Mock(return_value=lease)
@@ -5080,6 +5374,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +    def test_draw_packet_uses_shared_sequence_and_retains_local_attempt_count(self) -> None:
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.wid = 0x20
 +        source._damage_packet_sequence = 7
 +        source.allocate_damage_packet_sequence = Mock(return_value=41)
@@ -5091,7 +5386,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +        client_options = {}
 +        packet = WindowSource.make_draw_packet(
-+            source, 1, 2, 10, 20, "rgb24", b"pixels", 40, client_options, {
++            source, 1, 2, 10, 20, "rgb24", b"pixels", 40, client_options, typedict({
 +                "window-size": (100, 80),
 +                "subsurface-composite": SUBSURFACE_COMPOSITE_MODE,
 +                "subsurface-backing-epoch": 3,
@@ -5099,7 +5394,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +                "subsurface-transaction-id": 5,
 +                "subsurface-stage-index": 0,
 +                "subsurface-stage-count": 2,
-+            },
++            }),
 +        )
 +        self.assertEqual((packet.get_wid(), packet.get_u64(8)), (0x10, 41))
 +        self.assertEqual((packet.get_i16(2), packet.get_i16(3)), (4, 6))
@@ -5126,6 +5421,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +        pending = {}
 +        queued = []
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.wid = 0x20
 +        source.statistics = SimpleNamespace(
 +            damage_ack_pending=pending, damage_in_latency=[], last_packet_time=0,
@@ -5152,7 +5448,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +        self.assertFalse(detached.is_set())
 +
 +        packet = Packet(WINDOW_DRAW, 0x10, 0, 0, 1, 1, "rgb24", b"x", 1, 4, {})
-+        WindowSource.queue_damage_packet(source, packet, 1.0, 1.0)
++        WindowSource.queue_damage_packet(source, packet, 1.0, 1.0, typedict())
 +        self.assertEqual(pending, {})
 +        self.assertEqual(queued, [])
 +        self.assertEqual(connection._damage_packet_owners, {})
@@ -5161,12 +5457,12 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            WINDOW_DRAW, 0x10, 0, 0, 1, 1, "mmap", b"", 2, 4,
 +            {"chunks": ((4096, 4),)},
 +        )
-+        WindowSource.queue_damage_packet(source, mmap_packet, 2.0, 2.0)
++        WindowSource.queue_damage_packet(source, mmap_packet, 2.0, 2.0, typedict())
 +        self.assertEqual(pending, {})
 +        self.assertEqual(queued, [])
 +
 +        WindowSource.queue_damage_packet(
-+            source, mmap_packet, 2.0, 2.0, publication_lease,
++            source, mmap_packet, 2.0, 2.0, typedict(), publication_lease=publication_lease,
 +        )
 +        detach_thread.join(2)
 +        self.assertFalse(detach_thread.is_alive())
@@ -5179,7 +5475,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +        self.assertEqual(connection._damage_packet_publication_leases, {})
 +
 +        WindowSource.queue_damage_packet(
-+            source, mmap_packet, 2.0, 2.0, publication_lease,
++            source, mmap_packet, 2.0, 2.0, typedict(), publication_lease=publication_lease,
 +        )
 +        self.assertEqual(len(queued), 1)
 +
@@ -5190,7 +5486,9 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            WINDOW_DRAW, 0x10, 0, 0, 1, 1, "mmap", b"", 3, 4,
 +            {"chunks": ((4100, 4),)},
 +        )
-+        WindowSource.queue_damage_packet(source, closing_packet, 3.0, 3.0, closing_lease)
++        WindowSource.queue_damage_packet(
++            source, closing_packet, 3.0, 3.0, typedict(), publication_lease=closing_lease,
++        )
 +        self.assertEqual(len(queued), 1)
 +        self.assertEqual(connection._damage_packet_publication_leases, {})
 +
@@ -5218,6 +5516,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +    def test_mmap_encode_keeps_its_claimed_area_during_detach(self) -> None:
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.rgb_formats = ("BGRX",)
 +        source.supports_transparency = True
 +        source.global_statistics = SimpleNamespace(mmap_bytes_sent=0, mmap_free_size=0)
@@ -5254,6 +5553,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +        connection = self.make_connection()
 +        queued = []
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.wid = 0x20
 +        source.rgb_formats = ("BGRX",)
 +        source.supports_transparency = True
@@ -5322,6 +5622,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +        connection = self.make_connection()
 +        queued = []
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.wid = 0x20
 +        source.statistics = SimpleNamespace(
 +            encoding_pending={}, damage_ack_pending={}, damage_in_latency=[], last_packet_time=0,
@@ -5390,6 +5691,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +    def test_mmap_write_requires_and_releases_a_publication_lease(self) -> None:
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.statistics = SimpleNamespace(encoding_pending={})
 +        source.claim_damage_packet_publication = Mock(return_value=None)
 +        source.release_damage_packet_publication = Mock()
@@ -5433,6 +5735,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +
 +    def test_standalone_mmap_drain_publishes_its_terminal_descriptor(self) -> None:
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.wid = 0x20
 +        source._damage_packet_sequence = 7
 +        source.allocate_damage_packet_sequence = WindowSource.allocate_damage_packet_sequence.__get__(source)
@@ -5454,6 +5757,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +    def test_publish_exception_rolls_back_owner_and_pending_ack(self) -> None:
 +        connection = self.make_connection()
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.wid = 0x20
 +        source.statistics = SimpleNamespace(
 +            damage_ack_pending={}, damage_in_latency=[], last_packet_time=0,
@@ -5473,7 +5777,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +                with self.subTest(error=type(error).__name__):
 +                    source.queue_packet.side_effect = error
 +                    with self.assertRaises(type(error)):
-+                        WindowSource.queue_damage_packet(source, packet, 1.0, 1.0)
++                        WindowSource.queue_damage_packet(source, packet, 1.0, 1.0, typedict())
 +                    self.assertEqual(source.statistics.damage_ack_pending, {})
 +                    self.assertEqual(source.statistics.damage_in_latency, [])
 +                    self.assertEqual(source.statistics.last_packet_time, 0)
@@ -5487,6 +5791,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +    def test_published_packet_survives_diagnostic_artifact_failure(self) -> None:
 +        connection = self.make_connection()
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.wid = 0x20
 +        source.statistics = SimpleNamespace(
 +            damage_ack_pending={}, damage_in_latency=[], last_packet_time=0,
@@ -5502,7 +5807,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +        packet = Packet(WINDOW_DRAW, 0x10, 0, 0, 1, 1, "rgb24", b"x", 1, 4, {})
 +
 +        with patch("xpra.server.window.compress.SCREEN_UPDATES_DIRECTORY", "/enabled"):
-+            published = WindowSource.queue_damage_packet(source, packet, 1.0, 1.0)
++            published = WindowSource.queue_damage_packet(source, packet, 1.0, 1.0, typedict())
 +
 +        self.assertTrue(published)
 +        source.queue_packet.assert_called_once()
@@ -5526,6 +5831,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +        transport.protocol = Mock()
 +        transport.protocol.source_has_more.side_effect = RuntimeError("wakeup failed")
 +        source = WindowSource.__new__(WindowSource)
++        source.schedule_auto_refresh = Mock()
 +        source.wid = 0x20
 +        source.statistics = SimpleNamespace(
 +            damage_ack_pending={}, damage_in_latency=[], last_packet_time=0,
@@ -5539,7 +5845,7 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +        connection.configure_pixel_source(source)
 +        packet = Packet(WINDOW_DRAW, 0x10, 0, 0, 1, 1, "rgb24", b"x", 1, 4, {})
 +
-+        published = WindowSource.queue_damage_packet(source, packet, 1.0, 1.0)
++        published = WindowSource.queue_damage_packet(source, packet, 1.0, 1.0, typedict())
 +
 +        self.assertTrue(published)
 +        self.assertEqual(tuple(transport.packet_queue), ((packet, source.wid, 1, False),))
@@ -5642,7 +5948,8 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            return 1
 +
 +        with (
-+            patch("xpra.server.source.window.GLib.idle_add", side_effect=schedule),
++            source_scheduler("idle", side_effect=schedule),
++            patch.object(connection, "_run_subsurface_composite") as run_composite,
 +            self.assertRaisesRegex(RuntimeError, "child cleanup failed"),
 +        ):
 +            connection.cleanup_subsurface_source(child.wid)
@@ -5652,9 +5959,14 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +        self.assertEqual(connection._damage_packet_sources, {id(parent): parent})
 +        self.assertEqual(len(scheduled), 1)
 +        self.assertTrue(callable(scheduled[0][0]))
-+        self.assertEqual(scheduled[0][1][0], parent.wid)
 +        state = connection._subsurface_composites[parent.wid]
 +        self.assertEqual(state["pending_region"], (3, 4, 5, 6))
++        callback, args = scheduled[0]
++        self.assertFalse(callback(*args))
++        run_composite.assert_called_once_with(parent.wid, state["token"])
++        # False hands one-shot destruction to GLib; the connection must have
++        # relinquished its reservation before the exact repair is dispatched.
++        self.assertEqual(connection._subsurface_glib_sources, {})
 +
 +    def test_parent_removal_attempts_every_child_cleanup_after_error(self) -> None:
 +        connection = self.make_connection()
@@ -5750,11 +6062,6 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +        connection.no_idle()
 +        connection.cleanup_video_encoders()
 +        connection.reinit_encoders()
-+        cuda_context = object()
-+        connection.cuda_device_context = cuda_context
-+        EncodingsConnection.reinit_encodings(
-+            connection, SimpleNamespace(core_encodings=("png",), encodings=("png",)),
-+        )
 +        window = Mock()
 +        window.get_dimensions.return_value = (640, 480)
 +        parent.window = window
@@ -5800,7 +6107,6 @@ index 0000000000000000000000000000000000000000..dd23543fabfcb92b5f6f2612923456fc
 +            ):
 +                self.assertIn(expected, names)
 +            self.assertEqual(source.batch_config.delay, 12)
-+            self.assertIs(source.cuda_device_context, cuda_context)
 +        self.assertIn("video-clean", [name for name, _args in parent.calls])
 +        self.assertNotIn("video-clean", [name for name, _args in child.calls])
 +        connection.statistics.reset.assert_called_once_with()
@@ -6079,25 +6385,31 @@ index 0000000000000000000000000000000000000000..7694674fde5ca3e7b98518b632d309ed
 +    main()
 diff --git a/tests/unittests/unit/wayland/subsurface_discovery_client.c b/tests/unittests/unit/wayland/subsurface_discovery_client.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..c0f932c5477cfb2221e08c9604e22a74ffae0332
+index 0000000000000000000000000000000000000000..dbde697bd399a4b7cdd3c5845ab55b944c6d90fd
 --- /dev/null
 +++ b/tests/unittests/unit/wayland/subsurface_discovery_client.c
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,263 @@
 +/* This file is part of Xpra.
 + * Copyright (C) 2026 kogeler
 + * Xpra is released under the terms of the GNU GPL v2, or, at your option, any
 + * later version. See the file COPYING for details.
 + */
 +
++#define _POSIX_C_SOURCE 200809L
 +#include <stdio.h>
 +#include <stdlib.h>
 +#include <string.h>
++#include <sys/mman.h>
++#include <unistd.h>
 +#include <wayland-client.h>
 +#include "xdg-shell-client-protocol.h"
++#include "viewporter-client-protocol.h"
 +
 +static struct wl_compositor *compositor;
 +static struct wl_subcompositor *subcompositor;
 +static struct xdg_wm_base *shell;
++static struct wl_shm *shm;
++static struct wp_viewporter *viewporter;
 +
 +static void ping(void *data, struct xdg_wm_base *base, uint32_t serial) {
 +    (void)data;
@@ -6116,6 +6428,10 @@ index 0000000000000000000000000000000000000000..c0f932c5477cfb2221e08c9604e22a74
 +    } else if (strcmp(interface, "xdg_wm_base") == 0) {
 +        shell = wl_registry_bind(registry, name, &xdg_wm_base_interface, 1);
 +        xdg_wm_base_add_listener(shell, &shell_listener, NULL);
++    } else if (strcmp(interface, "wl_shm") == 0) {
++        shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
++    } else if (strcmp(interface, "wp_viewporter") == 0) {
++        viewporter = wl_registry_bind(registry, name, &wp_viewporter_interface, 1);
 +    }
 +}
 +
@@ -6170,13 +6486,90 @@ index 0000000000000000000000000000000000000000..c0f932c5477cfb2221e08c9604e22a74
 +    }
 +}
 +
++static void pixel_commits(struct wl_display *display, struct wl_surface *root,
++                          struct wl_surface *child) {
++    if (!shm || !viewporter) {
++        exit(1);
++    }
++    char name[] = "/tmp/xpra-subsurface-pixels-XXXXXX";
++    int fd = mkstemp(name);
++    if (fd < 0) {
++        exit(1);
++    }
++    unlink(name);
++    if (ftruncate(fd, 128) != 0) {
++        exit(1);
++    }
++    uint32_t *pixels = mmap(NULL, 128, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++    if (pixels == MAP_FAILED) {
++        exit(1);
++    }
++    for (int i = 0; i < 16; ++i) {
++        pixels[i] = 0x00112233;
++        pixels[16 + i] = 0xff112233;
++    }
++    struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, 128);
++    struct wl_buffer *opaque = wl_shm_pool_create_buffer(pool, 0, 4, 4, 16, WL_SHM_FORMAT_XRGB8888);
++    struct wl_buffer *alpha = wl_shm_pool_create_buffer(pool, 64, 4, 4, 16, WL_SHM_FORMAT_ARGB8888);
++    struct wp_viewport *viewport = wp_viewporter_get_viewport(viewporter, root);
++    wl_surface_attach(child, alpha, 0, 0);
++    wl_surface_damage(child, 0, 0, 4, 4);
++    wl_surface_commit(child);
++    wl_surface_attach(root, opaque, 0, 0);
++    wl_surface_damage(root, 0, 0, 4, 4);
++    wl_surface_commit(root);
++    roundtrip(display);
++    report_and_wait("pixels");
++
++    /* Change only raw formats: no damage or logical geometry changes. */
++    wl_surface_attach(child, opaque, 0, 0);
++    wl_surface_commit(child);
++    wl_surface_attach(root, alpha, 0, 0);
++    wl_surface_commit(root);
++    roundtrip(display);
++    report_and_wait("format");
++
++    /* This tiny attached buffer must never allocate the oversized raster. */
++    wp_viewport_set_destination(viewport, 65536, 65536);
++    wl_surface_commit(root);
++    roundtrip(display);
++    report_and_wait("oversized");
++    wp_viewport_set_destination(viewport, 4, 4);
++    wl_surface_commit(root);
++    roundtrip(display);
++    report_and_wait("recovered");
++
++    /* The reader injects one model retention failure, then sends no damage. */
++    wl_surface_damage(root, 0, 0, 4, 4);
++    wl_surface_commit(root);
++    roundtrip(display);
++    report_and_wait("failed-retain");
++    wl_surface_commit(root);
++    roundtrip(display);
++    report_and_wait("empty-recovered");
++
++    wl_surface_attach(child, NULL, 0, 0);
++    wl_surface_commit(child);
++    wl_surface_attach(root, NULL, 0, 0);
++    wl_surface_commit(root);
++    roundtrip(display);
++    report_and_wait("unmapped");
++    wp_viewport_destroy(viewport);
++    wl_buffer_destroy(opaque);
++    wl_buffer_destroy(alpha);
++    wl_shm_pool_destroy(pool);
++    munmap(pixels, 128);
++    close(fd);
++}
++
 +int main(int argc, char **argv) {
 +    if (argc != 2) {
 +        return 2;
 +    }
 +    const int prebuilt_root = strcmp(argv[1], "prebuilt-root") == 0;
 +    const int prebuilt_child = strcmp(argv[1], "prebuilt-child") == 0;
-+    if (!prebuilt_root && !prebuilt_child && strcmp(argv[1], "synchronized") != 0) {
++    const int test_pixels = strcmp(argv[1], "pixels") == 0;
++    if (!prebuilt_root && !prebuilt_child && !test_pixels && strcmp(argv[1], "synchronized") != 0) {
 +        return 2;
 +    }
 +    struct wl_display *display = wl_display_connect(NULL);
@@ -6227,6 +6620,9 @@ index 0000000000000000000000000000000000000000..c0f932c5477cfb2221e08c9604e22a74
 +    }
 +    /* No buffer is required for discovery: unmapped roles own listeners too. */
 +    report_and_wait("ready");
++    if (test_pixels) {
++        pixel_commits(display, root, child);
++    }
 +    wl_surface_commit(leaf);
 +    wl_surface_commit(child);
 +    wl_surface_commit(root);
@@ -6246,16 +6642,22 @@ index 0000000000000000000000000000000000000000..c0f932c5477cfb2221e08c9604e22a74
 +    wl_subcompositor_destroy(subcompositor);
 +    wl_compositor_destroy(compositor);
 +    xdg_wm_base_destroy(shell);
++    if (shm) {
++        wl_shm_destroy(shm);
++    }
++    if (viewporter) {
++        wp_viewporter_destroy(viewporter);
++    }
 +    wl_registry_destroy(registry);
 +    wl_display_disconnect(display);
 +    return 0;
 +}
 diff --git a/tests/unittests/unit/wayland/subsurface_discovery_test.py b/tests/unittests/unit/wayland/subsurface_discovery_test.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..1d2de9628c3e07f16705cb6488025dd02da9261a
+index 0000000000000000000000000000000000000000..70ea449df9173d0d2367fd2f434aca29c10fd0c6
 --- /dev/null
 +++ b/tests/unittests/unit/wayland/subsurface_discovery_test.py
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,250 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 kogeler
@@ -6278,18 +6680,21 @@ index 0000000000000000000000000000000000000000..1d2de9628c3e07f16705cb6488025dd0
 +    protocols = subprocess.check_output(
 +        ("pkg-config", "--variable=pkgdatadir", "wayland-protocols"), text=True,
 +    ).strip()
-+    protocol = Path(protocols) / "stable" / "xdg-shell" / "xdg-shell.xml"
-+    header = directory / "xdg-shell-client-protocol.h"
-+    code = directory / "xdg-shell-protocol.c"
-+    for kind, target in (("client-header", header), ("private-code", code)):
-+        subprocess.run(("wayland-scanner", kind, str(protocol), str(target)), check=True, timeout=30)
++    codes = []
++    for name in ("xdg-shell", "viewporter"):
++        protocol = Path(protocols) / "stable" / name / (name + ".xml")
++        header = directory / (name + "-client-protocol.h")
++        code = directory / (name + "-protocol.c")
++        for kind, target in (("client-header", header), ("private-code", code)):
++            subprocess.run(("wayland-scanner", kind, str(protocol), str(target)), check=True, timeout=30)
++        codes.append(str(code))
 +    flags = shlex.split(subprocess.check_output(
 +        ("pkg-config", "--cflags", "--libs", "wayland-client"), text=True,
 +    ))
 +    client = directory / "subsurface-discovery-client"
 +    subprocess.run((
 +        "cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-I", str(directory),
-+        str(Path(__file__).with_name("subsurface_discovery_client.c")), str(code),
++        str(Path(__file__).with_name("subsurface_discovery_client.c")), *codes,
 +        "-o", str(client), *flags,
 +    ), check=True, timeout=30)
 +    return client
@@ -6302,20 +6707,53 @@ index 0000000000000000000000000000000000000000..1d2de9628c3e07f16705cb6488025dd0
 +    os.environ.update(XDG_RUNTIME_DIR=str(runtime), XPRA_WAYLAND_GPU="no", WLR_RENDERER="pixman")
 +    from xpra.wayland.server.compositor import WaylandCompositor
 +    from xpra.wayland.server.wayland_surface import surfaces
++    from xpra.wayland.server.models.window import Window
++    from xpra.wayland.server.models.subsurface_window import SubsurfaceWindow
++    from xpra.wayland.server.subsystem.window import WaylandWindowServer
 +
 +    compositor = WaylandCompositor()
 +    roots = []
 +    children = []
 +    commits = []
++    models = {}
++    child_models = {}
++    root_commits = []
++
++    class ProbeWindowServer(WaylandWindowServer):
++        __slots__ = ()
++
++        def get_window(self, wid):
++            return models.get(wid)
++
++    server = ProbeWindowServer()
++
++    def child_snapshot(wid, _root_wid, _mapped, _has_buffer, _tree, _damage,
++                       image, width, height, *_rest):
++        model = child_models[wid]
++        model.replace_dimensions(width, height)
++        if image is None:
++            model.clear_image()
++        else:
++            model.replace_image_snapshot(image)
 +
 +    def child_created(parent_wid, child, *_args):
 +        children.append((parent_wid, child))
 +        child.connect("new-subsurface", child_created)
 +        child.connect("subsurface-commit", lambda wid, *_: commits.append(wid))
++        if mode == "pixels":
++            child_models[child.wid] = SubsurfaceWindow(0, 0)
++            child.connect("subsurface-commit", child_snapshot)
 +
 +    def root_created(root, *_args):
 +        roots.append(root)
 +        root.connect("new-subsurface", child_created)
++        if mode == "pixels":
++            models[root.wid] = Window({
++                "geometry": (0, 0, 4, 4), "image": None, "has-alpha": True, "surface": root,
++            })
++            root.connect("surface-snapshot", server.surface_snapshot)
++            root.connect("commit", lambda _wid, mapped, size, damage, _tree:
++                         root_commits.append((mapped, size, damage)))
 +
 +    compositor.connect("new-surface", root_created)
 +    process = None
@@ -6347,6 +6785,81 @@ index 0000000000000000000000000000000000000000..1d2de9628c3e07f16705cb6488025dd0
 +            pointers = tuple(surface.wl_surface_ptr for surface in wrappers)
 +            assert len(set(pointers)) == 3 and all(pointers), pointers
 +            assert all(surfaces.get(pointer) is surface for pointer, surface in zip(pointers, wrappers))
++
++            def advance(expected):
++                process.stdin.write(b"\n")
++                process.stdin.flush()
++                wait_for(expected)
++
++            if mode == "pixels":
++                root = roots[0]
++                model = models[root.wid]
++                child_model = child_models[direct.wid]
++
++                def check_frame(owner, alpha):
++                    image = owner.get_image(0, 0, 4, 4)
++                    assert image is not None and (image.get_width(), image.get_height()) == (4, 4), image
++                    try:
++                        assert ("A" in image.get_pixel_format()) == alpha, image
++                        assert owner.get_property("frame-has-alpha") == alpha
++                        assert owner.get_property("has-alpha") is True
++                        first = bytes(image.get_pixels())[:4]
++                        expected = b"\x33\x22\x11" if image.get_pixel_format().startswith("BGR") else b"\x11\x22\x33"
++                        assert first[:3] == expected, (image.get_pixel_format(), first)
++                    finally:
++                        image.free()
++
++                advance(b"pixels")
++                check_frame(model, False)
++                check_frame(child_model, True)
++                assert root.source_format == 0x34325258  # DRM_FORMAT_XRGB8888
++                # Synchronized child commit precedes its parent's first map;
++                # visibility must not erase its attached-buffer identity.
++                assert direct.source_format == 0x34325241, direct.source_format  # DRM_FORMAT_ARGB8888
++                generation = model.get_snapshot_generation()
++                advance(b"format")
++                check_frame(model, True)
++                check_frame(child_model, False)
++                assert root.source_format == 0x34325241
++                assert direct.source_format == 0x34325258, direct.source_format
++                assert model.get_snapshot_generation() > generation
++                assert root_commits[-1][2] == ((0, 0, 4, 4),), root_commits[-1]
++
++                advance(b"oversized")
++                assert root.get_size() == (65536, 65536)
++                assert not model.has_image()
++                try:
++                    image = root.capture_logical_pixels()
++                except ValueError as error:
++                    assert "exceeds maximum size" in str(error), error
++                else:
++                    if image is not None:
++                        image.free()
++                    raise AssertionError("oversized viewport was not rejected before readback")
++                advance(b"recovered")
++                check_frame(model, True)
++
++                original_set_image = model.set_image
++                failures = []
++
++                def fail_retention(_image):
++                    failures.append(True)
++                    raise MemoryError("injected native root retention failure")
++
++                model.set_image = fail_retention
++                try:
++                    advance(b"failed-retain")
++                finally:
++                    model.set_image = original_set_image
++                assert failures == [True], failures
++                assert not model.has_image()
++                advance(b"empty-recovered")
++                check_frame(model, True)
++                assert root_commits[-1][2] == ((0, 0, 4, 4),), root_commits[-1]
++                advance(b"unmapped")
++                assert not model.has_image() and not child_model.has_image()
++                assert root.source_format is None and direct.source_format is None
++
 +            commits.clear()
 +            process.stdin.write(b"\n")
 +            process.stdin.flush()
@@ -6359,6 +6872,7 @@ index 0000000000000000000000000000000000000000..1d2de9628c3e07f16705cb6488025dd0
 +            wait_for(b"destroyed")
 +            assert all(pointer not in surfaces for pointer in pointers), surfaces
 +            assert all(surface.wl_surface_ptr == 0 for surface in wrappers), wrappers
++            assert all(surface.source_format is None for surface in wrappers)
 +        returncode = process.wait(timeout=5)
 +        stderr = process.stderr.read().decode("utf-8", "replace")
 +        assert returncode == 0, (returncode, stderr)
@@ -6377,7 +6891,7 @@ index 0000000000000000000000000000000000000000..1d2de9628c3e07f16705cb6488025dd0
 +        with tempfile.TemporaryDirectory(prefix="xpra-subsurface-discovery-") as name:
 +            directory = Path(name)
 +            client = compile_client(directory)
-+            for mode in ("prebuilt-child", "prebuilt-root", "synchronized"):
++            for mode in ("prebuilt-child", "prebuilt-root", "synchronized", "pixels"):
 +                with self.subTest(mode=mode):
 +                    runtime = directory / mode
 +                    runtime.mkdir(mode=0o700)
@@ -6396,10 +6910,10 @@ index 0000000000000000000000000000000000000000..1d2de9628c3e07f16705cb6488025dd0
 +        unittest.main()
 diff --git a/tests/unittests/unit/wayland/subsurface_stream_test.py b/tests/unittests/unit/wayland/subsurface_stream_test.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..dc2a9177612eb21ae4df7f6434c156ef799c6168
+index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90eba94bf8
 --- /dev/null
 +++ b/tests/unittests/unit/wayland/subsurface_stream_test.py
-@@ -0,0 +1,1921 @@
+@@ -0,0 +1,1992 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 Antoine Martin <antoine@xpra.org>
@@ -6452,10 +6966,10 @@ index 0000000000000000000000000000000000000000..dc2a9177612eb21ae4df7f6434c156ef
 +        setattr(module, class_name, type(class_name, (), {}))
 +        modules[module_name] = module
 +    with patch.dict(sys.modules, modules):
-+        from xpra.wayland.server.subsystem.window import (
-+            WaylandWindowServer, replace_image_snapshot,
-+        )
-+    return WaylandWindowServer, replace_image_snapshot
++        from xpra.wayland.server.subsystem import window as window_server
++    return window_server.WaylandWindowServer, getattr(
++        window_server, "replace_image_snapshot", absent_case_callable("replace_image_snapshot"),
++    )
 +
 +
 +WaylandWindowServer, replace_image_snapshot = load_window_server_class()
@@ -6493,6 +7007,8 @@ index 0000000000000000000000000000000000000000..dc2a9177612eb21ae4df7f6434c156ef
 +        self.subsurface_stacking = {}
 +        self.subsurface_topology_errors = {}
 +        self._empty_damage_ack_timer = 0
++        self._empty_damage_ack_owner = None
++        self._empty_damage_ack_closed = False
 +        self._empty_damage_ack_windows = {}
 +        self.windows = {}
 +        self.sources = ()
@@ -7982,6 +8498,27 @@ index 0000000000000000000000000000000000000000..dc2a9177612eb21ae4df7f6434c156ef
 +        affine = wayland_sampling_affine(0, (0.25, 0.5, 2.5, 1.5), 2, 3)
 +        self.assertEqual(affine, (1.25, 0.0, 0.375, 0.0, 0.5, 0.25))
 +
++    def test_invalid_sampling_sizes_and_coordinates_fail_before_allocation(self):
++        from xpra.constants import MAX_WINDOW_SIZE
++
++        for size in ((0, 1), (1, 0), (MAX_WINDOW_SIZE + 1, 1), (1, 65536)):
++            with self.subTest(size=size), self.assertRaises(ValueError):
++                wayland_sampling_affine(0, (0.0, 0.0, 4.0, 4.0), *size)
++        for invalid in (float("inf"), float("-inf"), float("nan")):
++            for index in range(4):
++                box = [0.0, 0.0, 4.0, 4.0]
++                box[index] = invalid
++                with self.subTest(box=box), self.assertRaises(ValueError):
++                    wayland_sampling_affine(0, tuple(box), 4, 4)
++        source = self.make_image(2, 2)
++        try:
++            for size in ((MAX_WINDOW_SIZE + 1, 1), (1, MAX_WINDOW_SIZE + 1), (65536, 65536)):
++                with self.subTest(size=size), self.assertRaises(ValueError):
++                    image_for_xdg_geometry(source, (0, 0, *size))
++                self.assertTrue(source.has_pixels())
++        finally:
++            source.free()
++
 +    def test_effective_damage_translation_clipping_and_geometry_change(self):
 +        geometry = (2, -1, 4, 3)
 +        damage = ((1, 0, 4, 2), (5, -2, 3, 2), (20, 20, 1, 1))
@@ -8124,6 +8661,52 @@ index 0000000000000000000000000000000000000000..dc2a9177612eb21ae4df7f6434c156ef
 +    def make_image(pixel_format="BGRA") -> ImageWrapper:
 +        return ImageWrapper(0, 0, 2, 1, bytes((1, 2, 3, 4, 5, 6, 7, 8)), pixel_format, 32, 8)
 +
++    def test_retained_frame_alpha_tracks_bytes_not_the_backing_capability(self) -> None:
++        for model in (
++                Window({"geometry": (0, 0, 2, 1), "image": None, "has-alpha": True}),
++                SubsurfaceWindow(2, 1),
++        ):
++            with self.subTest(model=type(model).__name__):
++                for pixel_format in ("BGRX", "BGRA", "RGBX", "RGBA"):
++                    image = self.make_image(pixel_format)
++                    replace_image_snapshot(model, image)
++                    image.free()
++                    borrowed = model.get_image(0, 0, 2, 1)
++                    self.assertEqual(borrowed.get_pixel_format(), pixel_format)
++                    self.assertEqual(model.get_property("frame-has-alpha"), "A" in pixel_format)
++                    self.assertTrue(model.get_property("has-alpha"))
++                    model.clear_image()
++                    self.assertTrue(model.get_property("frame-has-alpha"))
++                    self.assertEqual(borrowed.get_pixel_format(), pixel_format)
++                    self.assertTrue(borrowed.has_pixels())
++                    borrowed.free()
++
++    def test_unmanage_disconnects_even_if_snapshot_release_raises(self) -> None:
++        window = Window({"geometry": (0, 0, 2, 1), "image": None})
++        window._managed = True
++        with (
++            patch.object(window, "clear_image", side_effect=RuntimeError("snapshot release failed")),
++            patch.object(window, "managed_disconnect") as disconnect,
++            self.assertRaisesRegex(RuntimeError, "snapshot release failed"),
++        ):
++            window.do_unmanaged(False)
++        self.assertFalse(window._managed)
++        disconnect.assert_called_once_with()
++
++    def test_root_retention_failure_reaches_native_capture_owner(self) -> None:
++        window = Window({"geometry": (0, 0, 2, 1), "image": None})
++        server = WindowTopologyHarness()
++        server.windows[7] = window
++        image = self.make_image("BGRX")
++        server.surface_snapshot(7, image)
++        with patch.object(window, "set_image", side_effect=MemoryError("retention failed")):
++            with self.assertRaisesRegex(MemoryError, "retention failed"):
++                server.surface_snapshot(7, image)
++        self.assertTrue(image.has_pixels())
++        self.assertFalse(window.has_image())
++        self.assertTrue(window.get_property("frame-has-alpha"))
++        image.free()
++
 +    def test_toplevel_replacement_and_clear_preserve_only_outstanding_borrows(self) -> None:
 +        window = Window({"geometry": (0, 0, 2, 1), "image": None})
 +        self.assertEqual(window.get_snapshot_generation(), 0)
@@ -8156,7 +8739,7 @@ index 0000000000000000000000000000000000000000..dc2a9177612eb21ae4df7f6434c156ef
 +        second.free()
 +
 +    def test_toplevel_replacement_rolls_back_partial_property_updates(self) -> None:
-+        for failure_property in ("image", "pixel-format"):
++        for failure_property in ("image", "pixel-format", "frame-has-alpha"):
 +            with self.subTest(failure_property=failure_property):
 +                window = Window({"geometry": (0, 0, 2, 1), "image": None})
 +                previous = self.make_image("BGRA")
@@ -8215,6 +8798,7 @@ index 0000000000000000000000000000000000000000..dc2a9177612eb21ae4df7f6434c156ef
 +            window._gproperties[name] = value
 +            updates.append((name, value))
 +            if name == "image":
++                self.assertIs(window._gproperties["frame-has-alpha"], True)
 +                self.assertEqual(window._gproperties["pixel-format"], "RGBA")
 +            return True
 +
@@ -8225,10 +8809,11 @@ index 0000000000000000000000000000000000000000..dc2a9177612eb21ae4df7f6434c156ef
 +        ):
 +            window.set_image(incoming)
 +
-+        self.assertEqual([name for name, _value in updates], ["pixel-format", "image"])
-+        self.assertEqual(updates[0][1], "RGBA")
-+        self.assertIsNot(updates[1][1], incoming)
-+        self.assertEqual(updates[1][1].get_pixel_format(), "RGBA")
++        self.assertEqual([name for name, _value in updates], ["frame-has-alpha", "pixel-format", "image"])
++        self.assertIs(updates[0][1], True)
++        self.assertEqual(updates[1][1], "RGBA")
++        self.assertIsNot(updates[2][1], incoming)
++        self.assertEqual(updates[2][1].get_pixel_format(), "RGBA")
 +        window.clear_image()
 +        incoming.free()
 +
@@ -8282,7 +8867,7 @@ index 0000000000000000000000000000000000000000..dc2a9177612eb21ae4df7f6434c156ef
 +                ):
 +                    replace_image_snapshot(model, None)
 +
-+                self.assertEqual(updates, [("pixel-format", "")])
++                self.assertEqual(updates, [("pixel-format", ""), ("frame-has-alpha", True)])
 +
 +    def test_failed_root_replacement_invalidates_model_until_recovery(self) -> None:
 +        window = Window({"geometry": (0, 0, 2, 1), "image": None})
@@ -8633,7 +9218,7 @@ index cac79b68e1f3f8f07f785293fa755ff5b9a75af7..e3c431bff5f8d6debb25b6cdf22530d3
          if not backing:
              fire_paint_callbacks(callbacks, False, message="no backing")
 diff --git a/xpra/client/gtk3/client_base.py b/xpra/client/gtk3/client_base.py
-index 2eaacc2bd7168e9928a6e6da88070761dccf9476..349d3e658ccebf579b045fa6e17502b9f231881a 100644
+index 17adae9eb6efe345bdc21f182b7d2662038dea86..bb815ecab6010b21ebf3bcb57d09ac11dc7f18a9 100644
 --- a/xpra/client/gtk3/client_base.py
 +++ b/xpra/client/gtk3/client_base.py
 @@ -9,7 +9,7 @@ import os
@@ -9253,7 +9838,7 @@ index 778f585589ea38004aacc90512f1f589f3008bb3..2a6886673629de5f356789de67efd09b
              if coding == "mmap":
                  self.paint_mmap(img_data, x, y, width, height, rowstride, options, callbacks)
 diff --git a/xpra/client/gui/window_base.py b/xpra/client/gui/window_base.py
-index b94c3553f2a67a4c9a54307c2e8ee980e2dc1fdc..2af8ddb30b118125a1a1d2b5016ec33212b8e097 100644
+index 9724967d0d9b131bfeaf0b03d8667faa77723432..43a6568ea419d7ed3d693e3a6ad84f6131f0432a 100644
 --- a/xpra/client/gui/window_base.py
 +++ b/xpra/client/gui/window_base.py
 @@ -8,14 +8,20 @@
@@ -9328,7 +9913,7 @@ index b94c3553f2a67a4c9a54307c2e8ee980e2dc1fdc..2af8ddb30b118125a1a1d2b5016ec332
          if self._backing:
              self._backing.close()
              self._backing = None
-@@ -850,31 +879,172 @@ class ClientWindowBase(ClientWidgetBase):
+@@ -857,31 +886,172 @@ class ClientWindowBase(ClientWidgetBase):
              log("draw_region: window %s has no backing, gone?", self.wid)
              fire_paint_callbacks(callbacks, -1, "no backing")
              return
@@ -9510,7 +10095,7 @@ index b94c3553f2a67a4c9a54307c2e8ee980e2dc1fdc..2af8ddb30b118125a1a1d2b5016ec332
              if self.window_offset:
                  rx += self.window_offset[0]
 diff --git a/xpra/client/subsystem/window/draw.py b/xpra/client/subsystem/window/draw.py
-index 6f9bdd90308da8e297cbd8a56a313ab665d4ef81..2dfc7e3e217e5cf737c750c9100850bf4bc84c5c 100644
+index 6f9bdd90308da8e297cbd8a56a313ab665d4ef81..e2a3bf62d911bd31f0ab192c2cd5d2776e07ab9d 100644
 --- a/xpra/client/subsystem/window/draw.py
 +++ b/xpra/client/subsystem/window/draw.py
 @@ -11,6 +11,7 @@ from typing import Any
@@ -9585,7 +10170,7 @@ index 6f9bdd90308da8e297cbd8a56a313ab665d4ef81..2dfc7e3e217e5cf737c750c9100850bf
 +                )
 +            if not current_delivery:
 +                self.idle_add(
-+                    record_draw_error, WINDOW_DECODE_ERROR,
++                    draw_abort, WINDOW_DECODE_ERROR,
 +                    "stale subsurface draw target after backing reconfiguration",
 +                )
 +                return
@@ -9693,10 +10278,10 @@ index 886c857b1928834b22a0be85577da12239803d5e..fdbe07d07819c49bd23506c38e1d679d
      def parse_server_capabilities(self, c: typedict) -> bool:
          self.server_window_frame_extents = c.boolget("window.frame-extents")
 diff --git a/xpra/common.py b/xpra/common.py
-index bcf2e8ec17f8180724f8c6149ae23a1915f2c25f..d28931bce055a50ee5233200130a7a1960cdca3f 100644
+index 0e0af89090bd7be909d7dd000849fd27e0c2dc9f..e70e74dcbcd849cf00f66361b725aa2121930788 100644
 --- a/xpra/common.py
 +++ b/xpra/common.py
-@@ -35,6 +35,35 @@ def gravity_str(v) -> str:
+@@ -61,6 +61,35 @@ def gravity_str(v) -> str:
  
  DEFAULT_DPI: int = 96
  
@@ -9733,7 +10318,7 @@ index bcf2e8ec17f8180724f8c6149ae23a1915f2c25f..d28931bce055a50ee5233200130a7a19
  def noop(*_args, **_kwargs) -> None:
      """ do nothing """
 diff --git a/xpra/opengl/backing.py b/xpra/opengl/backing.py
-index 527273775a7b1e9c094ad59c19960d66a7974f23..73c271b25d5f8d7c84465dbfb3024cc7f201474d 100644
+index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d655cb86eb 100644
 --- a/xpra/opengl/backing.py
 +++ b/xpra/opengl/backing.py
 @@ -58,15 +58,17 @@ from xpra.util.str_fn import repr_ellipsized, hexstr, csv
@@ -10567,7 +11152,7 @@ index 597e2e82c58089315e832872db79551a4f575f72..5bfdfa1472e4df511d8eadbc59945e61
              ws.set_av_sync_delay(self.av_sync_delay_total)
              ws.may_update_av_sync_delay()
 diff --git a/xpra/server/source/bandwidth.py b/xpra/server/source/bandwidth.py
-index 8cd25ffad3353db0ff664ce82d238082347d1625..7731efab0ef0a29526d0691e77de9e0fdaa0f992 100644
+index a4bd5065f91d6d5166e27509393a84c72bf1be23..e3c5b30d6737c1035c30707347ba2ec01fb45f03 100644
 --- a/xpra/server/source/bandwidth.py
 +++ b/xpra/server/source/bandwidth.py
 @@ -4,6 +4,7 @@
@@ -10578,7 +11163,7 @@ index 8cd25ffad3353db0ff664ce82d238082347d1625..7731efab0ef0a29526d0691e77de9e0f
  
  from xpra.net.common import BACKWARDS_COMPATIBLE
  from xpra.util.objects import typedict
-@@ -118,19 +119,28 @@ class BandwidthConnection(StubClientConnection):
+@@ -119,19 +120,28 @@ class BandwidthConnection(StubClientConnection):
          # we use the window size,
          # (we should use the number of bytes actually sent: framerate, compression, etc..)
          window_weight = {}
@@ -10622,10 +11207,10 @@ index 8cd25ffad3353db0ff664ce82d238082347d1625..7731efab0ef0a29526d0691e77de9e0f
 +                    weight = window_weight.get(wid, 0)
 +                    ws.bandwidth_limit = max(MIN_BANDWIDTH // 10, bandwidth_limit * weight // total_weight)
 diff --git a/xpra/server/source/client_connection.py b/xpra/server/source/client_connection.py
-index 7459cb1a2008514e9f8a5a046fb26ca05bb901d2..04526e41655ae46acdcdba75d8fdfff7e478f5af 100644
+index dad4314f2510e601e20aecd838a7b0184886c9fb..0225d0b2bf76df110fd3caabd9eed871fe6b3cac 100644
 --- a/xpra/server/source/client_connection.py
 +++ b/xpra/server/source/client_connection.py
-@@ -152,15 +152,33 @@ class ClientConnection(StubClientConnection):
+@@ -188,15 +188,33 @@ class ClientConnection(StubClientConnection):
              Add a new 'draw' packet to the 'packet_queue'.
              Note: this code runs in the non-ui thread
          """
@@ -10666,7 +11251,7 @@ index 7459cb1a2008514e9f8a5a046fb26ca05bb901d2..04526e41655ae46acdcdba75d8fdfff7
  
      def encode_loop(self) -> None:
          """
-@@ -199,12 +217,24 @@ class ClientConnection(StubClientConnection):
+@@ -232,12 +250,24 @@ class ClientConnection(StubClientConnection):
              return Packet("closed"), False, False
          synchronous = True
          more = False
@@ -10697,7 +11282,7 @@ index 7459cb1a2008514e9f8a5a046fb26ca05bb901d2..04526e41655ae46acdcdba75d8fdfff7
          if not more:
              more = bool(packet) and bool(self.ordinary_packets or self.packet_queue)
          return packet, synchronous, more
-@@ -213,10 +243,10 @@ class ClientConnection(StubClientConnection):
+@@ -246,10 +276,10 @@ class ClientConnection(StubClientConnection):
          """ This method queues non-damage packets (higher priority) """
          synchronous = bool(kwargs.get("synchronous", True))
          will_have_more = bool(kwargs.get("will_have_more", not synchronous))
@@ -10711,27 +11296,10 @@ index 7459cb1a2008514e9f8a5a046fb26ca05bb901d2..04526e41655ae46acdcdba75d8fdfff7
      def send_more(self, packet_type: str, *parts: PacketElement, **kwargs) -> None:
          kwargs["will_have_more"] = True
 diff --git a/xpra/server/source/encoding.py b/xpra/server/source/encoding.py
-index ee448cef7f7acd0dbd45a23ab0a23fbfacec9690..c433822bc6cf85eaf021a0def7316c6800735613 100644
+index 6f43de01f748a61385a1c57e959805dea68d3b65..9a68aad562f646360ac27426f6ead34c8d44aff2 100644
 --- a/xpra/server/source/encoding.py
 +++ b/xpra/server/source/encoding.py
-@@ -9,6 +9,7 @@ from math import sqrt
- from typing import Any
- from time import sleep, monotonic
- from collections.abc import Sequence
-+from contextlib import nullcontext
- 
- from xpra.os_util import gi_import
- from xpra.net.common import FULL_INFO, BACKWARDS_COMPATIBLE
-@@ -105,7 +106,7 @@ class EncodingsConnection(StubClientConnection):
-             self.allocate_cuda_device_context()
-         # Propagate cuda context to any window sources created before it was available.
-         if self.cuda_device_context:
--            for ws in self.all_window_sources():
-+            for ws in self.all_pixel_sources():
-                 if not ws.cuda_device_context:
-                     ws.cuda_device_context = self.cuda_device_context
- 
-@@ -128,6 +129,21 @@ class EncodingsConnection(StubClientConnection):
+@@ -129,6 +129,21 @@ class EncodingsConnection(StubClientConnection):
          window_sources = getattr(self, "window_sources", {})
          return tuple(window_sources.values())
  
@@ -10753,72 +11321,7 @@ index ee448cef7f7acd0dbd45a23ab0a23fbfacec9690..c433822bc6cf85eaf021a0def7316c68
      def get_caps(self) -> dict[str, str | int]:
          return {
              "auto_refresh_delay": self.auto_refresh_delay,
-@@ -196,7 +212,9 @@ class EncodingsConnection(StubClientConnection):
-         may_update_bandwidth_limits(self)
-         wids = tuple(self.calculate_window_ids)  # make a copy so we don't clobber new wids
-         focus = self.get_focus()
--        sources = self.window_sources.items()
-+        get_window_sources = getattr(self, "window_source_items", lambda: tuple(self.window_sources.items()))
-+        source_operation = getattr(self, "pixel_source_operation", nullcontext)
-+        sources = get_window_sources()
-         maximized_wids = tuple(wid for wid, source in sources if source is not None and source.maximized)
-         fullscreen_wids = tuple(wid for wid, source in sources if source is not None and source.fullscreen)
-         log("recalculate_delays() wids=%s, focus=%s, maximized=%s, fullscreen=%s",
-@@ -205,15 +223,16 @@ class EncodingsConnection(StubClientConnection):
-             # this is safe because we only add to this set from other threads:
-             self.calculate_window_ids.remove(wid)
-             self.calculate_window_pixels.pop(wid, None)
--            ws = self.window_sources.get(wid)
--            if ws is None:
--                continue
--            with log.trap_error("Error calculating delays for window %s", wid):
--                ws.statistics.update_averages()
--                ws.calculate_batch_delay(wid == focus,
--                                         len(fullscreen_wids) > 0 and wid not in fullscreen_wids,
--                                         len(maximized_wids) > 0 and wid not in maximized_wids)
--                ws.reconfigure()
-+            get_pixel_source = getattr(self, "get_pixel_source", self.window_sources.get)
-+            with source_operation(get_pixel_source(wid)) as ws:
-+                if ws is None:
-+                    continue
-+                with log.trap_error("Error calculating delays for window %s", wid):
-+                    ws.statistics.update_averages()
-+                    ws.calculate_batch_delay(wid == focus,
-+                                             len(fullscreen_wids) > 0 and wid not in fullscreen_wids,
-+                                             len(maximized_wids) > 0 and wid not in maximized_wids)
-+                    ws.reconfigure()
-             if self.is_closed():
-                 return
-             # allow other threads to run
-@@ -221,16 +240,17 @@ class EncodingsConnection(StubClientConnection):
-             sleep(0)
-         # calculate weighted average as new global default delay:
-         wdimsum, wdelay, tsize, tcount = 0, 0, 0, 0
--        for ws in tuple(self.window_sources.values()):
--            if ws.batch_config.last_updated <= 0:
--                continue
--            w, h = ws.window_dimensions
--            tsize += w * h
--            tcount += 1
--            time_w = 2.0 + (now - ws.batch_config.last_updated)  # add 2 seconds to even things out
--            weight = int(w * h * time_w)
--            wdelay += ws.batch_config.delay * weight
--            wdimsum += weight
-+        for _wid, source in get_window_sources():
-+            with source_operation(source) as ws:
-+                if ws is None or ws.batch_config.last_updated <= 0:
-+                    continue
-+                w, h = ws.window_dimensions
-+                tsize += w * h
-+                tcount += 1
-+                time_w = 2.0 + (now - ws.batch_config.last_updated)  # add 2 seconds to even things out
-+                weight = int(w * h * time_w)
-+                wdelay += ws.batch_config.delay * weight
-+                wdimsum += weight
-         if wdimsum > 0 and tcount > 0:
-             # weighted delay:
-             delay = wdelay // wdimsum
-@@ -448,9 +468,9 @@ class EncodingsConnection(StubClientConnection):
+@@ -451,9 +466,9 @@ class EncodingsConnection(StubClientConnection):
      #
      def set_auto_refresh_delay(self, delay: int, window_ids) -> None:
          if window_ids is not None:
@@ -10830,7 +11333,7 @@ index ee448cef7f7acd0dbd45a23ab0a23fbfacec9690..c433822bc6cf85eaf021a0def7316c68
          for ws in wss:
              if ws is not None:
                  ws.set_auto_refresh_delay(delay)
-@@ -474,9 +494,9 @@ class EncodingsConnection(StubClientConnection):
+@@ -477,9 +492,9 @@ class EncodingsConnection(StubClientConnection):
          if not encoding:
              encoding = "auto"
          if window_ids is not None:
@@ -10842,7 +11345,7 @@ index ee448cef7f7acd0dbd45a23ab0a23fbfacec9690..c433822bc6cf85eaf021a0def7316c68
          # if we're updating all the windows, reset global stats too:
          if set(wss).issuperset(self.all_window_sources()):
              log("resetting global stats")
-@@ -513,27 +533,27 @@ class EncodingsConnection(StubClientConnection):
+@@ -516,27 +531,27 @@ class EncodingsConnection(StubClientConnection):
          return info
  
      def set_min_quality(self, min_quality: int) -> None:
@@ -10906,7 +11409,7 @@ index 0000000000000000000000000000000000000000..53290a7359a4ff0a90cfe4bae1080360
 +        return packet
 +    return Packet(WINDOW_DRAW, *packet[1:])
 diff --git a/xpra/server/source/window.py b/xpra/server/source/window.py
-index a67b72eb2faef9fc53d218633a9ea7c979d0827b..88b5228aeb62a286a8bdb5a2b9edff066b5fe9b2 100644
+index a67b72eb2faef9fc53d218633a9ea7c979d0827b..d2c83cd908ebb9c3b81fa706ffd0753d7f50b97a 100644
 --- a/xpra/server/source/window.py
 +++ b/xpra/server/source/window.py
 @@ -5,9 +5,11 @@
@@ -10916,7 +11419,8 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..88b5228aeb62a286a8bdb5a2b9edff06
 +from threading import Condition, RLock
  from time import monotonic
  from typing import Any
- from collections.abc import Callable, Sequence
+-from collections.abc import Callable, Sequence
++from collections.abc import Callable, Mapping, Sequence
 +from contextlib import contextmanager
  
  from xpra.net.packet_type import (
@@ -11385,7 +11889,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..88b5228aeb62a286a8bdb5a2b9edff06
 +            source.publish_damage_packet = self.publish_damage_packet
 +            source.unregister_damage_packets = self.unregister_damage_packets
 +
-+    def snapshot_damage_options(self, source, options: dict) -> dict:
++    def snapshot_damage_options(self, source, options: Mapping[str, Any]) -> dict:
 +        result = dict(options)
 +        with self._damage_packet_lock:
 +            if self.subsurface_sources.get(source.wid) is source:
@@ -12104,7 +12608,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..88b5228aeb62a286a8bdb5a2b9edff06
              for x in ("always", "locked"):
                  if x in batch_props:
                      setattr(ws.batch_config, x, batch_props.boolget(x))
-@@ -627,8 +1449,899 @@ class WindowsConnection(StubClientConnection):
+@@ -627,8 +1449,901 @@ class WindowsConnection(StubClientConnection):
  
      def set_client_properties(self, wid: int, window, new_client_properties: typedict) -> None:
          assert self.window_enabled
@@ -12481,77 +12985,88 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..88b5228aeb62a286a8bdb5a2b9edff06
 +        self._free_subsurface_snapshot_images(snapshot_images)
 +
 +    @staticmethod
-+    def _remove_glib_source(source_id: int, description: str) -> None:
++    def _destroy_subsurface_source(source: GLib.Source, description: str) -> None:
 +        try:
-+            GLib.source_remove(source_id)
++            source.destroy()
 +        except BaseException:
-+            log.error("Error removing %s", description, exc_info=True)
++            log.error("Error destroying %s", description, exc_info=True)
 +
 +    def _register_subsurface_glib_source(
 +            self, parent_wid: int, token: object, kind: str,
-+            schedule: Callable[[Callable], int], callback: Callable,
-+    ) -> int:
-+        """Register a GLib callback as exact connection-owned WSSO state.
-+
-+        Test schedulers may invoke callbacks synchronously, while real GLib
-+        registration can race parent teardown before returning its source ID.
-+        The reservation therefore exists before ``schedule`` is called and a
-+        cancellation which wins that race removes the late ID immediately.
-+        """
++            create_source: Callable[[], GLib.Source], callback: Callable, *args,
++    ) -> GLib.Source | None:
++        """Own an exact Source before attachment can dispatch or race removal."""
 +        reservation = object()
 +        record: dict[str, Any] = {
 +            "parent-wid": parent_wid,
 +            "token": token,
 +            "kind": kind,
-+            "source-id": 0,
++            "source": None,
 +            "cancelled": False,
 +        }
 +        with self._damage_packet_lock:
 +            state = self._subsurface_composites.get(parent_wid)
 +            if self._damage_packet_closing or not state or state["token"] is not token:
-+                return -1
++                return None
 +            self._subsurface_glib_sources[reservation] = record
 +
-+        def dispatch(*args):
++        def dispatch(*_unused) -> bool:
 +            with self._damage_packet_lock:
 +                if self._subsurface_glib_sources.get(reservation) is not record:
 +                    return False
 +                self._subsurface_glib_sources.pop(reservation, None)
-+            return callback(*args)
++            callback(*args)
++            return False
 +
++        source = None
++        description = f"subsurface {kind} callback for parent {parent_wid:#x}"
 +        try:
-+            source_id = int(schedule(dispatch) or 0)
++            source = create_source()
++            with self._damage_packet_lock:
++                record["source"] = source
++                cancelled = record["cancelled"]
++            if cancelled:
++                self._destroy_subsurface_source(source, description)
++                return None
++            source.set_callback(dispatch)
++            with self._damage_packet_lock:
++                cancelled = record["cancelled"]
++            if cancelled:
++                self._destroy_subsurface_source(source, description)
++                return None
++            # No connection lock across attachment. Teardown can destroy this
++            # exact Source even while attach is blocked; a returned numeric ID
++            # is never retained or used for cancellation.
++            source_id = source.attach(None)
++            with self._damage_packet_lock:
++                cancelled = record["cancelled"]
++            if cancelled:
++                self._destroy_subsurface_source(source, description)
++                return None
++            if not source_id:
++                raise RuntimeError(f"failed to attach {description}")
++            # Dispatch may already have removed the reservation and destroyed
++            # the one-shot source. That is successful scheduling, not rollback.
++            return source
 +        except BaseException:
 +            with self._damage_packet_lock:
 +                if self._subsurface_glib_sources.get(reservation) is record:
 +                    self._subsurface_glib_sources.pop(reservation, None)
++                record["cancelled"] = True
++            if source is not None:
++                self._destroy_subsurface_source(source, description)
 +            raise
-+        remove_late = 0
-+        with self._damage_packet_lock:
-+            if self._subsurface_glib_sources.get(reservation) is record:
-+                if source_id > 0:
-+                    record["source-id"] = source_id
-+                else:
-+                    self._subsurface_glib_sources.pop(reservation, None)
-+            elif record["cancelled"] and source_id > 0:
-+                remove_late = source_id
-+        if remove_late:
-+            self._remove_glib_source(
-+                remove_late, f"cancelled subsurface {kind} callback for parent {parent_wid:#x}",
-+            )
-+            return -1
-+        return source_id
 +
 +    def _remove_subsurface_glib_source(
-+            self, source_id: int, parent_wid: int, token: object, kind: str,
++            self, source: GLib.Source | None, parent_wid: int, token: object, kind: str,
 +    ) -> bool:
-+        if source_id <= 0:
++        if source is None:
 +            return False
 +        owned = False
 +        with self._damage_packet_lock:
 +            for reservation, record in tuple(self._subsurface_glib_sources.items()):
 +                if (
-+                    record["source-id"] == source_id
++                    record["source"] is source
 +                    and record["parent-wid"] == parent_wid
 +                    and record["token"] is token
 +                    and record["kind"] == kind
@@ -12561,24 +13076,24 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..88b5228aeb62a286a8bdb5a2b9edff06
 +                    owned = True
 +                    break
 +        if owned:
-+            self._remove_glib_source(
-+                source_id, f"subsurface {kind} callback for parent {parent_wid:#x}",
++            self._destroy_subsurface_source(
++                source, f"subsurface {kind} callback for parent {parent_wid:#x}",
 +            )
 +        return owned
 +
 +    def _cancel_subsurface_glib_sources(self, parent_wid: int | None = None) -> None:
-+        source_ids: list[tuple[int, int, str]] = []
++        sources: list[tuple[GLib.Source, int, str]] = []
 +        with self._damage_packet_lock:
 +            for reservation, record in tuple(self._subsurface_glib_sources.items()):
 +                if parent_wid is not None and record["parent-wid"] != parent_wid:
 +                    continue
 +                self._subsurface_glib_sources.pop(reservation, None)
 +                record["cancelled"] = True
-+                if record["source-id"] > 0:
-+                    source_ids.append((record["source-id"], record["parent-wid"], record["kind"]))
-+        for source_id, owner_wid, kind in source_ids:
-+            self._remove_glib_source(
-+                source_id, f"subsurface {kind} callback for parent {owner_wid:#x}",
++                if record["source"] is not None:
++                    sources.append((record["source"], record["parent-wid"], record["kind"]))
++        for source, owner_wid, kind in sources:
++            self._destroy_subsurface_source(
++                source, f"subsurface {kind} callback for parent {owner_wid:#x}",
 +            )
 +
 +    def _schedule_subsurface_callback(
@@ -12586,16 +13101,11 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..88b5228aeb62a286a8bdb5a2b9edff06
 +            errors: list[tuple[BaseException, Any]] | None = None,
 +    ) -> bool:
 +        try:
-+            source_id = self._register_subsurface_glib_source(
-+                parent_wid, token, "idle",
-+                lambda dispatch: GLib.idle_add(dispatch, parent_wid, token, *args),
-+                callback,
++            source = self._register_subsurface_glib_source(
++                parent_wid, token, "idle", GLib.idle_source_new,
++                callback, parent_wid, token, *args,
 +            )
-+            if source_id < 0:
-+                return False
-+            if source_id == 0:
-+                raise RuntimeError("failed to register subsurface composition callback")
-+            return True
++            return source is not None
 +        except BaseException as e:
 +            self._park_subsurface_composite(parent_wid, token)
 +            if errors is not None:
@@ -12807,7 +13317,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..88b5228aeb62a286a8bdb5a2b9edff06
 +
 +        completed = False
 +        completion_lock = RLock()
-+        timeout_source = 0
++        timeout_source = None
 +        stage_sequence = 0
 +
 +        def complete_stage(published: bool, timed_out: bool = False) -> None:
@@ -12816,7 +13326,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..88b5228aeb62a286a8bdb5a2b9edff06
 +                if completed:
 +                    return
 +                completed = True
-+                remove_timeout = timeout_source if not timed_out else 0
++                remove_timeout = timeout_source if not timed_out else None
 +                cancel_sequence = stage_sequence if timed_out else 0
 +            if remove_timeout:
 +                self._remove_subsurface_glib_source(
@@ -12923,17 +13433,13 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..88b5228aeb62a286a8bdb5a2b9edff06
 +                        try:
 +                            timeout_source = self._register_subsurface_glib_source(
 +                                parent_wid, token, "watchdog",
-+                                lambda dispatch: GLib.timeout_add(
-+                                    SUBSURFACE_COMPOSITE_STAGE_TIMEOUT, dispatch,
++                                lambda: GLib.timeout_source_new(
++                                    SUBSURFACE_COMPOSITE_STAGE_TIMEOUT,
 +                                ),
 +                                stage_timeout,
 +                            )
-+                            if timeout_source < 0:
++                            if timeout_source is None:
 +                                return False
-+                            if timeout_source == 0:
-+                                raise RuntimeError(
-+                                    "failed to register subsurface composition stage watchdog"
-+                                )
 +                        except BaseException:
 +                            log.error(
 +                                "Error scheduling subsurface composition stage watchdog",
@@ -13005,7 +13511,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..88b5228aeb62a286a8bdb5a2b9edff06
  
      def get_window_source(self, wid: int):
          return self.window_sources.get(wid)
-@@ -668,20 +2381,41 @@ class WindowsConnection(StubClientConnection):
+@@ -668,20 +2383,41 @@ class WindowsConnection(StubClientConnection):
              self.rgb_formats,
              self.default_encoding_options,
              mmap_write_area, bandwidth_limit, jitter, datagram)
@@ -13056,7 +13562,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..88b5228aeb62a286a8bdb5a2b9edff06
          batch_config = self.make_batch_config(wid, window)
          ww, wh = window.get_dimensions()
          mmap_write_area = getattr(self, "mmap_write_area", None)
-@@ -717,27 +2451,77 @@ class WindowsConnection(StubClientConnection):
+@@ -717,27 +2453,77 @@ class WindowsConnection(StubClientConnection):
              logical_width=logical_width, logical_height=logical_height,
              native_width=native_width, native_height=native_height,
          )
@@ -13143,7 +13649,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..88b5228aeb62a286a8bdb5a2b9edff06
          assert window is not None
          if options:
              damage_options = options.copy()
-@@ -746,7 +2530,9 @@ class WindowsConnection(StubClientConnection):
+@@ -746,7 +2532,9 @@ class WindowsConnection(StubClientConnection):
          if s := self.statistics:
              s.damage_last_events.append((wid, monotonic(), w * h))
          ws = self.make_window_source(wid, window)
@@ -13154,7 +13660,7 @@ index a67b72eb2faef9fc53d218633a9ea7c979d0827b..88b5228aeb62a286a8bdb5a2b9edff06
  
      def client_ack_damage(self, damage_packet_sequence: int, wid: int,
                            width: int, height: int, decode_time: int, message: str) -> None:
-@@ -759,11 +2545,36 @@ class WindowsConnection(StubClientConnection):
+@@ -759,11 +2547,36 @@ class WindowsConnection(StubClientConnection):
          if not self.window_enabled:
              log.error("Error: draw ack received for window %#x, but it is not enabled!")
              return
@@ -13239,10 +13745,18 @@ index e118265051a5c90aa3fd11c39adf05858efd8ad6..5871b86edd8898c8bbc87f5abd393741
  
      def _set_encoding_property(self, name: str, value, *wids) -> str:
 diff --git a/xpra/server/window/compress.py b/xpra/server/window/compress.py
-index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda43feb65c 100644
+index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb9fcb6ea0 100644
 --- a/xpra/server/window/compress.py
 +++ b/xpra/server/window/compress.py
-@@ -14,7 +14,7 @@ from contextlib import nullcontext
+@@ -6,6 +6,7 @@
+ # later version. See the file COPYING for details.
+ 
+ import os
++from collections.abc import Mapping
+ from math import sqrt, ceil
+ from collections import deque
+ from dataclasses import dataclass
+@@ -14,7 +15,7 @@ from contextlib import nullcontext
  from typing import ContextManager, Any
  from collections.abc import Callable, Iterable, Sequence
  
@@ -13251,7 +13765,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
  from xpra.os_util import POSIX, OSX, gi_import
  from xpra.util.objects import typedict
  from xpra.util.str_fn import csv, repr_ellipsized, decode_str
-@@ -106,6 +106,7 @@ FORCE_PILLOW = envbool("XPRA_FORCE_PILLOW", False)
+@@ -106,6 +107,7 @@ FORCE_PILLOW = envbool("XPRA_FORCE_PILLOW", False)
  HARDCODED_ENCODING: str = os.environ.get("XPRA_HARDCODED_ENCODING", "")
  
  SCREEN_UPDATES_DIRECTORY = os.environ.get("XPRA_SCREEN_UPDATES_DIRECTORY", "")
@@ -13259,7 +13773,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
  
  MAX_SEQUENCE = 2**64
  
-@@ -1581,7 +1582,7 @@ class WindowSource(WindowIconSource):
+@@ -1613,7 +1615,7 @@ class WindowSource(WindowIconSource):
          self.update_encoding_options(force_reload)
          self.update_refresh_attributes()
  
@@ -13268,7 +13782,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
          """ decide what to do with the damage area:
              * send it now (if not congested)
              * add it to an existing delayed region
-@@ -1596,12 +1597,12 @@ class WindowSource(WindowIconSource):
+@@ -1628,12 +1630,12 @@ class WindowSource(WindowIconSource):
          """
          check_main_thread()
          if self.suspended:
@@ -13283,7 +13797,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
          now = monotonic()
          if options is None:
              options = {}
-@@ -1613,7 +1614,7 @@ class WindowSource(WindowIconSource):
+@@ -1645,7 +1647,7 @@ class WindowSource(WindowIconSource):
          ww, wh = self.may_update_window_dimensions()
          if ww == 0 or wh == 0:
              damagelog("damage%s window size %ix%i ignored", (x, y, w, h, options), ww, wh)
@@ -13292,7 +13806,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
          if ww > MAX_WINDOW_SIZE or wh > MAX_WINDOW_SIZE:
              if first_time(f"window-oversize-{self.wid:#x}"):
                  damagelog("")
-@@ -1621,7 +1622,7 @@ class WindowSource(WindowIconSource):
+@@ -1653,7 +1655,7 @@ class WindowSource(WindowIconSource):
                  damagelog.warn(" window updates will be dropped until this is corrected")
              else:
                  damagelog("ignoring damage for window %i size %ix%i", self.wid, ww, wh)
@@ -13301,7 +13815,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
          if self.full_frames_only:
              x, y, w, h = 0, 0, ww, wh
          elif DAMAGE_WIDTH_PADDING or DAMAGE_HEIGHT_PADDING or DAMAGE_WIDTH_PADDING_PCT or DAMAGE_HEIGHT_PADDING_PCT:
-@@ -1633,8 +1634,12 @@ class WindowSource(WindowIconSource):
+@@ -1665,8 +1667,12 @@ class WindowSource(WindowIconSource):
              y = max(0, y - h_padding)
              w = min(ww - x, x2 - x)
              h = min(wh - y, y2 - y)
@@ -13314,7 +13828,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
  
      def do_damage(self, ww: int, wh: int, x: int, y: int, w: int, h: int, options: dict) -> None:
          now = monotonic()
-@@ -2142,57 +2147,162 @@ class WindowSource(WindowIconSource):
+@@ -2174,57 +2180,162 @@ class WindowSource(WindowIconSource):
          # WindowVideoSource overrides this method
          return self.full_frames_only
  
@@ -13354,7 +13868,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
 -            raise RuntimeError("no encoding specified")
 -        check_main_thread()
 -        rgb_request_time = monotonic()
- 
+-
 -        if not self.window.is_managed():
 -            log("process_damage_region: the window %s is not managed", self.window)
 -            return
@@ -13383,7 +13897,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
 -            # full-window damage region. Preserve the requested destination
 -            # size so the draw packet can carry `scaled_size` metadata.
 -            options["scaled-damage-size"] = (w, h)
--
+ 
 -        def process_damage_image(img: ImageWrapper) -> None:
 -            self.process_damage_image(damage_time, rgb_request_time, img, coding, sequence, options, flush)
 +            A connection-owned composite transaction may supply an image which
@@ -13516,7 +14030,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
          elapsed = int(1000 * (monotonic() - rgb_request_time))
          log("retrieving %s took %ims", image, elapsed)
  
-@@ -2201,45 +2311,60 @@ class WindowSource(WindowIconSource):
+@@ -2233,45 +2344,60 @@ class WindowSource(WindowIconSource):
          h = image.get_height()
          if w == 0 or h == 0:
              log("process_damage_image: invalid dimensions: %ix%i", w, h)
@@ -13594,15 +14108,22 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
          """
          This method is not actually used in practice,
          as all window sources use the WindowVideoSource subclass.
-@@ -2255,6 +2380,7 @@ class WindowSource(WindowIconSource):
-         self.call_in_encode_thread(True, self.make_data_packet_cb, *item)
+@@ -2284,10 +2410,12 @@ class WindowSource(WindowIconSource):
+         w = image.get_width()
+         h = image.get_height()
+         item = (w, h, damage_time, now, image, coding, sequence, eoptions, flush)
+-        # the encode thread now owns this image and must free it:
+-        self.call_in_encode_thread(self.make_data_packet_cb, *item)
          log("process_damage_region: wid=%#x, sequence=%i, adding pixel data to encode queue (%4ix%-4i - %5s), elapsed time: %3.1f ms, request time: %3.1f ms",
              self.wid, sequence, w, h, coding, 1000 * (now - damage_time), elapsed)
++        # A successful queue return transfers ownership. No fallible diagnostic
++        # may make process_damage_image free this worker-owned image afterward.
++        self.call_in_encode_thread(self.make_data_packet_cb, *item)
 +        return True
  
      def scaled_size(self, image: ImageWrapper) -> tuple[int, int] | None:
          crs = self.client_render_size
-@@ -2274,26 +2400,56 @@ class WindowSource(WindowIconSource):
+@@ -2307,26 +2435,59 @@ class WindowSource(WindowIconSource):
          """ This function is called from the damage data thread!
              Extra care must be taken to prevent access to X11 functions on window.
          """
@@ -13647,7 +14168,10 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
 +            # is cancelled now, because the client releases shared ring space.
 +            if not packet:
 +                return
-+            published = self.queue_damage_packet(packet, damage_time, process_damage_time, publication_lease)
++            published = self.queue_damage_packet(
++                packet, damage_time, process_damage_time, options,
++                publication_lease=publication_lease,
++            )
 +            # queue_damage_packet has now either published the packet, sent
 +            # its terminal no-paint form, or rejected it because the whole
 +            # connection is closing.  In all cases it consumed responsibility
@@ -13663,7 +14187,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
 -        if not packet:
 -            return
 -        # queue packet for sending:
--        self.queue_damage_packet(packet, damage_time, process_damage_time)
+-        self.queue_damage_packet(packet, damage_time, process_damage_time, options)
 +            try:
 +                try:
 +                    if publication_lease is not None and mmap_drain_data is not None:
@@ -13677,7 +14201,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
  
      def schedule_auto_refresh(self, packet: Packet, options: typedict) -> None:
          if not self.can_refresh():
-@@ -2518,6 +2674,11 @@ class WindowSource(WindowIconSource):
+@@ -2551,6 +2712,11 @@ class WindowSource(WindowIconSource):
          self.refresh_regions = []
          w, h = self.window_dimensions
          refreshlog("full_quality_refresh() for %sx%s window with pending refresh regions: %s", w, h, refresh_regions)
@@ -13689,17 +14213,17 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
          new_options = damage_options.copy()
          encoding = self.auto_refresh_encodings[0]
          new_options.update(self.get_refresh_options())
-@@ -2536,7 +2697,8 @@ class WindowSource(WindowIconSource):
-             "speed"         : self.refresh_speed,
+@@ -2570,7 +2736,8 @@ class WindowSource(WindowIconSource):
          }
  
--    def queue_damage_packet(self, packet: Packet, damage_time: float, process_damage_time: float) -> None:
-+    def queue_damage_packet(self, packet: Packet, damage_time: float, process_damage_time: float,
+     def queue_damage_packet(self, packet: Packet, damage_time: float,
+-                            process_damage_time: float, options: typedict) -> None:
++                            process_damage_time: float, options: typedict, *,
 +                            publication_lease: object | None = None) -> bool:
          """
              Adds the given packet to the packet_queue,
              (warning: this runs from the non-UI 'encode' thread)
-@@ -2556,17 +2718,119 @@ class WindowSource(WindowIconSource):
+@@ -2592,20 +2759,123 @@ class WindowSource(WindowIconSource):
          now = monotonic()
          pixcount = width * height
          bytecount = len(data)
@@ -13722,6 +14246,10 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
 +                    compresslog.error("Error recording subsurface packet publication", exc_info=True)
 +
 +        def publish() -> None:
++            # Preserve upstream's real auto-refresh producer while the packet
++            # is still source-owned. The connection operation pins this source;
++            # its publication lock is not held across generic timer scheduling.
++            self.schedule_auto_refresh(packet, options)
 +            stats = self.statistics
 +            stats.damage_ack_pending[damage_packet_sequence] = (
 +                now, coding, pixcount, bytecount, client_options, damage_time,
@@ -13779,7 +14307,17 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
 +            wire_wid, damage_packet_sequence, self, publish, terminal_publisher,
 +            publication_lease,
 +            lambda: self.validate_damage_packet(self, packet) and self.can_publish_damage_packet(packet),
-+        )
+         )
+-        if process_damage_time > 0:
+-            damage_in_latency = now-process_damage_time
+-            stats.damage_in_latency.append((now, width*height, actual_batch_delay, damage_in_latency))
+-        stats.last_packet_time = monotonic()
+-        if SCREEN_UPDATES_DIRECTORY:
+-            self.save_update(packet, damage_time)
+-        # whilst the packet is still ours: lossy updates schedule a refresh,
+-        # lossless ones clear the regions they have covered
+-        self.schedule_auto_refresh(packet, options)
+-        self.queue_packet(packet, self.wid, pixcount, client_options.get("flush", 0) > 0)
 +
 +    def queue_mmap_drain(self, drain_data, publication_lease: object) -> bool:
 +        """Publish an already-written mmap descriptor without painting it.
@@ -13795,14 +14333,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
 +        packet = Packet(
 +            WINDOW_DRAW, -1, 0, 0, 1, 1, "mmap", bdata, sequence, 0,
 +            {"rgb_format": rgb_format, "chunks": chunks},
-         )
--        if process_damage_time > 0:
--            damage_in_latency = now-process_damage_time
--            stats.damage_in_latency.append((now, width*height, actual_batch_delay, damage_in_latency))
--        stats.last_packet_time = monotonic()
--        if SCREEN_UPDATES_DIRECTORY:
--            self.save_update(packet, damage_time)
--        self.queue_packet(packet, self.wid, pixcount, client_options.get("flush", 0) > 0)
++        )
 +
 +        def terminal_publisher() -> None:
 +            self.queue_packet(packet, 0, 0, False)
@@ -13829,7 +14360,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
  
      def save_update(self, packet: Packet, damage_time: float) -> None:
          import json
-@@ -2710,59 +2974,77 @@ class WindowSource(WindowIconSource):
+@@ -2749,59 +3019,77 @@ class WindowSource(WindowIconSource):
              (warning: this runs from the non-UI network parse thread,
              don't access the window from here!)
          """
@@ -13952,7 +14483,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
          damage_delayed = self._damage_delayed
          if not damage_delayed:
              self.soft_expired = 0
-@@ -2895,7 +3177,7 @@ class WindowSource(WindowIconSource):
+@@ -2943,7 +3231,7 @@ class WindowSource(WindowIconSource):
          self.statistics.encoding_stats.append((end, coding, w*h, bpp, csize, end-start))
          return self.make_draw_packet(x, y, outw, outh, coding, data, outstride, client_options, options)
  
@@ -13961,7 +14492,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
          # (wid, x, y) used in the outbound draw packet.
          # Subclasses may shift to retarget into a parent window.
          return self.wid, x, y
-@@ -2912,6 +3194,7 @@ class WindowSource(WindowIconSource):
+@@ -2960,6 +3248,7 @@ class WindowSource(WindowIconSource):
  
      def make_draw_packet(self, x: int, y: int, outw: int, outh: int,
                           coding: str, data, outstride: int, client_options, options) -> Packet:
@@ -13969,7 +14500,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
          if not isinstance(coding, str):
              raise RuntimeError(f"invalid type for encoding: {coding} ({type(coding)})")
          for v in (x, y, outw, outh, outstride):
-@@ -2920,21 +3203,78 @@ class WindowSource(WindowIconSource):
+@@ -2968,21 +3257,80 @@ class WindowSource(WindowIconSource):
          ws = options.get("window-size")
          if ws:
              client_options["window-size"] = ws
@@ -14018,7 +14549,9 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
 +        return False
 +
 +    @staticmethod
-+    def snapshot_damage_options(_source: "WindowSource", options: dict) -> dict:
++    def snapshot_damage_options(_source: "WindowSource", options: Mapping[str, Any]) -> dict:
++        # Packet construction also passes typedict. Cython's builtin dict
++        # annotation rejects that subclass before we can take the owned copy.
 +        return dict(options)
 +
 +    @staticmethod
@@ -14057,9 +14590,9 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
      def direct_queue_draw(self, coding: str, data: bytes, client_info: dict) -> None:
          # this is a frame from a compressed stream,
          # send it to all the window sources for this window:
-@@ -2954,9 +3294,10 @@ class WindowSource(WindowIconSource):
+@@ -3002,9 +3350,10 @@ class WindowSource(WindowIconSource):
                      self._damage_packet_sequence, client_info, options)
-         self.queue_damage_packet(packet, damage_time, process_damage_time)
+         self.queue_damage_packet(packet, damage_time, process_damage_time, options)
  
 -    def mmap_encode(self, coding: str, image: ImageWrapper, _options) -> tuple:
 +    def mmap_encode(self, coding: str, image: ImageWrapper, options) -> tuple:
@@ -14070,7 +14603,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
          # prepare the pixels in a format accepted by the client:
          pf = image.get_pixel_format()
          if pf not in self.rgb_formats:
-@@ -2973,7 +3314,7 @@ class WindowSource(WindowIconSource):
+@@ -3021,7 +3370,7 @@ class WindowSource(WindowIconSource):
          mmap_data = ()
          try:
              for i in range(5):
@@ -14079,7 +14612,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..f066d67095c2c5e9094fb934e4633cda
                  # elapsed = monotonic()-start+0.000000001 # make sure never zero!
                  # log("%s MBytes/s - %s bytes written to mmap in %.1f ms", int(len(data)/elapsed/1024/1024),
                  #    len(data), 1000*elapsed)
-@@ -2984,15 +3325,24 @@ class WindowSource(WindowIconSource):
+@@ -3032,15 +3381,24 @@ class WindowSource(WindowIconSource):
              if not mmap_data:
                  log("mmap write failed!")
                  return ()
@@ -14299,10 +14832,10 @@ index af4622c6feb1421991155ee7598f346d3b10ff19..87c5d5fbf27898276075167958d27561
 +        # stage set, so an internal source never owns an auto-refresh timer.
          return
 diff --git a/xpra/wayland/server/compositor.pyx b/xpra/wayland/server/compositor.pyx
-index a65d9363f033613d5ad60c3e5b0fe2216b070393..8dd31de08ce02f42ce9d2f5f501faa833ec3d9d6 100644
+index 6edbf6468a1e1e706751156eab1e5a755a970e1e..8fe156caf62669082c180190c2045e42394becef 100644
 --- a/xpra/wayland/server/compositor.pyx
 +++ b/xpra/wayland/server/compositor.pyx
-@@ -548,6 +548,9 @@ cdef class WaylandCompositor(ListenerObject):
+@@ -558,6 +558,9 @@ cdef class WaylandCompositor(ListenerObject):
          log(" configured=%s, initialized=%s, initial_commit=%i", bool(xdg_surf.configured), bool(xdg_surf.initialized), bool(xdg_surf.initial_commit))
          # Pass the Surface instance so consumers can connect per-surface signals.
          self.emit("new-surface", surface, title, app_id, size)
@@ -14313,7 +14846,7 @@ index a65d9363f033613d5ad60c3e5b0fe2216b070393..8dd31de08ce02f42ce9d2f5f501faa83
      cdef void new_popup(self, wlr_xdg_popup *popup) noexcept:
          if popup == NULL or popup.base == NULL or popup.base.surface == NULL:
 diff --git a/xpra/wayland/server/models/subsurface_window.py b/xpra/wayland/server/models/subsurface_window.py
-index eb78ba5d1a15f400bc9c832ada11091d7b3cd592..7bba1c510a815ee06ef456ef9a0dfda48387ee8d 100644
+index 8ab788fca671acfb00881ffe901432b633226e62..fc34dfcbbefd1261e79b0ebbe08a44c64e97dc69 100644
 --- a/xpra/wayland/server/models/subsurface_window.py
 +++ b/xpra/wayland/server/models/subsurface_window.py
 @@ -9,17 +9,20 @@ from xpra.codecs.image import ImageWrapper
@@ -14343,7 +14876,7 @@ index eb78ba5d1a15f400bc9c832ada11091d7b3cd592..7bba1c510a815ee06ef456ef9a0dfda4
  
      __gproperties__ = {
          "depth": (GObject.TYPE_INT, "bit depth", "", -1, 64, -1, GObject.ParamFlags.READABLE),
-@@ -36,6 +39,7 @@ class SubsurfaceWindow(WindowModelStub):
+@@ -41,6 +44,7 @@ class SubsurfaceWindow(WindowModelStub):
          self._width = width
          self._height = height
          self._image: ImageWrapper | None = None
@@ -14351,7 +14884,7 @@ index eb78ba5d1a15f400bc9c832ada11091d7b3cd592..7bba1c510a815ee06ef456ef9a0dfda4
          self._internal_set_property("depth", depth)
          self._internal_set_property("has-alpha", has_alpha)
          self._setup_done = True
-@@ -58,17 +62,22 @@ class SubsurfaceWindow(WindowModelStub):
+@@ -66,17 +70,22 @@ class SubsurfaceWindow(WindowModelStub):
          image = self._image
          if image is None:
              return None
@@ -14385,7 +14918,7 @@ index eb78ba5d1a15f400bc9c832ada11091d7b3cd592..7bba1c510a815ee06ef456ef9a0dfda4
  
      def get(self, name: str, default_value: Any = None) -> Any:
          if BACKWARDS_COMPATIBLE and name == "content-type":
-@@ -87,3 +96,59 @@ class SubsurfaceWindow(WindowModelStub):
+@@ -95,3 +104,69 @@ class SubsurfaceWindow(WindowModelStub):
  
      def is_shadow(self) -> bool:
          return False
@@ -14403,6 +14936,9 @@ index eb78ba5d1a15f400bc9c832ada11091d7b3cd592..7bba1c510a815ee06ef456ef9a0dfda4
 +        retained.set_target_x(0)
 +        retained.set_target_y(0)
 +        previous = self._image
++        previous_frame_alpha = self._gproperties.get("frame-has-alpha", True)
++        has_pixel_format = "pixel-format" in self.get_internal_property_names()
++        previous_pixel_format = self._gproperties.get("pixel-format")
 +        try:
 +            # Keep this call as the composition point for the WIS-owned
 +            # pixel-format update added independently to `set_image`.
@@ -14410,6 +14946,9 @@ index eb78ba5d1a15f400bc9c832ada11091d7b3cd592..7bba1c510a815ee06ef456ef9a0dfda4
 +        except BaseException:
 +            if self._image is retained:
 +                self._image = previous
++            self._gproperties["frame-has-alpha"] = previous_frame_alpha
++            if has_pixel_format:
++                self._gproperties["pixel-format"] = previous_pixel_format
 +            retained.free()
 +            raise
 +        self._snapshot_generation += 1
@@ -14436,8 +14975,12 @@ index eb78ba5d1a15f400bc9c832ada11091d7b3cd592..7bba1c510a815ee06ef456ef9a0dfda4
 +            if "pixel-format" in self.get_internal_property_names():
 +                self._updateprop("pixel-format", "")
 +        finally:
-+            if image:
-+                image.free()
++            try:
++                self._updateprop("frame-has-alpha", True)
++            finally:
++                self._gproperties["frame-has-alpha"] = True
++                if image:
++                    image.free()
 +
 +    def replace_colourspace_snapshot(self, colourspace) -> None:
 +        """Retain authoritative child colourspace outside WIS GObject state."""
@@ -14446,10 +14989,20 @@ index eb78ba5d1a15f400bc9c832ada11091d7b3cd592..7bba1c510a815ee06ef456ef9a0dfda4
 +    def get_colourspace_snapshot(self):
 +        return getattr(self, "_subsurface_colourspace", None)
 diff --git a/xpra/wayland/server/models/window.py b/xpra/wayland/server/models/window.py
-index 1b363f613037f00a13e5019c7d784a5fbaf18819..a8419616afbf84255c81e02d41ae07f54916cfee 100644
+index a5b455bc2a1f651274a08d372b70648becfffe00..51e215771359b7704f73b8b9b50887befd7c6591 100644
 --- a/xpra/wayland/server/models/window.py
 +++ b/xpra/wayland/server/models/window.py
-@@ -16,6 +16,159 @@ log = Logger("wayland", "window")
+@@ -4,7 +4,9 @@
+ # later version. See the file COPYING for details.
+ 
+ from typing import Any
++from math import isfinite
+ 
++from xpra.constants import MAX_WINDOW_SIZE
+ from xpra.util.gobject import one_arg_signal
+ from xpra.codecs.image import ImageWrapper
+ from xpra.server.window.model import WindowModelStub
+@@ -16,6 +18,162 @@ log = Logger("wayland", "window")
  GObject = gi_import("GObject")
  
  
@@ -14478,7 +15031,7 @@ index 1b363f613037f00a13e5019c7d784a5fbaf18819..a8419616afbf84255c81e02d41ae07f5
 +    ingest resampler needs for bilinear filtering.  ``source_box`` is the
 +    buffer-local box returned by ``wlr_surface_get_buffer_source_box``.
 +    """
-+    if logical_width <= 0 or logical_height <= 0:
++    if not (0 < logical_width <= MAX_WINDOW_SIZE and 0 < logical_height <= MAX_WINDOW_SIZE):
 +        raise ValueError(f"invalid logical raster size {logical_width}x{logical_height}")
 +    try:
 +        transform = (3 if buffer_transform == 1 else
@@ -14487,7 +15040,8 @@ index 1b363f613037f00a13e5019c7d784a5fbaf18819..a8419616afbf84255c81e02d41ae07f5
 +    except KeyError as e_invalid:
 +        raise ValueError(f"invalid wl_output_transform {buffer_transform}") from e_invalid
 +    source_x, source_y, source_width, source_height = source_box
-+    if source_width <= 0 or source_height <= 0:
++    if (not all(isfinite(value) for value in source_box)
++            or source_width <= 0 or source_height <= 0):
 +        raise ValueError(f"invalid Wayland buffer source box {source_box}")
 +    return (
 +        source_width * a / logical_width,
@@ -14533,6 +15087,8 @@ index 1b363f613037f00a13e5019c7d784a5fbaf18819..a8419616afbf84255c81e02d41ae07f5
 +    gx, gy, width, height = geometry
 +    if width <= 0 or height <= 0:
 +        return None
++    if width > MAX_WINDOW_SIZE or height > MAX_WINDOW_SIZE:
++        raise ValueError(f"Wayland XDG canvas exceeds maximum size: {width}x{height}")
 +    image_width = image.get_width()
 +    image_height = image.get_height()
 +    if gx == 0 and gy == 0 and width == image_width and height == image_height:
@@ -14609,7 +15165,7 @@ index 1b363f613037f00a13e5019c7d784a5fbaf18819..a8419616afbf84255c81e02d41ae07f5
  class Window(WindowModelStub):
      __gproperties__ = {
          "display": (
-@@ -173,6 +326,10 @@ class Window(WindowModelStub):
+@@ -192,6 +350,10 @@ class Window(WindowModelStub):
          super().__init__()
          for key, prop in props.items():
              self._internal_set_property(key, prop)
@@ -14620,15 +15176,19 @@ index 1b363f613037f00a13e5019c7d784a5fbaf18819..a8419616afbf84255c81e02d41ae07f5
  
      def __repr__(self) -> str:  # pylint: disable=arguments-differ
          surface = self._gproperties.get("surface", None)
-@@ -191,6 +348,7 @@ class Window(WindowModelStub):
+@@ -210,7 +372,10 @@ class Window(WindowModelStub):
          if not self._managed:
              return
          self._managed = False
-+        self.clear_image()
-         self.managed_disconnect()
+-        self.managed_disconnect()
++        try:
++            self.clear_image()
++        finally:
++            self.managed_disconnect()
  
      def acknowledge_changes(self) -> None:
-@@ -201,17 +359,64 @@ class Window(WindowModelStub):
+         if not self._managed:
+@@ -220,17 +385,73 @@ class Window(WindowModelStub):
          if display := self._gproperties.get("display"):
              display.flush_clients()
  
@@ -14656,7 +15216,11 @@ index 1b363f613037f00a13e5019c7d784a5fbaf18819..a8419616afbf84255c81e02d41ae07f5
 +        previous = self._gproperties.get("image")
 +        has_pixel_format = "pixel-format" in self.get_internal_property_names()
 +        previous_pixel_format = self._gproperties.get("pixel-format")
++        previous_frame_alpha = self._gproperties.get("frame-has-alpha", True)
 +        try:
++            # Preserve upstream's per-buffer policy before image notification;
++            # the visual/backing capability "has-alpha" remains unchanged.
++            self._updateprop("frame-has-alpha", "A" in pixel_format)
 +            if has_pixel_format:
 +                self._updateprop("pixel-format", pixel_format)
 +            self._updateprop("image", retained)
@@ -14665,6 +15229,7 @@ index 1b363f613037f00a13e5019c7d784a5fbaf18819..a8419616afbf84255c81e02d41ae07f5
 +            # after partially installing the new generation.  Restore the
 +            # complete previous state before releasing our private copy.
 +            self._gproperties["image"] = previous
++            self._gproperties["frame-has-alpha"] = previous_frame_alpha
 +            if has_pixel_format:
 +                self._gproperties["pixel-format"] = previous_pixel_format
 +            retained.free()
@@ -14683,8 +15248,12 @@ index 1b363f613037f00a13e5019c7d784a5fbaf18819..a8419616afbf84255c81e02d41ae07f5
 +            if "pixel-format" in self.get_internal_property_names():
 +                self._updateprop("pixel-format", "")
 +        finally:
-+            if image:
-+                image.free()
++            try:
++                self._updateprop("frame-has-alpha", True)
++            finally:
++                self._gproperties["frame-has-alpha"] = True
++                if image:
++                    image.free()
 +
 +    def has_image(self) -> bool:
 +        return self._gproperties.get("image") is not None
@@ -14696,7 +15265,7 @@ index 1b363f613037f00a13e5019c7d784a5fbaf18819..a8419616afbf84255c81e02d41ae07f5
          # just extracts the size from the geometry:
          return self._gproperties["geometry"][2:4]
 diff --git a/xpra/wayland/server/pointer.pyx b/xpra/wayland/server/pointer.pyx
-index b5ccb15544f61fbf45ac60e44b5bbe77b3e0becb..c4fbc65a848a36ff7955d42e0de63a5c63aa854b 100644
+index 3a241d80b8e3ef730633bddf4d2f71516bdb826d..eadea1ee95bcd85dec69d9dc19ad90a43222e535 100644
 --- a/xpra/wayland/server/pointer.pyx
 +++ b/xpra/wayland/server/pointer.pyx
 @@ -17,7 +17,7 @@ from xpra.wayland.server.wlroots cimport (
@@ -14867,7 +15436,7 @@ index b5ccb15544f61fbf45ac60e44b5bbe77b3e0becb..c4fbc65a848a36ff7955d42e0de63a5c
          self.have_last = False
  
      def click(self, button: int, pressed: bool, props: dict) -> None:
-@@ -296,21 +333,21 @@ cdef class WaylandPointer(ListenerObject):
+@@ -301,21 +338,21 @@ cdef class WaylandPointer(ListenerObject):
          wlr_pointer_constraint_v1_send_deactivated(constraint)
  
      cdef void constraint_region_changed(self, wlr_pointer_constraint_v1 *constraint) noexcept:
@@ -14901,7 +15470,7 @@ index b5ccb15544f61fbf45ac60e44b5bbe77b3e0becb..c4fbc65a848a36ff7955d42e0de63a5c
          cdef wlr_pointer_constraint_v1 *constraint = self.active_constraint
          if self.focused_surface == NULL:
              return
-@@ -326,8 +363,8 @@ cdef class WaylandPointer(ListenerObject):
+@@ -331,8 +368,8 @@ cdef class WaylandPointer(ListenerObject):
              max_x = min_x
          if max_y < min_y:
              max_y = min_y
@@ -14942,7 +15511,7 @@ index db44e06e0c0e15782af1de5658ae5dfaf5250698..f843e348356dd616c2cb73f85366acbc
 +    cdef void role_destroy(self) noexcept
      cdef void destroy(self) noexcept
 diff --git a/xpra/wayland/server/subsurface.pyx b/xpra/wayland/server/subsurface.pyx
-index 9cf17de235cbe58c77690791bca9a965052b7083..3d862a9349dadb98f071ba4203cdc0483d3ae665 100644
+index c29c7f77a5b3566ea119c6b4f0808b4297a0d4cc..c64bd9525098f4c45bfb37b6c337d5e291babc30 100644
 --- a/xpra/wayland/server/subsurface.pyx
 +++ b/xpra/wayland/server/subsurface.pyx
 @@ -6,22 +6,93 @@
@@ -15082,7 +15651,7 @@ index 9cf17de235cbe58c77690791bca9a965052b7083..3d862a9349dadb98f071ba4203cdc048
          self.parent = parent
          self.wlr_subsurface = subsurface
          self.wlr_surface = subsurface.surface
-@@ -53,47 +146,186 @@ cdef class Subsurface(WaylandSurface):
+@@ -53,49 +146,192 @@ cdef class Subsurface(WaylandSurface):
          # Listen for the underlying wl_surface's commit and destroy, and the
          # subsurface-role destroy.
          self.add_listener(L_COMMIT, &subsurface.surface.events.commit)
@@ -15125,6 +15694,7 @@ index 9cf17de235cbe58c77690791bca9a965052b7083..3d862a9349dadb98f071ba4203cdc048
          if self.wlr_surface == NULL:
              return
 -        if not self.wlr_surface.mapped:
+-            self.update_source_format(NULL)
 +        image = None
 +        try:
 +            mapped = bool(self.wlr_surface.mapped)
@@ -15163,8 +15733,13 @@ index 9cf17de235cbe58c77690791bca9a965052b7083..3d862a9349dadb98f071ba4203cdc048
 +                    subsurface_frames[self.wid] = size
 +                    subsurface_capture_pending.discard(self.wid)
 +            else:
++                self.update_source_format(NULL)
 +                subsurface_frames.pop(self.wid, None)
 +                subsurface_capture_pending.discard(self.wid)
++            # A synchronized child's commit can precede its parent's map.
++            # Keep the attached buffer's format with its retained raster:
++            # visibility is not a buffer detach, and remapping the parent
++            # need not produce another child commit to restore this identity.
 +            root = self.get_root()
 +            root_wid = getattr(root, "wid", 0)
 +            surface_tree = root.get_surface_tree() if root is not None and hasattr(root, "get_surface_tree") else ()
@@ -15272,6 +15847,7 @@ index 9cf17de235cbe58c77690791bca9a965052b7083..3d862a9349dadb98f071ba4203cdc048
          self._detach_all()
 -        self._emit("destroy", self.wid)
 -        self.unregister()
+-        self.update_source_format(NULL)
 -        # wlroots will free both the wl_surface and the wlr_subsurface struct
 -        # the moment we return; null both pointers so any later Python-side
 -        # access (capture_pixels, frame_done, etc.) is a safe no-op.
@@ -15289,6 +15865,7 @@ index 9cf17de235cbe58c77690791bca9a965052b7083..3d862a9349dadb98f071ba4203cdc048
 +                # The wl_surface is terminal and any still-attached role
 +                # pointer is no longer usable. Null every borrowed pointer even
 +                # when registry or observer cleanup fails.
++                self.update_source_format(NULL)
 +                self.wlr_surface = NULL
 +                self.wlr_subsurface = NULL
 +                self.parent = None
@@ -15406,7 +15983,7 @@ index 764e86656ae320fd15d13af67bcbb21f6b882f41..01be0fa55b890acbf0641f83b4762618
      def get_pointer_target(self, proto, wid: int, pos, props=None) -> tuple[int, int]:
          # wayland surfaces are fed surface-relative coordinates:
 diff --git a/xpra/wayland/server/subsystem/window.py b/xpra/wayland/server/subsystem/window.py
-index 991139776bcab9e4b2c80c50050424ab2a76eda4..a535a0fe907cba9052c82e8727f4683350501463 100644
+index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcfc1e8f6a3 100644
 --- a/xpra/wayland/server/subsystem/window.py
 +++ b/xpra/wayland/server/subsystem/window.py
 @@ -15,6 +15,7 @@ from xpra.net.packet_type import WINDOW_CREATE
@@ -15525,7 +16102,7 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..a535a0fe907cba9052c82e8727f46833
      def _register_surface_events(self, surface, events: Sequence[str]) -> None:
          for event in events:
              handler = getattr(self, event.replace("-", "_"))
-@@ -205,14 +277,27 @@ class WaylandWindowServer(WindowServer):
+@@ -217,14 +289,27 @@ class WaylandWindowServer(WindowServer):
          if not window:
              log.warn("Warning: cannot map window %i: not found!", wid)
              return
@@ -15553,7 +16130,7 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..a535a0fe907cba9052c82e8727f46833
  
      def minimize(self, wid: int) -> None:
          self._toggle_state(wid, "iconic")
-@@ -237,7 +322,7 @@ class WaylandWindowServer(WindowServer):
+@@ -249,7 +334,7 @@ class WaylandWindowServer(WindowServer):
      def commit(self, wid: int, mapped: bool,
                 size: tuple[int, int],
                 rects: Sequence[tuple[int, int, int, int]],
@@ -15562,10 +16139,10 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..a535a0fe907cba9052c82e8727f46833
          log(f"commit wid {wid} {mapped=}, {size=}, {rects=}, {subsurfaces=}")
          window = self.get_window(wid)
          if not window:
-@@ -246,6 +331,12 @@ class WaylandWindowServer(WindowServer):
-         self.track_toplevel(surface)
-         self.update_colourspace(window, surface)
+@@ -260,6 +345,12 @@ class WaylandWindowServer(WindowServer):
+         self.update_content_types(window, surface)
          self.update_size(window, size)
+         self.update_opaque_region(window, surface)
 +        if not isinstance(subsurfaces, list):
 +            # Native WSSO supplies an authoritative tuple containing the root
 +            # marker.  Keep the legacy list path below textually and
@@ -15575,7 +16152,7 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..a535a0fe907cba9052c82e8727f46833
          for sub_wid, sx, sy, logical_w, logical_h, native_w, native_h in subsurfaces:
              self.subsurface_info[sub_wid] = (wid, sx, sy, logical_w, logical_h, native_w, native_h)
              facade = self.subsurface_facades.get(sub_wid)
-@@ -264,6 +355,78 @@ class WaylandWindowServer(WindowServer):
+@@ -278,6 +369,78 @@ class WaylandWindowServer(WindowServer):
              options["more"] = i != last
              self.refresh_window_area(window, x, y, w, h, options=options)
  
@@ -15654,7 +16231,7 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..a535a0fe907cba9052c82e8727f46833
      def subsurface_image(self, wid: int, image: ImageWrapper,
                           logical_w: int, logical_h: int, native_w: int, native_h: int) -> None:
          info = self.subsurface_info.get(wid)
-@@ -291,6 +454,154 @@ class WaylandWindowServer(WindowServer):
+@@ -305,6 +468,154 @@ class WaylandWindowServer(WindowServer):
                                                 logical_w, logical_h, native_w, native_h)
              sub_ws.damage(0, 0, logical_w, logical_h, {})
  
@@ -15667,10 +16244,10 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..a535a0fe907cba9052c82e8727f46833
 +        if not window:
 +            log("surface-snapshot: unknown toplevel wid=%#x, dropping", wid)
 +            return
-+        try:
-+            replace_image_snapshot(window, image)
-+        except BaseException:
-+            log.error("Error replacing Wayland root snapshot %#x", wid, exc_info=True)
++        # The native capture owner catches failures and keeps capture pending.
++        # Swallowing them here would claim success after the model invalidated
++        # its snapshot, stranding a static root on later empty commits.
++        replace_image_snapshot(window, image)
 +
 +    def _prepare_subsurface_snapshot(
 +            self, wid: int, logical_w: int, logical_h: int,
@@ -15809,7 +16386,7 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..a535a0fe907cba9052c82e8727f46833
      @staticmethod
      def update_colourspace(window, surface) -> None:
          # the `wp_color_management_surface_v1` tag is double buffered state,
-@@ -367,6 +678,8 @@ class WaylandWindowServer(WindowServer):
+@@ -394,6 +705,8 @@ class WaylandWindowServer(WindowServer):
      def destroy(self, wid: int) -> None:
          # The wlroots xdg surface is being freed. Drop every server-side
          # surface reference before delayed focus or encoder callbacks can use it.
@@ -15818,7 +16395,7 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..a535a0fe907cba9052c82e8727f46833
          if wid in self.subsurface_info:
              self.subsurface_info.pop(wid, None)
              self.subsurface_facades.pop(wid, None)
-@@ -386,6 +699,521 @@ class WaylandWindowServer(WindowServer):
+@@ -413,6 +726,521 @@ class WaylandWindowServer(WindowServer):
          if self.pointer_focus == wid:
              self.pointer_focus = 0
  
@@ -16340,7 +16917,7 @@ index 991139776bcab9e4b2c80c50050424ab2a76eda4..a535a0fe907cba9052c82e8727f46833
      def set_parent(self, wid: int, parent_wid: int) -> None:
          log("set_parent: wid=%i, parent_wid=%i", wid, parent_wid)
          window = self.get_window(wid)
-@@ -395,10 +1223,50 @@ class WaylandWindowServer(WindowServer):
+@@ -422,10 +1250,50 @@ class WaylandWindowServer(WindowServer):
          window._updateprop("transient-for", parent_wid)
  
      def new_subsurface(self, wid: int, subsurface: Subsurface,
@@ -16405,7 +16982,7 @@ index f4f9565a9a44edc4c69e1be88415710b0bb7f4d0..04a81e9f9c79f72429e2cdd99bd56b76
      cdef void new_subsurface(self, wlr_subsurface *subsurface) noexcept
      cdef void unregister_toplevel_handlers(self) noexcept nogil
 diff --git a/xpra/wayland/server/surface.pyx b/xpra/wayland/server/surface.pyx
-index 43175265e73368e24425af564447eecb9c414d64..92ccaa4e2e1989f073281e45123f6906fd342117 100644
+index cc18b33ae54bcce6436d7f3b4973b8519a225296..a9579acbc7829fe5abc8d18a3f043cad60ff1d8d 100644
 --- a/xpra/wayland/server/surface.pyx
 +++ b/xpra/wayland/server/surface.pyx
 @@ -9,11 +9,12 @@ from typing import Dict
@@ -16422,11 +16999,13 @@ index 43175265e73368e24425af564447eecb9c414d64..92ccaa4e2e1989f073281e45123f6906
  # `surfaces` is the shared registry (Python dict) defined in wayland_surface.pyx
  from xpra.wayland.server.wayland_surface import surfaces
  
-@@ -23,7 +24,9 @@ from xpra.wayland.server.wlroots cimport (
+@@ -22,8 +23,10 @@ from xpra.wayland.server.wayland_surface import surfaces
+ from xpra.wayland.server.wlroots cimport (
      wl_listener,
      wlr_subsurface, wlr_surface_for_each_surface,
-     wlr_surface,
--    wlr_fbox, wlr_surface_get_buffer_source_box,
+-    wlr_surface,
+-    wlr_box, wlr_fbox, wlr_surface_get_buffer_source_box,
++    wlr_surface, wlr_box,
 +    wlr_surface_get_effective_damage, wlr_surface_has_buffer,
 +    WLR_SURFACE_STATE_TRANSFORM, WLR_SURFACE_STATE_SCALE,
 +    WLR_SURFACE_STATE_VIEWPORT,
@@ -16460,7 +17039,7 @@ index 43175265e73368e24425af564447eecb9c414d64..92ccaa4e2e1989f073281e45123f6906
  # `surfaces` registry and `next_wid` are imported from wayland_surface — the
  # base class shares them across every WaylandSurface subclass (xdg, subsurface…).
  
-@@ -242,24 +256,29 @@ cdef class Surface(WaylandSurface):
+@@ -243,25 +257,30 @@ cdef class Surface(WaylandSurface):
              # idempotent: destroy already ran (e.g. registry pop triggered it).
              return
          log("XDG surface DESTROYED, toplevel=%s", bool(self.wlr_xdg_surface.toplevel != NULL))
@@ -16476,6 +17055,7 @@ index 43175265e73368e24425af564447eecb9c414d64..92ccaa4e2e1989f073281e45123f6906
 -        if debug:
 -            log("xdg surface dropped")
 -        self.unregister()
+-        self.update_source_format(NULL)
 -        # wlroots will free the wlr_xdg_surface (and the wl_surface inside it)
 -        # as soon as we return from this destroy event. Null both pointers so
 -        # any later Python-side method calls (frame_done, resize, focus, ...)
@@ -16497,12 +17077,13 @@ index 43175265e73368e24425af564447eecb9c414d64..92ccaa4e2e1989f073281e45123f6906
 +                # wlroots will free the wlr_xdg_surface (and wl_surface) as
 +                # soon as this callback returns. Null every borrowed pointer
 +                # even when registry or observer cleanup fails.
++                self.update_source_format(NULL)
 +                self.wlr_xdg_surface = NULL
 +                self.wlr_surface = NULL
  
      cdef void request_move(self, uint32_t serial) noexcept:
          log("Surface REQUEST MOVE")
-@@ -343,50 +362,173 @@ cdef class Surface(WaylandSurface):
+@@ -359,52 +378,183 @@ cdef class Surface(WaylandSurface):
              else:
                  self.apply_decoration_mode()
  
@@ -16529,15 +17110,15 @@ index 43175265e73368e24425af564447eecb9c414d64..92ccaa4e2e1989f073281e45123f6906
          if wlr_surf.mapped:
 -            rects = get_damage_areas(&wlr_surf.buffer_damage)
 -            self.capture_surface_pixels()
--
--        subsurfaces = collect_surfaces(wlr_surf)
--        self._emit("commit", self.wid, bool(wlr_surf.mapped), size, rects, subsurfaces)
++            previous_format = self.source_format
++            self.update_source_format(wlr_surf.buffer.source if wlr_surf.buffer != NULL else NULL)
 +            # A sampling or logical-extent change alters the whole normalized
 +            # raster.  A buffer attach alone does not: clients attach on most
 +            # frames and its declared effective damage remains authoritative.
 +            sampling_changed = (
 +                self.wid in surface_capture_pending or
 +                previous_surface_size != surface_size or
++                previous_format != self.source_format or
 +                bool(wlr_surf.current.committed & (
 +                    WLR_SURFACE_STATE_TRANSFORM |
 +                    WLR_SURFACE_STATE_SCALE |
@@ -16554,9 +17135,16 @@ index 43175265e73368e24425af564447eecb9c414d64..92ccaa4e2e1989f073281e45123f6906
 +                # as this commit; the client may keep its already-presented
 +                # frame until a later successful generation arrives.
 +                surface_capture_pending.add(self.wid)
-+                self._emit("surface-snapshot", self.wid, None)
++                try:
++                    self._emit("surface-snapshot", self.wid, None)
++                except BaseException:
++                    log.error("Error invalidating root snapshot for %s", self, exc_info=True)
 +                self.capture_surface_pixels()
-+        else:
+         else:
+             self.update_source_format(NULL)
+-
+-        subsurfaces = collect_surfaces(wlr_surf)
+-        self._emit("commit", self.wid, bool(wlr_surf.mapped), size, rects, subsurfaces)
 +            rects = ()
 +            # A later map must publish a complete root raster even when the
 +            # client retained and reattached the same buffer without damage.
@@ -16564,7 +17152,10 @@ index 43175265e73368e24425af564447eecb9c414d64..92ccaa4e2e1989f073281e45123f6906
 +            surface_capture_pending.discard(self.wid)
 +            if not wlr_surface_has_buffer(wlr_surf):
 +                # A NULL-buffer commit permanently clears the root generation.
-+                self._emit("surface-snapshot", self.wid, None)
++                try:
++                    self._emit("surface-snapshot", self.wid, None)
++                except BaseException:
++                    log.error("Error invalidating root snapshot for %s", self, exc_info=True)
 +
 +        surface_tree = self.get_surface_tree()
 +        self._emit("commit", self.wid, bool(wlr_surf.mapped), size, rects, surface_tree)
@@ -16707,7 +17298,7 @@ index 43175265e73368e24425af564447eecb9c414d64..92ccaa4e2e1989f073281e45123f6906
          cdef int i
          for i in range(L_TOPLEVEL_DESTROY, L_REQUEST_SHOW_WINDOW_MENU + 1):
              self._detach_slot(i)
-@@ -444,58 +586,65 @@ cdef list get_damage_areas(pixman_region32_t *damage):
+@@ -492,58 +642,65 @@ cdef tuple get_clipped_opaque_region(pixman_region32_t *region,
  
  cdef struct collect_ctx:
      wlr_surface *root
@@ -16806,7 +17397,7 @@ index 43175265e73368e24425af564447eecb9c414d64..92ccaa4e2e1989f073281e45123f6906
 +        result.clear()
      return result
 diff --git a/xpra/wayland/server/wayland_surface.pyx b/xpra/wayland/server/wayland_surface.pyx
-index ddb9b15bda2c8ddb0dd7c77cddd9fca1f512de0b..a766bb5b4cfaac253ddf5ea010a2c683a7c05b96 100644
+index 51f3c03d3c5d27d65ed08cccdf71dd65fbfd888c..eb6351f8d101c96eb70be66e540bda24085cc6a3 100644
 --- a/xpra/wayland/server/wayland_surface.pyx
 +++ b/xpra/wayland/server/wayland_surface.pyx
 @@ -8,6 +8,8 @@
@@ -16818,21 +17409,23 @@ index ddb9b15bda2c8ddb0dd7c77cddd9fca1f512de0b..a766bb5b4cfaac253ddf5ea010a2c683
  from xpra.log import Logger
  from xpra.util.str_fn import Ellipsizer
  from xpra.util.env import first_time
-@@ -17,11 +19,13 @@ from xpra.util.colourspace import SRGB
+@@ -18,11 +20,15 @@ from xpra.common import CONTENT_TYPE_PICTURE, CONTENT_TYPE_VIDEO
  from xpra.wayland.server.colourspace import get_colourspace as parse_colourspace
  
  from libc.string cimport memset
 +from libc.math cimport floor as c_floor
  from libc.stdint cimport uintptr_t, uint32_t
  from libc.time cimport timespec
++from cpython.pyport cimport PY_SSIZE_T_MAX
  
  from xpra.buffers.membuf cimport getbuf, MemBuf
  from xpra.wayland.server.events cimport ListenerObject
 +from xpra.wayland.server.models.window import wayland_sampling_affine
++from xpra.constants import MAX_WINDOW_SIZE
  
  cdef extern from "time.h":
      int clock_gettime(int clk_id, timespec *tp)
-@@ -57,6 +61,87 @@ cdef unsigned long next_wid() noexcept:
+@@ -93,6 +99,106 @@ cdef unsigned long next_wid() noexcept:
      return _wid_counter
  
  
@@ -16851,15 +17444,35 @@ index ddb9b15bda2c8ddb0dd7c77cddd9fca1f512de0b..a766bb5b4cfaac253ddf5ea010a2c683
 +    """Sample one raw buffer texture into an exact surface-local raster."""
 +    if image is None or logical_width <= 0 or logical_height <= 0:
 +        return None
++    if logical_width > MAX_WINDOW_SIZE or logical_height > MAX_WINDOW_SIZE:
++        raise ValueError(f"Wayland logical raster exceeds maximum size: {logical_width}x{logical_height}")
 +    cdef int source_width = image.get_width()
 +    cdef int source_height = image.get_height()
-+    cdef int source_stride = image.get_rowstride()
++    cdef Py_ssize_t source_stride = image.get_rowstride()
 +    if source_width <= 0 or source_height <= 0:
 +        return None
++    if source_width > MAX_WINDOW_SIZE or source_height > MAX_WINDOW_SIZE:
++        raise ValueError(f"Wayland source raster exceeds maximum size: {source_width}x{source_height}")
 +    if image.get_bytesperpixel() != 4 or image.get_planes() != ImageWrapper.PACKED:
 +        raise ValueError(f"cannot normalize non-packed Wayland image {image}")
++    cdef Py_ssize_t source_row_bytes = <Py_ssize_t> source_width * 4
++    if source_stride < source_row_bytes:
++        raise ValueError("Wayland source rowstride is shorter than its packed row")
++    if source_height > 1 and source_stride > (PY_SSIZE_T_MAX - source_row_bytes) // (source_height - 1):
++        raise ValueError("Wayland source raster size overflows")
++    cdef Py_ssize_t source_bytes = source_stride * (source_height - 1) + source_row_bytes
++    cdef const unsigned char[::1] source = image.get_pixels()
++    if source.shape[0] < source_bytes:
++        raise ValueError("Wayland source pixel storage is shorter than its raster")
++    cdef Py_ssize_t output_stride = <Py_ssize_t> logical_width * 4
++    if logical_height > PY_SSIZE_T_MAX // output_stride:
++        raise ValueError("Wayland normalized raster size overflows")
 +
 +    affine = wayland_sampling_affine(buffer_transform, source_box, logical_width, logical_height)
++    source_x, source_y, source_w, source_h = source_box
++    if (source_x < 0 or source_y < 0
++            or source_x + source_w > source_width or source_y + source_h > source_height):
++        raise ValueError(f"Wayland sampling box {source_box} exceeds its source raster")
 +    cdef double sx_dx = affine[0]
 +    cdef double sx_dy = affine[1]
 +    cdef double sx_origin = affine[2]
@@ -16873,8 +17486,7 @@ index ddb9b15bda2c8ddb0dd7c77cddd9fca1f512de0b..a766bb5b4cfaac253ddf5ea010a2c683
 +            and source_box == (0.0, 0.0, float(source_width), float(source_height))):
 +        return image
 +
-+    output = bytearray(logical_width * logical_height * 4)
-+    cdef const unsigned char[::1] source = image.get_pixels()
++    output = bytearray(output_stride * logical_height)
 +    cdef unsigned char[::1] destination = output
 +    cdef int x, y, channel, x0, x1, y0, y1
 +    cdef double sx, sy, wx, wy, top, bottom, value
@@ -16896,7 +17508,7 @@ index ddb9b15bda2c8ddb0dd7c77cddd9fca1f512de0b..a766bb5b4cfaac253ddf5ea010a2c683
 +                p10 = y0 * source_stride + x1 * 4
 +                p01 = y1 * source_stride + x0 * 4
 +                p11 = y1 * source_stride + x1 * 4
-+                target = (y * logical_width + x) * 4
++                target = y * output_stride + <Py_ssize_t> x * 4
 +                for channel in range(4):
 +                    top = source[p00 + channel] * (1.0 - wx) + source[p10 + channel] * wx
 +                    bottom = source[p01 + channel] * (1.0 - wx) + source[p11 + channel] * wx
@@ -16909,7 +17521,7 @@ index ddb9b15bda2c8ddb0dd7c77cddd9fca1f512de0b..a766bb5b4cfaac253ddf5ea010a2c683
 +                        destination[target + channel] = <unsigned char> (value + 0.5)
 +    normalized = ImageWrapper(
 +        0, 0, logical_width, logical_height, output,
-+        image.get_pixel_format(), image.get_depth(), logical_width * 4,
++        image.get_pixel_format(), image.get_depth(), output_stride,
 +        planes=image.get_planes(), thread_safe=True,
 +        palette=image.get_palette(), full_range=image.get_full_range(),
 +    )
@@ -16920,7 +17532,7 @@ index ddb9b15bda2c8ddb0dd7c77cddd9fca1f512de0b..a766bb5b4cfaac253ddf5ea010a2c683
  cdef class WaylandSurface(ListenerObject):
  
      def __cinit__(self):
-@@ -179,6 +264,41 @@ cdef class WaylandSurface(ListenerObject):
+@@ -282,6 +388,50 @@ cdef class WaylandSurface(ListenerObject):
      def get_buffer_source_size(self) -> tuple[int, int]:
          return self.get_buffer_source_geometry()[2:4]
  
@@ -16933,15 +17545,24 @@ index ddb9b15bda2c8ddb0dd7c77cddd9fca1f512de0b..a766bb5b4cfaac253ddf5ea010a2c683
 +        of a full capture.
 +        """
 +        if self.wlr_surface == NULL:
++            self.update_source_format(NULL)
 +            return None
 +        cdef wlr_client_buffer *client_buffer = self.wlr_surface.buffer
-+        if not client_buffer or not client_buffer.texture:
++        if not client_buffer:
++            self.update_source_format(NULL)
++            return None
++        self.update_source_format(client_buffer.source)
++        if not client_buffer.texture:
 +            return None
 +        cdef int logical_width = self.wlr_surface.current.width
 +        cdef int logical_height = self.wlr_surface.current.height
 +        if logical_width <= 0 or logical_height <= 0:
 +            return None
++        if logical_width > MAX_WINDOW_SIZE or logical_height > MAX_WINDOW_SIZE:
++            raise ValueError(f"Wayland logical raster exceeds maximum size: {logical_width}x{logical_height}")
 +        cdef wlr_texture *texture = client_buffer.texture
++        if texture.width > MAX_WINDOW_SIZE or texture.height > MAX_WINDOW_SIZE:
++            raise ValueError(f"Wayland texture exceeds maximum size: {texture.width}x{texture.height}")
 +        raw = self.download_texture_pixels(0, 0, texture.width, texture.height)
 +        if raw is None:
 +            return None
@@ -16962,11 +17583,22 @@ index ddb9b15bda2c8ddb0dd7c77cddd9fca1f512de0b..a766bb5b4cfaac253ddf5ea010a2c683
      def capture_pixels(self, int x=-1, int y=-1, int width=0, int height=0):
          """Copy the current buffer's pixels out as an ImageWrapper.
          Returns None if the surface is destroyed or has no committed buffer."""
+@@ -374,7 +524,9 @@ cdef class WaylandSurface(ListenerObject):
+             if first_time("read-format-%#x" % read_format):
+                 log.warn("Warning: unsupported preferred pixel read format %#x, using ABGR8888", read_format)
+             read_format = DRM_FORMAT_ABGR8888
+-            pixel_format = get_capture_pixel_format(read_format)
++            pixel_format = get_capture_pixel_format(
++                read_format, self._source_format if self._has_source_format else None,
++            )
+ 
+         cdef wlr_texture_read_pixels_options opts
+         opts.data = <void*> texture_buffer.get_mem()
 diff --git a/xpra/wayland/server/wlroots.pxd b/xpra/wayland/server/wlroots.pxd
-index b1b2174f6bd80950aeabf3ca57080ec2540f1c2c..b2bf9d5cfb8d3028fe78902175dd945a3041612e 100644
+index 428b7807aca49b7d9883d3581690cad778ba919f..2f347423a56b9b3919c9056b2a85334764ef8e28 100644
 --- a/xpra/wayland/server/wlroots.pxd
 +++ b/xpra/wayland/server/wlroots.pxd
-@@ -1400,9 +1400,13 @@ cdef extern from "wlr/types/wlr_compositor.h":
+@@ -1416,9 +1416,13 @@ cdef extern from "wlr/types/wlr_compositor.h":
  
      ctypedef void (*wlr_surface_iterator_func_t)(wlr_surface *surface, int sx, int sy, void *user_data)
      void wlr_surface_for_each_surface(wlr_surface *surface, wlr_surface_iterator_func_t iterator, void *user_data)

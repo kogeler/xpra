@@ -1209,6 +1209,10 @@ class IsolatedWorkspaceTest(unittest.TestCase):
 
         self.case_dir = self.repo / "fork-maintenance" / "cases" / "sample-case"
         self.case_dir.mkdir(parents=True)
+        # Draft admission must inspect this fixture, not the real inactive duty.
+        cases_root = patch.object(contrib, "CASES_ROOT", self.case_dir.parent)
+        cases_root.start()
+        self.addCleanup(cases_root.stop)
         (self.case_dir / "README.md").write_text("# Sample\n", encoding="utf-8")
         patch_bytes = (
             b"diff --git a/target.txt b/target.txt\n"
@@ -6347,9 +6351,7 @@ class ManifestTest(unittest.TestCase):
                 "debian-libva-codecs-package",
                 "jph-parallel-build-objects",
                 "packet-handler-error-boundary",
-                "wayland-pointer-scroll-normalization",
                 "gtk-client-scroll-deduplication",
-                "upstream-test-quarantine",
                 "wayland-subsurface-stream-ownership",
                 "wayland-client-keymap-sync",
                 "wayland-empty-damage-throttle",
@@ -6363,20 +6365,62 @@ class ManifestTest(unittest.TestCase):
                 "x11-selection-refusal",
             },
         )
-        quarantine = cases["upstream-test-quarantine"]
-        self.assertEqual(quarantine.kind, "test-quarantine")
+        self.assertTrue(all(case.kind == "production" for case in cases.values()))
+        self.assertEqual(set(contrib.load_drafts()), {contrib.TEST_QUARANTINE_SLUG})
+
+    def test_quarantine_infrastructure_is_permanent_even_without_assignments(self) -> None:
+        directory = contrib.CASES_ROOT / contrib.TEST_QUARANTINE_SLUG
+        self.assertFalse(directory.is_symlink())
+        self.assertTrue(directory.is_dir(), "never delete the reserved quarantine scaffold")
+        for name in ("case.toml", "README.md", "fix.patch"):
+            with self.subTest(name=name):
+                path = directory / name
+                self.assertFalse(path.is_symlink())
+                self.assertTrue(path.is_file(), f"permanent quarantine file missing: {name}")
+        self.assertTrue((directory / "README.md").read_text(encoding="utf-8").strip())
+        data = contrib.read_toml(directory / "case.toml")
+        self.assertEqual(data["slug"], contrib.TEST_QUARANTINE_SLUG)
+        self.assertEqual(data["kind"], "test-quarantine")
+
+    def test_inactive_quarantine_is_empty_and_not_test_selectable(self) -> None:
+        directory = contrib.CASES_ROOT / contrib.TEST_QUARANTINE_SLUG
+        draft = contrib.load_draft_case(directory)
+        self.assertEqual(draft.kind, "test-quarantine")
+        self.assertEqual(draft.patch.read_bytes(), b"")
+        data = contrib.read_toml(draft.manifest)
+        self.assertEqual(data["patch_sha256"], "")
+        self.assertEqual(data["dependencies"], [])
+        self.assertEqual(data["paths"], [])
+        self.assertEqual(data["tests"]["list"], [])
+        self.assertEqual(data["evidence"]["required_gates"], [])
         self.assertEqual(
-            dict(quarantine.quarantined_tests_by_gate),
+            data["quarantine"],
             {
-                "quarantine": ("unit.client.x11_client_paint_test",),
-                "quarantine-cython": (
-                    "unit.client.x11_client_paint_test",
-                    "unit.client.record_test",
-                ),
-                "quarantine-no-compat": ("unit.client.x11_client_paint_test",),
+                "modules": [],
+                "gates": {gate: [] for gate in contrib.QUARANTINE_GATE_NAMES},
             },
         )
-        self.assertEqual(contrib.load_drafts(), {})
+        with self.assertRaisesRegex(contrib.ContribError, "draft schema"):
+            contrib.load_case(directory)
+        with self.assertRaisesRegex(contrib.ContribError, "unknown completed case"):
+            contrib.get_case(draft.slug)
+
+    def test_inactive_quarantine_queue_reference_is_commented(self) -> None:
+        stack = contrib.load_stacks(contrib.load_cases())["develop"]
+        self.assertNotIn(contrib.TEST_QUARANTINE_SLUG, stack.series)
+        manifest = (contrib.STACKS_ROOT / "develop.toml").read_text(encoding="utf-8")
+        self.assertRegex(manifest, r'(?m)^\s*# "upstream-test-quarantine",$')
+        with tempfile.TemporaryDirectory() as raw:
+            stacks = Path(raw)
+            (stacks / "develop.toml").write_text(
+                manifest.replace('# "upstream-test-quarantine",', '"upstream-test-quarantine",'),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(contrib, "STACKS_ROOT", stacks),
+                self.assertRaisesRegex(contrib.ContribError, "unique known cases"),
+            ):
+                contrib.load_stacks(contrib.load_cases())
 
     def test_develop_stack_is_the_complete_active_queue(self) -> None:
         cases = contrib.load_cases()
@@ -6395,12 +6439,10 @@ class ManifestTest(unittest.TestCase):
                 "jph-parallel-build-objects",
                 "debian-libva-codecs-package",
                 "packet-handler-error-boundary",
-                "wayland-pointer-scroll-normalization",
                 "gtk-client-scroll-deduplication",
                 "wayland-display-name-signal",
                 "client-codec-startup-order",
                 "x11-selection-refusal",
-                "upstream-test-quarantine",
             ),
         )
 

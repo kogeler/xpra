@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -407,6 +408,51 @@ selection_tool() {
         self.assertEqual(result.stdout, "")
         self.assertIn("cannot determine selection digest", result.stderr)
 
+    def test_wayland_gate_builds_client_and_gtk_before_native_discovery(self) -> None:
+        native = self.function_source("run_wayland", "run_libyuv")
+        with tempfile.TemporaryDirectory() as raw:
+            (Path(raw) / "tests" / "unittests").mkdir(parents=True)
+            harness = "WORK=" + shlex.quote(raw) + "\n" + r"""
+set -euo pipefail
+require_gate() { test "$1" = wayland; }
+prepare_source() { :; }
+installed_xpra_dir() { printf '%s/xpra\n' "$WORK"; }
+find() {
+    if [[ "$1" = "$WORK/xpra/wayland/server" ]]; then
+        printf '%s/module.so\n' "$1"
+    fi
+}
+readelf() { printf 'NEEDED libwayland-server.so.0\n'; }
+ldd() { :; }
+python3() {
+    if [[ "$1" = setup.py ]]; then
+        for required in --with-client --with-gtk3 --with-wayland_server; do
+            if [[ " $EXTRA_ARGS " != *" $required "* ]]; then
+                printf 'missing native build option: %s\n' "$required" >&2
+                return 37
+            fi
+        done
+        test "$*" = 'setup.py unittests unit/wayland/linkage_test.py'
+    else
+        test "$*" = 'unit/run.py unit/wayland'
+        printf 'native-suite=unit/wayland\n'
+    fi
+}
+"""
+            for missing in (None, "--with-client", "--with-gtk3"):
+                with self.subTest(missing=missing):
+                    candidate = native if missing is None else native.replace(missing + " ", "")
+                    result = subprocess.run(
+                        ("bash",), input=harness + candidate + "run_wayland\n",
+                        capture_output=True, text=True, check=False,
+                    )
+                    if missing is None:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertIn("native-suite=unit/wayland", result.stdout)
+                    else:
+                        self.assertNotEqual(result.returncode, 0, result.stdout)
+                        self.assertIn("missing native build option: " + missing, result.stderr)
+
     def test_callers_use_status_safe_capture_and_no_process_substitution(self) -> None:
         prepare = self.function_source("prepare_source", "installed_xpra_dir")
         focused = self.function_source("run_focused", "run_wayland")
@@ -438,6 +484,31 @@ selection_tool() {
         ):
             with self.subTest(authority=authority):
                 self.assertIn(authority, prepare)
+
+
+class InactiveQuarantineSelectionTest(unittest.TestCase):
+    def test_actual_inactive_scaffold_cannot_be_selected(self) -> None:
+        lab = Path(__file__).resolve().parents[2]
+        with self.assertRaisesRegex(selection.SelectionError, "draft case is not test-selectable"):
+            selection.load_selection(lab, "cases/upstream-test-quarantine")
+
+    def test_complete_stack_snapshot_excludes_the_preserved_scaffold(self) -> None:
+        lab = Path(__file__).resolve().parents[2]
+        scaffold = lab / "cases" / "upstream-test-quarantine"
+        self.assertTrue((scaffold / "case.toml").is_file())
+        selected = selection.load_selection(lab, "stacks/develop")
+        self.assertNotIn("upstream-test-quarantine", selected.subjects)
+        self.assertEqual(tuple(selection.iter_quarantined_tests(selected)), ())
+        with tempfile.TemporaryDirectory() as raw:
+            destination = Path(raw) / "snapshot"
+            selection.snapshot(selected, lab, destination)
+            self.assertFalse((destination / "cases" / "upstream-test-quarantine").exists())
+            frozen = selection.load_selection(destination, "stacks/develop")
+            self.assertEqual(frozen.subjects, selected.subjects)
+            self.assertEqual(
+                selection.selection_digest(frozen, destination),
+                selection.selection_digest(selected, lab),
+            )
 
 
 class QuarantineSelectionTest(unittest.TestCase):
@@ -535,6 +606,27 @@ class QuarantineSelectionTest(unittest.TestCase):
 
         with self.assertRaisesRegex(selection.SelectionError, "only upstream-test-quarantine"):
             selection.load_selection(self.lab, "cases/foreign-quarantine")
+
+    def test_even_a_populated_draft_cannot_be_selected_directly_or_by_a_stack(self) -> None:
+        manifest = self.directory / "case.toml"
+        # A valid nonempty candidate must still wait for explicit draft promotion.
+        manifest.write_text(
+            "draft = true\n" + manifest.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        stacks = self.lab / "stacks"
+        stacks.mkdir()
+        (stacks / "develop.toml").write_text(
+            'schema = 1\nslug = "develop"\nseries = ["upstream-test-quarantine"]\n'
+            '[tests]\nlist = ["full"]\n',
+            encoding="utf-8",
+        )
+        for name in ("cases/upstream-test-quarantine", "stacks/develop"):
+            with (
+                self.subTest(selection=name),
+                self.assertRaisesRegex(selection.SelectionError, "draft case is not test-selectable"),
+            ):
+                selection.load_selection(self.lab, name)
 
     def test_the_reserved_quarantine_slug_cannot_become_production(self) -> None:
         manifest = self.directory / "case.toml"

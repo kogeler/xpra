@@ -258,6 +258,10 @@ PY
             return 2
         fi
     done
+    # Independent test ownership survives retirement of production case patches.
+    # This fixed image-bound inventory never overwrites upstream or selected tests.
+    python3 "$HOST_RUNNER/neutral_tests.py" \
+        --source-tree "$WORK" --source-commit "$EXPECTED_COMMIT"
     git diff --check
     git diff --cached --check
 }
@@ -456,9 +460,10 @@ run_wayland() {
     require_gate wayland
     prepare_source
     cd "$WORK"
+    # Native GTK event regressions exercise the installed client adapter too.
     CFLAGS='-O0 -g0' \
     CXXFLAGS='-O0 -g0' \
-    EXTRA_ARGS='--minimal --with-modules --with-server --with-keyboard --with-wayland_server --with-clipboard --with-dmabuf' \
+    EXTRA_ARGS='--minimal --with-modules --with-server --with-client --with-gtk3 --with-keyboard --with-wayland_server --with-clipboard --with-dmabuf' \
         python3 setup.py unittests unit/wayland/linkage_test.py
 
     local xpra_dir clipboard compositor events display keyboard output
@@ -588,67 +593,98 @@ run_quarantine() {
         return "$status"
     fi
     python3 - "$output" "$gate" "${#quarantined[@]}" "${expected[@]}" <<'QUARANTINE_SUMMARY_PY'
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
+
+
+def parse_summary(output: str) -> tuple[int, int, int, tuple[str, ...]]:
+    markers = [match.start() for match in re.finditer(r"(?m)^test summary:$", output)]
+    if not markers:
+        raise SystemExit("quarantine probe produced no unit-test summary")
+    summary = output[markers[-1]:]
+
+    def count(label: str, *, optional: bool = False) -> int:
+        matches = re.findall(rf"(?m)^  {re.escape(label)}: ([0-9]+)$", summary)
+        if not matches and optional:
+            return 0
+        if len(matches) != 1:
+            raise SystemExit(f"quarantine probe omitted {label!r}")
+        return int(matches[0])
+
+    ignored_match = re.search(
+        r"(?m)^  ignored failures: [0-9]+\n(?P<items>(?:    - [^\n]+\n)*)",
+        summary,
+    )
+    ignored = []
+    if ignored_match:
+        for line in ignored_match.group("items").splitlines():
+            match = re.fullmatch(
+                r"    - (unit(?:\.[a-z0-9_]+)+) \(exit code=[0-9]+\)",
+                line,
+            )
+            if not match:
+                raise SystemExit(f"quarantine probe has malformed ignored failure: {line!r}")
+            ignored.append(match.group(1))
+    if count("ignored failures", optional=True) != len(ignored) or len(set(ignored)) != len(ignored):
+        raise SystemExit("quarantine probe has inconsistent ignored-failure accounting")
+    return count("successful tests"), count("failed tests"), count("skipped tests", optional=True), tuple(ignored)
+
 
 output = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
 gate = sys.argv[2]
 module_count = int(sys.argv[3])
 expected = tuple(sys.argv[4:])
-markers = [match.start() for match in re.finditer(r"(?m)^test summary:$", output)]
-if not markers:
-    raise SystemExit("quarantine probe produced no unit-test summary")
-summary = output[markers[-1]:]
-
-def count(label: str, *, optional: bool = False) -> int:
-    matches = re.findall(rf"(?m)^  {re.escape(label)}: ([0-9]+)$", summary)
-    if not matches and optional:
-        return 0
-    if len(matches) != 1:
-        raise SystemExit(f"quarantine probe omitted {label!r}")
-    return int(matches[0])
-
-ignored_match = re.search(
-    r"(?m)^  ignored failures: [0-9]+\n(?P<items>(?:    - [^\n]+\n)*)",
-    summary,
-)
-ignored = ()
-if ignored_match:
-    lines = ignored_match.group("items").splitlines()
-    parsed = []
-    for line in lines:
-        match = re.fullmatch(
-            r"    - (unit(?:\.[a-z0-9_]+)+) \(exit code=[0-9]+\)",
-            line,
-        )
-        if not match:
-            raise SystemExit(f"quarantine probe has malformed ignored failure: {line!r}")
-        parsed.append(match.group(1))
-    ignored = tuple(parsed)
-
-successful = count("successful tests")
-failed = count("failed tests")
-skipped = count("skipped tests", optional=True)
-ignored_count = count("ignored failures", optional=True)
+modes = {
+    "quarantine": ("without", "1"),
+    "quarantine-cython": ("with", "1"),
+    "quarantine-no-compat": ("without", "0"),
+}
+if (gate not in modes or len(set(expected)) != len(expected)
+        or module_count < len(expected)
+        or any(not re.fullmatch(r"unit(?:\.[a-z0-9_]+)+", module) for module in expected)):
+    raise SystemExit("invalid quarantine gate inventory")
+successful, failed, skipped, ignored = parse_summary(output)
 if failed or skipped:
     raise SystemExit(
         f"quarantine gate {gate} is contaminated: failed={failed}, skipped={skipped}"
     )
-if successful != module_count - len(expected):
+if (ignored != tuple(module for module in expected if module in ignored)
+        or successful != module_count - len(ignored)):
     raise SystemExit(
-        f"quarantine gate {gate} expected {module_count - len(expected)} successful "
-        f"modules, observed {successful}"
+        f"quarantine gate {gate} has inconsistent module results: "
+        f"successful={successful}, expected failures={expected!r}, observed={ignored!r}"
     )
-if ignored_count != len(ignored) or ignored != expected:
+
+stale = tuple(module for module in expected if module not in ignored)
+if stale:
+    # Confirm only the now-green assigned modules, in this same owned clean
+    # job/mode. Reuse upstream's incremental build/install and exact test entry,
+    # but never pass --skip-fail or alter the frozen selection to choose a test.
+    cythonize, compat = modes[gate]
+    env = dict(os.environ, CYTHONIZE_MORE=cythonize, XPRA_BACKWARDS_COMPATIBLE=compat,
+               EXTRA_ARGS="--with-terminal_client")
+    command = ["dbus-run-session", "--", "python3", "setup.py", "unittests",
+               *(module.replace(".", "/") + ".py" for module in stale)]
+    print(f"quarantine direct confirmation required: {', '.join(stale)}", flush=True)
+    result = subprocess.run(
+        command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, check=False, timeout=1800,
+    )
+    print(result.stdout, end="", flush=True)
+    ran = tuple(re.findall(r"(?m)^running (unit(?:\.[a-z0-9_]+)+) from [^\n]+$", result.stdout))
+    if (result.returncode or ran != stale
+            or parse_summary(result.stdout) != (len(stale), 0, 0, ())):
+        raise SystemExit(f"quarantine direct confirmation failed for {stale!r}")
+    print(f"quarantine direct confirmation passed: {', '.join(stale)}", flush=True)
+    # A second pass is evidence to REMOVE the assignment, not acceptance of
+    # the existing duty. The operator-visible named gate must remain failed.
     raise SystemExit(
-        f"quarantine gate {gate} is stale: expected ignored failures "
-        f"{expected!r}, observed {ignored!r}"
+        f"quarantine gate {gate} is stale: expected ignored failures {expected!r}, observed {ignored!r}"
     )
-print(
-    f"quarantine gate {gate} confirmed failures: "
-    + (", ".join(ignored) or "<none>")
-)
+print(f"quarantine gate {gate} confirmed failures: " + (", ".join(ignored) or "<none>"))
 QUARANTINE_SUMMARY_PY
 }
 

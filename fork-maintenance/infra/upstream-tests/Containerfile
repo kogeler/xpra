@@ -6,6 +6,11 @@ ARG DEBIAN_FRONTEND=noninteractive
 # Git and ccache are runner-only additions used to snapshot and patch the
 # read-only repository efficiently.
 # NumPy exercises PyOpenGL's native array output alongside ctypes containers.
+# rsync is required by upstream's unit-test install-tree merge.
+# xterm is the actual application in the upstream position/color regression.
+# Cython 3.3.0 rejects repeated local annotations in clean upstream backing.py.
+# Keep clean and patched legs on the same compatible compiler; reassess this
+# exact pin when that upstream boundary changes (see runbooks/upstream-tests.md).
 RUN apt-get update \
     && apt-get -y install \
         binutils \
@@ -80,6 +85,7 @@ RUN apt-get update \
         python3-setuptools \
         python3-wheel \
         python3-xdg \
+        rsync \
         sshpass \
         tigervnc-standalone-server \
         tigervnc-viewer \
@@ -89,9 +95,10 @@ RUN apt-get update \
         xauth \
         xserver-xorg-dev \
         xserver-xorg-video-dummy \
+        xterm \
         xutils-dev \
         xvfb \
-    && python3 -m pip install --break-system-packages Cython \
+    && python3 -m pip install --break-system-packages Cython==3.2.9 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -102,8 +109,12 @@ RUN install -d -o ubuntu -g ubuntu \
     && install -d -m 0700 -o ubuntu -g ubuntu /run/user/1000
 
 COPY --chown=ubuntu:ubuntu \
-    container_payload.py entrypoint.sh selection.py \
+    container_payload.py entrypoint.sh selection.py neutral_tests.py \
     /opt/xpra-fork-maintenance/upstream-tests/
+
+COPY --chown=ubuntu:ubuntu \
+    neutral/pointer_scroll_test.py neutral/pointer_scroll_client.c \
+    /opt/xpra-fork-maintenance/upstream-tests/neutral/
 
 RUN mkfifo /opt/xpra-fork-maintenance/upstream-tests/payload-ready.fifo \
     && chown ubuntu:ubuntu /opt/xpra-fork-maintenance/upstream-tests/payload-ready.fifo \

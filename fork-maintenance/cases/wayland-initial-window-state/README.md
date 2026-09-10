@@ -2,74 +2,63 @@
 
 ## Boundary
 
-A native-Wayland window has two different alpha facts. Its public `has-alpha`
-property says that the window may submit transparent buffers during its
-lifetime. The format of the current committed buffer says whether the pixels
-selected for the next draw are `RGBA` / `BGRA` or the opaque `RGBX` / `BGRX`
-variants. Codec selection must use both facts without turning the private
-per-frame value into changing window metadata.
+A native-Wayland window has a stable public `has-alpha` capability and a
+private `frame-has-alpha` value describing its latest buffer. Upstream now owns
+the latter property, its publication before the image, and the single
+constructor-owned notification in generic `WindowSource`. This case preserves
+that owner rather than subscribing to a second property or classifying format
+strings independently.
 
-This case publishes the current readback format as internal Wayland model
-state before the corresponding damage can select a coding. Each
-`WindowVideoSource` lazily acquires the applicable model notification on its
-first damage, caches a tri-state alpha classification, and rebinds its encoding
-selector before that damage can enter batching. Later format notifications
-rebind immediately, while every damage samples the current class and rebinds
-only when that class or its derived alpha policy changed. This folds a resize
-or other generic policy change into the callable without rebuilding it for
-unchanged steady-state frames. A
-frame whose alpha must be preserved is restricted to a negotiated,
-geometry-usable transparency encoding and fails closed. The actual extracted
-wrapper is checked again before video masks or encode-queue handoff, including
-video-subregion and refresh routes which choose their own coding. A known opaque frame
-enters the complete upstream adaptive selector, so it may use H.264 when the
-normal size, content, quality, CSC, and policy rules allow it.
+The residual patch keeps the actual readback `pixel-format` internal for
+server information and hardware provenance, serializes both private properties,
+and moves popup damage behind matching format/alpha/image publication. Its
+ordinary-toplevel CSC barrier waits for the relevant backing negotiation and
+recovers through the existing map refresh, without polling or damage replay.
 
-The same source also owns a narrow first-damage barrier. Ordinary mapped
-toplevels do not encode a video-only initial frame before their client backing
-has supplied the relevant per-window CSC modes. The map-time refresh remains
-the recovery edge; no timer, polling loop, or stored damage replay is added.
+A frame requiring alpha must use a negotiated, geometry-usable transparency
+encoding, even when a strict request, hint or hardcoded choice requests an
+opaque codec. Captured images are checked again before video masks or worker
+handoff, including video-subregion and refresh routes. That check uses cached
+feature/window/browser capability, not `has_alpha` narrowed by a newer model
+frame: a later XRGB buffer cannot authorize losing an earlier captured ARGB
+buffer's alpha. Opaque images retain the upstream adaptive selector.
 
-Frame policy is kept coherent when generic encoding configuration changes.
-Opaque-region changes recompute `discard_alpha` before selector rebinding, and
-the video dimension-update hook reapplies the cached frame class immediately
-after the base source has changed opaque-region coverage. This includes a
-resize discovered inside the generic damage method itself. Only the
-UI-owned notification and damage routes reach into the GObject model.
+Generic opaque-region notification computes discard state before virtual
+reconfiguration. The video resize hook refreshes UI-owned state and rebinds the
+selector before the same damage can enter batching. Encoder reconfiguration
+uses cached values and never reads a GObject model on a worker.
 
-This case owns frame state and the Python Wayland image/format publication
-seam. The separate `wayland-subsurface-stream-ownership` case feeds that seam
-with copied normalized root and child snapshots, owns native surface identity
-and topology, and publishes an ordered raw RGB32 transaction into the parent
-backing with atomic client-side composition. WIS decides what the current
-model image means for ordinary encoding; WSSO decides how a borrowed native
-tree generation becomes retained state and one atomic composite transaction.
-The separate `video-pipeline-cleanup-race` case owns codec instances and video
-resource teardown.
+WSSO separately owns normalized retained snapshots, surface identity/topology,
+raw RGB32 transactions and atomic client backing composition. Those raw stages
+bypass this case's ordinary codec/CSC policy. VPC owns video resources and the
+exact edge-image fanout/handoff; WIS owns whether masks apply to the selected
+coding, not a second fanout implementation.
 
 ## Embedded-source context
 
-The case resolves against source commit
-`212038243d0067b6860ebe7d6953692179ef353f`, embedded in the current `develop`
-history. That source already supplies the surrounding contracts which this
-patch preserves:
+The current source is `d95058b0916913fe6ae5296fb702f66d833898b0`.
+The earlier case was based on `212038243d0067b6860ebe7d6953692179ef353f`.
+Manual reassessment on the refreshed source removes the absorbed lazy
+`notify::pixel-format` lease and four-string classification. Upstream now
+publishes `frame-has-alpha` before the image, connects its notification once
+in `WindowSource.__init__()`, and narrows/reconfigures source alpha policy.
 
-- video pipeline candidates are built locally and published only after codec
-  initialization;
-- client map properties can update an existing per-window source;
-- a Wayland model whose geometry is still `0x0` is withheld until it becomes
-  ready;
-- native image access follows the existing `ImageWrapper` locking and lifetime
-  rules; and
-- ordinary non-composite toplevel empty-damage acknowledgement and
-  frame-callback pacing remain owned by `wayland-empty-damage-throttle`, while
-  WSSO owns composite-root acknowledgement and child commit completion.
+The source also already retains native source FourCC across readback, constructs
+video candidates locally, applies client map properties to existing sources,
+withholds 0x0 Wayland windows, and provides image locks and mandatory
+`call_in_encode_thread(callback, *args)` ownership. These are preserved,
+not reimplemented here.
 
-The case does not reimplement any of those behaviors. On an upstream refresh,
-retirement is behavioral: clean upstream must publish the current format at
-the same ordering boundary, preserve alpha-safe selection and CSC readiness,
-and pass the same focused and hardware gates. Patch application alone is not
-evidence of continued need or correctness.
+The remaining necessity follows concrete current paths: the popup commit
+precedes image publication, internal metadata names are unhandled, initial CSC
+readiness has no barrier, fixed selectors can bypass alpha, actual captured
+alpha can differ from the latest source state, picture sizes are still masked,
+and opaque-region/resize selection can use the previous discard decision.
+VPC's linked repair binds derived edge geometry to its existing fanout owner.
+
+Retirement requires a code-supported replacement of every residual boundary
+and preservation of its regressions. Applicability or passing tests alone
+cannot establish either continued necessity or correctness.
 
 ## Surrounding code and ownership map
 
@@ -88,8 +77,8 @@ negotiation, generic compression, and the video selector:
 | `xpra/server/window/metadata.py` | Serializes the internal current format for server information requests without adding a client window property. |
 | `xpra/server/source/window.py` | Creates one source per client/window and carries map properties to the source. |
 | `xpra/client/gui/window/backing.py` | Derives backing-specific `encoding.full_csc_modes`, possibly omitting values equal to connection defaults. |
-| `xpra/server/window/compress.py` | Owns stable transparency policy, opaque-region state, mmap precedence, damage batching, image extraction, and the later encode-side `pixel_format`. |
-| `xpra/server/window/video_compress.py` | Owns the frame-alpha cache, selector rebinding, client CSC readiness, adaptive video choice, CSC scoring, and encoder pipeline entry. |
+| `xpra/server/window/compress.py` | Owns the existing frame notification/cache, separately cached stable alpha capability, opaque-region state, damage batching, image extraction, and encode-side `pixel_format`. |
+| `xpra/server/window/video_compress.py` | Consumes cached frame policy for safe selection/CSC readiness and captured-wrapper admission; VPC owns exact video edge fanout and worker handoff. |
 
 With this case selected by itself, the normal mapped-toplevel path is:
 
@@ -99,13 +88,14 @@ wlroots surface commit
   -> native surface-image signal
   -> WaylandWindowServer.surface_image()
        -> model pixel-format
+       -> model frame-has-alpha (existing notification updates the selector)
        -> model image
   -> native commit with damage rectangles
   -> WaylandWindowServer.commit()
   -> refresh_window_area()
   -> WindowVideoSource.damage()
-       -> acquire one notify::pixel-format lease, if supported
-       -> UI-thread format sample and selector rebind
+       -> sample through generic update_has_alpha() on the UI thread
+       -> rebind only if cached class or alpha policy changed
   -> delayed / merged send_regions()
        -> choose coding from cached frame policy
   -> process_damage_region()
@@ -117,11 +107,11 @@ wlroots surface commit
   -> CSC / picture or video encoder
 ```
 
-After that first damage has acquired the lease, a later model format update
-also runs the synchronous `notify::pixel-format` callback between format and
-image publication. Thus construction order is covered by the mandatory first
-damage sample, while later `A <-> X` transitions rebind before the replacement
-image becomes damageable.
+The source constructor already owns one `notify::frame-has-alpha` lease, kept
+in `window_signal_handlers` and disconnected by generic UI cleanup.
+Notifications rebind before replacement damage. Damage also samples through
+that same generic owner; `pixel-format` is used for bounded provenance logging,
+never as an independently subscribed policy input.
 
 Damage can be delayed or coalesced, so this is not a promise that one Wayland
 commit becomes one Xpra packet. The notification or mandatory damage sample
@@ -161,106 +151,96 @@ state.
 
 ## Capability, frame, and client state
 
-The implementation deliberately keeps these domains separate:
-
 | State | Meaning | Consumer |
 | --- | --- | --- |
-| `has-alpha` | Stable capability of the producer window. | Generic window metadata and transparency policy. |
-| model `pixel-format` | Format of the most recently published Wayland image. | UI-thread notification and damage-time sampling. |
-| `_current_frame_has_alpha` | `True`, `False`, or `None` derived from the model format. | Cached video-source selector input. |
-| `discard_alpha` | Generic policy derived from opaque region, dimensions, and other source state. | Determines whether alpha may intentionally be discarded. |
-| `_want_alpha` | Current result of capability, client support, discard policy, and frame class. | Selects alpha-safe versus ordinary adaptive encoding. |
-| `WindowSource.pixel_format` | Format of the image actually extracted for encoding. | CSC and video pipeline scoring/setup. |
-| `_client_csc_modes_resolved` | Whether backing-specific map information reached a terminal state, including an explicit empty mapping. | Initial video-damage barrier. |
-| `full_csc_modes` | Client-advertised output formats for each video codec. | Candidate readiness and pipeline construction. |
+| model `has-alpha` | Stable producer capability. | Public metadata and backing lifetime. |
+| model `frame-has-alpha` | Upstream private current-buffer alpha fact. | Existing generic notification and UI samples. |
+| model `pixel-format` | Exact most recently published readback format. | Information replies and bounded frame diagnostics. |
+| `_alpha_capable` | Cached feature/window/browser policy before newest-frame narrowing. | Final captured-image alpha admission. |
+| `_current_frame_has_alpha` | Generic cached frame property, or `None` when unavailable. | Ordinary selector and initial CSC readiness. |
+| source `has_alpha` | Capability narrowed by the latest frame. | Generic encoding policy. |
+| `discard_alpha` | Current opaque-region coverage of source dimensions. | Intentional alpha stripping and selector coherence. |
+| `_want_alpha` | Tray/capability/client/frame policy after discard. | Cached selector. |
+| `WindowSource.pixel_format` | Actual extracted image format. | CSC and pipeline setup. |
+| `_client_csc_modes_resolved` | Terminal map or explicit CSC dictionary, including empty. | Startup barrier. |
+| `full_csc_modes` | Advertised output formats per video codec. | Readiness and pipeline construction. |
 
-The frame policy is equivalent to:
+Generic `update_has_alpha()` is the only owner of the frame cache. It computes
+feature/window/browser capability first, saves that independently, then narrows
+`has_alpha` only if the current frame property is false. An absent value stays
+conservative. Tray policy and client transparency remain explicit consumers;
+neither a frame transition nor this case mutates public `has-alpha`.
+
+The cached ordinary-frame decision is equivalent to:
 
 ```text
-frame_requires_alpha = current_frame_has_alpha is not False
-want_alpha = (
-    is_tray or (has_alpha and supports_transparency)
-) and not discard_alpha and frame_requires_alpha
+alpha_capable = feature && window capability && existing browser policy
+has_alpha = alpha_capable && current_frame_has_alpha is not False
+want_alpha = (is_tray || (has_alpha && client transparency)) && !discard_alpha
 ```
 
-`None` is conservative. An empty or unfamiliar format restores the stable
-capability policy; it never retains a selector derived from an older opaque
-frame. An A-format is treated as alpha-bearing even if a particular pixel
-sample happens to be opaque. Pixel inspection is not a substitute for the
-buffer format and lifetime contract.
-
-`has-alpha` is never changed when the frame class changes. Exporting the
-private value as public metadata would cause capability churn, confuse client
-backing lifetime, and make a per-buffer decision look like a window property.
+The final A-wrapper check deliberately substitutes `_alpha_capable` for the
+latest-frame-narrowed `has_alpha`. It does not infer opacity from pixel samples,
+nor reinterpret the captured wrapper using later model/discard state.
 
 ## Native format provenance
 
-The native capture path normalizes the supported wlroots read formats to four
-explicit Xpra values:
+Native `get_capture_pixel_format()` uses both read format and known source
+FourCC. Readback byte order maps as follows:
 
-| DRM read format | Xpra format | Cached class |
-| --- | --- | --- |
-| `DRM_FORMAT_ABGR8888` | `RGBA` | alpha-bearing |
-| `DRM_FORMAT_XBGR8888` | `RGBX` | opaque |
-| `DRM_FORMAT_ARGB8888` | `BGRA` | alpha-bearing |
-| `DRM_FORMAT_XRGB8888` | `BGRX` | opaque |
+| Read format | Byte order |
+| --- | --- |
+| `DRM_FORMAT_ABGR8888` | `RGBA` |
+| `DRM_FORMAT_XBGR8888` | `RGBX` |
+| `DRM_FORMAT_ARGB8888` | `BGRA` |
+| `DRM_FORMAT_XRGB8888` | `BGRX` |
 
-An unsupported preferred read format falls back to ABGR8888 and is therefore
-published as `RGBA`. DMA-BUF capture downloads before publication on this
-path, so the wrapper exposes the normalized CPU image format rather than an
-opaque DMA-BUF label.
+A known opaque XRGB/XBGR source narrows an alpha-bearing readback to its X
+variant. Unsupported preferred read formats use the existing ABGR fallback;
+WSSO also preserves the known source-format narrowing on that fallback and its
+direct normalized capture route. DMA-BUF readback still publishes a CPU image,
+not an opaque DMA-BUF token. WIS changes neither native format mapping nor
+capture allocation.
 
-`update_frame_alpha_state()` enumerates exactly the four normalized strings.
-It does not infer alpha from spelling. Any future format becomes `None` until
-its semantics are deliberately added and tested.
+The upstream model publishes the buffer's alpha fact; WIS no longer maintains
+another four-string table in the video source. `pixel-format` serialization
+accepts future names as provenance without assigning them new codec semantics.
 
 ## Model publication and notification lifetime
 
-Both Wayland model classes declare `pixel-format` as an internal property. It
-is readable by the server-side source but is excluded from client window
-metadata. Models initialize it to the empty string, then update it from the
-new `ImageWrapper` whenever an image is published.
+Both models declare `pixel-format` alongside `frame-has-alpha` in their
+internal names, not public or dynamic client metadata. The current format starts
+empty and follows the image. Generic `WindowServer.get_window_info()` enumerates
+internal properties, so the serializer explicitly supports both: empty string
+is the format default, true is the conservative frame-alpha default, and
+ordinary `skip_defaults`, unset values and `XPRA_SKIP_METADATA` semantics
+remain intact. Unknown property names still take the normal error path.
 
-Internal properties also pass through `WindowServer.get_window_info()` for
-`xpra info` and connected-client information requests. The shared metadata
-serializer therefore recognizes `pixel-format`, with the empty string as its
-default. It reports the actual GObject property, including future format
-names, and retains the ordinary `skip_defaults` and `XPRA_SKIP_METADATA`
-behavior. The property stays outside the public and dynamic model property
-lists, so frame changes do not become client window metadata. Without this
-serializer entry, every information request logs `unhandled property name:
-pixel-format` and omits the field even when the current buffer format is valid.
+The inherited constructor connects the sole frame signal before its first
+sample, retaining its exact handler ID until UI cleanup. WIS adds no signal,
+timer, lease acquisition flag or new cleanup owner. A second source for the
+same model owns its own handler; cleaning one must not disconnect the other.
+A real GObject model and actual source constructors exercise that boundary.
 
-Frame-policy state has conservative class defaults and becomes per-instance on
-first use. `damage()` performs a one-shot internal-property probe. If the model
-exposes `pixel-format`, the source connects `notify::pixel-format` to
-`update_frame_alpha_state()` and records the signal ID in the inherited
-`window_signal_handlers` list. The one-shot flag is source-lifetime state, not
-reusable encoder state in `init_vars()`. Normal `ui_cleanup()` disconnects the
-recorded lease with every other model signal. Models which do not expose the
-property pay only the first probe and retain capability-only behavior.
+On UI damage, `update_frame_alpha_state()` calls generic `update_has_alpha()`
+and rebinds only when the class or desired alpha changes. Resize repeats that
+sample after dimensions/discard have changed. Worker-side encoder
+reconfiguration uses the already narrowed generic `has_alpha`, without a
+model read or duplicate video override of `update_encoding_options()`.
 
-The first damage acquires the lease before sampling the already-published
-format and before the CSC barrier or generic batching. This makes the initial
-frame independent of constructor order. A later notification is synchronous
-with the model update and rebinds the cached selector before the event loop can
-service damage for the replacement image. Every damage samples the class and
-compares the derived alpha decision with `_want_alpha`. Dimension updates
-also reapply the cached class immediately after recomputing `discard_alpha`,
-including resizes first discovered inside generic damage handling after that
-initial sample. An unchanged steady-state sample does not rebuild the selector.
-Encoder reinitialization never reads a GObject model from a protocol or codec
-worker.
-
-The bounded diagnostic emitted on a class transition contains the window ID,
-format name, and `want-alpha` result. It contains no pixels or image content.
+The separately cached diagnostic tuple `(pixel-format, want-alpha)` bounds
+the existing per-window frame log. It is diagnostic only, not a second alpha
+classifier. Format or policy transitions produce one new record; unchanged
+damage does not rebuild the selector or repeat it. Logs contain identifiers
+and policy, never pixels or application content.
 
 ## Surface-specific ordering
 
 ### Toplevel
 
 The native toplevel route already emits `surface-image` before `commit`.
-`surface_image()` now publishes `pixel-format` before `image`; the later commit
+`surface_image()` publishes `pixel-format`, then upstream `frame-has-alpha`,
+then `image`; the later commit
 fans out its damage rectangles. The case does not add a second full-window
 damage and does not change wlroots frame acknowledgement.
 
@@ -269,7 +249,7 @@ damage and does not change wlroots frame acknowledgement.
 The native popup route reports commit state before it emits the captured image.
 Damage in the generic commit handler would therefore be able to select coding
 against the preceding frame. Popup full damage is issued instead from
-`surface_image()` after both format and image have been published, and only
+`surface_image()` after format, frame alpha and image have been published, and only
 for a positive mapped geometry.
 
 This preserves the native signal order rather than pretending that popups use
@@ -285,10 +265,10 @@ point remains the WIS publication route, but native WSSO ingest does not split
 a generation across that event and a later commit. It emits one
 `subsurface-commit`; the replacement helper first copies the borrowed
 normalized raster, then calls the same `set_image()` seam to publish a coherent
-image/format pair before topology exposure or child damage reconciliation.
-Unlike the toplevel GObject route, the child facade does not expose two
-separately observable property notifications whose relative order consumers
-may depend on.
+image/format/frame-alpha generation before topology exposure or child damage
+reconciliation. Both models can emit GObject notifications; consumers must not
+mistake an individual notification for acceptance of a complete WSSO snapshot.
+WSSO restores all three cached values and rejects the capture if publication fails.
 
 WSSO does not run the child through `WindowVideoSource` or this case's
 frame-alpha selector: it uses a direct `WindowSource` only to capture exact
@@ -329,8 +309,8 @@ The barrier applies only when all of the following are true:
 client CSC state is unresolved
 and source is an ordinary mapped toplevel
 and at least one selected video candidate exists
-and current frame is known opaque
-    or current format is unknown and there is no picture fallback
+and (current frame is known opaque
+     or frame state is unavailable and there is no picture fallback)
 and no selected candidate has a client CSC mode
 ```
 
@@ -347,58 +327,34 @@ replayed.
 
 ## Frame selector and rebinding
 
-`apply_frame_alpha_state()` computes `_want_alpha` from cached state and then
-calls the existing `assign_encoding_getter()`. Rebinding the callable is as
-important as updating the boolean: delayed damage consults the cached selector
-installed by generic compression code.
+The upstream `frame_has_alpha_changed()` callback recomputes the generic
+cache and runs the normal encoding-option update. That path recomputes
+`_want_alpha` and assigns the selector. WIS does not add a competing callback.
 
-The method runs at four state edges:
-
-- a recognized or unknown `pixel-format` notification;
-- a UI-thread damage sample whose class or derived alpha policy changed;
-- a dimension update after generic code recomputes `discard_alpha`; and
-- generic encoding-option reconfiguration.
-
-The format cache and bounded diagnostic change only when the normalized class
-changes. Selector application also runs when the class is unchanged but its
-derived policy differs. A resize updates `_want_alpha` and the cached callable
-in the same dimension-update hook, before its enclosing damage can be batched
-or encoded. Otherwise the steady-state damage sample leaves the cached callable
-intact.
+`apply_frame_alpha_state()` is the narrow cached rebinding used by UI damage
+sampling and resize recovery. It updates both `_want_alpha` and
+`get_best_encoding`: updating only the boolean would leave delayed damage
+using the previous callable. Sampling unchanged state does not reassign it.
 
 ## Opaque-region and resize coherence
 
-Generic `WindowSource` owns `_opaque_region` and derives `discard_alpha` by
-comparing it with current window dimensions. Its opaque-region notification
-uses the virtual `update_encoding_options()` path, so the video override must
-establish the current discard result before either the generic or frame-aware
-selector is assigned.
+The generic opaque-region callback now publishes the region, recomputes
+`discard_alpha`, and only then invokes virtual `update_encoding_options()`.
+The existing generic/video option updates run once in their existing owners;
+the old duplicate video discard/reapply wrapper is removed.
 
-`WindowVideoSource.update_encoding_options()` therefore:
+The base dimension hook updates dimensions, queue-size policy and discard
+coverage. The video hook then samples generic alpha policy on the UI thread
+(including the existing size-dependent browser policy) and rebinds before
+returning to damage batching. This matters because generic `damage()` may
+discover a resize after the outer video damage wrapper already sampled the
+old dimensions. Growing or shrinking across a fixed opaque region must take
+effect in that same `do_damage()` call, without another native commit.
 
-1. recomputes `discard_alpha` from the already-published region and dimensions;
-2. runs the complete generic option update;
-3. reapplies the cached frame class; and
-4. updates video-subregion policy and performs any requested codec reload.
-
-The repeated discard calculation is intentional and idempotent. It closes the
-virtual-dispatch ordering without moving generic opaque-region ownership into
-the video source.
-
-The base `update_window_dimensions()` publishes the new dimensions and
-refreshes generic discard state. The video override immediately reapplies the
-cached frame class before returning to its caller. This hook is required even
-with damage-time sampling: `WindowVideoSource.damage()` enters before generic
-`WindowSource.damage()` discovers changed dimensions through
-`may_update_window_dimensions()`. The same damage must see the new selector at
-its `do_damage()` batching boundary, without waiting for another commit or
-notification. Growing or shrinking across a fixed opaque region therefore
-cannot use the preceding alpha policy while the image remains `BGRA` or `RGBA`.
-Dimension mutation and video teardown stay in their established owners.
-
-`update_encoding_options()` and the dimension-update hook sample no model.
-They use the cached frame class; model reads remain confined to UI-owned
-notification and damage paths.
+The real resize callback installed by image filtering only replaces its filter;
+it does not send damage before this hook returns. Encoder reconfiguration
+continues to run with cached policy only and never calls these model-reading
+UI hooks from a worker.
 
 ## Encoding precedence and fail-closed behavior
 
@@ -418,7 +374,8 @@ An X format permits video; it does not force H.264.
 
 When `_want_alpha` is true, alpha safety outranks an opaque strict request,
 hint, hardcoded value, or adaptive video result. The existing lossless
-non-grayscale mmap transport remains the earlier authority because it preserves
+non-grayscale mmap transport is the earlier authority, including under a fixed
+opaque override, because it preserves
 the source data without choosing an opaque codec.
 
 `get_frame_transparent_encoding()` delegates candidate preference to the
@@ -446,7 +403,9 @@ but all converge on `do_process_damage_image()` before the captured wrapper
 can enter the encode queue.
 
 At that boundary, a frame-aware source checks the actual wrapper's `RGBA` or
-`BGRA` format and the existing client/window transparency policy. It preserves
+`BGRA` format and cached feature/window/browser/client transparency policy.
+The latest-frame-narrowed `has_alpha` cannot decide that older image's fate.
+It preserves
 non-grayscale mmap first; otherwise it reuses the negotiated transparency
 selector with the wrapper's actual width and height. An unavailable or
 geometry-unusable coding releases that wrapper and raises before any worker
@@ -471,15 +430,17 @@ the model has since published an alpha-bearing replacement.
 Video dimension masks belong only to a video coding. Picture and mmap
 handoffs retain the wrapper's exact dimensions, including odd sizes and 1x1
 repairs after a pipeline with even-width/even-height constraints. Only the
-video branch creates the established codec-edge regions; the frame case does
-not change that branch's edge policy or codec lifetime.
+video branch creates codec-edge regions. VPC owns their disjoint geometry,
+exact wrapper dimensions and exception-safe handoff. WIS does not duplicate
+that loop or change codec lifetime.
 
 ## Thread and resource lifecycle
 
 This case adds state ordering but no independent worker or resource owner:
 
 - wlroots capture and model publication run on the compositor/UI path;
-- model reads occur only in the notification and UI-thread `damage()` path;
+- model reads occur only in the existing constructor/notification and UI-owned
+  damage/resize paths;
 - cached booleans and selector assignment may be reapplied by generic
   configuration without touching the model;
 - delayed damage and image extraction retain the existing encode-queue
@@ -508,6 +469,7 @@ cases are composed with it.
 - `xpra/wayland/server/models/subsurface_window.py`;
 - `xpra/wayland/server/subsystem/window.py`;
 - `xpra/server/window/metadata.py`;
+- `xpra/server/window/compress.py`;
 - `xpra/server/window/video_compress.py`;
 - `tests/unittests/unit/server/window/make_metadata_test.py`;
 - `tests/unittests/unit/wayland/window_test.py`;
@@ -532,7 +494,7 @@ Responsibility is split as follows:
 | `wayland-subsurface-stream-ownership` | Normalized retained snapshots, stable surface identity, authoritative topology and colourspace, ordered raw RGB32 parent-backing transactions, exact packet ownership and client draw-ACK routing, atomic Cairo/OpenGL staging, native input, composite-root acknowledgement, child frame completion, and live subsurface proof. |
 | `wayland-empty-damage-throttle` | Ordinary non-composite toplevel frame-callback acknowledgement, empty-damage guard, and damage/no-damage pacing. |
 | `window-source-timer-lifecycle` | Generic window-source GLib timer leases and terminal close. |
-| `video-pipeline-cleanup-race` | Codec, video queue, flush/watchdog, and video-subregion resources. |
+| `video-pipeline-cleanup-race` | Codec, video queue, exact disjoint edge fanout, flush/watchdog, and video-subregion resources. |
 
 Refresh the patch only through an isolated workspace and
 `workspace-stage` / `workspace-update`; never edit its digest or path list by
@@ -557,27 +519,20 @@ method and test-class ownership. Low-context application proves neither
 correct placement nor behavioral composition by itself.
 
 `WaylandWindowServerFrameStateTest.test_map_applies_properties_before_first_refresh`
-uses `object.__new__(WindowVideoSource)` so it can exercise the real WIS
-`damage()` and `set_client_properties()` wrappers without constructing codecs,
-timers, queues, or a client connection. Bypassing normal construction makes
-the fixture responsible for the complete lazy frame-policy slice reached by
-that test: `window_signal_handlers`, `_client_csc_modes_resolved`,
-`_current_frame_has_alpha`, `_frame_alpha_signal_initialized`, `has_alpha`,
-`supports_transparency`, `discard_alpha`, and `_want_alpha`, plus the encoding
-candidate fields used by the CSC barrier.
+uses a constructor-free source to exercise actual map/CSC wrappers without
+constructing codecs or timers. It explicitly initializes generic cached
+capability/frame state, window/client policy, dimensions, content/window types
+and the selected video candidates. Its model advertises no frame property,
+so the initial class is conservative and a video-only pre-map damage waits.
+The map marker releases that wait before the recovery refresh.
 
-The fixture returns `()` from `window.get_internal_property_names()` on
-purpose. The map test therefore proves the CSC/map recovery order without
-also acquiring a `notify::pixel-format` lease, while `window.get()` returns the
-empty current format and exercises the conservative frame class.
-`initial_damage_test` separately owns the signal-lifetime boundary. The empty
-property set does not bypass WIS logic: `_ensure_frame_alpha_signal()` still
-runs exactly once, the initial pre-map damage is still withheld, and the
-map-triggered refresh still reaches the patched base `WindowSource.damage()`.
-Keep these explicit instance values when adjacent cases cause the real wrapper
-to execute through the complete stack; an unconstrained `Mock` or reliance on
-incidental class defaults would make the ordering assertion depend on
-construction artifacts rather than the documented lazy-state contract.
+This fixture does not prove signal ownership. The dedicated initial-damage
+module uses two actual source constructors and a real `SubsurfaceWindow`
+GObject model, invokes its real `set_image()` publication, and observes
+upstream-owned frame notifications, selector transitions, no additional
+subscription on damage and independent disconnection. Codec scoring is
+controlled at its terminal boundary, not by replacing the frame callback or
+generic encoding-option implementation.
 
 ## Patch ownership and non-goals
 
@@ -587,9 +542,8 @@ The production patch owns:
   models;
 - current-format serialization in server information replies;
 - format-before-image publication and popup image-before-damage ordering;
-- one lazily acquired model-format signal owned by each applicable video
-  source;
-- explicit four-format tri-state classification;
+- separately cached stable capability for captured-image admission, while
+  preserving the upstream frame cache and constructor-owned signal;
 - cached frame-aware selector rebinding;
 - alpha-safe negotiated selection with geometry validation and fail-closed
   behavior;
@@ -634,8 +588,8 @@ the existing publication tests retain their separate controlled native seam.
 `WindowVideoSource` method surface without constructing real codecs. The tests
 cover:
 
-- first-damage signal acquisition, one-shot reuse, per-source independence,
-  and inherited disconnection;
+- actual constructor-owned GObject frame notification, no additional damage-time
+  lease, per-source independence and inherited disconnection;
 - absence of model reads during encoder reinitialization;
 - video-only pre-map wait, map release, and explicit empty CSC resolution;
 - concrete/fixed codec readiness versus adaptive multi-codec readiness;
@@ -647,7 +601,7 @@ cover:
 - preservation of adaptive picture, lossless, explicit encoding, and mmap
   precedence;
 - `RGBX -> RGBA -> RGBX` selector transitions;
-- conservative recovery for an unknown future format;
+- conservative recovery when frame state is unavailable;
 - generic reconfiguration with an already cached opaque frame;
 - full opaque-region add/remove in both directions; and
 - grow/shrink transitions across a fixed opaque region, including a changed
@@ -655,35 +609,45 @@ cover:
 - identified video-subregion and `novideo` paths through real generic image
   processing and a real `ImageWrapper` to the worker handoff;
 - exact odd and 1x1 picture dimensions after video masks were installed;
-- captured-image alpha independent of a newer model format in both directions;
+- captured-image alpha independent of a newer model frame in both directions,
+  with actual narrowing of `has_alpha`, plus feature/window/browser/client gates;
 - an ordinary-dictionary planner snapshot with unchanged option values and
   the identical original `typedict` at the encode handoff;
-- mmap without picture candidates, intentional generic opaque-region discard,
+- mmap without picture candidates, grayscale policy, intentional generic opaque-region discard,
   and wrapper release when no usable transparency coding exists.
 
 `unit.wayland.window_test` exercises the real Python subsystem behind controlled
-native-extension stubs. Its 11 tests include four case-owned boundaries:
+native-extension stubs. Its case-owned boundaries include:
 
 - map properties are applied before resize, compositor flush, and first
   refresh;
-- `surface_image()` publishes current format before image;
+- `surface_image()` publishes current format and upstream frame alpha before image;
 - repeated popup format transitions damage only after the matching image and
   format are visible; and
 - a subsurface facade receives its exact image and format before its source is
   damaged.
 
 The map-order case uses the constructor-free fixture documented above and
-patches only the generic base operations at their terminal boundary. The
-dedicated initial-damage module uses a model which advertises `pixel-format`
-and therefore proves the complementary signal acquisition and cleanup path.
-Together they distinguish lazy frame-policy initialization from map ordering;
-neither test substitutes for WSSO's atomic `subsurface-commit` and backing
-transaction regressions.
+patches generic base operations only at the terminal boundary. The initial
+damage module separately proves the real signal lifecycle. Existing
+`unit.server.window.compress_test` is also required: the new generic cache
+must preserve upstream capability narrowing, no-frame-property behavior and
+adaptive encoding policy. None of these tests replaces WSSO's native capture,
+snapshot rollback or atomic backing-transaction controls.
 
 The clean tests-only selection must fail non-vacuously at these behavior
 assertions on the frozen source. The patched standalone selection must pass
-all four focused modules, and those modules must pass through the complete stack after
+all four case-owned focused modules plus the existing generic compression module;
+those modules must pass through the complete stack after
 the adjacent subsurface, timer, empty-damage, and video-cleanup cases compose.
+
+Resize controls use the actual `WindowPerformanceStatistics` owner, including
+its numeric packet counter and resize history, through generic encoding-option
+recalculation. Publication checks retain both the upstream `frame-has-alpha`
+notification and the case's preceding `pixel-format`, before image publication.
+The captured-frame control must expose the actual encode-boundary decision
+(`h264` instead of alpha-preserving `rgb32` on clean source); a missing private
+cache field is not its behavioral proof.
 
 The native `wayland` target compiles/imports the adjacent Cython boundary and
 runs the complete Wayland module set. It proves that the Python ordering tests
@@ -756,8 +720,8 @@ not a substitute for either frame-aware hardware profile.
 - Keep stable `has-alpha` capability separate from current buffer format.
 - Keep model `pixel-format` private and separate from the later extracted
   `WindowSource.pixel_format`.
-- Classify only `RGBA`, `BGRA`, `RGBX`, and `BGRX`; unknown means conservative,
-  not opaque.
+- Consume upstream `frame-has-alpha` through its single generic cache; do not
+  recreate an independent pixel-format classifier or signal owner.
 - Publish format before image and before any damage which may select coding for
   that image.
 - Preserve the native toplevel order and the distinct popup order; do not add
@@ -769,9 +733,11 @@ not a substitute for either frame-aware hardware profile.
 - Keep the standalone WIS `subsurface_image()` publication seam distinct from
   WSSO's combined native `subsurface-commit`; sharing `set_image()` does not
   share snapshot, topology, transaction, or callback ownership.
-- Acquire the format signal once, before first-damage sampling, own it through
-  `window_signal_handlers`, and retain sampling on every UI-thread damage.
+- Preserve the constructor-owned frame signal and its inherited disconnection;
+  damage and resize resample through the same generic owner.
 - Never read the model from `init_encoders()` or another protocol/codec worker.
+- Keep stable capability separate from latest-frame-narrowed source alpha at
+  actual-wrapper admission.
 - Treat A-formats conservatively unless existing `discard_alpha` policy is
   authoritative; never infer opacity from pixel samples.
 - Recompute discard state before virtual encoding reconfiguration and reapply
@@ -804,6 +770,10 @@ not a substitute for either frame-aware hardware profile.
 ## Required validation
 
 Follow [development and final acceptance](../../docs/runbooks/validation.md).
+During an upstream refresh, finish and checkpoint the initial per-case manual
+review/adaptation and the composed manual-review exit before starting the
+runtime sequence below. Tests challenge that review; they cannot replace
+reasoning about uncovered signal order, geometry and ownership interleavings.
 During development run the nearest selector/publication regression immediately
 after an atomic edit, include affected upstream and composed case modules, and
 check real native/compiled behavior where relevant. Exercise the appropriate
@@ -814,7 +784,7 @@ After candidate freeze, fill only missing or invalidated requirements:
 | Validation | Required proof |
 | --- | --- |
 | Clean tests-only focused run | The new selector/publication tests reach the frozen source and fail for the absent behavior, not import or fixture errors. |
-| Patched standalone focused run | All four declared focused modules pass on the atomic case, including metadata serialization and real-model information requests. |
+| Patched standalone focused run | The four case-owned modules and existing generic compression module pass, including metadata serialization and real-model information requests. |
 | Patched standalone `wayland` run | The current native Wayland extensions compile/import and the complete subsystem boundary passes. |
 | Complete-stack focused and `wayland` runs | Adjacent cases preserve frame, map, publication, selector, and resize behavior after composition. |
 | Patch, stack, whitespace, lint, and fork-control checks | Patch digest/path authority and repository integration are exact. |

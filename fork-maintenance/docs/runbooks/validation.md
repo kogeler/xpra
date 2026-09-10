@@ -174,6 +174,12 @@ same jobs independently. A failed or unexplained result still stops escalation.
 
 ## Final acceptance phase
 
+Quarantine reassessment below applies only to an active duty case. With none,
+record that there are no assignments, preserve the permanent inactive scaffold
+and commented TOML references, and do not test-select the draft or restore
+retired skips. Never delete quarantine infrastructure because its assignments
+are empty. This changes none of the production, full-suite or live gates.
+
 Fill the ledger's gaps on the reviewed stable candidate:
 
 1. Required non-vacuous clean controls, case/dependency and composed focused

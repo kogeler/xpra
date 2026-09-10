@@ -3,3 +3,7 @@
 !container_payload.py
 !entrypoint.sh
 !selection.py
+!neutral_tests.py
+!neutral/
+!neutral/pointer_scroll_test.py
+!neutral/pointer_scroll_client.c

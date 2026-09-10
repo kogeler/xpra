@@ -1,10 +1,8 @@
 diff --git a/tests/unittests/unit/server/window/compress_test.py b/tests/unittests/unit/server/window/compress_test.py
-index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cbe29fa39a 100644
+index 0323f173da940c79af07fba47abd40b220031eee..a390933424e20ed96b3d2674a5277e2a523b9cb3 100644
 --- a/tests/unittests/unit/server/window/compress_test.py
 +++ b/tests/unittests/unit/server/window/compress_test.py
-@@ -5,11 +5,148 @@
- # later version. See the file COPYING for details.
- 
+@@ -7,7 +7,145 @@
  import unittest
 +import warnings
 +from threading import Condition, Event, Lock, Thread
@@ -14,6 +12,7 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
  
 -from xpra.server.window import compress
 -from xpra.server.window.compress import WindowSource
++from xpra.net.common import Packet
 +from xpra.server.source import factory
 +from xpra.server.source.client_connection import ClientConnection
 +from xpra.server.source.window import WindowsConnection
@@ -152,11 +151,7 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +            raise WaitInterrupted("timer callback wait interrupted")
 +        return super().wait(timeout)
  
- 
- class CompressTest(unittest.TestCase):
-@@ -132,5 +269,1033 @@ class CompressTest(unittest.TestCase):
-         self.assertEqual(source.get_transparent_encoding(*size, {"quality": 80}, "auto"), "jpega")
- 
+@@ -185,3 +323,1104 @@ class CompressTest(unittest.TestCase):
  
 +class WindowSourceTimerLifecycleTest(unittest.TestCase):
 +
@@ -164,6 +159,9 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +    def make_source() -> WindowSource:
 +        source = object.__new__(WindowSource)
 +        source.init_vars()
++        # The real constructor clears this only after the source is ready.
++        # init_vars() alone deliberately leaves all damage cancelled.
++        source._damage_cancelled = 0
 +        source.wid = 7
 +        source.encoding = "rgb"
 +        source.statistics = SimpleNamespace(
@@ -341,6 +339,64 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +            finally:
 +                glib.release_timeout.set()
 +                worker.join(2)
++
++    @staticmethod
++    def make_refresh_source() -> WindowSource:
++        source = WindowSourceTimerLifecycleTest.make_source()
++        source.window = SimpleNamespace(is_managed=lambda: True)
++        source.window_dimensions = 64, 64
++        source.auto_refresh_delay = 100
++        source.base_auto_refresh_delay = 100
++        source.auto_refresh_encodings = ("rgb24",)
++        source.batch_config.delay = 1
++        source.global_statistics = SimpleNamespace(congestion_value=0)
++        source.statistics.damage_ack_pending = {}
++        source.statistics.damage_in_latency = []
++        source.queue_packet = Mock()
++        return source
++
++    def test_packet_publication_keeps_current_refresh_and_lossless_cancellation(self) -> None:
++        source = self.make_refresh_source()
++        glib = FakeGLib()
++        lossy = Packet("draw", source.wid, 0, 0, 64, 64, "jpeg", b"pixels", 1, 192, {"quality": 50})
++        lossless = Packet("draw", source.wid, 0, 0, 64, 64, "rgb24", b"pixels", 2, 192, {})
++        with patch.object(compress, "GLib", glib), patch.object(compress, "AUTO_REFRESH", True), \
++                patch.object(compress, "SCREEN_UPDATES_DIRECTORY", ""):
++            source.queue_damage_packet(lossy, 1, 2, typedict())
++            self.assertEqual(source.refresh_timer, 1)
++            self.assertEqual(source.refresh_regions, [rectangle(0, 0, 64, 64)])
++            source.queue_damage_packet(lossless, 1, 2, typedict())
++            self.assertEqual(source.refresh_regions, [])
++            self.assertEqual(source.refresh_timer, 0)
++            self.assertEqual(glib.callbacks, {})
++            self.assertEqual(glib.removed, [1])
++            self.assertEqual(source.queue_packet.call_count, 2)
++            source.cleanup()
++
++    def test_packet_refresh_publication_cannot_cross_terminal_cleanup(self) -> None:
++        # Exercise the current public encode-thread producer, not a new helper
++        # absent from clean source. Clean upstream publishes a dead timer ID
++        # after cleanup has cleared the window and its refresh state.
++        source = self.make_refresh_source()
++        glib = BlockingGLib()
++        packet = Packet("draw", source.wid, 0, 0, 64, 64, "jpeg", b"pixels", 1, 192, {"quality": 50})
++        with patch.object(compress, "GLib", glib), patch.object(compress, "AUTO_REFRESH", True), \
++                patch.object(compress, "SCREEN_UPDATES_DIRECTORY", ""):
++            worker, errors = self.run_thread(
++                lambda: source.queue_damage_packet(packet, 1, 2, typedict()), "packet-refresh-publication")
++            try:
++                self.assertTrue(glib.timeout_started.wait(2))
++                source.cleanup()
++                self.assertFalse(glib.fire(1))
++            finally:
++                glib.release_timeout.set()
++                worker.join(2)
++            self.assertFalse(worker.is_alive())
++            self.assertEqual(errors, [])
++            self.assertEqual(source.refresh_timer, 0)
++            self.assertEqual(glib.callbacks, {})
++            self.assertEqual(source.refresh_regions, [])
++            source.queue_packet.assert_called_once_with(packet, source.wid, 4096, False)
 +
 +    def test_stale_callback_cannot_clear_replacement(self) -> None:
 +        source = self.make_source()
@@ -644,8 +700,8 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +                raise RuntimeError("batch cleanup was not released")
 +            raise RuntimeError("batch cleanup failed")
 +
-+        def queue_encode(optional: bool, callback) -> None:
-+            events.append(("barrier", optional, callback))
++        def queue_encode(callback) -> None:
++            events.append(("barrier", callback))
 +
 +        def second_cleanup() -> None:
 +            second_cleanup_started.set()
@@ -675,7 +731,7 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +            self.assertRegex(str(first_errors[0]), "batch cleanup failed")
 +            self.assertEqual(second_errors, [])
 +            self.assertEqual(events, [
-+                ("barrier", False, source.encode_ended),
++                ("barrier", source.encode_ended),
 +                ("second-return",),
 +            ])
 +            self.assertTrue(source._cleanup_complete)
@@ -699,8 +755,8 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +            if not release_batch_cleanup.wait(2):
 +                raise RuntimeError("batch cleanup was not released")
 +
-+        def queue_encode(optional: bool, callback) -> None:
-+            events.append(("barrier", optional, callback))
++        def queue_encode(callback) -> None:
++            events.append(("barrier", callback))
 +
 +        def waiting_cleanup() -> None:
 +            try:
@@ -730,7 +786,7 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +            self.assertEqual(len(waiter_errors), 1)
 +            self.assertIsInstance(waiter_errors[0], WaitInterrupted)
 +            self.assertEqual(events, [
-+                ("barrier", False, source.encode_ended),
++                ("barrier", source.encode_ended),
 +                ("waiter-return",),
 +            ])
 +        finally:
@@ -759,7 +815,7 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +        self.assertEqual(cleanup_errors, [])
 +        self.assertEqual(events, ["unregister", "reentrant-return"])
 +        source.batch_config.cleanup.assert_called_once_with()
-+        source.call_in_encode_thread.assert_called_once_with(False, source.encode_ended)
++        source.call_in_encode_thread.assert_called_once_with(source.encode_ended)
 +        self.assertTrue(source._cleanup_complete)
 +        self.assertEqual(source._cleanup_owner, 0)
 +
@@ -785,7 +841,7 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +        self.assertFalse(source._cleanup_requested)
 +        self.assertEqual(source._cleanup_owner, 0)
 +        source.batch_config.cleanup.assert_called_once_with()
-+        source.call_in_encode_thread.assert_called_once_with(False, source.encode_ended)
++        source.call_in_encode_thread.assert_called_once_with(source.encode_ended)
 +
 +    def test_nested_callback_cleanup_defers_until_outer_callback_unwinds(self) -> None:
 +        source = self.make_source()
@@ -817,7 +873,7 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +        self.assertTrue(source._cleanup_complete)
 +        self.assertFalse(source._cleanup_requested)
 +        source.batch_config.cleanup.assert_called_once_with()
-+        source.call_in_encode_thread.assert_called_once_with(False, source.encode_ended)
++        source.call_in_encode_thread.assert_called_once_with(source.encode_ended)
 +
 +    def test_callback_error_remains_primary_over_deferred_cleanup_error(self) -> None:
 +        source = self.make_source()
@@ -832,8 +888,8 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +            events.append("batch-cleanup")
 +            raise DeferredCleanupInterrupted("deferred cleanup failed")
 +
-+        def queue_encode(optional: bool, callback) -> None:
-+            events.append(("barrier", optional, callback))
++        def queue_encode(callback) -> None:
++            events.append(("barrier", callback))
 +
 +        source.batch_config.cleanup = batch_cleanup
 +        source.call_in_encode_thread = queue_encode
@@ -844,7 +900,7 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +
 +        self.assertEqual(events, [
 +            "batch-cleanup",
-+            ("barrier", False, source.encode_ended),
++            ("barrier", source.encode_ended),
 +        ])
 +        self.assertTrue(source._cleanup_complete)
 +        self.assertEqual(source._cleanup_owner, 0)
@@ -907,7 +963,7 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +        self.assertTrue(source._timer_closed)
 +        self.assertTrue(source._cleanup_complete)
 +        source.batch_config.cleanup.assert_called_once_with()
-+        source.call_in_encode_thread.assert_called_once_with(False, source.encode_ended)
++        source.call_in_encode_thread.assert_called_once_with(source.encode_ended)
 +
 +    def test_active_callback_does_not_wait_for_external_cleanup_owner(self) -> None:
 +        source = self.make_source()
@@ -959,7 +1015,7 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +        self.assertFalse(source._cleanup_requested)
 +        self.assertEqual(source._cleanup_owner, 0)
 +        source.batch_config.cleanup.assert_called_once_with()
-+        source.call_in_encode_thread.assert_called_once_with(False, source.encode_ended)
++        source.call_in_encode_thread.assert_called_once_with(source.encode_ended)
 +
 +    def test_interrupted_callback_wait_still_completes_terminal_tail(self) -> None:
 +        source = self.make_source()
@@ -977,8 +1033,8 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +                raise RuntimeError("timer callback was not released")
 +            events.append("callback-end")
 +
-+        def queue_encode(optional: bool, callback) -> None:
-+            events.append(("barrier", optional, callback))
++        def queue_encode(callback) -> None:
++            events.append(("barrier", callback))
 +
 +        def terminal_cleanup() -> None:
 +            try:
@@ -997,7 +1053,7 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +                cleanup, cleanup_errors = self.run_thread(terminal_cleanup, "interrupted-cleanup")
 +                self.assertTrue(wait_interrupted.wait(2))
 +                self.assertFalse(cleanup_done.wait(0.1))
-+                self.assertNotIn(("barrier", False, source.encode_ended), events)
++                self.assertNotIn(("barrier", source.encode_ended), events)
 +
 +                release_callback.set()
 +                callback.join(2)
@@ -1011,7 +1067,7 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +                self.assertEqual(events, [
 +                    "callback-start",
 +                    "callback-end",
-+                    ("barrier", False, source.encode_ended),
++                    ("barrier", source.encode_ended),
 +                ])
 +            finally:
 +                release_callback.set()
@@ -1111,8 +1167,7 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +            self.assertEqual(glib.removed, [1])
 +            self.assertFalse(stale_callback())
 +            self.assertEqual(source.call_in_encode_thread.call_count, 1)
-+            optional, callback = source.call_in_encode_thread.call_args.args
-+            self.assertFalse(optional)
++            (callback,) = source.call_in_encode_thread.call_args.args
 +            self.assertEqual(callback, source.encode_ended)
 +
 +    def test_icon_encode_queue_remains_a_single_batch(self) -> None:
@@ -1137,9 +1192,11 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +
 +            source.send_window_icon()
 +            self.assertEqual(glib.callbacks, {})
-+            optional, encode_callback = source.call_in_encode_thread.call_args.args
-+            self.assertTrue(optional)
-+            source.window_icon_data = None
++            (encode_callback,) = source.call_in_encode_thread.call_args.args
++            # Preserve upstream's cleanup-time payload cancellation for work
++            # that has already left the GLib timer and entered the encode queue.
++            windowicon.WindowIconSource.cleanup(source)
++            self.assertIsNone(source.window_icon_data)
 +            encode_callback()
 +            self.assertFalse(source.window_icon_queued)
 +
@@ -1186,23 +1243,29 @@ index 72265962b2e25ca763995e21b3ba955d39a26525..e387ee28f6a504da45b922d1538810cb
 +            source.cleanup()
 +
 +
++def load_tests(_loader, tests, _pattern):
++    # Establish behavior through an existing encode-thread entry point before
++    # exercising the patch's internal lease representation. On clean source,
++    # fail-fast must report the dead refresh timer, not a missing new helper.
++    control = WindowSourceTimerLifecycleTest("test_packet_refresh_publication_cannot_cross_terminal_cleanup")
++    ordered = unittest.TestSuite([control])
++    for group in tests:
++        ordered.addTests(test for test in group if test.id() != control.id())
++    return ordered
++
++
  if __name__ == "__main__":
-     unittest.main()
+-    unittest.main()
++    unittest.main(failfast=True)
 diff --git a/xpra/server/window/compress.py b/xpra/server/window/compress.py
-index 8ea0a302f33f1bc5152f39ad06859b737a616c65..bdf3ff06b1be19909678185c766207c63ea4f105 100644
+index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..f8d835c4da6c91fa771aa7fa1cbed9fa25dbf985 100644
 --- a/xpra/server/window/compress.py
 +++ b/xpra/server/window/compress.py
-@@ -11,6 +11,7 @@ from collections import deque
- from dataclasses import dataclass
- from time import monotonic, sleep
+@@ -13,2 +13,3 @@ from time import monotonic, sleep
  from contextlib import nullcontext
 +from threading import Condition, Lock, get_ident
  from typing import ContextManager, Any
- from collections.abc import Callable, Iterable, Sequence
- 
-@@ -161,6 +162,16 @@ class DelayedRegions:
-         )
- 
+@@ -163,2 +164,12 @@ class DelayedRegions:
  
 +@dataclass
 +class _TimerLease:
@@ -1215,11 +1278,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..bdf3ff06b1be19909678185c766207c6
 +
 +
  def capr(v: int) -> int:
-     return min(100, max(0, int(v)))
- 
-@@ -205,6 +216,18 @@ class WindowSource(WindowIconSource):
- 
-     (also by 'send_window_icon' and clipboard packets)
+@@ -207,2 +218,14 @@ class WindowSource(WindowIconSource):
      """
 +
 +    TIMER_SLOTS = (
@@ -1234,27 +1293,15 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..bdf3ff06b1be19909678185c766207c6
 +    )
 +
      def __init__(self,
-                  ww: int, wh: int,
-                  record_congestion_event: Callable, queue_size: Callable,
-@@ -221,6 +244,7 @@ class WindowSource(WindowIconSource):
-                  rgb_formats: Sequence[str],
-                  default_encoding_options,
+@@ -223,2 +246,3 @@ class WindowSource(WindowIconSource):
                   mmap_write_area, bandwidth_limit: int, jitter: int, datagram=0):
 +        self._init_timer_lifecycle()
          super().__init__(window_icon_encodings, icons_encoding_options)
-         # mmap:
-         # (this is a `BaseMmapArea` but we can't depend on the mmap module here)
-@@ -245,7 +269,6 @@ class WindowSource(WindowIconSource):
-         self.av_sync_delay_target = av_sync_delay       # the av-sync delay we want at this point in time (can vary quickly)
-         self.av_sync_delay_base = av_sync_delay         # the total av-sync delay we are trying to achieve (including video encoder delay)
+@@ -247,3 +271,2 @@ class WindowSource(WindowIconSource):
          self.av_sync_frame_delay: int = 0              # how long frames spend in the video encoder
 -        self.av_sync_timer: int = 0
          self.encode_queue: list[tuple] = []
-         self.encode_queue_max_size: int = 10
-         self.last_scroll_event: float = 0
-@@ -408,6 +431,268 @@ class WindowSource(WindowIconSource):
-     def __repr__(self) -> str:
-         return f"WindowSource({self.wid:#x} : {self.window_dimensions})"
+@@ -409,2 +432,264 @@ class WindowSource(WindowIconSource):
  
 +    def _init_timer_lifecycle(self) -> None:
 +        """Initialize timer ownership once; unlike ``init_vars``, this state is terminal."""
@@ -1519,28 +1566,16 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..bdf3ff06b1be19909678185c766207c6
 +                self._timer_condition.notify_all()
 +
      def insert_encoder(self, encoder_name: str, encoding: str, encode_fn: Callable) -> None:
-         log(f"insert_encoder({encoder_name}, {encoding}, {encode_fn})")
-         self._all_encoders.setdefault(encoding, []).insert(0, encode_fn)
-@@ -458,6 +743,7 @@ class WindowSource(WindowIconSource):
-         self.picture_encodings = tuple(picture_encodings)
- 
+@@ -459,2 +744,3 @@ class WindowSource(WindowIconSource):
      def init_vars(self) -> None:
 +        self._init_timer_lifecycle()
          self.server_core_encodings = ()
-         self.server_encodings = ()
-         self.encoding = ""
-@@ -477,8 +763,6 @@ class WindowSource(WindowIconSource):
-         self.strict = STRICT_MODE
-         self.decoder_speed = typedict()
+@@ -478,4 +764,2 @@ class WindowSource(WindowIconSource):
          #
 -        self.decode_error_refresh_timer: int = 0
 -        self.may_send_timer: int = 0
          self.auto_refresh_delay = 0
-         self.base_auto_refresh_delay = 0
-         self.min_auto_refresh_delay = 50
-@@ -487,11 +771,7 @@ class WindowSource(WindowIconSource):
-         self.refresh_speed = AUTO_REFRESH_SPEED
-         self.refresh_event_time: float = 0.0
+@@ -488,7 +772,3 @@ class WindowSource(WindowIconSource):
          self.refresh_target_time: float = 0.0
 -        self.refresh_timer: int = 0
          self.refresh_regions: list[rectangle] = []
@@ -1548,12 +1583,10 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..bdf3ff06b1be19909678185c766207c6
 -        self.expire_timer: int = 0
 -        self.soft_timer: int = 0
          self.soft_expired: int = 0
-         self.max_soft_expired = MAX_SOFT_EXPIRED
-         self.is_OR = False
-@@ -527,15 +807,57 @@ class WindowSource(WindowIconSource):
-         self._damage_packet_sequence: int = 1
- 
+@@ -528,13 +808,53 @@ class WindowSource(WindowIconSource):
      def cleanup(self) -> None:
+-        # `WindowIconSource.cleanup` cancels the window icon timer:
+-        super().cleanup()
 -        self.cancel_damage(MAX_SEQUENCE)
 -        log("encoding_totals for wid=%#x with primary encoding=%s : %s",
 -            self.wid, self.encoding, self.statistics.encoding_totals)
@@ -1562,7 +1595,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..bdf3ff06b1be19909678185c766207c6
 -        self.batch_config.cleanup()
 -        # we can only clear the encoders after clearing the whole encoding queue:
 -        # (because mmap cannot be cancelled once queued for encoding)
--        self.call_in_encode_thread(False, self.encode_ended)
+-        self.call_in_encode_thread(self.encode_ended)
 +        # A connection-level damage registry may call timer cancellation while
 +        # holding its own lock. Deactivate this source before entering the timer
 +        # lifecycle, without requiring that optional connection integration.
@@ -1602,7 +1635,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..bdf3ff06b1be19909678185c766207c6
 +            # We can only clear the encoders after clearing the whole encoding queue
 +            # because mmap cannot be cancelled once queued for encoding. This barrier
 +            # must still be attempted when an earlier cleanup step raises.
-+            run_cleanup_step(self.call_in_encode_thread, False, self.encode_ended)
++            run_cleanup_step(self.call_in_encode_thread, self.encode_ended)
 +            if cleanup_errors:
 +                for later_error, later_traceback in cleanup_errors[1:]:
 +                    log.error("Additional error during window source cleanup: %s", later_error,
@@ -1615,11 +1648,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..bdf3ff06b1be19909678185c766207c6
 +            # after this owner has attempted the mandatory encode-ended barrier.
 +            self._finish_terminal_cleanup()
  
-     def encode_ended(self) -> None:
-         log("encode_ended()")
-@@ -906,10 +1228,9 @@ class WindowSource(WindowIconSource):
-             return  # already up to date
-         if self.av_sync_timer:
+@@ -940,6 +1260,5 @@ class WindowSource(WindowIconSource):
              return  # already scheduled
 -        self.av_sync_timer = GLib.timeout_add(delay, self.update_av_sync_delay)
 +        self._schedule_timer("av_sync_timer", delay, self.update_av_sync_delay)
@@ -1627,11 +1656,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..bdf3ff06b1be19909678185c766207c6
      def update_av_sync_delay(self) -> None:
 -        self.av_sync_timer = 0
          delta = self.av_sync_delay_target-self.av_sync_delay
-         if delta == 0:
-             return
-@@ -1279,36 +1600,24 @@ class WindowSource(WindowIconSource):
-                 self.statistics.encoding_pending.pop(sequence, None)
- 
+@@ -1313,20 +1632,12 @@ class WindowSource(WindowIconSource):
      def cancel_expire_timer(self) -> None:
 -        if et := self.expire_timer:
 -            self.expire_timer = 0
@@ -1656,8 +1681,7 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..bdf3ff06b1be19909678185c766207c6
 -            GLib.source_remove(rt)
 +        if self._cancel_timer("refresh_timer"):
              self.refresh_event_time = 0
-             self.refresh_target_time = 0
- 
+@@ -1335,10 +1646,6 @@ class WindowSource(WindowIconSource):
      def cancel_timeout_timer(self) -> None:
 -        if tt := self.timeout_timer:
 -            self.timeout_timer = 0
@@ -1670,122 +1694,86 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..bdf3ff06b1be19909678185c766207c6
 -            GLib.source_remove(avst)
 +        self._cancel_timer("av_sync_timer")
  
-     def is_cancelled(self, sequence=MAX_SEQUENCE) -> bool:
-         """ See cancel_damage(wid) """
-@@ -1670,7 +1979,7 @@ class WindowSource(WindowIconSource):
-                       (x, y, w, h, options), self.wid, len(regions), 1000*(now-delayed.damage_time))
-             if not self.expire_timer and not self.soft_timer and self.soft_expired == 0:
+@@ -1704,3 +2011,3 @@ class WindowSource(WindowIconSource):
                  log.error("Error: bug, found a delayed region without a timer!")
 -                self.expire_timer = GLib.timeout_add(0, self.expire_delayed_region, now)
 +                self._schedule_timer("expire_timer", 0, self.expire_delayed_region, now)
              return
- 
-         # create a new delayed region:
-@@ -1729,7 +2038,7 @@ class WindowSource(WindowIconSource):
-         damagelog(" delay=%i, elapsed=%i, resize_elapsed=%i, congestion_elapsed=%i, batch=%i, min=%i, inc=%i",
-                   delay, elapsed, resize_elapsed, congestion_elapsed, self.batch_config.delay, min_delay, inc)
+@@ -1763,3 +2070,3 @@ class WindowSource(WindowIconSource):
          due = now+expire_delay/1000.0
 -        self.expire_timer = GLib.timeout_add(expire_delay, self.expire_delayed_region, due, target_delay)
 +        self._schedule_timer("expire_timer", expire_delay, self.expire_delayed_region, due, target_delay)
  
-     def may_update_window_dimensions(self) -> tuple[int, int]:
-         ww, wh = self.window.get_dimensions()
-@@ -1763,7 +2072,6 @@ class WindowSource(WindowIconSource):
-         """ mark the region as expired so damage_packet_acked can send it later,
-             and try to send it now.
+@@ -1797,3 +2104,2 @@ class WindowSource(WindowIconSource):
          """
 -        self.expire_timer = 0
          delayed = self._damage_delayed
-         if not delayed:
-             damagelog("expire_delayed_region() already processed")
-@@ -1787,7 +2095,7 @@ class WindowSource(WindowIconSource):
-             # not due yet, don't allow soft expiry, just try again later:
-             delay = int(1000*(due-now))
+@@ -1821,3 +2127,3 @@ class WindowSource(WindowIconSource):
              expire_delay = max(self.batch_config.min_delay, min(self.batch_config.expire_delay, delay))
 -            self.expire_timer = GLib.timeout_add(expire_delay, self.expire_delayed_region, due)
 +            self._schedule_timer("expire_timer", expire_delay, self.expire_delayed_region, due)
              return False
-         # the region has not been sent yet because we are waiting for damage ACKs from the client
-         max_soft_expired = min(1+self.statistics.damage_events_count//2, self.max_soft_expired)
-@@ -1799,7 +2107,7 @@ class WindowSource(WindowIconSource):
-             # we have already waited for "expire delay" to get here,
-             # wait gradually longer as we soft-expire more regions:
+@@ -1833,3 +2139,3 @@ class WindowSource(WindowIconSource):
              soft_delay = self.soft_expired*target_delay
 -            self.soft_timer = GLib.timeout_add(soft_delay, self.delayed_region_soft_timeout)
 +            self._schedule_timer("soft_timer", soft_delay, self.delayed_region_soft_timeout)
          else:
-             damagelog("expire_delayed_region: soft expire limit reached: %i", max_soft_expired)
-             if max_soft_expired == self.max_soft_expired:
-@@ -1818,19 +2126,17 @@ class WindowSource(WindowIconSource):
-             # but if somehow they go missing... clean it up from a timeout:
-             if not self.timeout_timer:
+@@ -1852,4 +2158,4 @@ class WindowSource(WindowIconSource):
                  delayed_region_time = delayed.damage_time
 -                self.timeout_timer = GLib.timeout_add(self.batch_config.timeout_delay,
 -                                                      self.delayed_region_timeout, delayed_region_time)
 +                self._schedule_timer("timeout_timer", self.batch_config.timeout_delay,
 +                                     self.delayed_region_timeout, delayed_region_time)
          return False
- 
+@@ -1857,3 +2163,2 @@ class WindowSource(WindowIconSource):
      def delayed_region_soft_timeout(self) -> bool:
 -        self.soft_timer = 0
          log("delayed_region_soft_timeout() soft_expired=%i, max_soft_expired=%i",
-             self.soft_expired, self.max_soft_expired)
-         self.do_send_delayed()
-         return False
- 
+@@ -1864,3 +2169,2 @@ class WindowSource(WindowIconSource):
      def delayed_region_timeout(self, delayed_region_time) -> bool:
 -        self.timeout_timer = 0
          delayed = self._damage_delayed
-         if delayed is None:
-             # delayed region got sent
-@@ -1867,9 +2173,6 @@ class WindowSource(WindowIconSource):
-                 log_fn(" %6i %-5s: %3is", seq, coding, elapsed)
- 
+@@ -1901,5 +2205,2 @@ class WindowSource(WindowIconSource):
      def _may_send_delayed(self) -> None:
 -        # this method is called from the timer,
 -        # we know we can clear it (and no need to cancel it):
 -        self.may_send_timer = 0
          self.may_send_delayed()
- 
-     def may_send_delayed(self) -> None:
-@@ -1911,7 +2214,7 @@ class WindowSource(WindowIconSource):
-         def check_again(delay=actual_delay/10.0):
-             # schedules a call to check again:
+@@ -1945,3 +2246,3 @@ class WindowSource(WindowIconSource):
              delay = int(min(self.batch_config.max_delay, max(10.0, delay)))
 -            self.may_send_timer = GLib.timeout_add(delay, self._may_send_delayed)
 +            self._schedule_timer("may_send_timer", delay, self._may_send_delayed)
          # locked means a fixed delay we try to honour,
-         # this code ensures that we don't fire too early if called from damage_packet_acked
-         if self.batch_config.locked:
-@@ -2394,7 +2697,7 @@ class WindowSource(WindowIconSource):
-                 int(self.base_auto_refresh_delay * mult),
-             )
+@@ -2429,3 +2730,3 @@ class WindowSource(WindowIconSource):
              self.refresh_target_time = now + sched_delay/1000.0
 -            self.refresh_timer = GLib.timeout_add(sched_delay, self.refresh_timer_function, options)
 +            self._schedule_timer("refresh_timer", sched_delay, self.refresh_timer_function, options)
              rec(f"scheduling refresh in {sched_delay}ms (pct={pct}, batch={self.batch_config.delay})")
-             return
-         # some of those rectangles may overlap,
-@@ -2456,7 +2759,6 @@ class WindowSource(WindowIconSource):
-             We figure out if now is the right time to do the refresh,
-             and if not re-schedule.
+@@ -2491,4 +2792,3 @@ class WindowSource(WindowIconSource):
          """
 -        self.refresh_timer = 0
-         # timer is running now, clear it so that we don't try to cancel it somewhere else:
+-        # timer is running now, clear it so that we don't try to cancel it somewhere else:
++        # The lease wrapper has already retired this one-shot timer.
          # re-do some checks that may have changed:
-         if not self.can_refresh():
-@@ -2471,7 +2773,7 @@ class WindowSource(WindowIconSource):
-             self.timer_full_refresh()
-             return False
+@@ -2506,3 +2806,3 @@ class WindowSource(WindowIconSource):
          # re-schedule ourselves:
 -        self.refresh_timer = GLib.timeout_add(int(delta*1000), self.refresh_timer_function, damage_options)
 +        self._schedule_timer("refresh_timer", int(delta*1000), self.refresh_timer_function, damage_options)
          refreshlog("refresh_timer_function: rescheduling auto refresh timer with extra delay %ims", int(1000*delta))
-         return False
- 
-@@ -2792,16 +3094,13 @@ class WindowSource(WindowIconSource):
-         self.global_statistics.decode_errors += 1
-         if self.window and not self.decode_error_refresh_timer:
+@@ -2819,9 +3119,5 @@ class WindowSource(WindowIconSource):
+         """
+-            This is called from `damage_packet_acked`, so it runs in the network parse thread.
+-            `decode_error_refresh_timer` is tested and assigned without any locking whilst
+-            the UI thread may be cancelling that same timer, so we can end up scheduling
+-            two refresh timers - or losing a cancellation.
+-            Neither is worth paying for a lock: the worst case is one extra refresh,
+-            and `full_quality_refresh` does nothing at all
+-            once the window is gone or the window source is cancelled.
++            Called from `damage_packet_acked` in the network parse thread.
++            The named lease owns publication and cancellation against UI cleanup;
++            `full_quality_refresh` retains the existing cancelled-window policy.
+         """
+@@ -2842,6 +3138,5 @@ class WindowSource(WindowIconSource):
              delay = min(1000, 250+self.global_statistics.decode_errors*100)
 -            self.decode_error_refresh_timer = GLib.timeout_add(delay, self.decode_error_refresh)
 +            self._schedule_timer("decode_error_refresh_timer", delay, self.decode_error_refresh)
@@ -1793,82 +1781,60 @@ index 8ea0a302f33f1bc5152f39ad06859b737a616c65..bdf3ff06b1be19909678185c766207c6
      def decode_error_refresh(self) -> None:
 -        self.decode_error_refresh_timer = 0
          self.full_quality_refresh({})
- 
+@@ -2849,5 +3144,3 @@ class WindowSource(WindowIconSource):
      def cancel_decode_error_refresh_timer(self) -> None:
 -        if dert := self.decode_error_refresh_timer:
 -            self.decode_error_refresh_timer = 0
 -            GLib.source_remove(dert)
 +        self._cancel_timer("decode_error_refresh_timer")
  
-     def may_use_scrolling(self, _image: ImageWrapper, _options: typedict) -> bool:
-         # overridden in video source
 diff --git a/xpra/server/window/video_compress.py b/xpra/server/window/video_compress.py
-index 8c70c4ecaf4ac1e6f34577b2a973b943aef6b8ab..c5f196e73eb9b2777922546b486f6cc164e1718c 100644
+index 8aac38e996f354d3015988f7beac347fcbd3603d..1cd24a936c358102dcf722ab547029f443ea5c77 100644
 --- a/xpra/server/window/video_compress.py
 +++ b/xpra/server/window/video_compress.py
-@@ -927,7 +927,7 @@ class WindowVideoSource(WindowSource):
-         else:
-             self._damage_delayed = DelayedRegions(damage_time, encoding=coding, options=options, regions=regions)
+@@ -932,3 +932,3 @@ class WindowVideoSource(WindowSource):
              sublog("send_regions: delaying non video regions %s some more by %ims", regions, delay)
 -            self.expire_timer = GLib.timeout_add(delay, self.expire_delayed_region)
 +            self._schedule_timer("expire_timer", delay, self.expire_delayed_region)
  
-     def must_encode_full_frame(self, encoding: str) -> bool:
-         non_video = self.non_video_encodings
 diff --git a/xpra/server/window/windowicon.py b/xpra/server/window/windowicon.py
-index 913bd1a395ebd40cebd71c3ba141ecd66774c006..968ac4c975c75c3f7ceb5cb385f3c8b527701d0a 100644
+index ca65fe6266e0d84aa37c5ee4b8843b6d3a3dce5a..56f4d287c9ef452f800753da577aceec142213c3 100644
 --- a/xpra/server/window/windowicon.py
 +++ b/xpra/server/window/windowicon.py
-@@ -85,6 +85,7 @@ class WindowIconSource:
- 
-         self.window_icon_data: tuple[int, int, str, bytes] | None = None
+@@ -87,2 +87,3 @@ class WindowIconSource:
          self.send_window_icon_timer = 0
 +        self.window_icon_queued = False
          self.theme_default_icons = icons_encoding_options.strtupleget("default.icons")
-         self.window_icon_greedy = icons_encoding_options.boolget("greedy", False)
-         self.window_icon_size = icons_encoding_options.intpair("size", (64, 64))
-@@ -109,6 +110,9 @@ class WindowIconSource:
-         self.cancel_window_icon_timer()
- 
+@@ -113,2 +114,5 @@ class WindowIconSource:
      def cancel_window_icon_timer(self) -> None:
 +        if cancel_timer := getattr(self, "_cancel_timer", None):
 +            cancel_timer("send_window_icon_timer")
 +            return
          if swit := self.send_window_icon_timer:
-             self.send_window_icon_timer = 0
-             GLib.source_remove(swit)
-@@ -228,19 +232,30 @@ class WindowIconSource:
-             log("no suitable icon")
-             return
+@@ -232,3 +236,3 @@ class WindowIconSource:
          self.window_icon_data = icon
 -        if not self.send_window_icon_timer:
 +        if not self.send_window_icon_timer and not self.window_icon_queued:
              # call compress via the work queue
-             # and delay sending it by a bit to allow basic icon batching:
-             w, h = self.window_icon_data[:2]
-             delay = min(1000, max(50, w * h * self.batch_config.delay_per_megapixel // 1000000))
-             log("send_window_icon() window=%s, wid=%#x, compression scheduled in %sms for batch delay=%i",
+@@ -239,3 +243,6 @@ class WindowIconSource:
                  self.window, self.wid, delay, self.batch_config.delay_per_megapixel)
--            self.send_window_icon_timer = GLib.timeout_add(delay, self.call_in_encode_thread,
--                                                           True, self.compress_and_send_window_icon)
+-            self.send_window_icon_timer = GLib.timeout_add(delay, self.queue_window_icon)
 +            if schedule_timer := getattr(self, "_schedule_timer", None):
 +                schedule_timer("send_window_icon_timer", delay, self.queue_window_icon)
 +            else:
 +                self.send_window_icon_timer = GLib.timeout_add(delay, self.queue_window_icon)
-+
-+    def queue_window_icon(self) -> None:
-+        self.send_window_icon_timer = 0
+ 
+@@ -247,3 +254,8 @@ class WindowIconSource:
+         self.send_window_icon_timer = 0
+-        self.call_in_encode_thread(self.compress_and_send_window_icon)
 +        self.window_icon_queued = True
 +        try:
-+            self.call_in_encode_thread(True, self.compress_and_send_window_icon)
++            self.call_in_encode_thread(self.compress_and_send_window_icon)
 +        except BaseException:
 +            self.window_icon_queued = False
 +            raise
  
-     def compress_and_send_window_icon(self) -> None:
+@@ -251,2 +263,3 @@ class WindowIconSource:
          # this runs in the work queue
--        self.send_window_icon_timer = 0
 +        self.window_icon_queued = False
          idata = self.window_icon_data
-         if not idata or not self.has_png:
-             return

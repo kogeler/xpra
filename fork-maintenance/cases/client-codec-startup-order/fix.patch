@@ -1,9 +1,9 @@
 diff --git a/tests/unittests/unit/client/subsystem/codec_startup_test.py b/tests/unittests/unit/client/subsystem/codec_startup_test.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..537177bb93b5c7c759c746426c10f5d4f1548d9d
+index 0000000000000000000000000000000000000000..779717c92c93c0f02f72dad157e1b22a65b73982
 --- /dev/null
 +++ b/tests/unittests/unit/client/subsystem/codec_startup_test.py
-@@ -0,0 +1,309 @@
+@@ -0,0 +1,310 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 kogeler
@@ -262,7 +262,8 @@ index 0000000000000000000000000000000000000000..537177bb93b5c7c759c746426c10f5d4
 +            app.cleanup()
 +
 +    def test_native_codecs_and_seccomp_on_the_same_worker(self):
-+        env = dict(os.environ, XPRA_SECCOMP="1", XPRA_SECCOMP_DECODE_ACTION="errno")
++        env = dict(os.environ, XPRA_SECCOMP="1", XPRA_SECCOMP_DECODE_ACTION="errno",
++                   PYTHONPATH=os.pathsep.join(sys.path))
 +        result = subprocess.run(
 +            (sys.executable, __file__, "--native"), env=env,
 +            capture_output=True, text=True, timeout=30, check=False,
@@ -349,10 +350,10 @@ index 2e4a69bc71815d1440709019cc523d990b15392a..de6b057504f0e6e5587bb9632c3aa8ff
  
      def preload(self) -> None:
 diff --git a/xpra/scripts/main.py b/xpra/scripts/main.py
-index 97eac58c7252ad3fcf5e1fa172be9bfeadd8d65c..8be7e2113fe40f69e0748e94b2ff83208c8c5986 100755
+index 99aebe32d154bcb3969d7ad33af310e87c307f1b..ea3bdb42533a57a384cdccf8b47a66816b510452 100755
 --- a/xpra/scripts/main.py
 +++ b/xpra/scripts/main.py
-@@ -1524,7 +1524,6 @@ def get_client_gui_app(opts, request_mode: str, extra_args: Sequence[str], mode:
+@@ -1523,7 +1523,6 @@ def get_client_gui_app(opts, request_mode: str, extra_args: Sequence[str], mode:
      may_show_progress(app, 30, "client configuration")
      try:
          app.init(opts)
@@ -360,7 +361,7 @@ index 97eac58c7252ad3fcf5e1fa172be9bfeadd8d65c..8be7e2113fe40f69e0748e94b2ff8320
  
          def handshake_complete(*_args) -> None:
              may_show_progress(app, 100, "connection established")
-@@ -1544,6 +1543,7 @@ def get_client_gui_app(opts, request_mode: str, extra_args: Sequence[str], mode:
+@@ -1543,6 +1542,7 @@ def get_client_gui_app(opts, request_mode: str, extra_args: Sequence[str], mode:
          app.init_ui(opts)
          may_show_progress(app, 50, "loading user interface")
          app.load()
@@ -368,7 +369,7 @@ index 97eac58c7252ad3fcf5e1fa172be9bfeadd8d65c..8be7e2113fe40f69e0748e94b2ff8320
          if request_mode:
              sns = get_start_new_session_dict(opts, request_mode, extra_args)
              extra_args = [f"socket:{opts.system_proxy_socket}"]
-@@ -1587,7 +1587,10 @@ def handle_client_encoding_option(app, encoding: str) -> str:
+@@ -1586,7 +1586,10 @@ def handle_client_encoding_option(app, encoding: str) -> str:
      enc_subsystem = app.get_subsystem("encoding")
      if not enc_subsystem:
          return ""

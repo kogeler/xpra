@@ -3,23 +3,21 @@ slug = "x11-client-clipboard-events"
 kind = "production"
 title = "Restore X11 client clipboard synchronization"
 commit_subject = "Restore X11 client clipboard synchronization"
-patch_sha256 = "4400b55d657e7e6a396210bf40666dbfe8072a19d98a10d55c4f03bf18ca0003"
+patch_sha256 = "75b4fd9fbc26808b0c33f34fb83d51cb044ed8407a92a9b574357dd718381207"
 dependencies = []
 paths = [
-  "setup.py",
   "tests/unittests/unit/client/subsystem/clipboard_test.py",
   "tests/unittests/unit/clipboard_core_test.py",
+  "tests/unittests/unit/clipboard_timeout_test.py",
   "tests/unittests/unit/server/subsystem/clipboard_test.py",
   "tests/unittests/unit/wayland/clipboard_test.py",
   "tests/unittests/unit/x11/common_test.py",
+  "xpra/clipboard/core.py",
   "xpra/clipboard/proxy.py",
   "xpra/clipboard/timeout.py",
   "xpra/server/subsystem/clipboard.py",
   "xpra/wayland/server/clipboard.pyx",
   "xpra/wayland/server/compositor.pyx",
-  "xpra/x11/common.py",
-  "xpra/x11/gtk/__init__.py",
-  "xpra/x11/gtk/bindings.pyx",
   "xpra/x11/selection/clipboard.py",
   "xpra/x11/selection/proxy.py",
 ]
@@ -27,6 +25,7 @@ paths = [
 [tests]
 list = [
   "unit.clipboard_core_test",
+  "unit.clipboard_timeout_test",
   "unit.client.subsystem.clipboard_test",
   "unit.server.subsystem.clipboard_test",
   "unit.x11.common_test",
