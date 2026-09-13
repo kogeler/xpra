@@ -151,6 +151,7 @@ entry {
         "pending_paste": None,
         "selecting": False,
         "selection_keys": 0,
+        "first_selection_key_ns": 0,
         "last_selection_key_ns": 0,
     }
     diagnostic_stream = diagnostic_file.open("x", encoding="utf-8")
@@ -213,6 +214,8 @@ entry {
         if operation == "select":
             state["selecting"] = True
             state["selection_keys"] = 0
+            state["first_selection_key_ns"] = 0
+            state["last_selection_key_ns"] = 0
             entry.hide()
             text_view.show()
             text_view.set_cursor_visible(True)
@@ -221,6 +224,7 @@ entry {
             return GLib.SOURCE_CONTINUE
         if operation == "select-end":
             diagnostic("selection-finished", key_events=state["selection_keys"],
+                       first_key_ns=state["first_selection_key_ns"],
                        last_key_ns=state["last_selection_key_ns"],
                        characters=text_buffer.get_char_count(),
                        selection=[iterator.get_offset() for iterator in text_buffer.get_selection_bounds()])
@@ -349,6 +353,8 @@ entry {
         if state["selecting"]:
             state["selection_keys"] += 1
             state["last_selection_key_ns"] = time.monotonic_ns()
+            if not state["first_selection_key_ns"]:
+                state["first_selection_key_ns"] = state["last_selection_key_ns"]
         else:
             diagnostic("key-input", keyval=int(event.keyval), modifiers=int(event.state))
         return False

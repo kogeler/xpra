@@ -369,6 +369,11 @@ In forward-enabled sessions, the same one-line fixture then exercises rapid
 PRIMARY changes using actual selection keys. An event-driven X11 GTK consumer
 requests TARGETS and then text on owner notifications, without claiming the
 selection or polling.
+The fixture records both ends of the 59-key native callback interval and
+requires that burst to take less than two seconds. Arming the fixture precedes
+host/Podman input setup and is not the first key timestamp. Collection rejects
+missing, reversed or stale timestamps, retains the final-value deadline after
+the last key, and does not count a delayed command launch as slow native input.
 With `both`, it must receive the final one-character selection after the last
 native key. With reverse transfer denied, the local X11 contents must remain
 unchanged by that remote selection burst.

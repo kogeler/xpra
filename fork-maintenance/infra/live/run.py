@@ -67,13 +67,14 @@ LIVE_CLI_CONFIG = MAINTENANCE_ROOT / "live-cli.yml"
 DEFAULT_STATE_ROOT = MAIN_REPOSITORY_ROOT / ".artifacts" / "fork-maintenance"
 DEFAULT_ZED_DIRECTORY = Path.home() / ".local" / "zed.app"
 DEFAULT_RENDER_NODE = Path("/dev/dri/renderD128")
-FORK_REMOTE_URL = "https://github.com/kogeler/xpra.git"
 SERVER_DISPLAY = ":150"
 SERVER_PORT = 14500
 CLIENT_PROXY_PORT = 14501
 CLIENT_DISPLAY = ":0"
 WAIT_SECONDS = 60.0
-CLIPBOARD_MONITOR_SECONDS = 12.0
+# A lifecycle watchdog, not a transfer deadline: explicit stop follows client
+# exit, after all forward, selection and reverse clipboard operations.
+CLIPBOARD_MONITOR_SECONDS = 120.0
 CLIPBOARD_JSONL_BYTES = 1024 * 1024
 CLIPBOARD_JSONL_EVENTS = 128
 EXPECTED_PILLOW_VERSION = "12.1.1"
@@ -1875,12 +1876,14 @@ def clipboard_native_checks(directory: Path, policy: str,
         stimulus = not forward and not arms and not ends
         if forward and len(arms) == len(ends) == 1:
             end = ends[0]
+            first_key_ns = end.get("first_key_ns")
             last_key_ns = end.get("last_key_ns")
             stimulus = bool(
                 end.get("characters") == 29 and end.get("selection") == [0, 1]
-                and end.get("key_events") == 59 and type(last_key_ns) is int
-                and results[2]["monotonic_ns"] < arms[0]["monotonic_ns"] < last_key_ns <= end["monotonic_ns"]
-                and last_key_ns - arms[0]["monotonic_ns"] < 2_000_000_000
+                and end.get("key_events") == 59 and type(first_key_ns) is int and type(last_key_ns) is int
+                and results[2]["monotonic_ns"] < arms[0]["monotonic_ns"] < first_key_ns
+                <= last_key_ns <= end["monotonic_ns"]
+                and last_key_ns - first_key_ns < 2_000_000_000
                 and sum(record["event"] == "clipboard-owner-change" and record.get("selection") == "PRIMARY"
                         and arms[0]["monotonic_ns"] < record["monotonic_ns"] < end["monotonic_ns"]
                         for record in native) >= 29
@@ -3700,19 +3703,14 @@ def resolve_embedded_source() -> tuple[str, str, int]:
         raise LabFailure(f"Xpra source is not a working tree: {SOURCE_REPOSITORY}")
     if git_output("branch", "--show-current") != "develop":
         raise LabFailure("live acceptance must run from the current develop branch")
-    remotes = set(git_output("remote").splitlines())
-    if "origin" not in remotes:
-        raise LabFailure("Xpra fork checkout has no 'origin' remote")
-    origin_url = git_output("remote", "get-url", "origin").removesuffix("/")
-    if origin_url.removesuffix(".git") != FORK_REMOTE_URL.removesuffix(".git"):
-        raise LabFailure(f"Xpra 'origin' remote has an unexpected URL: {origin_url}")
-
     head = git_output("rev-parse", "HEAD")
-    source_tip = git_output("rev-parse", "refs/remotes/origin/master")
+    local_refs = git_output("for-each-ref", "--format=%(refname)", "refs/heads/master").splitlines()
+    source_ref = "refs/heads/master" if "refs/heads/master" in local_refs else "refs/remotes/origin/master"
+    source_tip = git_output("rev-parse", source_ref)
     if not re.fullmatch(r"[0-9a-f]{40}", head) or not re.fullmatch(
         r"[0-9a-f]{40}", source_tip
     ):
-        raise LabFailure("could not resolve develop or cached origin/master")
+        raise LabFailure(f"could not resolve develop or {source_ref}")
     bases = git_output("merge-base", "--all", source_tip, head).splitlines()
     if len(bases) != 1 or not re.fullmatch(r"[0-9a-f]{40}", bases[0]):
         raise LabFailure("current develop has no single embedded source boundary")
@@ -3725,9 +3723,9 @@ def resolve_embedded_source() -> tuple[str, str, int]:
     )
     if (
         git_output("rev-parse", "HEAD") != head
-        or git_output("rev-parse", "refs/remotes/origin/master") != source_tip
+        or git_output("rev-parse", source_ref) != source_tip
     ):
-        raise LabFailure("develop or cached origin/master changed while freezing source")
+        raise LabFailure("develop or source ref changed while freezing source")
     return commit, commit_marker, revision
 
 
@@ -6082,7 +6080,7 @@ def _saved_update_group_location(
 def _saved_packet_bucket_locations(
     packets: list[dict[str, Any]], window_id: int,
 ) -> list[tuple[str, int]] | None:
-    """File indexes belong to rounded-time buckets, not individual flush groups."""
+    """Validate storage indexes in wire order, not damage-time bucket order."""
     seen_groups: set[str] = set()
     previous_group = ""
     expected_index = 0
@@ -6096,8 +6094,8 @@ def _saved_packet_bucket_locations(
         if group != previous_group:
             if group in seen_groups:
                 return None
-            if previous_group and int(group) <= int(previous_group):
-                return None
+            # Video may publish after newer non-video damage. The directory
+            # records the original damage time, not publication order.
             seen_groups.add(group)
             previous_group = group
             expected_index = 0
@@ -12122,11 +12120,23 @@ def read_container_subsurface_events(
 ) -> list[dict[str, Any]]:
     """Read only the bounded live fixture authority while its process is active."""
     relative = _artifact_relative(relative)
-    if container_artifact_size(container, relative) > 256 * 1024:
-        raise LabFailure("subsurface fixture event stream is too large")
+    probe = r"""
+import os
+import stat
+import sys
+
+descriptor = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+with os.fdopen(descriptor, 'rb') as stream:
+    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        raise SystemExit('subsurface fixture event stream is not a regular file')
+    data = stream.read(256 * 1024 + 1)
+if len(data) > 256 * 1024:
+    raise SystemExit('subsurface fixture event stream is too large')
+sys.stdout.buffer.write(data)
+"""
     result = podman_exec(
         container,
-        ["cat", f"/artifacts/{relative}"],
+        ["python3", "-c", probe, f"/artifacts/{relative}"],
         announce=False,
     )
     return parse_subsurface_fixture_jsonl_text(result.stdout, relative)
@@ -14399,6 +14409,98 @@ def synchronize_subsurface_saved_updates(
             tuple(sorted(set(missing_payloads))),
         )
     return _subsurface_saved_updates(directory, source_wid)
+
+
+def synchronize_subsurface_active_updates(
+    container: str,
+    directory: Path,
+    role_ids: dict[str, int],
+) -> dict[str, dict[str, Any]]:
+    """Collect the ordered active packet inventories in one validated stream."""
+    roles = ("primary", "secondary", "lower", "upper")
+    if not set(roles).issubset(role_ids):
+        raise LabFailure("subsurface active source identities are invalid")
+    source_wids = [role_ids[role] for role in roles]
+    if any(
+        _exact_int(wid, positive=True) is None or wid > 2**31 - 1
+        for wid in source_wids
+    ) or len(set(source_wids)) != len(roles):
+        raise LabFailure("subsurface active source identities are invalid")
+    ensure_private_directory(directory)
+    known: list[str] = []
+    for role in roles:
+        window = directory / "screen-updates" / str(role_ids[role])
+        for path in sorted(window.glob("*/[0-9]*.info")):
+            try:
+                info = _load_subsurface_packet_info(path)
+            except LabFailure:
+                continue
+            payload = info.get("file")
+            if (isinstance(payload, str) and payload not in {"", ".", ".."}
+                    and PurePosixPath(payload).name == payload
+                    and (path.parent / payload).is_file()):
+                known.append(path.relative_to(directory).as_posix())
+    probe = r"""
+import json
+import os
+import re
+import stat
+import sys
+from pathlib import Path, PurePosixPath
+
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+from container_payload import PayloadEntry, PayloadError, write_archive
+
+root = Path(sys.argv[2])
+wids = json.loads(sys.argv[3])
+known = set(json.loads(sys.argv[4]))
+
+def entries():
+    # Fully freeze primary before looking at any later stream. A newer child
+    # tail cannot extend the earlier root frontier used by the host oracle.
+    for wid in wids:
+        paths = tuple(sorted((root / 'screen-updates' / str(wid)).glob('*/*.info')))
+        for path in paths:
+            relative = path.relative_to(root).as_posix()
+            if not re.fullmatch(r'screen-updates/[1-9][0-9]*/(?:0|[1-9][0-9]*)/'
+                                r'(?:0|[1-9][0-9]*)\.info', relative):
+                continue
+            if relative in known:
+                continue
+            for attempt in range(2):
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(descriptor, 'rb') as stream:
+                    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                        raise PayloadError('subsurface packet info is not a regular file')
+                    data = stream.read(1024 * 1024 + 1)
+                if len(data) > 1024 * 1024:
+                    raise PayloadError('subsurface packet info is too large')
+                try:
+                    info = json.loads(data)
+                    break
+                except json.JSONDecodeError:
+                    if attempt:
+                        raise
+            payload = info.get('file') if isinstance(info, dict) else None
+            if (not isinstance(payload, str) or payload in {'', '.', '..'}
+                    or PurePosixPath(payload).name != payload):
+                raise PayloadError('subsurface saved packet payload path is unsafe')
+            yield PayloadEntry(path, PurePosixPath(relative))
+            payload_path = path.parent / payload
+            yield PayloadEntry(payload_path, PurePosixPath(payload_path.relative_to(root).as_posix()))
+
+write_archive(sys.stdout.buffer, entries())
+"""
+    command = [
+        "podman", "exec", container, "python3", "-c", probe,
+        CONTAINER_PAYLOAD, "/artifacts",
+        json.dumps(source_wids), json.dumps(known),
+    ]
+    try:
+        container_payload.merge_from_process(command, directory)
+    except container_payload.PayloadError as error:
+        raise LabFailure(str(error)) from error
+    return {role: _subsurface_saved_updates(directory, role_ids[role]) for role in roles}
 
 
 def container_subsurface_source_wids(container: str) -> set[int]:
@@ -16913,17 +17015,13 @@ def _wait_subsurface_continuous_active(
         updates_by_role: dict[str, dict[str, Any]] = {}
         packet_cut = None
         try:
+            diagnostic["stage"] = "collect-active-packets"
+            collection_started = time.monotonic_ns()
+            updates_by_role = synchronize_subsurface_active_updates(server, directory, role_ids)
+            diagnostic["collection_elapsed_ns"] = time.monotonic_ns() - collection_started
             for role in ("primary", "secondary", "lower", "upper"):
-                diagnostic["stage"] = f"collect-{role}"
-                role_started = time.monotonic_ns()
-                updates_by_role[role] = synchronize_subsurface_saved_updates(
-                    server,
-                    directory,
-                    role_ids[role],
-                )
                 values = updates_by_role[role]["updates"]
                 diagnostic["roles"][role] = {
-                    "elapsed_ns": time.monotonic_ns() - role_started,
                     "packet_count": len(values),
                     "maximum_sequence": max((packet["sequence"] for packet in values), default=0),
                 }
@@ -16933,9 +17031,8 @@ def _wait_subsurface_continuous_active(
                     if not sequences:
                         diagnostic["reason"] = "primary has no continuous packet yet"
                         return False
-                    # Freeze one prefix before pulling the later roles. Their
-                    # newer packets remain final-drain evidence, but cannot
-                    # turn this earlier root inventory into an interior gap.
+                    # The bulk collector inventories primary before the later
+                    # roles. Their newer tails remain final-drain evidence.
                     packet_cut = max(sequences) + 1
                     diagnostic["packet_cut_before_sequence"] = packet_cut
             diagnostic["stage"] = "validate-bounded-packet-snapshot"

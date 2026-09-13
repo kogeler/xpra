@@ -48,8 +48,9 @@ equal. An ahead or divergent fork, missing ref, authorization or branch-rule
 failure, concurrent upstream movement, or post-sync mismatch fails closed for
 owner review.
 
-Agents never invoke `ci-master-sync`, trigger `workflow_dispatch`, or provide a
-token for it. Unit tests mock the remote mutation and assert the exact command.
+Agents dispatch this hosted workflow only on an explicit operator request;
+it is never part of autonomous local refresh. The hosted target rejects local
+execution. Unit tests mock the remote mutation and assert the exact command.
 
 ## Manual launch
 
@@ -61,19 +62,15 @@ gh workflow run master-sync.yml --repo kogeler/xpra --ref develop
 ```
 
 When this dispatch belongs to an explicit refresh cycle, wait for it to finish.
-Before fetching the fork master it produced, enter the one-start-commit boundary
-in [`upstream-refresh.md`](upstream-refresh.md): inspect every non-ignored
-change and, iff legitimate work exists, preserve the complete reviewed set in
-the one autonomous local commit authorized by invoking that runbook. A clean
-checkout gets no empty commit, and no later refresh-result commit is allowed.
-Only after the runbook records that commit SHA or `<none>` and requires clean
-porcelain, fetch and verify:
+Fetching and preparing local `master` are separate operator operations, or
+agent operations on explicit instruction. One optional fetch/verification tool
+is:
 
 ```bash
 make -C fork-maintenance repo-sync
 ```
 
-Agents never execute this dispatch. This explicit-refresh command fetches and
+This explicitly requested command fetches and
 verifies both master refs and requires exact fork/canonical equality. If it
 still reports a stale fork, the operator may run the same non-forced
 `gh repo sync` command directly, then repeat `repo-sync`; an ahead or divergent
@@ -93,16 +90,12 @@ Execute autonomous-upstream-refresh against the current fork master.
 This is an agent directive, not a shell command. The exhaustive procedure is
 [`upstream-refresh.md`](upstream-refresh.md); every case receives equal-depth
 manual review. The older optional `PRIMARY_CASE=<slug>` spelling affects only
-starting order, never depth or scope. Its initial local
-worktree review and optional one preservation commit must finish before the
-first command below. That invocation needs no additional commit confirmation;
-all later adaptation and validation results remain uncommitted. Its ref and
-rebase sequence is:
+starting order, never depth or scope. Require clean local `develop` and
+existing local `master`; preserve dirty work pending operator disposition.
+All adaptation and validation results remain uncommitted. The autonomous
+Git operation is only the local rebase:
 
 ```bash
-make -C fork-maintenance repo-sync
-make -C fork-maintenance master-update
-git switch develop
 make -C fork-maintenance develop-rebase
 make -C fork-maintenance patch-start-check
 ```

@@ -298,7 +298,13 @@ that key callback with a current Wayland input serial, and a compositor-driven
 `owner-change` record confirms the claim. Keep the root XFixes monitor running
 through the raw reverse conversion and until the Xpra client has exited, then
 drain a real X-server round trip before publishing the terminal record. Require
-the third production owner transition and the same new owner XID in `both`,
+the explicit stop and drain: the monitor's bounded 120-second lifetime is a
+safety watchdog covering the whole multi-step scenario, not an individual
+transfer deadline or a sleep before acceptance. A short fixed lifetime can
+expire during healthy input and Podman operations on slower hosts. Transfer
+waits keep their own unchanged deadlines; watchdog expiry still fails the gate.
+
+Require the third production owner transition and the same new owner XID in `both`,
 followed only by its zero-owner release/destroy after the fixture closes.
 `to-server` and `off` retain exactly the two original same-XID forward
 transitions and the original raw owner through client termination. A delayed
@@ -335,7 +341,11 @@ token, a reconnect, a longer timeout, or polling cannot satisfy the gate.
 Forward pastes now cross the real GTK text-buffer path: Ctrl+V, context-menu
 Paste, then Ctrl+V. Only `off` uses the asynchronous no-offer conversion
 control. The fixture then selects and shrinks its one 29-character line with
-real keyboard input. An owner-change-driven X11 PRIMARY consumer requests
+real keyboard input. Its GTK callbacks record first and last key timestamps;
+the 59-key stimulus must span less than two seconds of actual native input.
+The earlier arm command and host/Podman setup are not the input interval.
+Missing or unordered key timestamps fail, and final delivery retains its
+2.5-second deadline after the last key. An owner-change-driven X11 PRIMARY consumer requests
 TARGETS and text, never taking ownership or polling. Under `both`, the final
 one-character selection must arrive after the last native key; denied reverse
 policies must retain their local content. `native-paste-input.jsonl` and
@@ -443,7 +453,12 @@ The loop remains responsive to Wayland input and the stop marker. The observer
 has five seconds from continuous-start for its active proof, including packet
 collection and the subsequent fresh producer sample. The separate schema-3
 active/drain record fixes an exclusive packet frontier from the first primary
-inventory before fetching other streams. Validate every packet below it as
+inventory before fetching other streams. The active collector inventories
+primary first, then the other three roles, and transfers only new immutable
+packet sidecars and their bound payloads in one common validated tar stream.
+It reads each bounded producer prefix in one regular-file probe; repeated
+Podman startup latency must not consume the five-second proof budget through
+redundant per-role transfers. Validate every packet below the frontier as
 complete transactions plus one root-stage tail, then independently bind that
 exact prefix to the final immutable packet ledger. Later packets still require
 complete drain, pixel and global packet/ACK validation; a frontier cannot hide
@@ -886,8 +901,10 @@ numbers in recorded order and be complete in its
 the legacy allocator, or an exact window projection of the complete owned
 connection ledger when WSSO is selected. Rounded damage-time directories are
 storage buckets, not group identity: several real damage groups may share one
-millisecond bucket. The descending `flush` countdown reconstructs each exact
-group, while bucket-local indexes remain contiguous. Startup layout and picture
+millisecond bucket. Delayed video may publish after newer non-video damage,
+so directory timestamps do not order packets. The descending `flush` countdown
+reconstructs each exact group; bucket-local indexes remain contiguous from
+zero and completed buckets cannot recur. Startup layout and picture
 groups are structurally validated but cannot satisfy the gate. After both
 title-bound windows are stable, the runner records a baseline tied to the active
 exact IDR group and its saved source geometry. It closes the primary interval

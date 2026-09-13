@@ -10,12 +10,12 @@ Execute autonomous-upstream-refresh against the current fork master.
 
 `autonomous-upstream-refresh` is an agent workflow name, not a shell command or
 Make target. The directive is the complete invocation of this runbook. It
-explicitly chooses the current fork `master` as the next source boundary,
+explicitly chooses existing local `master` as the next source boundary,
 authorizes the queue-wide keep/adapt/retire decisions and in-scope repairs
 defined below, and requires the agent to continue through the complete
 validation and uncommitted handoff. Do not ask the operator to repeat the base
-choice, provide a `CYCLE`, expand scope for another active case, or separately
-confirm the one preservation commit.
+choice, provide a `CYCLE`, or expand scope for another active case. The only
+autonomous Git mutation is the local rebase described below.
 
 Every case receives equally high review priority, depth, and evidence
 requirements. Use stack order for operational dependencies, not to rank the
@@ -63,16 +63,17 @@ necessity and uncovered behavior. Exhaustive test coverage is not achievable,
 and a green suite cannot establish that every patch is correct or still needed.
 
 This is the canonical autonomous end-to-end runbook for an operator-selected
-upstream refresh. Use it after the operator has synchronized
-`kogeler/xpra:master` from `Xpra-org/xpra:master` and wants the agent to move
-the complete maintained queue to that current fork-master boundary. The
-invocation above is that explicit choice.
+upstream refresh. The operator prepares local `master` and chooses when to
+move the complete queue to that local boundary. Remote state and transport
+are not prerequisites. The invocation above authorizes local `develop` rebase
+onto existing local `master`, including conflict continuation or abort.
 
-The agent may fetch and verify both master refs, fast-forward the local
-`master`, and rebase local `develop` onto that verified fork `master`. The agent
-must not dispatch the hosted sync workflow, run `gh repo sync`, push or
-force-push a ref, or change the default branch. A remote mismatch returns the
-workflow to the operator; it is not repaired locally.
+All other Git operations are performed by the operator or delegated to the
+agent by a separate explicit instruction. Do not fetch, update `master`,
+switch branches, configure remotes, stash, create a content commit, or publish
+as an implicit part of refresh. Read-only local inspection and private
+workspace/test indexes remain part of authorized patch work and leave host
+Git state unchanged.
 
 Moving the embedded source invalidates every previous functional result. The
 agent therefore reads and semantically reassesses each active patch in its
@@ -87,10 +88,9 @@ nine complete-stack live profiles. Every case requires the same detailed
 correctness and necessity analysis, including cases whose patch bytes do not
 change.
 
-Invoking this runbook authorizes one local preservation commit at the very
-beginning when legitimate non-ignored changes already exist. The agent makes
-that one start commit without another confirmation. It does not authorize any
-later content commit: every adaptation, retirement, quarantine, CI,
+Invoking this runbook never authorizes a preservation or result commit.
+Require clean `develop` before rebasing; preserve dirty work pending an
+explicit operator disposition. Every adaptation, retirement, quarantine, CI,
 documentation, runner, or runbook result produced by the refresh remains
 uncommitted for operator review.
 
@@ -101,7 +101,7 @@ the optional `PRIMARY_CASE`, it must be one production slug in the pre-refresh
 `stacks/develop.toml` and affects only starting order, never review depth.
 Derive `CYCLE` as specified by the single entry point and use it for every
 `RUN`, `IMAGE_RUN`, and `WORKSPACE` created by this refresh. The directive itself confirms that this refresh should move
-`develop` to the current verified fork `master`; there are no additional
+`develop` to existing local `master`; there are no additional
 required inputs.
 
 Replace placeholders such as `<case>` and `<cycle>` in every example; never
@@ -160,7 +160,7 @@ An optional starting slug cannot be `upstream-test-quarantine`: it is a
 temporary test duty, not a production behavior. The duty is nevertheless
 always in scope and is reassessed through `test-quarantine.md`.
 
-## One start commit and the clean boundary
+## Clean local rebase boundary
 
 Start on `develop` with no merge, rebase, cherry-pick, or revert in progress.
 Before touching a ref, inspect every staged, unstaged, and untracked non-ignored
@@ -170,9 +170,7 @@ copy, and any file whose ownership or intent is uncertain. Ignored runtime
 state is never staged. `isolated-start-check` must prove that every legitimate
 change stays inside the allowed fork-control boundary.
 
-If legitimate non-ignored changes exist, this runbook requires the agent to
-preserve all of them in exactly one local start commit without asking again.
-Review and validate the complete candidate first:
+Review the current state without changing it:
 
 ```bash
 (
@@ -197,43 +195,20 @@ make -C fork-maintenance RUFF=<ruff> check
 )
 ```
 
-Inspect the contents of every listed untracked file separately; a filename is
-not sufficient review. Fix any in-scope preflight defect before snapshotting.
-Then, if and only if the porcelain is nonempty, stage the complete reviewed
-non-ignored state, prove nothing was omitted, and create one commit with a
-concise subject describing that preserved work:
-
-```bash
-git add --all -- .
-(
-set -eu
-git diff --quiet
-test -z "$(git ls-files --others --exclude-standard)"
-git diff --cached --check
-git diff --cached --stat
-git diff --cached --name-status
-git diff --cached
-)
-git commit -m '<reviewed start-snapshot subject>'
-test -z "$(git status --porcelain=v1 --untracked-files=all)"
-git rev-parse HEAD
-```
-
-If the checkout began clean, do not create an empty commit. In either branch,
-record the start-commit SHA or `<none>`, then require clean porcelain. This is
-the runbook's only autonomous content commit. From this point onward do not
-commit or amend any refresh result, even if a later clean-host-only operation
-would otherwise be convenient; use the isolated reconstruction flow or stop
-with an exact handoff.
+Inspect every listed untracked file separately. If non-ignored changes remain,
+preserve them and return only that prerequisite to the operator, who may
+resolve it directly or explicitly delegate the necessary Git operation. Do
+not stage, commit, stash or discard them merely to pass this boundary.
+Record existing local `develop` and `master` once the checkout is clean.
+Any missing local branch must likewise be prepared through an explicit
+operator action. Leave all subsequent refresh results uncommitted; use the
+isolated workflow when later edits prevent a clean-host-only operation.
 
 ## Pre-refresh record
 
 Record in the handoff notes, without creating a tracked evidence file:
 
-- the pre-preservation `develop` commit and the one start-commit SHA, or
-  `<none>`;
-- old `develop` commit which will enter the rebase (the start-commit SHA when
-  one was required, otherwise the pre-preservation commit);
+- old local `develop` commit which will enter the rebase;
 - old embedded source merge base;
 - local and cached fork-master commits;
 - every active case patch SHA-256 and the complete stack resolution digest;
@@ -253,8 +228,8 @@ test -z "$(git status --porcelain=v1 --untracked-files=all)"
 git status --short --branch
 git branch --show-current
 git rev-parse HEAD
-git rev-parse refs/remotes/origin/master
-set -- $(git merge-base --all refs/remotes/origin/master HEAD)
+git rev-parse refs/heads/master
+set -- $(git merge-base --all refs/heads/master HEAD)
 test "$#" -eq 1
 printf 'old_source=%s\n' "$1"
 if git show-ref --verify --quiet refs/heads/master; then
@@ -273,10 +248,9 @@ make -C fork-maintenance RUFF=<ruff> check
 )
 ```
 
-Local `master` may legitimately be absent in a new checkout; `repo-status`
-does not report this local ref, so the explicit conditional above records either
-its exact commit or its absence. `master-update` creates the branch after remote
-equality is proven. Do not turn its absence into a pre-refresh failure.
+`repo-status` does not report local `master`, so record it explicitly. A
+missing local `master` blocks the rebase until the operator prepares it or
+explicitly delegates that operation. Refresh never creates or updates it.
 
 There is no single global runtime-status target. Before rebasing, perform a
 bounded read-only inventory of the exact ownership roots. Skip a root only when
@@ -651,33 +625,17 @@ Do not start the rebase with an unexplained offline failure, ambiguous merge
 base, merge commit in the downstream range, host Xpra source change, active
 case/workspace transaction, or unreviewed runtime owner.
 
-## Verify fork master and rebase develop
+## Rebase develop onto local master
 
-The operator's hosted workflow changes remote fork `master`; it does not update
-this checkout. Fetch and verify the result:
-
-```bash
-make -C fork-maintenance repo-sync
-```
-
-The public target rechecks clean porcelain and the `develop` branch before its
-first fetch, so an omitted preservation step fails before either cached ref can
-move. `repo-sync` must then prove that cached and live `origin/master` and
-`upstream/master` are all the same commit. If the fork is stale, ahead,
-divergent, missing, or moves during verification, stop. Return the refresh to
-the operator, who owns the hosted master-sync workflow, then repeat this gate
-only after that workflow has completed successfully.
-
-With equality proven, update only local `master`, switch to `develop`, and
-rebase:
+Stay on clean local `develop` and use the recorded existing local `master`.
+Neither remote URLs nor cached/live remote equality are admission gates.
+The public target performs no fetch, master update or branch switch:
 
 ```bash
-make -C fork-maintenance master-update
-git switch develop
 make -C fork-maintenance develop-rebase
 ```
 
-Never substitute `upstream/master` for the verified fork `master`, and never
+Never substitute a remote-tracking ref for local `master`, and never
 merge either master ref into `develop`.
 
 If rebase stops, inspect the current commit, both sides of every conflict, and
@@ -752,7 +710,7 @@ A new or modified canonical workflow must be moved to the byte-identical
 workflows executable. Complete this repair before building the upstream-test
 image or starting any test. Keep it uncommitted as a refresh result; subsequent
 case work must use isolated workspaces and must not require a clean host or a
-second content commit.
+content commit.
 
 ## Autonomous queue-wide authority and self-correction
 
@@ -807,7 +765,7 @@ does not invalidate an otherwise exact result. If uncertainty remains, treat
 the result as invalid and rerun its gate with a new identity.
 
 Stop and return to the operator only for a boundary the directive cannot safely
-authorize: an unequal or divergent live fork master requiring remote mutation;
+authorize: missing local master or a required Git mutation not separately authorized;
 unsafe, secret, unexplained, or externally owned local state; an unresolved
 semantic choice where a correct implementation cannot be established; or a
 mandatory physical/resource boundary which is genuinely unavailable. Report
@@ -910,6 +868,13 @@ decision with no required changes records the unchanged digest; it needs no
 artificial edit or export. A retirement includes its durable coverage migration
 before the old owner is removed.
 
+Complete the current case README to the mandatory
+[documentation standard](case-documentation.md) before closing its checkpoint.
+Preserve the depth of existing analysis, update affected explanations against
+current callers and tests, and do not replace it with a short applicability
+summary. Missing mechanism, ownership or oracle analysis is an unfinished
+case review, even when its patch did not need an edit.
+
 When correctness requires another case's interface or overlapping hunk to
 change, inspect and repair those consumers in this iteration. Record a bounded
 linked set of cases and the shared invariant; export each case separately
@@ -969,7 +934,7 @@ use the documented recovery targets for an interrupted transaction. Re-read
 the specific source needed for the next edit and any changed consumers.
 Preserve completed reviews whose inputs and assumptions still match; reopen
 only affected ones. Continue implementing a previously recorded justified
-decision before reviewing unrelated remaining cases. Do not repeat fetch,
+decision before reviewing unrelated remaining cases. Do not fetch or repeat
 rebase, cleanup, a full reading sweep, or valid expensive gates merely because
 context was compacted or the operator said to continue.
 
@@ -1691,7 +1656,7 @@ how to commit it after the handoff.
 The handoff must state:
 
 - old and new fork-master/source/develop commits;
-- the sole automatic start-commit SHA, or that the checkout began clean;
+- the clean pre-rebase state and any separately instructed prerequisite Git work;
 - rewritten commit range and any rebase conflict resolutions;
 - the whole-queue manual-review exit record before the first runtime run,
   including any reopening for later findings or changed candidates;
@@ -1718,6 +1683,6 @@ make -C fork-maintenance cycle-clean \
 ```
 
 Results remain ignored local state until that reviewed cleanup; never copy
-them into Git. The operator alone publishes rewritten `develop`, using the
+them into Git. Publication is a separate explicit operator operation using the
 exact-SHA `--force-with-lease` procedure in
-[`publish-develop.md`](publish-develop.md). The agent never pushes.
+[`publish-develop.md`](publish-develop.md), delegated to the agent only on request.

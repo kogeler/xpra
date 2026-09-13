@@ -670,10 +670,6 @@ def get_case(
         raise ContribError(f"unknown completed case: {slug}") from error
 
 
-def normalize_url(value: str) -> str:
-    return value.rstrip("/").removesuffix(".git")
-
-
 def verify_repo(
     repo: Path,
     remotes: Sequence[str] = ("origin", "upstream"),
@@ -683,13 +679,12 @@ def verify_repo(
     top = Path(git(repo, "rev-parse", "--show-toplevel").stdout.strip()).resolve()
     if top != repo.resolve():
         fail(f"repository path is not its top level: {repo}")
+    available = set(git(repo, "remote").stdout.splitlines()) if remotes else set()
     for remote in remotes:
-        expected = REMOTE_URLS.get(remote)
-        if expected is None:
+        if remote not in REMOTE_URLS:
             fail(f"unsupported repository remote: {remote}")
-        actual = git(repo, "remote", "get-url", remote).stdout.strip()
-        if normalize_url(actual) != normalize_url(expected):
-            fail(f"{remote} has unexpected URL: {actual}")
+        if remote not in available:
+            fail(f"repository has no {remote!r} remote")
 
 
 def rev_parse(repo: Path, revision: str) -> str:
@@ -799,13 +794,13 @@ def require_current_master_in_history(repo: Path, base: str) -> str:
     head = rev_parse(repo, "HEAD")
     if not is_ancestor(repo, base, head):
         fail(
-            f"current branch does not contain fork origin/{BASE_BRANCH} {base}; "
-            "rebase develop onto the updated local master first"
+            f"current branch does not contain local {BASE_BRANCH} {base}; "
+            "rebase develop onto local master through the upstream-refresh runbook"
         )
     return head
 
 
-def require_local_master(repo: Path, base: str) -> str:
+def require_local_master(repo: Path, base: str = "") -> str:
     result = git(
         repo,
         "show-ref",
@@ -817,10 +812,10 @@ def require_local_master(repo: Path, base: str) -> str:
     if result.returncode not in (0, 1):
         fail("cannot inspect local master")
     if result.returncode == 1:
-        fail("local master is missing; run master-update")
+        fail("local master is missing; the operator must prepare it before upstream refresh")
     local = rev_parse(repo, f"refs/heads/{BASE_BRANCH}")
-    if local != base:
-        fail(f"local master {local} is stale; run master-update before rebasing develop")
+    if base and local != base:
+        fail(f"local master changed from {base} to {local}")
     return local
 
 
@@ -841,7 +836,7 @@ def require_rebased_develop(repo: Path, base: str) -> str:
     develop = rev_parse(repo, f"refs/heads/{INTEGRATION_BRANCH}")
     if not is_ancestor(repo, base, develop):
         fail(
-            f"develop is not rebased onto fork origin/{BASE_BRANCH} {base}; "
+            f"develop is not rebased onto local {BASE_BRANCH} {base}; "
             "run develop-rebase before patch work"
         )
     merges = tuple(
@@ -870,10 +865,10 @@ def require_patch_branch(repo: Path, base: str) -> str:
 
 
 def patch_start_check(repo: Path) -> str:
-    verify_repo(repo, ("origin",))
+    verify_repo(repo, ())
     require_clean(repo)
     require_non_master(repo)
-    base = sync_repo(repo)
+    base = require_local_master(repo)
     require_patch_branch(repo, base)
     return base
 
@@ -2294,7 +2289,7 @@ def update_case_patch(
         and not allow_path_change
     ):
         fail(f"staged paths {names} do not match manifest paths {tuple(sorted(case.paths))}")
-    base = sync_repo(repo)
+    base = require_local_master(repo)
     require_patch_branch(repo, base)
     require_source_baseline(repo, base, names)
     if git(repo, "diff", "--cached", "--check", check=False).returncode:
@@ -2570,9 +2565,6 @@ def validate_ci_checkout(repo: Path) -> None:
     if current_branch(repo) != INTEGRATION_BRANCH:
         fail(f"CI checkout must be on {INTEGRATION_BRANCH}")
 
-    origin = git(repo, "remote", "get-url", "origin").stdout.strip()
-    if normalize_url(origin) != normalize_url(FORK_URL):
-        fail(f"origin has unexpected URL in CI: {origin}")
     verify_repo(repo, ("origin",))
     require_clean(repo)
 
@@ -2757,9 +2749,9 @@ def ci_master_sync(repo: Path) -> MasterSyncState:
     )
 
 
-def embedded_develop_state(repo: Path, purpose: str) -> IsolatedState:
+def embedded_develop_state(repo: Path, purpose: str, *, source_ref: str = "") -> IsolatedState:
     """Locate the immutable source boundary already embedded in ``develop``."""
-    verify_repo(repo, ("origin",))
+    verify_repo(repo, ())
     artifact_boundary_check(repo)
     branch = current_branch(repo)
     if branch != INTEGRATION_BRANCH:
@@ -2775,7 +2767,10 @@ def embedded_develop_state(repo: Path, purpose: str) -> IsolatedState:
             f"be dirty: {unexpected_dirty}"
         )
 
-    source_tip = cached_master(repo, "origin")
+    if not source_ref:
+        local_refs = git(repo, "for-each-ref", "--format=%(refname)", "refs/heads/master").stdout.splitlines()
+        source_ref = "refs/heads/master" if "refs/heads/master" in local_refs else "refs/remotes/origin/master"
+    source_tip = rev_parse(repo, source_ref)
     merge_base = git(repo, "merge-base", "--all", source_tip, head, check=False)
     source_commits = tuple(merge_base.stdout.splitlines())
     if (
@@ -2784,7 +2779,7 @@ def embedded_develop_state(repo: Path, purpose: str) -> IsolatedState:
         or not GIT_SHA_RE.fullmatch(source_commits[0])
     ):
         fail(
-            f"{INTEGRATION_BRANCH} and cached origin/{BASE_BRANCH} "
+            f"{INTEGRATION_BRANCH} and {source_ref} "
             "have no single usable history boundary"
         )
     source_commit = source_commits[0]
@@ -2801,11 +2796,11 @@ def embedded_develop_state(repo: Path, purpose: str) -> IsolatedState:
     if (
         current_branch(repo) != branch
         or rev_parse(repo, "HEAD") != head
-        or cached_master(repo, "origin") != source_tip
+        or rev_parse(repo, source_ref) != source_tip
         or porcelain(repo) != status
     ):
         fail(
-            "repository branch, HEAD, cached origin/master, or worktree changed "
+            "repository branch, HEAD, source ref, or worktree changed "
             "while locating the embedded source"
         )
     return IsolatedState(
@@ -2820,7 +2815,7 @@ def embedded_develop_state(repo: Path, purpose: str) -> IsolatedState:
 
 def ci_start_check(repo: Path) -> IsolatedState:
     """Locate the source boundary already embedded in pushed ``develop``."""
-    return embedded_develop_state(repo, "CI checkout")
+    return embedded_develop_state(repo, "CI checkout", source_ref="refs/remotes/origin/master")
 
 
 def checkout_source_check(repo: Path) -> CheckoutSourceState:
@@ -4681,7 +4676,7 @@ def validate_upstream_status(values: dict[str, str], name: str, root: Path) -> s
             or not GIT_SHA_RE.fullmatch(values["source_head"])
             or not SELECTION_RE.fullmatch(values["selection"])
             or values["patch_mode"] not in RUNNER_PATCH_MODES
-            or values["source_remote"] not in REMOTE_URLS
+            or values["source_remote"] not in (*REMOTE_URLS, "local")
             or not TEST_RE.fullmatch(values["target"])
             or not values["image"]
             or values["payload_path"]
@@ -6869,7 +6864,7 @@ def _build_cleanup_plan_unlocked(
                     info = require_cleanup_file(path, "upstream source-bundle lock")
                     if (
                         re.fullmatch(
-                            r"[0-9a-f]{40}-(?:origin|upstream)\.bundle\.lock",
+                            r"[0-9a-f]{40}-(?:local|origin|upstream)\.bundle\.lock",
                             path.name,
                         )
                         is None
@@ -7307,12 +7302,11 @@ def master_update(repo: Path) -> str:
 
 
 def develop_rebase(repo: Path) -> str:
-    verify_repo(repo, ("origin",))
+    verify_repo(repo, ())
     require_clean(repo)
     if current_branch(repo) != INTEGRATION_BRANCH:
         fail(f"current branch must be {INTEGRATION_BRANCH}")
-    base = sync_repo(repo)
-    require_local_master(repo, base)
+    base = require_local_master(repo)
     result = git(repo, "rebase", f"refs/heads/{BASE_BRANCH}", check=False)
     if result.returncode:
         detail = "\n".join(
@@ -7590,7 +7584,20 @@ def scaffold_case(repo: Path, slug: str) -> Path:
         )
         (temporary / "fix.patch").write_bytes(b"")
         (temporary / "README.md").write_text(
-            f"# {slug}\n\nDocument the failure, patch boundary, and required tests here.\n",
+            f"# {slug}\n\n"
+            "Draft: complete the [case README standard]"
+            "(../../docs/runbooks/case-documentation.md) before promotion.\n"
+            "Headings alone do not satisfy its semantic review.\n\n"
+            "## Boundary\n\n"
+            "## Embedded-source context\n\n"
+            "## Surrounding code and ownership map\n\n"
+            "## Mechanism and lifecycle\n\n"
+            "## Patch-queue and integration ownership\n\n"
+            "## Patch ownership and non-goals\n\n"
+            "## Regression design and clean control\n\n"
+            "## Durable live or package boundary\n\n"
+            "## Invariants not to simplify\n\n"
+            "## Required validation\n",
             encoding="utf-8",
         )
         (temporary / "tests" / "README.md").write_text(

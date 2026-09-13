@@ -151,9 +151,17 @@ class PrivateStateTest(unittest.TestCase):
 
 
 class UpstreamMakeContractTest(unittest.TestCase):
-    def test_local_runner_defaults_to_fork_master(self) -> None:
+    def test_local_runner_prefers_local_master_with_cached_origin_fallback(self) -> None:
         makefile = MAKEFILE.read_text(encoding="utf-8")
-        self.assertIn("SOURCE_REMOTE ?= origin", makefile)
+        source_default = next(line for line in makefile.splitlines() if line.startswith("SOURCE_REMOTE ?="))
+        self.assertIn("$(filter refs/heads/master,", source_default)
+        self.assertIn("for-each-ref --format='%(refname)' refs/heads/master", source_default)
+        self.assertTrue(source_default.endswith(",local,origin)"))
+        self.assertIn(
+            "SOURCE_REF := $(if $(filter local,$(SOURCE_REMOTE)),"
+            "refs/heads/master,refs/remotes/$(SOURCE_REMOTE)/master)",
+            makefile,
+        )
         self.assertNotIn("SOURCE_REMOTE ?= upstream", makefile)
 
     def test_tests_only_mode_keeps_production_unpatched(self) -> None:
