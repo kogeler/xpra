@@ -874,7 +874,7 @@ index 3d41b65a33e26cbe4ae012f5d8b99b7d7c9c8e81..ce3da596b4c3ebcb9e44c115b50177d9
                  client.cleanup()
  
 diff --git a/tests/unittests/unit/client/opengl_backing_test.py b/tests/unittests/unit/client/opengl_backing_test.py
-index 1d3c21d79c2b757631eb549ad1815873018d1157..5f7272d778090833ee9910c1761b3df216bce9b9 100755
+index 1d3c21d79c2b757631eb549ad1815873018d1157..33f3cac6e3d76ccc297a6d0d416de5268830f9a5 100755
 --- a/tests/unittests/unit/client/opengl_backing_test.py
 +++ b/tests/unittests/unit/client/opengl_backing_test.py
 @@ -12,6 +12,31 @@ from unittest.mock import MagicMock, patch
@@ -909,11 +909,41 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..5f7272d778090833ee9910c1761b3df2
  class TestModuleFunctions(unittest.TestCase):
      """Test pure Python helper functions at module level."""
  
-@@ -141,6 +166,62 @@ def _make_mock_backing(wid=1, window_alpha=False, pixel_depth=0):
+@@ -141,6 +166,92 @@ def _make_mock_backing(wid=1, window_alpha=False, pixel_depth=0):
      return b
  
  
 +class TestGLContextLifecycle(unittest.TestCase):
++
++    def test_missing_context_on_live_backing_remains_a_paint_error(self):
++        from xpra.codecs.image import ImageWrapper
++        from xpra.util.objects import typedict
++
++        for kind in ("rgb", "scroll", "planar"):
++            with self.subTest(kind=kind):
++                backing = _make_mock_backing()
++                results = []
++                callbacks = [lambda success, message="": results.append((success, message))]
++                image = None
++                try:
++                    self.assertFalse(backing._gl_context_callbacks_closed)
++                    if kind == "rgb":
++                        backing.do_paint_rgb(None, "rgb", "BGRX", bytes(4),
++                                             0, 0, 1, 1, 1, 1, 4, typedict(), callbacks)
++                    elif kind == "scroll":
++                        backing.do_scroll_paints(None, ((0, 0, 1, 1, 0, 0),), 0, callbacks)
++                    else:
++                        image = ImageWrapper(0, 0, 2, 2, (bytes(4), bytes(2)),
++                                             "NV12", 24, (2, 2), planes=ImageWrapper.PLANAR_2)
++                        backing.paint_planar(None, "NV12_to_RGB", "h264", image,
++                                             0, 0, 2, 2, 2, 2, typedict(), callbacks)
++                    self.assertEqual(len(results), 1)
++                    self.assertIs(results[0][0], False)
++                    self.assertIn("context", results[0][1])
++                    if image is not None:
++                        self.assertTrue(image.freed)
++                finally:
++                    backing.close()
 +
 +    def test_idle_callback_closes_once_after_widget_replacement(self):
 +        backing = _make_mock_backing()
@@ -972,7 +1002,7 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..5f7272d778090833ee9910c1761b3df2
  class TestInitFormats(unittest.TestCase):
      """Test init_formats() logic at various bit depths."""
  
-@@ -317,6 +398,151 @@ class TestSwapFbos(unittest.TestCase):
+@@ -317,6 +428,151 @@ class TestSwapFbos(unittest.TestCase):
          assert b.textures[TEX_TMP_FBO] == 20
  
  
@@ -1124,7 +1154,7 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..5f7272d778090833ee9910c1761b3df2
  class TestFailShader(unittest.TestCase):
      """fail_shader() raises RuntimeError; glDeleteShader is skipped if shader not registered."""
  
-@@ -376,6 +602,36 @@ class TestPresentFboLogic(unittest.TestCase):
+@@ -376,6 +632,36 @@ class TestPresentFboLogic(unittest.TestCase):
          b.present_fbo(ctx, 50, 0, 50, 50)
          assert len(b.pending_fbo_paint) == 2
  
@@ -1161,7 +1191,7 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..5f7272d778090833ee9910c1761b3df2
      def test_flush_nonzero_does_not_call_managed(self):
          """With flush>0 and PAINT_FLUSH enabled, managed_present_fbo is deferred."""
          from unittest.mock import patch
-@@ -451,6 +707,208 @@ class TestOverlayTextureLogic(unittest.TestCase):
+@@ -451,6 +737,208 @@ class TestOverlayTextureLogic(unittest.TestCase):
          assert blend_function.call_args_list[-1].args == old_function
          combine_texture.assert_called_once_with("overlay", 2, 3, 4, 5, {"rgba": 1}, {})
  
@@ -1370,7 +1400,7 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..5f7272d778090833ee9910c1761b3df2
  
  class TestPaintBoxEarlyReturn(unittest.TestCase):
      """paint_box() with line_width=0 returns immediately with no GL calls."""
-@@ -473,6 +931,49 @@ class TestPaintBoxEarlyReturn(unittest.TestCase):
+@@ -473,6 +961,49 @@ class TestPaintBoxEarlyReturn(unittest.TestCase):
  # On macOS / Windows a display is assumed to already be present.
  # ---------------------------------------------------------------------------
  
@@ -1420,7 +1450,7 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..5f7272d778090833ee9910c1761b3df2
  class TestGLInit(unittest.TestCase):
  
      xvfb = None
-@@ -503,17 +1004,51 @@ class TestGLInit(unittest.TestCase):
+@@ -503,17 +1034,51 @@ class TestGLInit(unittest.TestCase):
  
      @classmethod
      def tearDownClass(cls):
@@ -1483,7 +1513,7 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..5f7272d778090833ee9910c1761b3df2
  
      def _make_gl_backing(self, window_alpha=False, pixel_depth=0):
          from xpra.os_util import gi_import
-@@ -545,6 +1080,192 @@ class TestGLInit(unittest.TestCase):
+@@ -545,6 +1110,243 @@ class TestGLInit(unittest.TestCase):
              backing.close()
              win.destroy()
  
@@ -1621,29 +1651,80 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..5f7272d778090833ee9910c1761b3df2
 +                    win.destroy()
 +
 +    def test_close_before_paint_idle_completes_callback(self):
-+        """A paint queued for the GTK idle loop is completed after its backing closes."""
++        """Queued paints terminate as skips, not renderer failures, after close."""
++        from xpra.codecs.image import ImageWrapper
 +        from xpra.os_util import gi_import
 +        from xpra.util.objects import typedict
 +
-+        backing, win = self._make_gl_backing()
-+        results = []
-+        try:
-+            backing.paint_rgb(
-+                "BGRA", bytes(4), 0, 0, 1, 1, 4, typedict(),
-+                [lambda success, message="": results.append((success, message))],
-+            )
-+            self.assertEqual(results, [])
-+            backing.close()
-+            self.assertEqual(results, [])
-+            main_context = gi_import("GLib").main_context_default()
-+            for _ in range(20):
-+                main_context.iteration(False)
-+            self.assertEqual(len(results), 1)
-+            self.assertFalse(results[0][0])
-+            self.assertIn("no opengl context", results[0][1])
-+        finally:
-+            backing.close()
-+            win.destroy()
++        for kind in ("BGRX", "BGRA", "scroll", "planar"):
++            with self.subTest(kind=kind):
++                backing, win = self._make_gl_backing()
++                results = []
++                image = None
++                callbacks = [lambda success, message="": results.append((success, message))]
++                try:
++                    if kind in ("BGRX", "BGRA"):
++                        backing.paint_rgb(kind, bytes(4), 0, 0, 1, 1, 4, typedict(), callbacks)
++                    elif kind == "scroll":
++                        backing.paint_scroll(((0, 0, 1, 1, 0, 0),), typedict(), callbacks)
++                    else:
++                        image = ImageWrapper(0, 0, 2, 2, (bytes(4), bytes(2)),
++                                             "NV12", 24, (2, 2), planes=ImageWrapper.PLANAR_2)
++                        backing.paint_image_wrapper("h264", image, 0, 0, 2, 2, typedict(), callbacks)
++                    self.assertEqual(results, [])
++                    backing.close()
++                    self.assertEqual(results, [])
++                    main_context = gi_import("GLib").main_context_default()
++                    for _ in range(20):
++                        main_context.iteration(False)
++                    self.assertEqual(len(results), 1)
++                    self.assertIs(type(results[0][0]), int)
++                    self.assertEqual(results[0][0], -1)
++                    self.assertIn("backing is closed", results[0][1])
++                    if image is not None:
++                        self.assertTrue(image.freed)
++                    backing.close()
++                    self.assertEqual(len(results), 1)
++                finally:
++                    backing.close()
++                    win.destroy()
++
++    def test_rgb_paints_before_realize_and_after_close_are_skipped(self):
++        from xpra.client.gtk3.opengl.drawing_area import GLDrawingArea
++        from xpra.client.gtk3.opengl.glarea_backing import GLAreaBacking
++        from xpra.os_util import gi_import
++        from xpra.util.objects import typedict
++
++        main_context = gi_import("GLib").main_context_default()
++        for backing_class in (GLDrawingArea, GLAreaBacking):
++            with self.subTest(backing_class=backing_class.__name__):
++                backing = backing_class(1, False, 24)
++                widget = backing._backing
++                results = []
++
++                def queue_paint():
++                    backing.paint_rgb(
++                        "BGRX", bytes(4), 0, 0, 1, 1, 4, typedict(),
++                        [lambda success, message="": results.append((success, message))],
++                    )
++                    for _ in range(20):
++                        main_context.iteration(False)
++
++                try:
++                    self.assertFalse(widget.get_mapped())
++                    queue_paint()
++                    self.assertEqual(results, [])
++                    self.assertEqual(len(backing._pending_gl_context_callbacks), 1)
++                    backing.close()
++                    self.assertEqual(results, [(-1, "backing is closed")])
++                    queue_paint()
++                    self.assertEqual(results, [(-1, "backing is closed")] * 2)
++                    self.assertEqual(backing._pending_gl_context_callbacks, [])
++                    backing.close()
++                    self.assertEqual(len(results), 2)
++                finally:
++                    backing.close()
++                    widget.destroy()
 +
 +    def test_pre_realize_callbacks_close_once_for_both_gtk_backings(self):
 +        """Both GTK GL widgets delegate unrealized work to the shared close owner."""
@@ -1676,7 +1757,7 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..5f7272d778090833ee9910c1761b3df2
      def test_init_textures(self):
          """init_textures() creates textures and fbos."""
          backing, win = self._make_gl_backing()
-@@ -625,6 +1346,283 @@ class TestGLInit(unittest.TestCase):
+@@ -625,6 +1427,283 @@ class TestGLInit(unittest.TestCase):
              backing.close()
              win.destroy()
  
@@ -10318,7 +10399,7 @@ index 0e0af89090bd7be909d7dd000849fd27e0c2dc9f..e70e74dcbcd849cf00f66361b725aa21
  def noop(*_args, **_kwargs) -> None:
      """ do nothing """
 diff --git a/xpra/opengl/backing.py b/xpra/opengl/backing.py
-index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d655cb86eb 100644
+index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb13652594a92a 100644
 --- a/xpra/opengl/backing.py
 +++ b/xpra/opengl/backing.py
 @@ -58,15 +58,17 @@ from xpra.util.str_fn import repr_ellipsized, hexstr, csv
@@ -10637,7 +10718,14 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d6
          if b := self._backing:
              self._backing = None
              b.destroy()
-@@ -740,6 +832,8 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -736,10 +828,15 @@ class GLWindowBackingBase(WindowBackingBase):
+ 
+     def do_scroll_paints(self, context, scrolls, flush: int, callbacks: PaintCallbacks) -> None:
+         log("do_scroll_paints%s", (context, scrolls, flush))
++        if self._gl_context_callbacks_closed:
++            fire_paint_callbacks(callbacks, -1, "backing is closed")
++            return
+         if not context:
              log("%s.do_scroll_paints(..) no context!", self)
              fire_paint_callbacks(callbacks, False, "no opengl context")
              return
@@ -10646,7 +10734,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d6
  
          def fail(msg: str) -> None:
              log.error("Error: %s", msg)
-@@ -833,6 +927,44 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -833,6 +930,44 @@ class GLWindowBackingBase(WindowBackingBase):
                            dx, dy, dx + w, dy + h,
                            GL_COLOR_BUFFER_BIT, GL_NEAREST)
  
@@ -10691,7 +10779,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d6
      def swap_fbos(self) -> None:
          log("swap_fbos()")
          # swap references to tmp and offscreen so tmp becomes the new offscreen:
-@@ -842,6 +974,36 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -842,6 +977,36 @@ class GLWindowBackingBase(WindowBackingBase):
          tmp = self.textures[TEX_FBO]
          self.textures[TEX_FBO] = self.textures[TEX_TMP_FBO]
          self.textures[TEX_TMP_FBO] = tmp
@@ -10728,7 +10816,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d6
  
      def painted(self, context, x: int, y: int, w: int, h: int, flush=0) -> None:
          if self.draw_needs_refresh:
-@@ -934,7 +1096,7 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -934,7 +1099,7 @@ class GLWindowBackingBase(WindowBackingBase):
              glReadBuffer(GL_COLOR_ATTACHMENT0)
  
              for x, y, w, h in rectangles:
@@ -10737,7 +10825,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d6
                                    round(x*xscale), round(y*yscale), round((x+w)*xscale), round((y+h)*yscale),
                                    GL_COLOR_BUFFER_BIT, sampling)
  
-@@ -1157,48 +1319,125 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1157,48 +1322,125 @@ class GLWindowBackingBase(WindowBackingBase):
              if not blend_enabled:
                  glDisable(GL_BLEND)
  
@@ -10898,7 +10986,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d6
  
      def draw_border(self, border) -> None:
          rgba = charclamp(256 * border.red), charclamp(256 * border.green), charclamp(256 * border.blue), charclamp(256 * border.alpha)
-@@ -1230,11 +1469,44 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1230,11 +1472,44 @@ class GLWindowBackingBase(WindowBackingBase):
          # show region being painted if debug paint box is enabled only:
          if self.paint_box_line_width <= 0:
              return
@@ -10944,7 +11032,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d6
          with TemporaryViewport(0, 0, bw, bh):
              self.draw_rectangle(x, y, w, h, self.paint_box_line_width, r, g, b, a, bh)
  
-@@ -1597,6 +1869,8 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1597,6 +1872,8 @@ class GLWindowBackingBase(WindowBackingBase):
  
      def paint_nvjpeg(self, gl_context, encoding: str, img_data, x: int, y: int, width: int, height: int,
                       options: typedict, callbacks: PaintCallbacks) -> None:
@@ -10953,7 +11041,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d6
          with self.assign_cuda_context(True):
              # we can import pycuda safely here,
              # because `self.assign_cuda_context` will have imported it with the lock:
-@@ -1684,15 +1958,19 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1684,15 +1961,22 @@ class GLWindowBackingBase(WindowBackingBase):
                       options: typedict, callbacks: PaintCallbacks) -> None:
          log("%s.do_paint_rgb(%s, %s, %s bytes, x=%d, y=%d, width=%d, height=%d, rowstride=%d, options=%s)",
              self, encoding, rgb_format, len(img_data), x, y, width, height, rowstride, options)
@@ -10964,7 +11052,9 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d6
 -            return
 -        if not options.boolget("paint", True):
 -            fire_paint_callbacks(callbacks)
--            return
++        if self._gl_context_callbacks_closed:
++            fire_paint_callbacks(callbacks, -1, "backing is closed")
+             return
 +        stage = None
          try:
 +            stage = self.get_subsurface_composite_stage(encoding, rgb_format, options)
@@ -10981,7 +11071,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d6
              upload, img_data = pixels_for_upload(img_data)
  
              self.gl_init(context)
-@@ -1713,6 +1991,11 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1713,6 +1997,11 @@ class GLWindowBackingBase(WindowBackingBase):
              bpp = PIXEL_FORMAT_BPP.get(rgb_format, 0)
              if not bpp:
                  raise ValueError(f"unknown bytes per pixel for {rgb_format!r}")
@@ -10993,7 +11083,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d6
              if width > 0 and height > 0:
                  if rowstride < width * bpp:
                      raise ValueError(f"invalid rowstride {rowstride} for {width}x{height} {rgb_format}")
-@@ -1726,7 +2009,13 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1726,7 +2015,13 @@ class GLWindowBackingBase(WindowBackingBase):
              # uploads in an RGB texture discards the X component; framebuffer
              # reads supply the missing alpha component as 1.0 when we blit to
              # an alpha-capable backing.
@@ -11008,7 +11098,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d6
  
              gl_marker("%s update at (%d,%d) size %dx%d (%s bytes) to %dx%d, using GL %s format=%s / %s to internal=%s",
                        rgb_format, x, y, width, height, len(img_data), render_width, render_height,
-@@ -1736,14 +2025,47 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1736,14 +2031,47 @@ class GLWindowBackingBase(WindowBackingBase):
              # Upload data as temporary RGB texture
              target = GL_TEXTURE_RECTANGLE
              glBindTexture(target, self.textures[TEX_RGB])
@@ -11056,14 +11146,14 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d6
 +                        log.error("Error presenting a committed subsurface frame", exc_info=True)
 +                fire_paint_callbacks(callbacks)
 +                return
-+
-+            self.invalidate_subsurface_transaction(context)
  
++            self.invalidate_subsurface_transaction(context)
++
 +            self.restore_ordinary_fbo_format()
              glBindFramebuffer(GL_READ_FRAMEBUFFER, self.tmp_fbo)
              glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, target, self.textures[TEX_RGB], 0)
              glReadBuffer(GL_COLOR_ATTACHMENT0)
-@@ -1770,6 +2092,7 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1770,6 +2098,7 @@ class GLWindowBackingBase(WindowBackingBase):
          except Exception as e:
              message = f"OpenGL {rgb_format} paint error: {e}"
              log("Error in %s paint of %i bytes, options=%s", rgb_format, len(img_data), options, exc_info=True)
@@ -11071,9 +11161,14 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d6
          fire_paint_callbacks(callbacks, False, message)
  
      def do_video_paint(self, coding: str, img,
-@@ -1806,6 +2129,16 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1805,7 +2134,21 @@ class GLWindowBackingBase(WindowBackingBase):
+     def paint_planar(self, context, shader: str, encoding: str, img,
                       x: int, y: int, enc_width: int, enc_height: int, width: int, height: int,
                       options: typedict, callbacks: PaintCallbacks) -> None:
++        if self._gl_context_callbacks_closed:
++            img.free()
++            fire_paint_callbacks(callbacks, -1, "backing is closed")
++            return
          pixel_format = img.get_pixel_format()
 +        if "subsurface-composite" in options:
 +            mode = options.get("subsurface-composite")
@@ -11088,7 +11183,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..7918380eed883f10bb73aa016e30f2d6
          if pixel_format not in PLANAR_FORMATS:
              img.free()
              raise ValueError(f"the GL backing does not handle pixel format {pixel_format!r} yet!")
-@@ -1814,10 +2147,12 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1814,10 +2157,12 @@ class GLWindowBackingBase(WindowBackingBase):
              log("%s.paint_planar(..) no OpenGL context!", self)
              fire_paint_callbacks(callbacks, False, "failed to get a gl context")
              return

@@ -34,13 +34,18 @@ this fork's policy requires it, not because an upstream document orders it.
 
 ## Repository identities
 
-The enclosing Git repository is the only source checkout. It has exactly these
-remote roles:
+The enclosing Git repository is the only source checkout. Its source roles are:
 
-- `origin`: `https://github.com/kogeler/xpra.git`;
-- `upstream`: `https://github.com/Xpra-org/xpra.git`;
+- `origin`: the operator-configured fork history anchor;
+- `upstream`: the operator-configured canonical history anchor;
 - operational patch base: the unique source merge base already embedded in the
   current `develop` history.
+
+Remote URLs and transport are operator configuration, not local acceptance
+inputs. Local gates must not require HTTPS, rewrite a remote, or contact it
+to admit source inspection, patch work, builds or tests. They verify the
+actual local source boundary and frozen inputs. Hosted service identity is
+validated separately through its Actions repository, workflow and checkout.
 
 `upstream/master` is the canonical source, but its current tip is not an input
 to ordinary work on an existing `develop`. The operator owns the decision to
@@ -81,13 +86,10 @@ gh repo sync kogeler/xpra --source Xpra-org/xpra --branch master
 
 The command is never run with `--force`. The workflow verifies both live refs
 afterward, changes no local ref, and fails when fork master cannot fast-forward.
-Agents never invoke or dispatch this remote-mutating path. Only after the
-operator explicitly chooses to refresh the embedded base does `repo-sync`
-become a gate. If it reports a stale fork, the operator may run that exact
-command without `--force`, then repeat `repo-sync`. `master-update` may
-fast-forward local `master` only after equality is freshly proven. An ahead or
-divergent fork or local branch stops that refresh for owner review; it does not
-invalidate testing of the current queue.
+These synchronization operations are performed by the operator or by an agent
+on a separate explicit instruction. Neither `repo-sync` nor `master-update`
+is part of autonomous refresh. The refresh uses existing local `master` and
+does not require any relationship with live or cached remote tips.
 
 Fork-only files, production fixes, tests not intended for upstream, merge
 commits, and automation commits are forbidden on `master`. The hosted sync is
@@ -113,23 +115,21 @@ embedded source boundary and contains no merge commits above it. A moving
 master ref does not alter that boundary.
 
 Only an operator-selected upstream-refresh cycle rebases the fork-only
-`develop` commits onto the freshly verified local `master`, followed by patch
+`develop` commits onto existing local `master`, followed by patch
 resolution and validation against the new source. Merging `master`,
 `upstream/master`, or an equivalent upstream ref into `develop` is forbidden.
-Before any fetch or rebase, that runbook reviews the complete non-ignored
-worktree. If legitimate changes exist, its invocation authorizes the agent to
-stage all and only those tracked and untracked changes and create exactly one
-local preservation commit without further confirmation, including reviewed
-legitimate user work unrelated to the refresh; a clean checkout gets no empty
-commit. The agent creates no later intermediate or result commit in that
-refresh. Rebase replay may change the identities of the already committed
-series but is not another direct content commit.
+The runbook requires clean `develop` and an existing local `master`. It
+inspects and preserves dirty work pending explicit operator disposition;
+it never commits, stashes or discards that work to obtain a clean checkout.
+Only the local rebase, including conflict continuation or abort, is autonomous.
+Fetching, updating master, switching branches, changing remotes/configuration,
+creating content commits and publication require separate explicit requests.
 If Git stops during that explicit rebase, the refresh remains incomplete until
 every conflict is resolved and the rebase completes; existing pre-refresh
 evidence remains historical rather than evidence for the new base.
 
-A published `develop` is intentionally rewritten by later refreshes. Agents
-and automation never publish that rewrite. The operator may do so only with an
+A published `develop` is intentionally rewritten by later refreshes.
+Publication is a separately requested operation and uses an
 exact expected remote SHA and `--force-with-lease`; plain `--force` is
 forbidden.
 
@@ -144,8 +144,10 @@ the checked-out branch to remain `develop`, locates the unique embedded source
 commit without fetch or `ls-remote`, rejects dirty or committed Xpra source
 changes, and permits local changes only in `AGENTS.md`, `.gitignore`,
 `.github/workflows/`, `.github/upstream-workflows/`, and `fork-maintenance/`. It
-records the branch, HEAD, cached `origin/master`, worktree status, and embedded
-source commit and must not change any of them.
+uses local `master` as the history anchor, falling back to cached
+`origin/master` only when local `master` is absent. It records the branch,
+HEAD, worktree status, and embedded source commit, verifies the selected ref
+did not move, and must not change any of them.
 
 ### Temporary branches
 
@@ -171,6 +173,17 @@ Each completed `cases/<slug>/` is either a production case or the single active
 - `README.md`: current failure boundary, patch ownership, and required
   validation;
 - optional `tests/`: case-owned functional probes.
+
+Production README content must satisfy the mandatory
+[case documentation standard](docs/runbooks/case-documentation.md). It explains
+current-source necessity, callers/state ownership, each changed mechanism,
+failure paths and queue interactions, test stimuli/assertions and limitations,
+durable live/package proof, non-goals and invariants. Semantic completeness is
+required before draft promotion or exported handoff and when closing a case
+reassessment; headings or line counts alone cannot certify it. New cases get
+the same analytical depth as established cases without a second operator
+request. Transient validation results and pending work belong in the ignored
+cycle ledger, not the README. This standard adds no alternative gate schedule.
 
 The `test-quarantine` kind and the `upstream-test-quarantine` slug are a
 bidirectional reserved identity: no other slug may use that kind, and that slug
@@ -262,7 +275,8 @@ Only these active cases are retained:
 12. `gtk-client-scroll-deduplication`;
 13. `wayland-display-name-signal`;
 14. `client-codec-startup-order`;
-15. `x11-selection-refusal`.
+15. `x11-selection-refusal`;
+16. `client-popup-modal-lifecycle`.
 
 ## Stack contract
 
@@ -458,11 +472,12 @@ only after that staging is gone.
 
 ## Host patch lifecycle
 
-Host patch application is an exceptional integration tool for an explicitly
-selected upstream-refresh cycle. `patch-start-check` then re-verifies equal
-live fork and canonical master refs, exact local master, linear rebased
-`develop`, and the ancestry of any temporary branch. Committed versions of all
-patch-owned source paths must match that refreshed master. Ordinary patch work,
+Host patch application is an exceptional integration tool requiring a separate
+explicit operator request for host source/index changes; refresh alone does
+not authorize it. `patch-start-check` verifies existing local master, linear
+rebased `develop`, and the ancestry of any temporary branch without contacting
+a remote. Committed versions of all patch-owned source paths must match that
+local master. Ordinary patch work,
 investigation, and acceptance use `isolated-start-check` and the embedded-base
 isolated lifecycle above, with no sync or rebase prerequisite.
 
@@ -525,43 +540,38 @@ After the gate, use the development loop and early complete live suite from
 and remaining live acceptance only after a reviewed candidate freeze. Reuse
 exact valid new-base controls instead of repeating them at each numbered phase.
 
-1. require `develop`; inspect every non-ignored tracked and untracked change,
-   reject unsafe, unexplained, secret, generated, or applied-Xpra-source content,
-   and, when legitimate changes exist, create the one complete preservation
-   commit authorized by invoking this runbook, including legitimate user work
-   unrelated to the refresh; require a clean checkout after that commit and
-   create no empty commit when it was already clean;
-2. run `repo-sync`;
-3. fast-forward local `master` with `master-update`;
-4. switch to `develop` and run `develop-rebase`;
-5. resolve and stage every conflict, then use `git rebase --continue` until the
+1. require clean `develop`; inspect and preserve any pending work without
+   creating a commit, stashing or discarding it;
+2. record existing local `master` and `develop`, then run `develop-rebase`
+   without network access, branch switching or another ref update;
+3. resolve and stage every conflict, then use `git rebase --continue` until the
    rebase completes; abort and stop if correct resolution is not possible;
-6. run `patch-start-check` and inventory every individual `patch-check`
+4. run the local read-only `patch-start-check` and inventory every individual `patch-check`
    outcome; perform the incremental deep review/decision/implementation/export/
    re-review/checkpoint loop for every case, including unchanged/exactly present
    patches and the quarantine, repairing necessary cross-case changes within
    the owning iteration; finish all initial adaptations, removals and regression
    migrations, review the composed code, resolve the resulting stack and record
    the manual-review exit gate;
-7. when a duty case is active, run every clean quarantine gate and remove or
+5. when a duty case is active, run every clean quarantine gate and remove or
    narrow entries that no longer fail on this exact master;
-8. run the complete offline fork-control suite and a tests-only clean control
+6. run the complete offline fork-control suite and a tests-only clean control
    for every production case which owns retained test paths; when a case owns no
    test path, record that the control is unavailable and perform the
    case-specific semantic inspection; compare results with the prior manual
    conclusions and reopen affected reviews before further runtime validation
    when evidence contradicts them, without requesting scope for another case;
-9. run every patched focused and native gate, all three complete upstream test
+7. run every patched focused and native gate, all three complete upstream test
    legs (`full`, `full-cython`, and `full-no-compat`), every
    case-specific durable package boundary including both real Ubuntu 26.04 and
    Debian 13 builds against the complete resulting stack, and all nine fixed
    positive stack live profiles, even if the patches applied without textual
    changes;
-10. reproduce any newly failing author test on this exact clean master before
+8. reproduce any newly failing author test on this exact clean master before
     adding it to the single duty quarantine, then rerun its clean quarantine
     gates for changed inputs and fill the final patched-matrix gaps after the
     updated candidate is stable;
-11. run `develop-check` before handoff only when the resulting branch is clean;
+9. run `develop-check` before handoff only when the resulting branch is clean;
     otherwise leave every reviewed refresh result uncommitted and report this
     final gate as intentionally outstanding for the operator. Do not create an
     intermediate or final result commit to satisfy a clean-host gate.
@@ -577,17 +587,10 @@ command/assertion, scenario, runner,
 or acceptance semantics changed. Editing explanatory text alone does not
 restart the ladder; uncertainty invalidates the affected result.
 
-The single start commit is the only direct content commit this refresh
-authorizes. If later adaptation needs another clean-host-only operation, order
-all such work before tracked result edits, use a supported isolated mechanism,
-or stop and describe the missing mechanism; never use an intermediate commit
-as workspace cleanup.
-
-This explicit sequence fetches both master refs and requires live
-fork/canonical equality. If step 2 reports a stale fork, the operator may run
-the exact non-forced `gh repo sync` command printed by the gate, then repeat
-step 2. Agents never run that remote mutation. Publishing, testing, or editing
-the unchanged current `develop` does not implicitly start this sequence.
+No content commit is authorized by refresh. If a clean-host-only operation is
+unavailable, use the supported isolated workflow or request an explicit Git
+disposition. No fetch, synchronization or remote-URL check is a refresh step.
+Ordinary patch work does not implicitly start a rebase.
 
 No form of `git merge master`, `git merge upstream/master`, or an equivalent
 merge is accepted as upstream transfer. `develop-check` rejects merge commits
@@ -614,8 +617,10 @@ the case and update its stack/references together; create no history archive.
 
 Local upstream-test and live acceptance runners and hosted develop test CI
 freeze the unique source merge base already embedded in their `develop`
-checkout, never the mutable working tree or a moving master tip. Cached
-`origin/master` is only the local history anchor used to locate that commit.
+checkout, never the mutable working tree or a moving master tip. Local runners
+use local `master`, falling back to cached `origin/master` only when it is
+absent; hosted test CI explicitly uses cached `origin/master`. The selected
+ref is only the history anchor used to locate that commit.
 None of these paths fetches or queries live master refs. Each test or live run
 binds:
 
@@ -944,8 +949,8 @@ The master-sync workflow:
 
 The scheduled sync updates only fork `master`. It never rebases, merges, signs,
 commits, or publishes `develop`; the operator may later choose to start the
-documented local `repo-sync` / `master-update` / `develop-rebase` cycle. Until
-that explicit decision, a newer master has no effect on current `develop`
+documented local `develop-rebase` cycle after separately preparing local
+`master`. Until that explicit decision, a newer master has no effect on current `develop`
 testing. An ahead, divergent, missing, concurrently moving, unauthorized, or
 post-sync unequal ref fails the sync itself closed for owner review.
 
@@ -1011,8 +1016,9 @@ master-sync and package-release workflows have no test matrix.
 
 The develop test and package source/build paths never fetch, sync, switch,
 merge, or rebase after `actions/checkout` has populated the checkout. A local
-operator who explicitly elects to move the upstream base separately verifies
-both live master refs and rebases onto that commit. Publication and testing of
+operator who elects to move the upstream base prepares local `master`, then
+invokes the refresh runbook to rebase onto that existing local ref. Remote
+synchronization requires its own explicit instruction. Publication and testing of
 the unchanged current base do not imply that refresh.
 
 CI never invokes a `live-*` target and cannot satisfy RGB, render-node,
@@ -1512,10 +1518,13 @@ never authority. The primary's first saved
 frame-state record must remain opaque, and its complete saved packet history
 must have positive sequence numbers in recorded order with exact completeness
 in the verified namespace above. The rounded damage-time directory is storage
-only: one millisecond may contain multiple
-damage groups, which are reconstructed by each exact descending `flush`
-countdown. Startup layout/picture groups remain structurally validated but are
-not production evidence. Once both title-bound windows are stable, the runner
+only: one millisecond may contain multiple damage groups, and delayed video
+may publish after newer non-video damage. Directory timestamps need not
+increase in packet order. Bucket-local indexes must remain dense from zero,
+and a completed bucket cannot recur. Damage groups are reconstructed by each
+exact descending `flush` countdown. Startup layout/picture groups remain
+structurally validated but are not production evidence. Once both title-bound
+windows are stable, the runner
 records a baseline against the active exact IDR group and its saved source
 geometry, then an end sequence before auxiliary exit. Each group in that
 interval has exactly accounted sequences in that namespace, one terminal
@@ -1826,24 +1835,25 @@ provenance. The saved item is not modified or reclassified as acceptance.
 
 ## Authority boundary
 
-The automation may verify/fetch refs read-only, fast-forward local `master`,
-perform an explicitly invoked local `develop` rebase, create and remove exact
+The operator performs Git mutations or explicitly delegates them to the
+agent, who is responsible for their correct execution. The sole autonomous
+exception is local `develop` rebase onto existing local `master` through the
+upstream-refresh runbook, including conflict continuation or abort. No other
+ref, configuration, index, commit or network operation is implied.
+Read-only local Git inspection and private workspace/test indexes are part of
+authorized patch work and leave the host Git state untouched.
+
+The automation may create and remove exact
 owned isolated workspaces, recover exact marker-backed case/workspace staging
 and removal or case-update transactions, remove a digest-confirmed finalized
 artifact cycle or apply the permanent structural artifact-disposal policy,
 update case files from a verified workspace, apply or remove
 patches in a clean non-master host worktree, run tests, and print status.
 
-No target creates a new content commit automatically. Invocation of the
-canonical **Autonomous Upstream Refresh and Full Queue Adaptation** runbook
-itself authorizes one direct agent
-preservation commit before fetch/rebase iff exhaustive review finds legitimate
-non-ignored changes. That commit contains the complete reviewed tracked and
-untracked set, requires no further confirmation, and is omitted for an already
-clean checkout. No intermediate or final refresh result commit is authorized;
-the operator receives those changes uncommitted. `develop-rebase` only replays
-existing fork-only commits onto fetched fork master and therefore changes
-their local identities. The hosted-only `ci-master-sync` target may only perform
+No target creates a new content commit automatically. Refresh results remain
+uncommitted; committing existing work also requires a separate explicit
+operator instruction. `develop-rebase` only replays existing fork-only commits
+onto recorded local `master`. The hosted-only `ci-master-sync` target may only perform
 the exact non-forced fork-master sync defined above. The hosted-only
 `ci-deb-release` target may only create its unique draft, ordinary release with
 the exact Debian-version title, package tag, and two validated tar assets. If
@@ -1860,7 +1870,6 @@ attempt. Drafts and unrelated or manual releases, tag-only state, and ambiguous
 state remain untouched outside the exact recovery rules above. All other
 automation never pushes, force-updates or mutates remote refs or releases,
 creates or edits a pull request, changes the default branch, or changes global
-Git configuration. Agents invoke neither hosted mutation target. Outside the
-one runbook-start preservation boundary, an agent creates a new commit only
-after explicit current-conversation authorization. The operator reviews and
-performs all result commits, branch publication, and default-branch actions.
+Git configuration without an explicit operator request. Invoking a hosted
+workflow is likewise a separate operator decision. The operator reviews and
+performs result commits and publication or explicitly delegates those operations.

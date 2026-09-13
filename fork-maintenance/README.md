@@ -38,7 +38,8 @@ The active patches are:
 12. `gtk-client-scroll-deduplication`;
 13. `wayland-display-name-signal`;
 14. `client-codec-startup-order`;
-15. `x11-selection-refusal`.
+15. `x11-selection-refusal`;
+16. `client-popup-modal-lifecycle`.
 
 No quarantine duty case is currently active. The permanent
 [`upstream-test-quarantine` scaffold](cases/upstream-test-quarantine/README.md)
@@ -168,32 +169,23 @@ then uses the post-review development loop before freezing the candidate for
 complete final acceptance. The exhaustive procedure is
 [`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md).
 
-Before the first `repo-sync`, that runbook reviews every staged, unstaged, and
-untracked non-ignored path. If legitimate work exists, invoking the runbook
-authorizes the agent to preserve the complete reviewed set in one local start
-commit without another confirmation; a clean checkout gets no empty commit.
-No intermediate or final refresh-result commit is created after that boundary.
-The commands below therefore start only after the runbook has required clean
-porcelain and recorded the preservation commit SHA or `<none>`.
+The runbook requires clean local `develop` and existing local `master`. It
+preserves dirty work pending operator disposition and creates no preservation
+or result commit. The only autonomous Git mutation is the local rebase;
+fetching, preparing master, switching branches, changing remotes and publishing
+require separate explicit operator instructions. Remote URLs are not local gates.
 
 Run commands from the Xpra root:
 
 ```bash
 make -C fork-maintenance check
 make -C fork-maintenance repo-status
-make -C fork-maintenance repo-sync
 ```
 
-The scheduled workflow may sync remote fork `master` from upstream.
-`repo-sync` fetches both master refs, verifies each against live GitHub state,
-and requires exact fork/canonical equality for this explicit refresh. If it
-reports a stale fork, only the operator may run the printed non-forced
-`gh repo sync` command and repeat `repo-sync`. After equality is proven, update
-the local mirror:
+The operator prepares local `master` independently. Refresh records and uses
+that local commit without fetching or checking remote equality:
 
 ```bash
-make -C fork-maintenance master-update
-git switch develop
 make -C fork-maintenance develop-rebase
 make -C fork-maintenance patch-start-check
 make -C fork-maintenance stack-check STACK=develop
@@ -519,6 +511,8 @@ the agent then performs the guarded fetch, local-master fast-forward, and
 
 ## Documentation
 
+- [`docs/runbooks/case-documentation.md`](docs/runbooks/case-documentation.md):
+  mandatory case README structure, analytical depth and semantic review checklist.
 - [`CONTRACT.md`](CONTRACT.md): branch, patch, validation, and storage invariants;
 - [`docs/runbooks/validation.md`](docs/runbooks/validation.md): development,
   candidate freeze, final acceptance, and input-verified evidence reuse;
@@ -567,10 +561,8 @@ canonical owned DEB releases and removes older owned releases in exact
 tag-first/release-ID-last order. A failed or cancelled prior attempt with an
 exact published release may resume only that retention; unrelated or manual
 releases, drafts outside exact recovery, tag-only state, and ambiguous state
-are preserved. Agents invoke neither hosted mutation target.
-`develop-rebase` only replays existing local commits onto fetched fork master
-during an operator-selected upstream refresh.
-The refresh runbook invocation separately authorizes one direct agent
-preservation commit before its first `repo-sync` iff legitimate non-ignored
-work exists. It contains the complete reviewed pre-existing state and needs no
-second confirmation; the agent creates no later intermediate or result commit.
+are preserved. Hosted workflow dispatch requires an explicit operator request.
+`develop-rebase` only replays existing local commits onto existing local
+`master` during an operator-selected refresh. All other Git operations are
+performed by the operator or explicitly delegated to the agent. Refresh
+results remain uncommitted and pending work is never automatically committed.

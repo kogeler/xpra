@@ -33,8 +33,9 @@ Remain on `develop` and run:
 make -C fork-maintenance isolated-start-check
 ```
 
-The gate locates the unique source merge base of current `develop` and cached
-`origin/master`. The cached ref is a local history anchor only: the command
+The gate locates the unique source merge base of current `develop` and local
+`master`, falling back to cached `origin/master` only when local `master` is
+absent. The selected ref is a history anchor only: the command
 does not fetch, query upstream, require master freshness/equality, or rebase.
 It permits dirty files only below the fork control boundary:
 
@@ -97,7 +98,10 @@ Use `tests-only` for the non-vacuous upstream control. It cannot be exported as
 a complete case patch.
 
 For a new case, first run `case-new` and complete only its human-authored
-manifest fields and README. A draft is not selectable by test runners, but it
+manifest fields and README under the mandatory
+[case documentation standard](case-documentation.md). The generated outline
+is a draft, not completed analysis; finish the semantic checklist alongside
+the candidate before promotion/export handoff. A draft is not selectable by test runners, but it
 can start one isolated workspace in clean mode:
 
 ```bash

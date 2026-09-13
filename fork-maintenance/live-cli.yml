@@ -65,6 +65,7 @@ server:
 client:
   base:
     - "--minimal"
+    - "--modal-windows=yes"
     - "--mousewheel=on"
     - "--compressors=none"
     - "--reconnect=no"

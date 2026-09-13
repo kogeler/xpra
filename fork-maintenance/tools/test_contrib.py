@@ -476,8 +476,8 @@ class DevelopRebaseTest(unittest.TestCase):
 
     def sync_mocks(self):
         return (
-            patch.object(contrib, "verify_repo"),
-            patch.object(contrib, "sync_repo", return_value=self.base),
+            patch.object(contrib, "fetch_master", side_effect=AssertionError("unexpected fetch")),
+            patch.object(contrib, "sync_repo", side_effect=AssertionError("unexpected sync")),
         )
 
     def test_patch_start_rejects_develop_before_rebase(self) -> None:
@@ -499,6 +499,8 @@ class DevelopRebaseTest(unittest.TestCase):
             command("git", "rev-list", "--merges", f"{self.base}..develop", cwd=self.repo),
             "",
         )
+        self.assertEqual(command("git", "rev-parse", "master", cwd=self.repo), self.base)
+        self.assertEqual(command("git", "remote", cwd=self.repo), "")
         verify, sync = self.sync_mocks()
         with verify, sync:
             self.assertEqual(contrib.patch_start_check(self.repo), self.base)
@@ -512,6 +514,15 @@ class DevelopRebaseTest(unittest.TestCase):
             self.assertRaisesRegex(contrib.ContribError, "merge commits"),
         ):
             contrib.patch_start_check(self.repo)
+
+    def test_rebase_rejects_dirty_work_without_preserving_or_discarding_it(self) -> None:
+        (self.repo / "fork.txt").write_text("pending operator work\n", encoding="utf-8")
+        before = command("git", "status", "--porcelain=v1", cwd=self.repo)
+        with self.assertRaises(contrib.ContribError):
+            contrib.develop_rebase(self.repo)
+        self.assertEqual(command("git", "rev-parse", "HEAD", cwd=self.repo), self.old_develop)
+        self.assertEqual(command("git", "rev-parse", "master", cwd=self.repo), self.base)
+        self.assertEqual(command("git", "status", "--porcelain=v1", cwd=self.repo), before)
 
 
 class IsolatedStartTest(unittest.TestCase):
@@ -549,6 +560,18 @@ class IsolatedStartTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_remote_transport_and_location_do_not_change_local_admission(self) -> None:
+        command("git", "remote", "add", "origin", "git@github.com:kogeler/xpra.git", cwd=self.repo)
+        for url in ("git@github.com:kogeler/xpra.git", "ssh://git@example.invalid/fork", "/local/mirror"):
+            with self.subTest(url=url):
+                command("git", "remote", "set-url", "origin", url, cwd=self.repo)
+                before = command("git", "status", "--porcelain=v1", cwd=self.repo)
+                with patch.object(contrib, "fetch_master", side_effect=AssertionError("unexpected fetch")):
+                    state = contrib.isolated_start_check(self.repo)
+                self.assertEqual(state.source_commit, self.base)
+                self.assertEqual(command("git", "remote", "get-url", "origin", cwd=self.repo), url)
+                self.assertEqual(command("git", "status", "--porcelain=v1", cwd=self.repo), before)
+
     def test_allows_dirty_control_plane_without_touching_the_branch(self) -> None:
         status = command("git", "status", "--porcelain=v1", cwd=self.repo)
         with patch.object(contrib, "verify_repo"):
@@ -558,6 +581,21 @@ class IsolatedStartTest(unittest.TestCase):
         self.assertEqual(state.source_commit, self.base)
         self.assertTrue(state.source_in_head)
         self.assertEqual(command("git", "status", "--porcelain=v1", cwd=self.repo), status)
+
+    def test_local_master_can_advance_without_fetching_remote_tracking_refs(self) -> None:
+        (self.repo / "source.py").write_text("VALUE = 2\n", encoding="utf-8")
+        command("git", "add", "source.py", cwd=self.repo)
+        command("git", "commit", "-q", "-m", "new local source", cwd=self.repo)
+        local_master = command("git", "rev-parse", "HEAD", cwd=self.repo)
+        command("git", "update-ref", "refs/heads/master", local_master, cwd=self.repo)
+        before = command("git", "status", "--porcelain=v1", cwd=self.repo)
+        with patch.object(contrib, "fetch_master", side_effect=AssertionError("unexpected fetch")):
+            state = contrib.isolated_start_check(self.repo)
+        self.assertEqual(state.source_commit, local_master)
+        self.assertEqual(command("git", "rev-parse", "refs/remotes/origin/master", cwd=self.repo), self.base)
+        self.assertEqual(command("git", "status", "--porcelain=v1", cwd=self.repo), before)
+        with self.assertRaisesRegex(contrib.ContribError, "outside the patch queue"):
+            contrib.ci_start_check(self.repo)
 
     def test_accepts_current_develop_when_cached_origin_master_is_newer(self) -> None:
         tree = command("git", "rev-parse", "HEAD^{tree}", cwd=self.repo)
@@ -3693,6 +3731,26 @@ required_gates = []
         staging = contrib.case_staging_root(self.repo)
         self.assertEqual(tuple(staging.iterdir()), ())
 
+    def test_scaffold_readme_links_the_standard_and_preserves_its_full_outline(self) -> None:
+        cases_root = self.repo / "fork-maintenance" / "cases"
+        with patch.object(contrib, "CASES_ROOT", cases_root):
+            target = contrib.scaffold_case(self.repo, "documented-draft-case")
+        readme = (target / "README.md").read_text(encoding="utf-8")
+        standard = contrib.AUTOMATION_ROOT / "docs/runbooks/case-documentation.md"
+        required = [
+            line.removeprefix("### ")
+            for line in standard.read_text(encoding="utf-8").splitlines()
+            if line.startswith("### ")
+        ]
+        self.assertTrue(required)
+        self.assertEqual(
+            [line.removeprefix("## ") for line in readme.splitlines() if line.startswith("## ")],
+            required,
+        )
+        self.assertIn("../../docs/runbooks/case-documentation.md", readme)
+        self.assertIn("Draft:", readme)
+        self.assertTrue(contrib.read_toml(target / "case.toml")["draft"])
+
     def test_scaffold_preserves_the_reserved_quarantine_identity(self) -> None:
         cases_root = self.repo / "fork-maintenance" / "cases"
         with patch.object(contrib, "CASES_ROOT", cases_root):
@@ -5236,8 +5294,12 @@ class CycleCleanupTest(unittest.TestCase):
         workspace_lock.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         for lock in (upstream_lock, image_cache_lock, live_lock, workspace_lock):
             lock.touch(mode=0o600)
-        source_lock = self.sources / f"{'1' * 40}-origin.bundle.lock"
-        source_lock.touch(mode=0o600)
+        source_locks = [
+            self.sources / f"{'1' * 40}-{source}.bundle.lock"
+            for source in ("local", "origin", "upstream")
+        ]
+        for source_lock in source_locks:
+            source_lock.touch(mode=0o600)
         with contrib.case_update_lock(self.repo):
             pass
         case_update_lock = contrib.case_updates_root(self.repo) / ".lifecycle.lock"
@@ -5258,8 +5320,26 @@ class CycleCleanupTest(unittest.TestCase):
         self.assertTrue(image_cache_lock.exists())
         self.assertTrue(live_lock.exists())
         self.assertTrue(workspace_lock.exists())
-        self.assertTrue(source_lock.exists())
+        self.assertTrue(all(source_lock.exists() for source_lock in source_locks))
         self.assertTrue(case_update_lock.exists())
+
+    def test_cleanup_rejects_invalid_source_bundle_locks(self) -> None:
+        self.collected_result("audit-focused-01")
+        for name, mode in (
+            (f"{'1' * 40}-unknown.bundle.lock", 0o600),
+            (f"{'1' * 39}-local.bundle.lock", 0o600),
+            (f"{'1' * 40}-local.bundle.lock", 0o644),
+        ):
+            with self.subTest(name=name, mode=mode):
+                lock = self.sources / name
+                lock.touch(mode=mode)
+                lock.chmod(mode)
+                try:
+                    with self.assertRaisesRegex(contrib.ContribError, "upstream source-bundle lock"):
+                        contrib.build_cleanup_plan(self.repo, "audit", inspect_runtime=False)
+                    self.assertTrue(lock.exists())
+                finally:
+                    lock.unlink()
 
     def test_cleanup_rejects_an_unsafe_retained_lifecycle_lock(self) -> None:
         self.collected_result("audit-focused-01")
@@ -6340,8 +6420,7 @@ class ManifestTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.repo = contrib.DEFAULT_REPO
-        contrib.verify_repo(cls.repo)
-        cls.revision = contrib.rev_parse(cls.repo, "refs/remotes/origin/master")
+        cls.revision = contrib.isolated_start_check(cls.repo).source_commit
 
     def test_only_declared_active_cases_remain(self) -> None:
         cases = contrib.load_cases()
@@ -6363,6 +6442,7 @@ class ManifestTest(unittest.TestCase):
                 "wayland-display-name-signal",
                 "client-codec-startup-order",
                 "x11-selection-refusal",
+                "client-popup-modal-lifecycle",
             },
         )
         self.assertTrue(all(case.kind == "production" for case in cases.values()))
@@ -6443,6 +6523,7 @@ class ManifestTest(unittest.TestCase):
                 "wayland-display-name-signal",
                 "client-codec-startup-order",
                 "x11-selection-refusal",
+                "client-popup-modal-lifecycle",
             ),
         )
 
@@ -6476,7 +6557,7 @@ class ManifestTest(unittest.TestCase):
         ):
             self.assertIn(gate, stack.tests)
 
-    def test_each_patch_resolves_against_cached_fork_master(self) -> None:
+    def test_each_patch_resolves_against_embedded_source(self) -> None:
         for slug in contrib.load_cases():
             with self.subTest(case=slug):
                 resolution = contrib.selection_resolution(

@@ -672,7 +672,8 @@ class LiveJobTest(unittest.TestCase):
                 native_event(native_records, 27300 + index * 40,
                              "clipboard-owner-change", selection="PRIMARY")
             native_event(native_records, 29000, "selection-finished", key_events=59,
-                         characters=29, selection=[0, 1], last_key_ns=1_028_600_000)
+                         characters=29, selection=[0, 1],
+                         first_key_ns=1_027_250_000, last_key_ns=1_028_600_000)
         for index, (at_us, marker) in enumerate(((1200, "one"), (12200, "two"), (22200, "one")), 1):
             native_event(primary_records, at_us, "targets-request", request_id=index)
             native_event(primary_records, at_us + 100, "targets-result", request_id=index, count=5)
@@ -3055,11 +3056,13 @@ class LiveJobTest(unittest.TestCase):
                     self.assertFalse(live_run.clipboard_artifact_evidence_matches(interaction, root))
 
     def test_clipboard_burst_oracle_requires_stimulus_final_value_and_drain(self) -> None:
-        for mutation in ("final-value", "missing-result", "pending-request", "no-stimulus", "no-native-paste"):
+        native_mutations = {"no-stimulus", "no-native-paste", "missing-first-key", "invalid-first-key",
+                            "first-key-before-arm", "first-key-after-last"}
+        for mutation in ("final-value", "missing-result", "pending-request", *sorted(native_mutations)):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary) / "artifacts"
                 interaction = self.make_clipboard_fixture_artifacts(root, "both")
-                native = mutation in {"no-stimulus", "no-native-paste"}
+                native = mutation in native_mutations
                 path = root / ("native-paste-input.jsonl" if native else "native-primary-consumer.jsonl")
                 records = live_run.read_clipboard_records(path)
                 if mutation == "final-value":
@@ -3070,6 +3073,14 @@ class LiveJobTest(unittest.TestCase):
                     records[-1]["pending_targets"] = [5]
                 elif mutation == "no-stimulus":
                     records[-1]["key_events"] = 0
+                elif mutation == "missing-first-key":
+                    records[-1].pop("first_key_ns")
+                elif mutation == "invalid-first-key":
+                    records[-1]["first_key_ns"] = True
+                elif mutation == "first-key-before-arm":
+                    records[-1]["first_key_ns"] = 1_027_000_000
+                elif mutation == "first-key-after-last":
+                    records[-1]["first_key_ns"] = records[-1]["last_key_ns"] + 1
                 else:
                     next(record for record in records if record["event"] == "gtk-paste-done")["event"] = "gtk-read-done"
                 for index, record in enumerate(records):
@@ -3078,6 +3089,31 @@ class LiveJobTest(unittest.TestCase):
                 checks = live_run.clipboard_interaction_checks(interaction, root)
                 self.assertFalse(all(checks.values()))
                 self.assertFalse(live_run.clipboard_artifact_evidence_matches(interaction, root))
+
+    def test_clipboard_burst_clock_excludes_setup_but_bounds_native_input(self) -> None:
+        for setup_ns, input_ns, expected in ((0, 0, True), (5_000_000_000, 0, True),
+                                            (5_000_000_000, 2_000_000_000, False)):
+            with self.subTest(setup_ns=setup_ns, input_ns=input_ns), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "artifacts"
+                interaction = self.make_clipboard_fixture_artifacts(root, "both")
+                native_path = root / "native-paste-input.jsonl"
+                native = live_run.read_clipboard_records(native_path)
+                arm = next(record for record in native if record["event"] == "selection-armed")
+                end = next(record for record in native if record["event"] == "selection-finished")
+                consumer_path = root / "native-primary-consumer.jsonl"
+                consumer = live_run.read_clipboard_records(consumer_path)
+                for record in (*native, *consumer):
+                    if record["monotonic_ns"] > arm["monotonic_ns"]:
+                        record["monotonic_ns"] += setup_ns + input_ns
+                end["first_key_ns"] += setup_ns
+                end["last_key_ns"] += setup_ns + input_ns
+                native_path.write_text(clipboard_jsonl(native), encoding="utf-8")
+                consumer_path.write_text(clipboard_jsonl(consumer), encoding="utf-8")
+                checks = live_run.clipboard_native_checks(root, "both", interaction["wayland"]["records"])
+                self.assertEqual(checks["primary_burst_final_value"], expected)
+                self.assertTrue(checks["native_paste_input"])
+                self.assertTrue(checks["clipboard_requests_completed"])
+                self.assertTrue(checks["no_clipboard_rate_or_timeout"])
 
     def test_clipboard_artifact_helpers_accept_exact_policy_matrix(self) -> None:
         for policy in live_run.CLIPBOARD_POLICIES:
@@ -3797,8 +3833,9 @@ int main(int argc, char **argv) {
                 (generations, None),
                 (generations * (live_run.SUBSURFACE_CONTINUOUS_MAX_GENERATIONS // 2), None),
             ]),
-            patch.object(live_run, "synchronize_subsurface_saved_updates",
-                         return_value={"updates": [{"sequence": 28}]}),
+            patch.object(live_run, "synchronize_subsurface_active_updates",
+                         return_value={role: {"updates": [{"sequence": 28}]}
+                                       for role in ("primary", "secondary", "lower", "upper")}),
             patch.object(live_run, "_subsurface_continuous_transaction_snapshot", return_value=snapshot),
             patch.object(live_run, "podman_exec", return_value=completed([])),
             patch.object(live_run, "wait_for", side_effect=lambda _name, check, **_kwargs: check()),
@@ -3861,8 +3898,9 @@ int main(int argc, char **argv) {
                 patch.object(live_run, "container_process_exists", return_value=True),
                 patch.object(live_run, "read_container_subsurface_events", side_effect=read_events),
                 patch.object(live_run.time, "monotonic_ns", side_effect=lambda current=clock: current[0]),
-                patch.object(live_run, "synchronize_subsurface_saved_updates",
-                             return_value={"updates": [{"sequence": 28}]}),
+                patch.object(live_run, "synchronize_subsurface_active_updates",
+                             return_value={role: {"updates": [{"sequence": 28}]}
+                                           for role in ("primary", "secondary", "lower", "upper")}),
                 patch.object(live_run, "_subsurface_continuous_transaction_snapshot", return_value=captured),
                 patch.object(live_run, "podman_exec", return_value=completed([])),
                 patch.object(live_run, "wait_for", side_effect=one_observation),
@@ -3934,8 +3972,7 @@ int main(int argc, char **argv) {
             patch.object(live_run, "container_process_exists", return_value=True),
             patch.object(live_run, "read_container_subsurface_events", side_effect=read_events),
             patch.object(live_run.time, "monotonic_ns", side_effect=lambda: clock[0]),
-            patch.object(live_run, "synchronize_subsurface_saved_updates",
-                         side_effect=lambda _server, _directory, wid: updates[next(role for role in roles if roles[role] == wid)]),
+            patch.object(live_run, "synchronize_subsurface_active_updates", return_value=updates),
             patch.object(live_run, "podman_exec", return_value=completed([])),
             patch.object(live_run, "wait_for", side_effect=observe_once),
         ):
@@ -5333,6 +5370,105 @@ int main(int argc, char **argv) {
             )
         self.assertEqual(updates["updates"][0]["sequence"], 3)
         pull.assert_called_once_with("server", root, (relative,))
+
+    def test_subsurface_active_sync_uses_one_validated_stream_and_reuses_packets(self) -> None:
+        source = self.root / "active-packet-source"
+        interaction = self.make_subsurface_fixture_artifacts(source)
+        roles = {**interaction["child_wids"], **interaction["parent_wids"]}
+        target = self.root / "active-packet-target"
+        target.mkdir(mode=0o700)
+        merge = live_run.container_payload.merge_from_process
+
+        def receive(command: list[str], directory: Path) -> None:
+            self.assertEqual(command[:5], ["podman", "exec", "server", "python3", "-c"])
+            self.assertEqual(json.loads(command[8]), [roles[role] for role in
+                                                     ("primary", "secondary", "lower", "upper")])
+            local = [sys.executable, *command[4:]]
+            local[4] = str(source)
+            merge(local, directory)
+
+        helper = LIVE_DIRECTORY.parent.parent / "tools" / "container_payload.py"
+        with (
+            patch.object(live_run, "CONTAINER_PAYLOAD", str(helper)),
+            patch.object(live_run.container_payload, "merge_from_process", side_effect=receive) as pull,
+        ):
+            first = live_run.synchronize_subsurface_active_updates("server", target, roles)
+            self.assertEqual(pull.call_count, 1)
+            self.assertEqual(json.loads(pull.call_args.args[0][9]), [])
+            for role in ("primary", "secondary", "lower", "upper"):
+                self.assertEqual(first[role], live_run._subsurface_saved_updates(source, roles[role]))
+            second = live_run.synchronize_subsurface_active_updates("server", target, roles)
+            self.assertEqual(pull.call_count, 2)
+            known = json.loads(pull.call_args.args[0][9])
+            self.assertEqual(len(known), sum(value["count"] for value in first.values()))
+            self.assertEqual(first, second)
+            partial = target / first["primary"]["updates"][0]["relative_info"]
+            partial.write_bytes(b"{\n")
+            missing = target / live_run._subsurface_saved_payload_relative(first["lower"]["updates"][0])
+            missing.unlink()
+            self.assertEqual(first, live_run.synchronize_subsurface_active_updates("server", target, roles))
+            self.assertEqual(pull.call_count, 3)
+            self.assertEqual(len(json.loads(pull.call_args.args[0][9])), len(known) - 2)
+        self.assertEqual(list(target.glob("screen-updates/*/*/screenshot.png")), [])
+
+    def test_subsurface_active_sync_rejects_bad_sidecars_and_payload_paths(self) -> None:
+        source = self.root / "active-invalid-source"
+        interaction = self.make_subsurface_fixture_artifacts(source)
+        roles = {**interaction["parent_wids"], **interaction["child_wids"]}
+        info_path = next((source / "screen-updates" / str(roles["primary"])).glob("*/*.info"))
+        original = info_path.read_bytes()
+        merge = live_run.container_payload.merge_from_process
+
+        def receive(command: list[str], directory: Path) -> None:
+            local = [sys.executable, *command[4:]]
+            local[4] = str(source)
+            merge(local, directory)
+
+        info = json.loads(original)
+        invalid = {
+            "partial": b"{\n",
+            "oversize": b" " * (1024 * 1024 + 1),
+            "escape": json.dumps({**info, "file": "../../outside"}).encode(),
+            "absolute": json.dumps({**info, "file": "/outside"}).encode(),
+            "directory": json.dumps({**info, "file": "."}).encode(),
+            "missing": json.dumps({**info, "file": "absent.rgb32"}).encode(),
+            "duplicate": original[:-1] + b', "sequence": 999}',
+        }
+        helper = LIVE_DIRECTORY.parent.parent / "tools" / "container_payload.py"
+        with (
+            patch.object(live_run, "CONTAINER_PAYLOAD", str(helper)),
+            patch.object(live_run.container_payload, "merge_from_process", side_effect=receive),
+        ):
+            for name, data in invalid.items():
+                with self.subTest(name=name):
+                    info_path.write_bytes(data)
+                    target = self.root / f"active-invalid-{name}"
+                    target.mkdir(mode=0o700)
+                    with self.assertRaises(live_run.LabFailure):
+                        live_run.synchronize_subsurface_active_updates("server", target, roles)
+
+    def test_subsurface_event_probe_is_single_bounded_regular_file_read(self) -> None:
+        path = self.root / "active-events"
+
+        def execute(_container: str, command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.assertEqual(command[:2], ["python3", "-c"])
+            return live_run.run([sys.executable, *command[1:-1], str(path)], announce=False)
+
+        with patch.object(live_run, "podman_exec", side_effect=execute) as probe:
+            path.write_text('{"event":"ready"}\n')
+            self.assertEqual(live_run.read_container_subsurface_events("server"), [{"event": "ready"}])
+            self.assertEqual(probe.call_count, 1)
+            path.write_bytes(b" " * (256 * 1024 + 1))
+            with self.assertRaisesRegex(live_run.LabFailure, "too large"):
+                live_run.read_container_subsurface_events("server")
+            path.unlink()
+            path.symlink_to(self.root / "absent")
+            with self.assertRaises(live_run.LabFailure):
+                live_run.read_container_subsurface_events("server")
+            path.unlink()
+            os.mkfifo(path)
+            with self.assertRaisesRegex(live_run.LabFailure, "not a regular file"):
+                live_run.read_container_subsurface_events("server")
 
     def test_subsurface_rgb24_baseline_uses_declared_opaque_pixel_size(self) -> None:
         pixels = ((11, 23, 47), (71, 89, 107), (127, 149, 163), (181, 211, 239))
@@ -7760,10 +7896,9 @@ class LiveSourceTest(unittest.TestCase):
         responses = {
             ("rev-parse", "--is-inside-work-tree"): "true",
             ("branch", "--show-current"): "develop",
-            ("remote",): "origin",
-            ("remote", "get-url", "origin"): live_run.FORK_REMOTE_URL,
+            ("for-each-ref", "--format=%(refname)", "refs/heads/master"): "refs/heads/master",
             ("rev-parse", "HEAD"): head,
-            ("rev-parse", "refs/remotes/origin/master"): source_tip,
+            ("rev-parse", "refs/heads/master"): source_tip,
             ("merge-base", "--all", source_tip, head): commit,
             ("describe", "--long", "--always", "--tags", commit): "v6.4-1-g111111111",
             ("rev-list", "--count", "--first-parent", commit): "10",
@@ -8286,7 +8421,73 @@ class LiveTransportProfileTest(unittest.TestCase):
                     self.assertEqual(execute.call_args_list[1].args[1][-1], "p")
                 self.assertEqual(actions.mock_calls[-1].args[2:4], ("paste-result", 2))
 
-    def test_clipboard_monitor_drains_late_events_after_stop(self) -> None:
+    def test_native_selection_clock_starts_at_input_and_resets_on_rearm(self) -> None:
+        gtk = Mock()
+        gdk = Mock()
+        gdk.Display.get_default.return_value.get_name.return_value = "wayland-test"
+        glib = Mock(SOURCE_REMOVE=False, SOURCE_CONTINUE=True)
+        text_signals: dict[str, Callable] = {}
+        window_signals: dict[str, Callable] = {}
+        gtk.TextView.return_value.connect.side_effect = text_signals.__setitem__
+        gtk.Window.return_value.connect.side_effect = window_signals.__setitem__
+        buffer = gtk.TextView.return_value.get_buffer.return_value
+        buffer.get_char_count.return_value = 29
+        buffer.get_selection_bounds.return_value = [
+            SimpleNamespace(get_offset=lambda: 0), SimpleNamespace(get_offset=lambda: 1),
+        ]
+        specification = importlib.util.spec_from_file_location(
+            "clipboard_selection_clock", LIVE_DIRECTORY / "wayland_clipboard_fixture.py",
+        )
+        assert specification is not None and specification.loader is not None
+        fixture = importlib.util.module_from_spec(specification)
+        with patch.dict(sys.modules, {
+            "gi": Mock(), "gi.repository": SimpleNamespace(Gdk=gdk, GLib=glib, Gtk=gtk),
+        }):
+            specification.loader.exec_module(fixture)
+        clock_ns = 1_000_000_000
+
+        def exercise() -> None:
+            nonlocal clock_ns
+            poll = glib.timeout_add.call_args.args[1]
+            poll()
+            clock_ns = 6_000_000_000
+            self.assertFalse(text_signals["key-press-event"](None, SimpleNamespace(keyval=65360)))
+            clock_ns = 7_000_000_000
+            self.assertFalse(text_signals["key-press-event"](None, SimpleNamespace(keyval=65361)))
+            poll()
+            clock_ns = 8_000_000_000
+            poll()
+            clock_ns = 9_000_000_000
+            poll()
+            window_signals["delete-event"](None, None)
+
+        gtk.main.side_effect = exercise
+        with (
+            patch.object(fixture, "take_command", side_effect=[("select", None), ("select-end", None)] * 2),
+            patch.object(fixture.signal, "signal"),
+            patch.object(fixture.time, "monotonic_ns", side_effect=lambda: clock_ns),
+            redirect_stdout(StringIO()),
+            tempfile.TemporaryDirectory() as temporary,
+        ):
+            diagnostic = Path(temporary) / "diagnostic"
+            self.assertEqual(fixture.run(Path(temporary) / "command", diagnostic), 0)
+            records = live_run.read_clipboard_records(diagnostic)
+        ends = [record for record in records if record["event"] == "selection-finished"]
+        self.assertEqual([(record["first_key_ns"], record["last_key_ns"], record["key_events"])
+                          for record in ends], [(6_000_000_000, 7_000_000_000, 2), (0, 0, 0)])
+
+    def test_clipboard_monitor_launch_uses_the_lifecycle_watchdog(self) -> None:
+        with (
+            patch.object(live_run, "podman_exec") as execute,
+            patch.object(live_run, "wait_for_clipboard_event_count"),
+        ):
+            live_run.start_x11_clipboard_monitor("client")
+        script = execute.call_args.args[1][-1]
+        self.assertIn(f"--timeout={live_run.CLIPBOARD_MONITOR_SECONDS} ", script)
+        self.assertIn(f"--stop-file={live_run.CLIPBOARD_MONITOR_COMMAND} ", script)
+        self.assertTrue(execute.call_args.kwargs["detach"])
+
+    def test_clipboard_monitor_survives_slow_reverse_and_drains_late_events(self) -> None:
         specification = importlib.util.spec_from_file_location(
             "clipboard_monitor_callbacks", LIVE_DIRECTORY / "x11_clipboard_fixture.py"
         )
@@ -8294,6 +8495,7 @@ class LiveTransportProfileTest(unittest.TestCase):
         fixture = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(fixture)
         clock_ns = 1_000_000_000
+        stop_after_ns = clock_ns + 30_000_000_000
         queue: list[int] = []
         sync_sent = False
         stop_requested = False
@@ -8303,7 +8505,7 @@ class LiveTransportProfileTest(unittest.TestCase):
 
         def sleep(_duration: float) -> None:
             nonlocal clock_ns
-            clock_ns += 10_000_000
+            clock_ns += 1_000_000_000
 
         def sync(*_args: object) -> None:
             nonlocal sync_sent
@@ -8313,6 +8515,8 @@ class LiveTransportProfileTest(unittest.TestCase):
 
         def stop(_path: Path) -> bool:
             nonlocal stop_requested
+            if clock_ns < stop_after_ns:
+                return False
             stop_requested = True
             return True
 
@@ -8346,11 +8550,13 @@ class LiveTransportProfileTest(unittest.TestCase):
         ):
             self.assertEqual(fixture.run_monitor(
                 event_window=None, root=True,
-                stop_file=Path(temporary) / "stop", timeout=1,
+                stop_file=Path(temporary) / "stop",
+                timeout=fixture.positive_timeout(str(live_run.CLIPBOARD_MONITOR_SECONDS)),
             ), 0)
         records = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual([record["owner_xid"] for record in records[1:3]], [601, 401])
         self.assertEqual(records[-1]["event_count"], 2)
+        self.assertGreaterEqual(records[-1]["stop_requested_ns"], stop_after_ns)
         self.assertGreaterEqual(records[-1]["drained_ns"], records[-1]["stop_requested_ns"])
 
     def test_tracked_live_configuration_parser_fails_closed_generically(self) -> None:
@@ -14003,6 +14209,31 @@ class PacketSequenceLedgerTest(unittest.TestCase):
         self.assertEqual(snapshot["packet_sequence_observation"]["unsealed_primary"], [])
         self.assertEqual([p["sequence"] for p in snapshot["updates"]], [2, 4, 5])
 
+    def test_damage_time_buckets_do_not_order_packet_publication(self) -> None:
+        windows = self.global_windows()
+        authority = windows[1]["packet_sequence_ledger"]["authority"]
+        primary = windows[1]
+        for packet, path in zip(primary["updates"], ("100/0", "99/0", "99/1"), strict=True):
+            packet["relative_info"] = f"screen-updates/1/{path}.info"
+        complete = live_run.bind_packet_sequence_ledger(windows, authority)
+        groups = live_run._ordered_saved_damage_groups(
+            complete[1]["updates"], 1, complete[1]["packet_sequence_ledger"],
+        )
+        self.assertIsNotNone(groups)
+        self.assertEqual([[p["sequence"] for p in group] for group in groups], [[2], [4, 5]])
+        self.assertEqual(live_run._complete_packet_sequence_prefix(primary["updates"], 1), 3)
+        self.assertTrue(live_run.h264_with_lossless_rgb_edges(complete[1]))
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            with patch.object(live_run, "synchronize_saved_updates", return_value=windows[2]):
+                snapshot = live_run.synchronize_packet_sequence_projection(
+                    "server", directory, 1, authority, primary=primary,
+                )
+            self.assertEqual(snapshot["packet_sequence_ledger"]["frontier"], 6)
+            self.assertEqual([p["sequence"] for p in snapshot["updates"]], [2, 4, 5])
+            live_run.retain_packet_sequence_observation(directory, "readiness", snapshot)
+            live_run.validate_packet_sequence_observations(directory, complete)
+
     def test_complete_prefix_keeps_multiple_flush_groups_in_one_millisecond_bucket(self) -> None:
         windows = self.global_windows()
         authority = windows[1]["packet_sequence_ledger"]["authority"]
@@ -14040,7 +14271,8 @@ class PacketSequenceLedgerTest(unittest.TestCase):
         for paths in (
             ["100/0", "100/2", "100/1"],
             ["100/0", "100/2", "100/3"],
-            ["100/0", "99/0", "99/1"],
+            ["100/0", "100/1", "100/1"],
+            ["100/0", "99/0", "100/1"],
         ):
             with self.subTest(paths=paths):
                 malformed = copy.deepcopy(primary["updates"][:3])

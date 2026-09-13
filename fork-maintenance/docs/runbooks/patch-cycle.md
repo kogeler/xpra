@@ -37,8 +37,9 @@ A new draft starts with `workspace-create ... PATCH_MODE=clean`; its first
 duty case follows the separate admission and rebase rules in
 [`test-quarantine.md`](test-quarantine.md).
 
-The remainder of this runbook is the clean host-worktree fallback used only
-when the operator deliberately begins a new upstream adaptation cycle. The
+The remainder of this runbook describes the clean host-worktree fallback,
+requiring a separate explicit operator request for host source/index changes.
+Starting upstream refresh alone does not authorize this fallback. The
 complete autonomous rebase, every-case decision tree, queue-wide package/test
 ladder and all nine complete-stack live profiles are owned by
 [`upstream-refresh.md`](upstream-refresh.md). Its single agent entry point is:
@@ -50,31 +51,24 @@ Execute autonomous-upstream-refresh against the current fork master.
 That line is an agent directive, not a shell command. Every case receives
 equally deep manual review; the older optional `PRIMARY_CASE=<slug>` spelling
 affects only starting order, never depth or scope.
-That canonical runbook first creates one reviewed preservation commit when
-non-ignored work exists; its invocation authorizes that commit without another
-confirmation. It creates no empty commit for a clean checkout and no later
-intermediate or result commit.
+That runbook authorizes only local `develop` rebase onto existing local
+`master` as a Git mutation. Commits and all other Git changes require separate
+explicit operator instructions. Dirty work is preserved pending disposition.
 
 ## Host-worktree fallback preconditions
 
 Only when the operator chooses to move the queue to a newer upstream base,
-complete the canonical runbook's exhaustive initial-worktree review and its
-one preservation commit when needed. Once that leaves `develop` clean, fetch
-the fork base and prepare the branch in this order:
+require clean local `develop` and an existing local `master` prepared by the
+operator. Follow the canonical runbook without fetching or updating another ref:
 
 ```bash
-make -C fork-maintenance repo-sync
-make -C fork-maintenance master-update
-git switch develop
 make -C fork-maintenance develop-rebase
 make -C fork-maintenance patch-start-check
 make -C fork-maintenance patch-check CASE=short-behavior-name
 ```
 
-`repo-sync` fetches both master refs, verifies each against live GitHub state,
-and requires exact fork/canonical equality. If it reports a stale fork, only
-the operator may run the printed non-forced `gh repo sync` command and repeat
-the gate. Resolve every rebase conflict and finish the rebase before
+Remote URLs and live equality are not local gates. Resolve every rebase
+conflict and finish the rebase before
 `patch-start-check`; do not merge an upstream ref into `develop`. Only after
 this sequence may host-worktree source editing against that new base begin. The
 default isolated cycle, all tests, and live acceptance of current `develop` do
@@ -211,13 +205,10 @@ new commit as the next patch-adaptation base by invoking
 [`upstream-refresh.md`](upstream-refresh.md) is the canonical exhaustive
 runbook.
 
-After the canonical runbook's initial preservation boundary has left the
-checkout clean:
+After the canonical runbook has verified clean local `develop` and recorded
+existing local `master`:
 
 ```bash
-make -C fork-maintenance repo-sync
-make -C fork-maintenance master-update
-git switch develop
 make -C fork-maintenance develop-rebase
 ```
 
@@ -281,11 +272,8 @@ intermediate or final refresh-result commit to satisfy the gate.
 
 ## Commit boundary
 
-No automation target commits. Invocation of the canonical upstream-refresh
-runbook itself authorizes exactly one direct local preservation commit before
-fetch/rebase when exhaustive review finds legitimate non-ignored changes. It
-contains the complete reviewed tracked and untracked set, is omitted for a
-clean checkout, and never contains an applied source copy. After that boundary
-the agent leaves all case, stack, and automation refresh results uncommitted
-for the operator; no intermediate or final result commit is allowed merely to
-restore a clean gate. Never push.
+No automation target commits. The operator performs Git mutations or explicitly
+delegates them to the agent; only the runbook's local rebase is autonomous.
+Refresh never includes preservation commits, fetching, branch switching,
+master updates or publication. Leave results uncommitted for review and never
+create a commit merely to restore a clean gate.

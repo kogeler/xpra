@@ -28,7 +28,12 @@ The focused selection covers these complementary boundaries:
 - Cairo and mapped GTK OpenGL tests compare real staging and committed
   pixels. The OpenGL depth controls distinguish persistent byte-composite
   storage from configured ordinary/output depth and cover partial updates,
-  abort, ordinary/scroll transitions, resize, and close.
+  abort, ordinary/scroll transitions, resize, and close. Queued RGB, scroll
+  and planar paints overtaken by close must complete exactly once as skipped,
+  with planar images released. Both GTK GL backends cover pre-realize and
+  post-close work. Missing context on a live owner still fails the paint.
+  Compare new close-status assertions against the pre-repair fork owner;
+  clean upstream's missing shared callback API is not that negative control.
 - Client window/draw and GTK/terminal capability tests bind backing epochs,
   rejection, refresh, callback completion, and exact renderer admission.
 
@@ -41,10 +46,13 @@ make -C fork-maintenance test-status RUN=<unique-run>
 make -C fork-maintenance test-collect RUN=<unique-run>
 ```
 
-The separate `live-wayland-subsurface` profile selects exactly this case for
-both endpoints. Its schema-5 fixture, canonical source oracle, retained raw
+The `live-wayland-subsurface` profile runs the complete `stacks/develop` queue
+on both endpoints as one member of the mandatory nine-profile `live-all`
+suite. Its schema-6 fixture, canonical source oracle, retained raw
 packet replay, real input, active-producer proof, final drain, and owned
 cleanup are maintained in `fork-maintenance/infra/live`, not duplicated here.
+The complete-stack hardware profiles additionally reject late paint errors
+through actual window destruction, including ordinary RGB video-edge paints.
 Source callback counts and captured transaction counts have distinct owners:
 normal pending-damage coalescing may produce fewer transactions than native
 commits. Every captured transaction and ACK must still be complete, at least

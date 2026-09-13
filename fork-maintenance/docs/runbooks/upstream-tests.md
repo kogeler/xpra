@@ -12,14 +12,17 @@ invalidated results.
 Every local acceptance job archives the unique source merge base already
 embedded in current `develop`, resolves the selected case or stack, and applies
 only forward-applicable patches inside an isolated container source tree.
+Local jobs use local `master` as the history anchor, falling back to cached
+`origin/master` only when it is absent. `SOURCE_REMOTE=local` records the actual
+`refs/heads/master` bundle ref; no remote or network operation is involved.
 Hosted develop test CI uses the same model and derives that boundary from the
 checkout's cached `origin/master`. Neither local nor hosted jobs fetch, compare
 moving master refs, require master freshness/equality, switch branches, merge,
 or rebase. Neither path packages `develop`, `.git`, ignored files, credentials,
 or the host working-tree diff.
 
-Cached `origin/master` may later advance to a descendant without changing the
-source selected for a named job. The credential-free bundle records that cached
+The selected history ref may later advance to a descendant without changing the
+source selected for a named job. The credential-free bundle records that
 tip so it contains and authenticates the history, while the job's separate
 `source` identity remains the unique merge base embedded in `develop`. Named
 background jobs do not require those two commits to be equal.
@@ -31,10 +34,27 @@ artifact bind to retrieve results. The one named ccache volume is cache-only.
 Test containers return only their normal log; the entrypoint prints the exact
 selection-resolution digest into that log for collection and validation.
 Detached and hosted test containers explicitly use `k8s-file` logging. Before
-starting a detached test, the runner verifies its actual logging driver and
-unlimited size (`log_size_max=-1` in containers.conf). Podman's CLI size parser
-does not accept `--log-opt=max-size=-1`; do not substitute zero, which can leave
-the host's size limit in effect. Host journald rate limits and log rotation
+delivering any source payload or starting the test workload, the detached
+runner verifies its actual logging driver and unlimited size. The container
+initially runs only the readiness waiter. Explicit `-1`, `"-1"` and `"-1B"`
+inspection values retain their direct admission path, including Ubuntu 26.04.
+
+Older Podman reports per-container `0`/`"0"`/`"0B"` when the effective limit is
+inherited from containers.conf. That value alone is not accepted. The runner
+then inspects the live, same-user conmon process identified by the owned
+container, checks its executable, container ID, exact k8s-file log path and
+stable PID/start identity, and requires both file and global log limits to be
+absent (conmon's unlimited defaults) or explicitly `-1`. Missing process proof,
+finite/ambiguous limits or mismatched identities fail before payload delivery
+and use the existing owned prelaunch rollback. This follows
+[Podman's inherited-limit handling](https://github.com/containers/podman/blob/v5.4.2/libpod/oci_conmon_common.go)
+and [conmon's two log-limit options](https://github.com/containers/conmon/blob/v2.1.12/src/cli.c),
+not an assumption that zero means unlimited. Remote-engine zero values without
+local process proof cannot satisfy this fallback.
+
+Use `log_size_max=-1` in containers.conf when host logging is limited. Podman's
+CLI size parser does not accept `--log-opt=max-size=-1`; do not substitute zero,
+which can leave the host's size limit in effect. Host journald rate limits and log rotation
 must not discard diagnostics. Collection still retrieves both streams through
 `podman logs`; no bind-mounted log path is introduced. Hosted foreground tests
 stream directly to the owning CI job's stdout/stderr.

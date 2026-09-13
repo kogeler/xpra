@@ -29,6 +29,10 @@ container recipe, tests, and the disabled canonical workflow it mirrors at
 `../.github/upstream-workflows/test.yml`.
 That inherited workflow is a technical reference for commands and dependencies;
 the fork-owned contract and runbooks alone decide when and how our checks run.
+Read and apply [the case README standard](docs/runbooks/case-documentation.md)
+whenever creating, changing or reassessing a case. Its semantic completeness
+check is part of the same pass, before draft promotion or exported handoff;
+do not leave a summary-only README for the operator to request expanding.
 
 ## Layout
 
@@ -68,12 +72,11 @@ current. `isolated-start-check` remains on `develop`, allows dirt only in the
 fork control plane, rejects host Xpra source changes, and records that embedded
 source commit without changing a ref or the worktree.
 
-Only an operator decision to begin a new upstream adaptation cycle activates
-`repo-sync`, `master-update`, `develop-rebase`, and `patch-start-check`.
-`repo-sync` then fetches both master refs, verifies their live equality, and
-may instruct the operator to perform the documented non-forced remote sync;
-agents never run that mutation. Those explicit refresh commands are never a
-prerequisite for examining, editing, or testing the current `develop` queue.
+An operator-selected upstream adaptation cycle authorizes only local
+`develop-rebase` onto existing local `master`, followed by read-only
+`patch-start-check`. Fetch, master updates, remote configuration, branch
+switches, commits and publication require separate explicit operator
+instructions. Local gates do not validate remote URL spelling or live equality.
 The single agent entry point for the canonical **Autonomous Upstream Refresh
 and Full Queue Adaptation** procedure is:
 
@@ -99,16 +102,13 @@ unique cycle identifier and self-corrects any in-scope procedural or harness
 defect without restarting expensive evidence whose frozen semantic inputs are
 unchanged.
 
-That explicit runbook begins by normalizing `develop`: when non-ignored
-changes exist, the agent exhaustively reviews them and creates one local
-preservation commit containing every legitimate tracked and untracked change
-and nothing else, including reviewed legitimate work unrelated to the refresh.
-The runbook invocation itself supplies authority for that one commit, so no
-additional confirmation is requested. A clean checkout gets no empty commit.
-No refresh result, intermediate prerequisite, or final queue
-change is committed by the agent after this boundary; if later work needs a
-clean host, order it before tracked result edits, use an isolated supported
-path, or stop rather than manufacturing another commit.
+The runbook requires clean `develop` before its local rebase. It reviews and
+preserves dirty work without committing, stashing or discarding it. The operator
+performs prerequisite Git operations or explicitly delegates them. The agent
+owns correct execution of delegated Git work; no other mutation is implicit.
+Read-only inspection and isolated workspace/test Git internals remain part of
+authorized local work and leave host Git state untouched. Refresh results
+remain uncommitted unless the operator separately requests a commit.
 
 A temporary non-master branch is supported only for exceptional clean
 host-worktree integration diagnosis and patch operations after it descends from
@@ -118,7 +118,8 @@ not a temporary-branch workflow.
 `develop-check` validates the current embedded-base branch and requires:
 
 - clean `develop`;
-- one unique embedded source boundary against cached `origin/master`;
+- one unique embedded source boundary against local `master` (cached
+  `origin/master` only when local `master` is absent);
 - no merge commits in the downstream range above that boundary;
 - no committed Xpra source changes outside the patch queue representation;
 - a resolvable `stacks/develop.toml`;
@@ -228,9 +229,10 @@ tests avoid building Xpra.
 ## Runners and artifacts
 
 Local acceptance runners and hosted develop test CI freeze the unique source
-merge base already embedded in their `develop` checkout. Cached
-`origin/master` is only a local history anchor for locating that commit; its
-freshness and equality with upstream are irrelevant to the run. Neither path
+merge base already embedded in their `develop` checkout. Local jobs use local
+`master`, falling back to cached `origin/master` only when it is absent. Hosted
+CI explicitly uses cached `origin/master`. These refs are history anchors;
+their freshness and equality with upstream are irrelevant to the run. Neither path
 fetches, syncs, switches, merges, or rebases. Both apply the selected queue in
 an isolated context and never package the develop working tree, `.git`,
 credentials, ignored files, or Git configuration.
@@ -536,8 +538,8 @@ the three newest canonical owned DEB releases and removes older owned releases
 in the same tag-first/release-ID-last order. A rerun may instead resume that
 retention from an exact published release left by a failed or cancelled prior
 attempt; unrelated or manual releases, drafts outside exact orphan recovery,
-tag-only state, and ambiguous state remain untouched. Agents never invoke or
-dispatch it.
+tag-only state, and ambiguous state remain untouched. Agent dispatch requires
+a separate explicit operator publication request.
 
 Every container build context, source tree, patch selection, application input,
 and returned artifact uses `tools/container_payload.py` over stdin/stdout. Do
@@ -609,12 +611,12 @@ tag-only, or ambiguous state is otherwise preserved. On successful package
 publication it may additionally keep the three newest canonical owned DEB
 releases and delete older owned releases in exact tag-first/release-ID-last
 order; an exact published release from a failed or cancelled earlier attempt
-may resume only this retention. Agents invoke neither target.
+may resume only this retention. Agent dispatch of either workflow requires
+separate explicit operator instructions.
 
-The only direct agent commit implied by a runbook is the canonical
-upstream-refresh preservation commit before fetch/rebase when the checkout is
-dirty. It is exhaustively reviewed, contains all and only legitimate
-non-ignored pre-existing changes, including legitimate unrelated user work,
-and is created without a second confirmation.
-After it—or immediately when the checkout began clean—the agent leaves all
-refresh results uncommitted. Rebase replay is not a new direct content commit.
+No runbook implies authority for a content commit. Git changes are performed
+by the operator or by the agent on explicit operator instruction. Only local
+`develop` rebase onto existing local `master` is autonomous within the refresh
+runbook, including its conflict continuation or abort. Read-only inspection
+and private patch/test indexes do not change host Git state. Refresh results
+remain uncommitted for review.

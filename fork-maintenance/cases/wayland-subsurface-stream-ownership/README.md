@@ -1349,12 +1349,25 @@ Backing replacement or close instead completes every detached callback exactly
 once with `context=None`, after the backing has become unusable, and a later
 call against a closed backing receives the same immediate terminal result.
 
-The `None` result follows the ordinary renderer failure callback: matching
-private composite staging is discarded and the draw receives a failed ACK. It
-is not silently migrated into a new GL object or a Cairo backing. A subsequent
-backing selected through normal client policy begins with its own epoch and
-clean staging. Both GTK OpenGL backends delegate queueing and drain ownership
-to this common base so their close and pre-realize semantics cannot diverge.
+The terminal status distinguishes cancellation from a live renderer failure.
+After `_begin_gl_context_close` closes the owner, RGB, scroll and planar paint
+callbacks return the existing negative skip status, not `False`. The draw
+subsystem maps that status to `WINDOW_DECODE_SKIPPED`; it must not report a
+decoder or renderer error merely because an idle paint was overtaken by
+window destruction. The planar path also releases its retained image. These
+guards run before staging or GL access. Close has already invalidated private
+composite staging; a skipped stage is not a successful commit.
+
+An absent context on a still-live owner, including obsolete widget work after
+replacement without closing the owner, remains an ordinary renderer failure.
+Its matching private composite staging is discarded and the draw receives a
+failed ACK. Work is never silently migrated into a new GL object or a Cairo
+backing. A subsequent backing selected through normal client policy begins
+with its own epoch and clean staging. Both GTK OpenGL backends delegate
+queueing and drain ownership to this common base so their close and
+pre-realize semantics cannot diverge. This also covers ordinary root-window
+RGB edge, scroll and decoded video paints sharing the same context owner;
+the distinction is not specific to composite packets.
 
 ## Redraw and client error semantics
 
@@ -1852,6 +1865,21 @@ pre-commit/post-commit errors, format alpha semantics, final-only redraw,
 idle-before-close, pre-realize close for both GTK GL backends, backing identity
 replacement, and exception-complete GL teardown.
 
+The close-status regressions queue real paints on a mapped GTK GL backing,
+close it before dispatching the GLib idle, and require one skipped callback
+for opaque RGB, alpha RGB, scroll and decoded planar data. The planar image
+must be freed. Both GTK GL implementations additionally queue an unrealized
+paint, close before realization, then receive another paint after close;
+each completes once without leaving deferred work. A separate live-owner
+control passes no context directly into all three renderers and still
+requires `False`, so cancellation cannot conceal a genuine context failure.
+The pre-repair fork implementation fails the closed-owner status assertions;
+clean upstream lacks this case's shared callback owner and is not a substitute
+for that owner-local before/after control. These native tests make shutdown
+ordering deterministic; the complete-stack hardware live gates additionally
+check the complete client log for late RGB edge or video paint errors through
+real window destruction, transport and hardware presentation.
+
 `TestSubsurfaceTransactionFbos.test_texture_container_truth_is_never_used`
 uses empty and nonempty sequences whose boolean conversion raises, without a
 NumPy dependency. It checks target restoration and exactly-once texture, FBO,
@@ -1985,9 +2013,11 @@ transactions. A stale source snapshot taken before an expensive transfer
 cannot certify active completion. The retained artifact validator independently
 rechecks the same timing, progress, cadence, and exact packet authorities.
 
-An active snapshot has one explicit packet frontier. The observer first pulls
-the primary source inventory and freezes its greatest new packet sequence plus
-one. Only then does it pull the secondary and both children. Those later reads
+An active snapshot has one explicit packet frontier. The collector inventories
+the primary source before the secondary and both children inside the container.
+This fixes the primary's greatest new packet sequence plus one independently
+of later reads. New immutable sidecars and their bound payloads travel in one
+common validated tar stream; complete cached packets are reused. Later inventories
 may contain newer transactions; the active proof includes exactly the packets
 below the already fixed frontier, without moving that frontier to fit the
 result. Its last included packet is the newest primary stage zero, so it retains
@@ -2000,8 +2030,8 @@ transaction, pixel, draw, ACK, and global sequence accounting; selecting an
 observation prefix never discards final evidence.
 
 The retained runner log bounds observation diagnostics to 64 attempts. Each
-record identifies the last stage/reason, start/end monotonic times, per-role
-collection durations and packet counts/frontiers, and available generation and
+record identifies the last stage/reason, start/end monotonic times, collection
+duration and per-role packet counts/frontiers, and available generation and
 transaction counts. It contains no pixel payloads. A failed attempt therefore
 distinguishes source readiness, transfer cost, a malformed bounded prefix, and
 the final activity/deadline boundary without weakening any of them.
@@ -2276,7 +2306,9 @@ Future work must preserve all of these invariants.
   framebuffer rectangle endpoints.
 - Deferred GL-context work belongs to one exact backing and completes once;
   replacement or close supplies `context=None` rather than waiting for a
-  realization which can no longer occur.
+  realization which can no longer occur. Closed-owner paints are skipped and
+  release retained planar images; a live owner's missing context remains a
+  paint error. Neither outcome can commit private staging.
 - Transaction IDs and packet sequences are connection-global and never reused.
 - Backing, topology, geometry, source, and content generations are independent.
 - Handled and successfully repaired sources are tracked per affected root;

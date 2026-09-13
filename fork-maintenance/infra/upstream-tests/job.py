@@ -62,7 +62,12 @@ TARGETS = {
     "full-cython",
     "full-no-compat",
 }
-SOURCE_REMOTES = {"origin", "upstream"}
+SOURCE_REFS = {
+    "local": "refs/heads/master",
+    "origin": "refs/remotes/origin/master",
+    "upstream": "refs/remotes/upstream/master",
+}
+SOURCE_REMOTES = set(SOURCE_REFS)
 RUNNER_INPUTS = (
     RUNNER_ROOT / "Makefile",
     RUNNER_ROOT / "private_state.py",
@@ -281,7 +286,7 @@ def source_snapshot(args: argparse.Namespace) -> int:
         raise JobError("invalid source snapshot head")
     if args.source_remote not in SOURCE_REMOTES:
         raise JobError(f"invalid source remote: {args.source_remote!r}")
-    source_ref = f"refs/remotes/{args.source_remote}/master"
+    source_ref = SOURCE_REFS[args.source_remote]
     if args.source_ref != source_ref:
         raise JobError("source snapshot ref does not match its remote")
     bundle = source_bundle_path(args.source_head, args.source_remote)
@@ -707,7 +712,7 @@ def test_payload(
 
 
 def payload_environment(args: argparse.Namespace, selection_sha256: str) -> list[str]:
-    source_ref = f"refs/remotes/{args.source_remote}/master"
+    source_ref = SOURCE_REFS[args.source_remote]
     return [
         "--env",
         f"XPRA_EXPECTED_SOURCE_COMMIT={args.source}",
@@ -1209,16 +1214,94 @@ def matching_test_prelaunch(record: dict[str, str]) -> dict[str, Any] | None:
     return prelaunch
 
 
+def require_unlimited_conmon_logs(item: dict[str, Any], *, proc_root: Path = Path("/proc")) -> None:
+    """Prove the effective limit when older Podman reports an inherited zero."""
+    state = item.get("State")
+    pid = state.get("ConmonPid") if isinstance(state, dict) else None
+    host = item.get("HostConfig")
+    log = host.get("LogConfig") if isinstance(host, dict) else None
+    cid = item.get("Id")
+    log_path = log.get("Path") if isinstance(log, dict) else None
+    if (
+        not isinstance(state, dict) or state.get("Status") != "running"
+        or type(pid) is not int or pid <= 0
+        or not isinstance(cid, str) or not SHA256_RE.fullmatch(cid)
+        or not isinstance(log_path, str) or not Path(log_path).is_absolute()
+    ):
+        raise JobError("inherited test log limit has no live conmon identity")
+    before = background_job.process_identity(pid)
+    if before is None or before[0] in {"Z", "X"}:
+        raise JobError("test log conmon process is unavailable")
+    proc = proc_root / str(pid)
+    try:
+        if proc.stat().st_uid != os.getuid() or Path(os.readlink(proc / "exe")).name != "conmon":
+            raise JobError("test log process is not the current user's conmon")
+        with (proc / "cmdline").open("rb") as stream:
+            payload = stream.read(65537)
+    except OSError as error:
+        raise JobError(f"cannot inspect test log conmon: {error}") from error
+    after = background_job.process_identity(pid)
+    if after is None or after[0] in {"Z", "X"} or after[1:] != before[1:]:
+        raise JobError("test log conmon identity changed during inspection")
+    if not payload or len(payload) > 65536 or not payload.endswith(b"\0"):
+        raise JobError("test log conmon arguments are incomplete")
+    argv = [os.fsdecode(value) for value in payload[:-1].split(b"\0")]
+    if not argv[0] or Path(argv[0]).name != "conmon":
+        raise JobError("test log conmon executable does not match its arguments")
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, exit_on_error=False)
+    parser.add_argument("-c", "--cid", action="append")
+    parser.add_argument("-l", "--log-path", action="append")
+    parser.add_argument("--log-size-max", type=int, action="append")
+    parser.add_argument("--log-global-size-max", type=int, action="append")
+    parser.add_argument("--log-level")
+    parser.add_argument("--log-tag")
+    forwarded = ("--exit-command-arg", "--runtime-arg", "--runtime-opt", "--restore-arg")
+    for option in forwarded:
+        parser.add_argument(option, action="append")
+    # GLib consumes these values verbatim, including leading '--'. Normalize
+    # them for argparse so cleanup/runtime flags cannot become conmon options.
+    arguments = iter(argv[1:])
+    normalized = []
+    for value in arguments:
+        if value in forwarded:
+            try:
+                value = f"{value}={next(arguments)}"
+            except StopIteration as error:
+                raise JobError("test log conmon has an incomplete forwarded argument") from error
+        normalized.append(value)
+    try:
+        options, unknown = parser.parse_known_args(normalized)
+    except argparse.ArgumentError as error:
+        raise JobError(f"invalid test log conmon arguments: {error}") from error
+    # Conmon defaults both limits to -1; inspect both because either can rotate
+    # or truncate k8s-file logs. A mere zero from Podman is never the proof.
+    if (
+        options.cid != [cid] or options.log_path != [f"k8s-file:{log_path}"]
+        or options.log_size_max not in (None, [-1])
+        or options.log_global_size_max not in (None, [-1])
+        or any(value.startswith("--log-") for value in unknown)
+    ):
+        raise JobError("test log conmon has limited, ambiguous or mismatched logging")
+
+
 def require_complete_test_logs(item: dict[str, Any]) -> None:
     host = item.get("HostConfig")
     log = host.get("LogConfig") if isinstance(host, dict) else None
     size = log.get("Size") if isinstance(log, dict) else None
-    if (
-        not isinstance(log, dict)
-        or log.get("Type") != "k8s-file"
-        or not ((type(size) is int and size == -1) or (type(size) is str and size in ("-1", "-1B")))
-    ):
-        raise JobError("test logs require k8s-file with log_size_max=-1 in containers.conf")
+    driver = log.get("Type") if isinstance(log, dict) else None
+    if driver == "k8s-file":
+        if (type(size) is int and size == -1) or (type(size) is str and size in ("-1", "-1B")):
+            return
+        if (type(size) is int and size == 0) or (type(size) is str and size in ("0", "0B")):
+            try:
+                require_unlimited_conmon_logs(item)
+            except JobError as error:
+                raise JobError(f"test logs require proven unlimited conmon logging: {error}") from error
+            return
+    raise JobError(
+        "test logs require k8s-file with log_size_max=-1 in containers.conf; "
+        f"observed driver={driver!r}, size={size!r}"
+    )
 
 
 def container_state(record: dict[str, str], *, require_full_logs: bool = False) -> dict[str, Any]:
@@ -1399,15 +1482,17 @@ def _test_start_locked(args: argparse.Namespace) -> int:
             "image_id": image_id,
             "image_input_sha256": args.image_input_sha256,
         }
-        container_state(
-            {key: str(value) for key, value in record.items()}, require_full_logs=True,
-        )
+        string_record = {key: str(value) for key, value in record.items()}
+        container_state(string_record)
         publish_record(test_record_path(name), record)
         owner_published = True
         command(
             ["podman", "start", created],
             pass_fds=(int(args.lifecycle_lock_descriptor),),
         )
+        # Only the readiness waiter is running. No source payload or test may
+        # execute until the actual logging boundary has been verified.
+        container_state(string_record, require_full_logs=True)
         send_test_payload(created, args, selection_sha)
         remove_test_prelaunch(name)
     except BaseException:

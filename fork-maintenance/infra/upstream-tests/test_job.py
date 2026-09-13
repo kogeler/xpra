@@ -59,6 +59,41 @@ class SourceBundleTest(unittest.TestCase):
                 job.source_bundle_path(source, "upstream"),
                 Path(raw) / f"{source}-upstream.bundle",
             )
+            self.assertEqual(
+                job.source_bundle_path(source, "local"),
+                Path(raw) / f"{source}-local.bundle",
+            )
+
+    def test_local_source_snapshot_preserves_the_real_master_ref(self) -> None:
+        head = "2" * 40
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            sources = root / "sources"
+            sources.mkdir(mode=0o700)
+            args = argparse.Namespace(
+                bundle=str(sources / f"{head}-local.bundle"),
+                source_head=head,
+                source_host=str(root),
+                source_ref="refs/heads/master",
+                source_remote="local",
+            )
+
+            def run_bundle(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                self.assertEqual(argv[-1], "refs/heads/master")
+                Path(argv[-2]).write_bytes(b"bundle")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with (
+                patch.object(job, "PROJECT_ROOT", root),
+                patch.object(job, "SOURCE_ROOT", sources),
+                patch.object(job, "prepare_state"),
+                patch.object(job, "command", return_value=subprocess.CompletedProcess([], 0, head + "\n", "")),
+                patch.object(job, "verify_source_bundle") as verify,
+                patch.object(job.subprocess, "run", side_effect=run_bundle),
+            ):
+                self.assertEqual(job.source_snapshot(args), 0)
+            self.assertTrue(verify.called)
+            self.assertEqual((sources / f"{head}-local.bundle").read_bytes(), b"bundle")
 
     def test_rejects_an_untrusted_source_remote(self) -> None:
         with self.assertRaisesRegex(job.JobError, "invalid source remote"):
@@ -837,9 +872,11 @@ class BackgroundContainerTest(unittest.TestCase):
 
     def test_log_config_accepts_only_unlimited_file_logging(self) -> None:
         for size in (-1, "-1", "-1B"):
-            job.require_complete_test_logs({
-                "HostConfig": {"LogConfig": {"Type": "k8s-file", "Size": size}},
-            })
+            with patch.object(job, "require_unlimited_conmon_logs") as conmon:
+                job.require_complete_test_logs({
+                    "HostConfig": {"LogConfig": {"Type": "k8s-file", "Size": size}},
+                })
+                conmon.assert_not_called()
         for config in (
             {}, {"HostConfig": None}, {"HostConfig": {"LogConfig": []}},
             *({"HostConfig": {"LogConfig": {"Type": driver, "Size": size}}}
@@ -854,6 +891,95 @@ class BackgroundContainerTest(unittest.TestCase):
                 job.JobError, "test logs require",
             ):
                 job.require_complete_test_logs(config)
+
+    def test_inherited_log_size_requires_the_conmon_proof(self) -> None:
+        for size in (0, "0", "0B"):
+            config = {"HostConfig": {"LogConfig": {"Type": "k8s-file", "Size": size}}}
+            with patch.object(job, "require_unlimited_conmon_logs") as conmon:
+                job.require_complete_test_logs(config)
+                conmon.assert_called_once_with(config)
+            with (
+                patch.object(job, "require_unlimited_conmon_logs", side_effect=job.JobError("limited")),
+                self.assertRaisesRegex(job.JobError, "proven unlimited"),
+            ):
+                job.require_complete_test_logs(config)
+
+    @contextmanager
+    def conmon_fixture(self, extra=()):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            proc = root / "1234"
+            proc.mkdir()
+            (proc / "exe").symlink_to("/usr/bin/conmon")
+            item = {
+                "Id": "5" * 64,
+                "HostConfig": {"LogConfig": {"Path": "/private/container/ctr.log"}},
+                "State": {"Status": "running", "ConmonPid": 1234},
+            }
+            argv = ["/usr/bin/conmon", "-c", item["Id"], "-l", "k8s-file:/private/container/ctr.log", *extra]
+            (proc / "cmdline").write_bytes(b"\0".join(os.fsencode(value) for value in argv) + b"\0")
+            with patch.object(job.background_job, "process_identity", return_value=("S", "1234", "42")):
+                yield root, item
+
+    def test_conmon_log_proof_accepts_default_and_explicit_unlimited_limits(self) -> None:
+        for extra in (
+            (), ("--log-size-max", "-1", "--log-global-size-max=-1"),
+            ("--exit-command-arg", "--log-level", "--exit-command-arg", "warning"),
+            ("--runtime-arg=--log-size-max", "--runtime-opt", "--log-global-size-max"),
+        ):
+            with self.subTest(extra=extra), self.conmon_fixture(extra) as (root, item):
+                job.require_unlimited_conmon_logs(item, proc_root=root)
+
+    def test_conmon_log_proof_rejects_limits_and_ambiguous_arguments(self) -> None:
+        for extra in (
+            ("--log-size-max", "8192"), ("--log-size-max=8192",),
+            ("--log-global-size-max", "8192"), ("--log-global-size-max=8192",),
+            ("--log-size-max", "0"), ("--log-size-max", "invalid"),
+            ("--log-size-max",), ("--log-size-max=-1", "--log-size-max=-1"),
+            ("--cid", "6" * 64), ("--log-path", "journald:"),
+            ("--log-future-limit=8192",),
+            ("--exit-command-arg",),
+        ):
+            with (
+                self.subTest(extra=extra), self.conmon_fixture(extra) as (root, item),
+                self.assertRaises(job.JobError),
+            ):
+                job.require_unlimited_conmon_logs(item, proc_root=root)
+
+    def test_conmon_log_proof_binds_container_and_log_path(self) -> None:
+        for key, value in (("Id", "6" * 64), ("HostConfig", {"LogConfig": {"Path": "/private/other/ctr.log"}})):
+            with self.subTest(key=key), self.conmon_fixture() as (root, item):
+                item[key] = value
+                with self.assertRaisesRegex(job.JobError, "mismatched"):
+                    job.require_unlimited_conmon_logs(item, proc_root=root)
+
+    def test_conmon_log_proof_rejects_absent_reused_or_foreign_processes(self) -> None:
+        for identities in (
+            (None,), (("Z", "1234", "42"),),
+            (("S", "1234", "42"), None),
+            (("S", "1234", "42"), ("S", "1234", "43")),
+        ):
+            with (
+                self.subTest(identities=identities), self.conmon_fixture() as (root, item),
+                patch.object(job.background_job, "process_identity", side_effect=identities),
+                self.assertRaises(job.JobError),
+            ):
+                job.require_unlimited_conmon_logs(item, proc_root=root)
+        with self.conmon_fixture() as (root, item):
+            with patch.object(job.os, "getuid", return_value=os.getuid() + 1), self.assertRaises(job.JobError):
+                job.require_unlimited_conmon_logs(item, proc_root=root)
+
+    def test_conmon_log_proof_rejects_incomplete_identity_and_arguments(self) -> None:
+        for state in ({}, {"Status": "created", "ConmonPid": 1234}, {"Status": "running", "ConmonPid": True}):
+            with self.subTest(state=state), self.conmon_fixture() as (root, item):
+                item["State"] = state
+                with self.assertRaises(job.JobError):
+                    job.require_unlimited_conmon_logs(item, proc_root=root)
+        for payload in (b"", b"conmon", b"x" * 65536 + b"\0", b"/usr/bin/other\0"):
+            with self.subTest(payload_length=len(payload)), self.conmon_fixture() as (root, item):
+                (root / "1234/cmdline").write_bytes(payload)
+                with self.assertRaises(job.JobError):
+                    job.require_unlimited_conmon_logs(item, proc_root=root)
 
     def test_runtime_uses_the_bounded_upstream_user_namespace(self) -> None:
         args = argparse.Namespace(
@@ -944,6 +1070,7 @@ class BackgroundContainerTest(unittest.TestCase):
             root = Path(raw)
             calls: list[list[str]] = []
             inherited: list[tuple[int, ...]] = []
+            events: list[str] = []
             prelaunch_seen_before_create = False
 
             @contextmanager
@@ -955,6 +1082,7 @@ class BackgroundContainerTest(unittest.TestCase):
                 calls.append(argv)
                 if argv[:2] == ["podman", "create"] or argv[:2] == ["podman", "start"]:
                     inherited.append(tuple(_kwargs.get("pass_fds", ())))
+                    events.append(argv[1])
                 if argv[:3] == ["podman", "container", "exists"]:
                     return absent
                 if argv[:2] == ["podman", "create"]:
@@ -980,9 +1108,14 @@ class BackgroundContainerTest(unittest.TestCase):
                     return_value=("R", str(os.getpgrp()), "42"),
                 ),
                 patch.object(job, "prelaunch_container_id", return_value=created),
-                patch.object(job, "container_state", return_value={}) as inspect_state,
+                patch.object(
+                    job, "container_state",
+                    side_effect=lambda _record, **kwargs: events.append(
+                        "logs" if kwargs.get("require_full_logs") else "identity",
+                    ) or {},
+                ) as inspect_state,
                 patch.object(job, "publish_record"),
-                patch.object(job, "send_test_payload") as send,
+                patch.object(job, "send_test_payload", side_effect=lambda *_args: events.append("payload")) as send,
             ):
                 self.assertEqual(job.test_start(args), 0)
                 self.assertEqual(inspect_state.call_args.kwargs, {"require_full_logs": True})
@@ -994,6 +1127,7 @@ class BackgroundContainerTest(unittest.TestCase):
         # The starter keeps the cache lock through immutable-ID handoff, but
         # Podman's long-lived networking helper must not inherit and lease it.
         self.assertEqual(inherited, [(42,), (42,)])
+        self.assertEqual(events, ["create", "identity", "start", "logs", "payload"])
         self.assertFalse(any("kill" in argv for argv in calls))
         send.assert_called_once_with(
             created,

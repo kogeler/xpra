@@ -97,13 +97,13 @@ help:
 		'make -C fork-maintenance check' \
 		'    Offline static and unit checks for the in-repository automation' \
 		'make -C fork-maintenance repo-sync' \
-		'    Explicit upstream refresh: fetch and verify equal fork/canonical master refs' \
+		'    Separate operator Git request: fetch and verify equal fork/canonical master refs' \
 		'make -C fork-maintenance master-update' \
-		'    Explicit upstream refresh: fast-forward local master to fetched origin/master' \
+		'    Separate operator Git request: fast-forward local master to fetched origin/master' \
 		'make -C fork-maintenance develop-rebase' \
 		'    Explicit upstream refresh: rebase clean develop onto local master' \
 		'make -C fork-maintenance patch-start-check' \
-		'    Verify an explicitly selected sync/rebase cycle before host patch integration' \
+		'    Verify the local rebase boundary before explicit host patch integration' \
 		'make -C fork-maintenance isolated-start-check' \
 		'    Locate the source commit already embedded in current develop; no network access' \
 		'make -C fork-maintenance case-new CASE=short-behavior-name' \

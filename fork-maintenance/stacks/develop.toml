@@ -17,6 +17,7 @@ series = [
   "wayland-display-name-signal",
   "client-codec-startup-order",
   "x11-selection-refusal",
+  "client-popup-modal-lifecycle",
   # Enable only to disable currently broken upstream tests after clean-source proof.
   # Keep the inactive case infrastructure and empty patch even when all tests pass.
   # "upstream-test-quarantine",
