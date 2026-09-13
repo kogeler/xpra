@@ -16,12 +16,12 @@ override SOURCE_BUNDLE_ROOT := $(STATE_ROOT)/sources
 SELECTION ?= stacks/develop
 PATCH_MODE ?= patched
 IMAGE_TAG_SUFFIX ?=
-SOURCE_REMOTE ?= origin
+SOURCE_REMOTE ?= $(if $(filter refs/heads/master,$(shell git -C "$(SOURCE_HOST)" for-each-ref --format='%(refname)' refs/heads/master)),local,origin)
 SOURCE_COMMIT ?=
 export XPRA_FORK_SELECTION := $(SELECTION)
 export XPRA_PATCH_MODE := $(PATCH_MODE)
 
-override SOURCE_REF := refs/remotes/$(SOURCE_REMOTE)/master
+override SOURCE_REF := $(if $(filter local,$(SOURCE_REMOTE)),refs/heads/master,refs/remotes/$(SOURCE_REMOTE)/master)
 override SOURCE_TIP_COMMIT := $(shell git -C "$(SOURCE_HOST)" rev-parse "$(SOURCE_REF)" 2>/dev/null)
 override EMBEDDED_COMMIT := $(shell git -C "$(SOURCE_HOST)" merge-base --all "$(SOURCE_REF)" HEAD 2>/dev/null)
 override BASE_COMMIT := $(if $(strip $(SOURCE_COMMIT)),$(strip $(SOURCE_COMMIT)),$(EMBEDDED_COMMIT))
@@ -107,7 +107,7 @@ inputs-check:
 	@command -v "$(PODMAN)" >/dev/null 2>&1 || { \
 		printf 'Podman is required by the upstream-test runner\n' >&2; exit 2; \
 	}
-	@case "$(SOURCE_REMOTE)" in upstream|origin) ;; \
+	@case "$(SOURCE_REMOTE)" in local|upstream|origin) ;; \
 		*) printf 'invalid SOURCE_REMOTE: %s\n' "$(SOURCE_REMOTE)" >&2; exit 2 ;; \
 	esac
 	@[[ "$(IMAGE_TAG_SUFFIX)" =~ ^(-[a-z0-9]+(-[a-z0-9]+)*)?$$ ]] || { \
@@ -139,16 +139,10 @@ selection-check: inputs-check
 
 source-check: inputs-check
 	@test -d "$(SOURCE_HOST)/.git" || { printf 'missing Xpra fork checkout: %s\n' "$(SOURCE_HOST)" >&2; exit 2; }
-	@[[ "$(SOURCE_TIP_COMMIT)" =~ ^[0-9a-f]{40}$$ ]] || { printf 'invalid cached %s/master commit: %s\n' "$(SOURCE_REMOTE)" "$(SOURCE_TIP_COMMIT)" >&2; exit 2; }
+	@[[ "$(SOURCE_TIP_COMMIT)" =~ ^[0-9a-f]{40}$$ ]] || { printf 'invalid source ref %s commit: %s\n' "$(SOURCE_REF)" "$(SOURCE_TIP_COMMIT)" >&2; exit 2; }
 	@[[ "$(EMBEDDED_COMMIT)" =~ ^[0-9a-f]{40}$$ ]] || { printf 'current develop has no single embedded source boundary: %s\n' "$(EMBEDDED_COMMIT)" >&2; exit 2; }
 	@[[ "$(BASE_COMMIT)" =~ ^[0-9a-f]{40}$$ ]] || { printf 'invalid selected source commit: %s\n' "$(BASE_COMMIT)" >&2; exit 2; }
 	@[[ "$(WORKFLOW_SHA)" =~ ^[0-9a-f]{64}$$ ]] || { printf 'invalid workflow digest: %s\n' "$(WORKFLOW_SHA)" >&2; exit 2; }
-	@actual="$$(git -C "$(SOURCE_HOST)" remote get-url "$(SOURCE_REMOTE)")"; \
-		actual="$${actual%/}"; actual="$${actual%.git}"; \
-		case "$(SOURCE_REMOTE):$$actual" in \
-			origin:https://github.com/kogeler/xpra|upstream:https://github.com/Xpra-org/xpra) ;; \
-			*) printf '%s has unexpected URL: %s\n' "$(SOURCE_REMOTE)" "$$actual" >&2; exit 2 ;; \
-		esac
 	@git -C "$(SOURCE_HOST)" cat-file -e "$(BASE_COMMIT)^{commit}"
 	@git -C "$(SOURCE_HOST)" cat-file -e "$(BASE_COMMIT):.github/workflows/test.yml"
 	@git -C "$(SOURCE_HOST)" archive --format=tar "$(BASE_COMMIT)" >/dev/null

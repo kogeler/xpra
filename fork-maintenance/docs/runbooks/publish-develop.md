@@ -2,11 +2,10 @@
 
 ## Authority
 
-The operator owns every refresh-result commit and signature, push, remote
-branch creation, and default-branch change. The sole earlier exception is the
-canonical **Autonomous Upstream Refresh and Full Queue Adaptation** runbook's
-one reviewed preservation commit before fetch/rebase when non-ignored
-pre-existing work must be retained. Its agent directive is:
+The operator performs Git operations or explicitly delegates them to the
+agent, who owns their correct execution. The sole autonomous exception is
+local `develop` rebase onto existing local `master` through the
+**Autonomous Upstream Refresh and Full Queue Adaptation** runbook:
 
 ```text
 Execute autonomous-upstream-refresh against the current fork master.
@@ -14,8 +13,8 @@ Execute autonomous-upstream-refresh against the current fork master.
 
 It is not a shell command. Every case requires equally deep manual review;
 the older optional `PRIMARY_CASE=<slug>` spelling affects only starting order,
-never depth or scope. Agents and automation may otherwise prepare and audit
-local state, but never execute remote mutations.
+never depth or scope. Fetch, branch preparation, remote configuration,
+preservation/result commits and publication need separate explicit requests.
 
 Do not publish an applied patch worktree. Clean `develop` contains the patch
 queue representation and automation only.
@@ -25,7 +24,7 @@ queue representation and automation only.
 Immediately before handoff:
 
 ```bash
-git switch develop
+test "$(git branch --show-current)" = develop
 make -C fork-maintenance isolated-start-check
 make -C fork-maintenance stack-check STACK=develop
 make -C fork-maintenance ci-layout-check
@@ -94,28 +93,18 @@ contains a concise outcome only.
 
 ## Commits
 
-No target creates a new content commit automatically. Invoking
-[`upstream-refresh.md`](upstream-refresh.md) authorizes the agent to create
-exactly one direct preservation commit at the start, before fetch/rebase, iff
-exhaustive review finds legitimate non-ignored changes. It must contain all and
-only that complete reviewed tracked and untracked set, must contain no secret,
-generated artifact, unexplained content, or applied Xpra source, includes
-reviewed legitimate user work even when unrelated to the refresh, and needs no
-additional confirmation. An already clean checkout gets no empty commit.
-
-After that boundary, the agent creates no intermediate, prerequisite, adapted
-case, retirement, quarantine, CI-layout, documentation, or final result commit
-during the refresh. `develop-rebase` does replay the pre-existing series and
-changes commit identities, but that replay is not a second direct content
-commit. Dirty reviewed results are handed to the operator with
-`develop-check` explicitly outstanding. Do not change Git signing
-configuration; if the configured start commit cannot be created, stop before
-fetch/rebase rather than weakening signing policy or making a later commit.
+No target or runbook creates a content commit automatically. A commit requires
+an explicit operator request, including any proposed preservation commit
+before a rebase. Refresh requires clean `develop` and preserves pending work
+until the operator supplies its disposition. `develop-rebase` replays the
+existing series without authorizing another commit. Reviewed dirty results
+are handed off with `develop-check` outstanding. Preserve signing configuration
+unless changing it is explicitly requested.
 
 After the operator creates or amends a result commit, recheck parent,
 tree/diff, subject, and signature because the commit identity changed.
 
-## Operator-only push
+## Explicit publication
 
 After review, the operator resolves the exact remote command. For the initial
 publication its expected shape is:
@@ -139,8 +128,8 @@ git push \
 
 A lease mismatch stops publication and requires a fresh audit; do not override
 it. Plain `--force`, an unspecified lease, and merge-based upstream transfer
-are forbidden. Automation deliberately has no push target, and agents never
-run either publication command.
+are forbidden. Automation has no push target. An agent may execute these
+commands only when the operator explicitly delegates publication.
 
 After the operator pushes, a read-only audit may compare:
 
@@ -151,7 +140,7 @@ git rev-parse develop
 
 The commits must match exactly.
 
-## Operator-only default branch change
+## Explicit default branch change
 
 Only after `develop` is published and audited does the operator change the
 fork's default branch, using GitHub UI or an equivalent command such as:
@@ -170,5 +159,4 @@ delete master, change upstream's default, or repoint patch bases to develop.
 If an active downstream patch is later proposed upstream, prepare a separate
 atomic topic branch from verified `upstream/master`. Do not use the complete
 develop branch or its automation diff as the PR. Publishing that topic branch
-and creating the PR remain operator-only actions and require a separate,
-explicit task.
+and creating the PR require a separate explicit operator task.

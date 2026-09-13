@@ -1,0 +1,23 @@
+schema = 1
+slug = "client-popup-modal-lifecycle"
+kind = "production"
+title = "Preserve popup identity and restore parent modality on close"
+commit_subject = "Preserve popup identity and restore parent modality on close"
+patch_sha256 = "cd182e5693633ce374b6c55fdba92810643467239f85a64776107a0fc60e9a55"
+dependencies = []
+paths = [
+  "tests/unittests/unit/client/subsystem/popup_modal_test.py",
+  "xpra/client/subsystem/window/manager.py",
+]
+
+[tests]
+list = [
+  "unit.client.subsystem.popup_modal_test",
+  "unit.client.subsystem.window_test",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = ["live-x11-clipboard"]

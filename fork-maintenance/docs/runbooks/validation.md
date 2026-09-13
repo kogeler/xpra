@@ -134,6 +134,12 @@ invalidation, installed-module and real-run behavior are implemented and tested.
 
 ## Candidate freeze
 
+Complete each affected README's
+[semantic documentation review](case-documentation.md) alongside the candidate.
+A short summary or generated outline is not a finished case explanation;
+source necessity, ownership, failure paths and oracle limits must be recorded
+before freeze, without waiting for another operator request.
+
 Freeze only after reviewing production source, tests, composed queue, native
 and compiled risks, relevant live fixtures/oracles, and package/build changes.
 An unresolved runtime oracle or known source defect means development continues.

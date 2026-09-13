@@ -106,7 +106,7 @@ validate_inputs() {
         return 2
     }
     case "$EXPECTED_SOURCE_REF" in
-        refs/remotes/origin/master|refs/remotes/upstream/master) ;;
+        refs/heads/master|refs/remotes/origin/master|refs/remotes/upstream/master) ;;
         *)
             printf 'invalid expected source ref: %s\n' "$EXPECTED_SOURCE_REF" >&2
             return 2
