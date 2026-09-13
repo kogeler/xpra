@@ -48,7 +48,10 @@ operator-review boundary.
 
 The draft is intentionally unselectable by test jobs. Complete its
 human-authored kind, title, commit subject, dependencies, focused tests,
-required gates, and README. Leave `draft`, `patch_sha256`, and `paths`
+required gates, and README. Apply the mandatory
+[case documentation standard](case-documentation.md) in this same pass,
+including the mechanism, ownership/failure paths and real regression limits;
+the generated headings alone do not complete it. Leave `draft`, `patch_sha256`, and `paths`
 unchanged. Create a clean isolated workspace for the first candidate:
 
 ```bash
