@@ -27,6 +27,10 @@ make -C fork-maintenance workspace-create \
 make -C fork-maintenance typecheck WORKSPACE=<unique-name>
 ```
 
+The tool environment is session state: [`artifacts-close`](session-close.md)
+removes it with the rest of `.artifacts/fork-maintenance/` except the knowledge
+base, so a later session provisions it again with the first two commands.
+
 The wrapper requires mypy 2.3.1, verifies the workspace against the current
 forward-applied queue before and after checking, validates every scope path's
 active-patch ownership, and reports exact source/selection/workspace identities.

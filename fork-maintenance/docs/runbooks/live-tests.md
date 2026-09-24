@@ -181,7 +181,8 @@ another profile starts. Diagnostics identify the file and warning category,
 never reproduce a possibly clipboard-bearing log line. These checks complement
 the application and per-profile oracles; they do not replace them.
 The same Zed payload is required in RGB and H.264. Review/save the summary in the
-ignored cycle handoff before cycle cleanup removes its underlying evidence.
+session ledger (`work/<session>/`) before cleanup removes its underlying
+evidence; only its distilled conclusion survives the session close.
 A changed patch invalidates the whole live suite. Unchanged exact-input evidence
 may be reread; the old clean-client/case-only architecture never qualifies.
 

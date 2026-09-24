@@ -4113,7 +4113,19 @@ def parse_status_file(path: Path) -> dict[str, str]:
     return values
 
 
-def secure_tree_fingerprint(path: Path, *, private: bool = True) -> str:
+def secure_tree_fingerprint(
+    path: Path,
+    *,
+    private: bool = True,
+    foreign_links: bool = False,
+) -> str:
+    """Fingerprint a tree without following links.
+
+    Owner-bound results admit only contained relative links.  Disposable
+    artifact trees (for example virtual environments) may also carry links to
+    host paths; ``foreign_links`` records their exact target text instead of
+    rejecting it.  Deletion never follows a link either way.
+    """
     require_owned_directory(path, "cycle cleanup directory", private=private)
     entries: list[dict[str, Any]] = []
     for candidate in sorted(path.rglob("*")):
@@ -4126,9 +4138,9 @@ def secure_tree_fingerprint(path: Path, *, private: bool = True) -> str:
             target = os.readlink(candidate)
             target_path = Path(target)
             depth = len(candidate.parent.relative_to(path).parts)
-            if target_path.is_absolute():
+            if target_path.is_absolute() and not foreign_links:
                 fail(f"cycle cleanup symlink has an absolute target: {candidate}")
-            for part in target_path.parts:
+            for part in () if foreign_links else target_path.parts:
                 if part in ("", "."):
                     continue
                 if part == "..":
@@ -4184,7 +4196,7 @@ def artifact_fingerprint(path: Path) -> str:
     if info.st_uid != os.getuid() or mode & 0o002:
         fail(f"artifact is not safely owned: {path}")
     if stat.S_ISDIR(info.st_mode):
-        content = secure_tree_fingerprint(path, private=False)
+        content = secure_tree_fingerprint(path, private=False, foreign_links=True)
     elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
         content = sha256_file(path)
     else:

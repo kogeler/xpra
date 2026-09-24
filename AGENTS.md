@@ -37,6 +37,25 @@ fork's process rules. Unbound historical output is diagnostic context only, not
 current acceptance evidence. A retained named result may satisfy a current gate
 only under the exact-input/equivalence rules in the canonical validation flow.
 
+## Session start and close
+
+Every task is one session with a lowercase session ID, which is also the cycle
+prefix of its runs and workspaces. Follow the
+[session runbook](fork-maintenance/docs/runbooks/session-close.md):
+
+- start by reading `.artifacts/fork-maintenance/knowledge/INDEX.md`, the
+  generated registry of earlier sessions, and open only matching records;
+- during the session, keep any amount of output below
+  `.artifacts/fork-maintenance/`; own notes, ledger and scratch go in
+  `work/<session>/`;
+- when the task is finished, before any commit and before the final handoff,
+  distill the session into `knowledge/sessions/<session>.md`, run
+  `knowledge-index`, then `artifacts-close-plan`, `artifacts-close
+  CONFIRM=<digest>` and `artifacts-close-check`. Only the knowledge base
+  survives; raw results, workspaces, caches and scratch are discarded.
+
+A paused, unfinished task keeps its session state and closes when it finishes.
+
 ## Autonomous upstream-refresh entry point
 
 To make an agent rebase local `develop` onto existing local `master`,
@@ -71,9 +90,11 @@ The directive is sufficient authorization for the whole local pass:
 - run all required clean controls, quarantine, focused/native and fork-control
   checks, both real DEB builds, all three full upstream legs, and all nine
   positive complete-stack live profiles;
-- leave every adaptation and repair result uncommitted for operator review.
+- leave every adaptation and repair result uncommitted for operator review;
+- distill the refresh into its session record and close the session before the
+  final handoff.
 
-The agent derives a unique cycle identifier; the operator need not provide one
+The agent derives a unique cycle identifier, which is also its session ID; the operator need not provide one
 or separately expand scope for another active case. The older optional
 `PRIMARY_CASE=<slug>` spelling requests only a starting order, never a deeper
 review for one case or a shallower review for another. The only Git mutation
@@ -724,8 +745,9 @@ mismatch fails closed.
 
 All generated filesystem output—logs, reports, screenshots, source bundles,
 build contexts, status files, publication drafts, caches, and virtual
-environments—lives below ignored `.artifacts/fork-maintenance/` or another
-explicitly ignored local path. It is never staged or committed. Owned Podman
+environments—lives below ignored `.artifacts/fork-maintenance/`; only
+transient interpreter caches such as `__pycache__` may use another explicitly
+ignored local path. It is never staged or committed. Owned Podman
 containers, images, networks, and volumes remain engine runtime objects and are
 controlled by the corresponding lifecycle and label checks.
 
@@ -736,13 +758,14 @@ named temporary-file fallback. The live environment uses retained
 `venvs/.environment.lock` and exact marker-owned `.environment.partial` state;
 only a later `live-venv` performs its locked recovery.
 
-Use one common prefix for every named run and isolated workspace in a work
-cycle. After the patch queue and validation are final and reviewed, run the
-two-phase `cycle-clean-plan` / digest-confirmed `cycle-clean` workflow. It may
-remove only exact owned collected results and finalized workspaces, must refuse
-active runtime state or an unexported candidate, and retains shared caches,
-including frozen source and DEB selection snapshots, images, ccache, and virtual
-environments by default. Retained lock files are validated; source, selection,
+Use the session ID as the one common prefix for every named run and isolated
+workspace in a work cycle. To discard one reviewed cycle's results while the
+session continues, run the two-phase `cycle-clean-plan` / digest-confirmed
+`cycle-clean` workflow. It may remove only exact owned collected results and
+finalized workspaces, must refuse active runtime state or an unexported
+candidate, and retains shared caches, including frozen source and DEB selection
+snapshots, images, ccache, and virtual environments; `artifacts-close` discards
+those filesystem caches when the session ends. Retained lock files are validated; source, selection,
 matching DEB validation scratch, a DEB abort transaction, or live-freeze
 prelaunch/abort transaction/partials block cleanup. Planning and removal acquire
 the upstream lifecycle, upstream image-cache, live
@@ -761,21 +784,26 @@ staging also block cleanup until the exact public `case-recover` or
 Cleanup is branch-agnostic and neither requires nor changes a named remote,
 branch, or ref.
 
-For whole-directory housekeeping, use `artifacts-clean-plan`, then
-`artifacts-clean CONFIRM=<digest>`, and `artifacts-check`. The permanent
-structural allowlist is `fork-maintenance/artifacts.toml`, not an agent-selected
-list of run names, dates, newest results, or cycle prefixes. Shared caches,
-explicit operator records in `retained/`, and lifecycle/recovery authorities
-remain; runtime-bound results and unexported workspaces are protected. All other
-safe output is disposable, including legacy reports and ad hoc scratch. This
-is deliberate evidence disposal, not acceptance or a way around job removal.
-It does not stop processes, remove Podman objects, or promote old results.
-Complete the intended evidence review before invoking it: deleting a named
-result ends its reuse window. Put durable handoffs under `retained/current/`
-and deliberate sealed preservation archives under `retained/checkpoints/`;
-never automatically retain all reports or add current cycle names to the
-policy. Follow the [artifact runbook](fork-maintenance/docs/runbooks/artifacts.md)
-for confirmation, protection reports and interrupted-cleanup recovery.
+The permanent structural allowlist is `fork-maintenance/artifacts.toml`, not
+an agent-selected list of run names, dates, newest results, or cycle prefixes.
+It has three classes: `permanent` (only the `knowledge/` base), lifecycle
+`infrastructure`, and session `task` state (`work/` and every cache). For
+mid-session housekeeping use `artifacts-clean-plan`, then
+`artifacts-clean CONFIRM=<digest>`, and `artifacts-check`: it keeps knowledge,
+infrastructure, session work and caches, protects runtime-bound results and
+unexported workspaces, and discards all other safe output. Every finished
+session ends with `artifacts-close-plan`, `artifacts-close CONFIRM=<digest>`
+and `artifacts-close-check`: it refuses while any runtime, recovery state,
+invalid knowledge record or entry outside `.artifacts/fork-maintenance/`
+remains, and then leaves only `knowledge/` plus idle lock files. Both are
+deliberate evidence disposal, not acceptance or a way around job removal. They
+do not stop processes, remove Podman objects, or promote old results. Complete
+the intended evidence review before invoking them: deleting a named result
+ends its reuse window. Durable experience goes into the distilled session
+record, never into preserved logs, reports or archives. Follow the
+[artifact runbook](fork-maintenance/docs/runbooks/artifacts.md) and the
+[session runbook](fork-maintenance/docs/runbooks/session-close.md) for
+confirmation, protection reports and interrupted-cleanup recovery.
 
 Do not create tracked `evidence/`, `runs/`, `results/`, or `communications/`
 trees. Git history stores automation, patch inputs, tests, and contracts—not

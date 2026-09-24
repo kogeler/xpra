@@ -1,6 +1,7 @@
 # Copyright (C) 2026 kogeler
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
@@ -12,6 +13,36 @@ from unittest.mock import patch
 
 import artifacts
 import contrib
+import knowledge
+
+RECORD = """# Popup keeps a modal grab
+
+- Date: 2026-09-12
+- Kind: patch
+- Cases: client-popup-modal-lifecycle
+- Keywords: gtk3, popup, modal grab
+- Summary: The popup release path must drop the modal grab before unmap.
+
+## Problem
+
+A popup left the client modal.
+
+## Findings
+
+The release ran after unmap.
+
+## Changes
+
+Reordered the release in the case patch.
+
+## Verification
+
+Focused and complete live suite passed.
+
+## Next time
+
+Start at the popup lifecycle case README.
+"""
 
 
 class ArtifactsTest(unittest.TestCase):
@@ -57,13 +88,23 @@ class ArtifactsTest(unittest.TestCase):
         path.chmod(mode)
         return path
 
-    def operate(self, action: str = "plan", confirm: str = "") -> artifacts.Inventory:
-        return artifacts.operate(self.repo, action, confirm, inspect_runtime=False)
+    def operate(self, action: str = "plan", confirm: str = "", scope: str = artifacts.CLEAN) -> artifacts.Inventory:
+        return artifacts.operate(self.repo, action, confirm, scope=scope, inspect_runtime=False)
 
     def clean(self) -> artifacts.Inventory:
         report = self.operate()
         self.operate("clean", report.plan.digest)
         return report
+
+    def close(self) -> artifacts.Inventory:
+        report = self.operate(scope=artifacts.CLOSE)
+        self.operate("clean", report.plan.digest, artifacts.CLOSE)
+        return report
+
+    def record(self, session: str = "popup-20260912") -> Path:
+        path = self.file(f"knowledge/sessions/{session}.md", RECORD)
+        knowledge.write_index(self.repo)
+        return path
 
     def test_static_policy_removes_old_and_future_scratch_without_name_lists(self) -> None:
         for name in (
@@ -79,7 +120,8 @@ class ArtifactsTest(unittest.TestCase):
         kept = [
             self.file(name)
             for name in (
-                "retained/handoff.md",
+                "knowledge/sessions/any.md",
+                "work/session/ledger.md",
                 "build-contexts/live/cache",
                 "source-archives/cache",
                 "upstream-tests/sources/cache",
@@ -231,14 +273,24 @@ class ArtifactsTest(unittest.TestCase):
         outside.chmod(0o600)
         (self.root / "link").symlink_to(outside)
         os.link(outside, self.root / "hardlink")
-        self.directory("tree")
-        (self.root / "tree/link").symlink_to(outside)
         unsafe = self.file("unsafe", mode=0o666)
         self.file("scratch")
         report = self.clean()
-        self.assertEqual(len(report.blocked), 4)
+        self.assertEqual(len(report.blocked), 3)
         self.assertEqual(outside.read_text(encoding="utf-8"), "must survive")
         self.assertTrue(unsafe.exists())
+
+    def test_disposable_tree_with_host_symlinks_is_removed_without_following(self) -> None:
+        outside = self.repo / ".artifacts/outside-tree"
+        outside.mkdir()
+        (outside / "keep").write_text("must survive", encoding="utf-8")
+        self.file("scratch/venv/pyvenv.cfg")
+        (self.root / "scratch/venv/python").symlink_to("/usr/bin/python3")
+        (self.root / "scratch/venv/escape").symlink_to("../../../outside-tree")
+        report = self.clean()
+        self.assertEqual(report.blocked, ())
+        self.assertFalse((self.root / "scratch").exists())
+        self.assertEqual((outside / "keep").read_text(encoding="utf-8"), "must survive")
 
     def test_runtime_and_locks_survive_an_accidental_policy_omission(self) -> None:
         owner = self.file("upstream-tests/runs/run.owner")
@@ -248,6 +300,7 @@ class ArtifactsTest(unittest.TestCase):
         policy = self.repo / ".artifacts/policy.toml"
         payload = artifacts.POLICY_PATH.read_bytes()
         for entry in ("upstream-tests/runs", "upstream-tests/logs/.lifecycle.lock", "case-updates", "cycle-cleanups"):
+            self.assertIn(f'  "{entry}",\n'.encode(), payload)
             payload = payload.replace(f'  "{entry}",\n'.encode(), b"")
         policy.write_bytes(payload)
         report = artifacts.operate(self.repo, "plan", policy_path=policy, inspect_runtime=False)
@@ -325,18 +378,118 @@ class ArtifactsTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(contrib.ContribError):
                 artifacts.relative_path(value)
 
-    def test_save_moves_only_unmanaged_records_without_clobber(self) -> None:
-        source = self.file("handoff.md", mode=0o664)
-        target = artifacts.save(self.repo, "handoff.md", "notes/handoff.md")
-        self.assertFalse(source.exists())
-        self.assertTrue(target.exists())
-        self.file("handoff.md", "new")
-        with self.assertRaises(FileExistsError):
-            artifacts.save(self.repo, "handoff.md", "notes/handoff.md")
-        with self.assertRaisesRegex(contrib.ContribError, "unmanaged"):
-            artifacts.save(self.repo, "upstream-tests", "unsafe")
+    def test_policy_lets_only_knowledge_survive_close(self) -> None:
+        policy = self.repo / ".artifacts/policy.toml"
+        payload = artifacts.POLICY_PATH.read_bytes()
+        for old, new in (
+            (b'permanent = [\n  "knowledge",\n]', b'permanent = [\n  "knowledge",\n  "retained",\n]'),
+            (b'  "work",\n', b""),
+            (b'  "venvs",\n', b'  "venvs",\n  "knowledge",\n'),
+            (b"schema = 2", b"schema = 1"),
+        ):
+            with self.subTest(old=old):
+                self.assertIn(old, payload)
+                policy.write_bytes(payload.replace(old, new))
+                with self.assertRaises(contrib.ContribError):
+                    artifacts.load_policy(policy)
+
+    def test_close_leaves_only_knowledge_and_idle_locks(self) -> None:
+        record = self.record()
+        session = [
+            self.file(name)
+            for name in (
+                "work/popup-20260912/ledger.md",
+                "work/popup-20260912/scratch/probe/output.log",
+                "build-contexts/live/cache/source",
+                "source-archives/cache.tar",
+                "tooling-venv/bin/ruff",
+                "venvs/.environment.lock",
+                "venvs/live-cache/pyvenv.cfg",
+                "upstream-tests/sources/.cache.bundle.lock",
+                "deb-packages/selections/cache/selection.json",
+                "deb-packages/locks/images/ubuntu-cache.lock",
+                "upstream-tests/logs/old.log",
+                "live-results/old/report.json",
+                "legacy-report.md",
+            )
+        ]
+        lock = self.file("deb-packages/locks/terminal.lock", "")
+        self.assertNotEqual(self.operate("check", scope=artifacts.CLOSE).plan.targets, ())
+        self.close()
+        self.assertFalse(any(path.exists() for path in session))
+        self.assertTrue(record.exists() and lock.exists())
+        remaining = {path.relative_to(self.root).as_posix() for path in self.root.rglob("*") if not path.is_dir()}
+        self.assertEqual(
+            {path for path in remaining if not path.endswith(".lock")},
+            {"knowledge/INDEX.md", "knowledge/sessions/popup-20260912.md"},
+        )
+        report = self.operate("check", scope=artifacts.CLOSE)
+        self.assertEqual((report.plan.targets, report.blocked), ((), ()))
+        self.assertEqual(self.close().plan.targets, ())
+
+    def test_missing_state_root_is_a_closed_session(self) -> None:
+        self.root.rmdir()
+        report = self.operate("check", scope=artifacts.CLOSE)
+        self.assertEqual((report.plan.targets, report.blocked), ((), ()))
+
+    def test_mid_session_clean_keeps_session_work_and_caches(self) -> None:
+        kept = [self.file("work/session/notes.md"), self.file("venvs/live-cache/pyvenv.cfg")]
         self.clean()
-        self.assertEqual(target.read_text(encoding="utf-8"), "fixture\n")
+        self.assertTrue(all(path.exists() for path in kept))
+
+    def test_close_refuses_to_delete_anything_while_state_is_live(self) -> None:
+        for name in (
+            "upstream-tests/runs/run.owner",
+            "case-updates/case.update.owner.json",
+            "deb-packages/releases/run-1-attempt-1/publication.json",
+            "knowledge/sessions/Bad Name.md",
+        ):
+            with self.subTest(name=name):
+                blocker = self.file(name)
+                work = self.file("work/session/ledger.md")
+                report = self.operate(scope=artifacts.CLOSE)
+                self.assertIn(blocker.relative_to(self.root).as_posix(), dict(report.blocked))
+                with self.assertRaisesRegex(contrib.ContribError, "deletes nothing"):
+                    self.operate("clean", report.plan.digest, artifacts.CLOSE)
+                self.assertTrue(work.exists())
+                blocker.unlink()
+
+    def test_close_requires_a_current_generated_registry(self) -> None:
+        record = self.record()
+        record.write_text(RECORD.replace("gtk3, popup", "gtk3, popup, grab"), encoding="utf-8")
+        report = self.operate(scope=artifacts.CLOSE)
+        self.assertIn("run knowledge-index", dict(report.blocked)["knowledge/INDEX.md"])
+        knowledge.write_index(self.repo)
+        self.assertEqual(self.operate(scope=artifacts.CLOSE).blocked, ())
+
+    def test_close_blocks_on_entries_outside_the_managed_root(self) -> None:
+        foreign = self.repo / ".artifacts/typecheck-probe"
+        foreign.mkdir()
+        report = self.operate(scope=artifacts.CLOSE)
+        self.assertIn("../typecheck-probe", dict(report.blocked))
+        foreign.rmdir()
+        self.assertEqual(self.operate(scope=artifacts.CLOSE).blocked, ())
+
+    def test_close_waits_for_an_active_cache_lock_holder(self) -> None:
+        lock = self.file("venvs/.environment.lock", "")
+        report = self.operate(scope=artifacts.CLOSE)
+        descriptor = os.open(lock, os.O_RDONLY)
+        self.addCleanup(os.close, descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        with self.assertRaisesRegex(contrib.ContribError, "held by an active process"):
+            self.operate("clean", report.plan.digest, artifacts.CLOSE)
+        self.assertTrue(lock.exists())
+        self.assertIsNone(contrib.load_pending_cleanup_transaction(self.repo))
+
+    def test_pending_close_resumes_only_through_close(self) -> None:
+        self.file("work/session/a")
+        report = self.operate(scope=artifacts.CLOSE)
+        with contrib.cleanup_lifecycle_locks(self.repo):
+            contrib.publish_cleanup_transaction(self.repo, report.plan)
+        with self.assertRaisesRegex(contrib.ContribError, "another cycle, policy or scope"):
+            self.operate()
+        self.operate("clean", report.plan.digest, artifacts.CLOSE)
+        self.assertFalse((self.root / "work").exists())
 
     def test_pending_transaction_preserves_newly_owned_target(self) -> None:
         self.file("live-results/run/input")
