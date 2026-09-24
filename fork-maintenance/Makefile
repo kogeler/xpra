@@ -26,8 +26,7 @@ IMAGE_RUN ?=
 WORKSPACE ?=
 CYCLE ?=
 CONFIRM ?=
-ITEM ?=
-AS ?=
+SESSION ?=
 TARGET ?= focused
 PATCH_MODE ?= patched
 IMAGE_TAG_SUFFIX ?=
@@ -58,8 +57,7 @@ export XPRA_FORK_RENDER_NODE := $(RENDER_NODE)
 export XPRA_FORK_ZED_DIRECTORY := $(ZED_DIRECTORY)
 export XPRA_FORK_SELECTOR := $(SELECTOR)
 export XPRA_ARTIFACT_CONFIRM := $(CONFIRM)
-export XPRA_ARTIFACT_ITEM := $(ITEM)
-export XPRA_ARTIFACT_AS := $(AS)
+export XPRA_KNOWLEDGE_SESSION := $(SESSION)
 
 AUTOMATION_PYTHON := $(shell find tools infra cases -type f -name '*.py' -print 2>/dev/null | sort)
 AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_wayland_clipboard_fixture.sh \
@@ -76,7 +74,8 @@ AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_waylan
 	workspace-name-check workspace-create workspace-status workspace-diff workspace-stage \
 	workspace-update workspace-remove workspace-recover \
 	cycle-name-check cycle-clean-plan cycle-clean \
-	artifacts-clean-plan artifacts-clean artifacts-check artifacts-save artifact-tests \
+	artifacts-clean-plan artifacts-clean artifacts-check artifact-tests \
+	knowledge-new knowledge-index knowledge-check artifacts-close-plan artifacts-close artifacts-close-check \
 	run-name-check image-run-name-check test-target-check live-options-check \
 	deb-policy-check \
 	test-image test-image-start test-image-status test-image-logs test-image-wait \
@@ -121,9 +120,14 @@ help:
 		'make -C fork-maintenance artifacts-clean-plan' \
 		'make -C fork-maintenance artifacts-clean CONFIRM=printed-sha256' \
 		'make -C fork-maintenance artifacts-check' \
-		'    Apply permanent artifacts.toml storage policy; preserve runtime and unfinished work' \
-		'make -C fork-maintenance artifacts-save ITEM=top-level-record AS=notes/record' \
-		'    Move an explicit operator record into the retained namespace without overwriting' \
+		'    Mid-session housekeeping; keep session work, caches, runtime and unfinished work' \
+		'make -C fork-maintenance knowledge-new SESSION=session-id' \
+		'make -C fork-maintenance knowledge-{index,check}' \
+		'    Start a distilled session record; regenerate or validate the session registry' \
+		'make -C fork-maintenance artifacts-close-plan' \
+		'make -C fork-maintenance artifacts-close CONFIRM=printed-sha256' \
+		'make -C fork-maintenance artifacts-close-check' \
+		'    End a session: discard everything below .artifacts except the knowledge base' \
 		'make -C fork-maintenance develop-check' \
 		'    Verify clean linear develop, embedded source boundary, queue, and ignore boundary' \
 		'make -C fork-maintenance ci-layout-check' \
@@ -185,6 +189,7 @@ check: artifact-boundary ci-layout-check
 	@$(PYTHON) tools/test_contrib.py
 	@$(PYTHON) tools/test_typecheck.py
 	@$(PYTHON) tools/test_artifacts.py
+	@$(PYTHON) tools/test_knowledge.py
 	@$(PYTHON) tools/test_background_job.py
 	@PYTHONPATH="$(AUTOMATION_ROOT)/tools" $(PYTHON) tools/test_container_payload.py
 	@PYTHONPATH="$(AUTOMATION_ROOT)/tools" $(PYTHON) tools/test_podman_policy.py
@@ -207,6 +212,7 @@ contributor-tests:
 
 artifact-tests:
 	@$(PYTHON) tools/test_artifacts.py
+	@$(PYTHON) tools/test_knowledge.py
 	@$(PYTHON) tools/test_contrib.py CycleCleanupTest
 
 artifacts-clean-plan:
@@ -218,8 +224,24 @@ artifacts-clean:
 artifacts-check:
 	@$(PYTHON) tools/artifacts.py check
 
-artifacts-save:
-	@$(PYTHON) tools/artifacts.py save
+knowledge-new:
+	@test -n "$(SESSION)" || { printf 'SESSION is required\n' >&2; exit 2; }
+	@$(PYTHON) tools/knowledge.py new
+
+knowledge-index:
+	@$(PYTHON) tools/knowledge.py index
+
+knowledge-check:
+	@$(PYTHON) tools/knowledge.py check
+
+artifacts-close-plan:
+	@$(PYTHON) tools/artifacts.py close-plan
+
+artifacts-close:
+	@$(PYTHON) tools/artifacts.py close
+
+artifacts-close-check:
+	@$(PYTHON) tools/artifacts.py close-check
 
 artifact-boundary:
 	@$(CONTRIB) doctor >/dev/null

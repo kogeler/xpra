@@ -5,23 +5,45 @@ The policy selects storage classes; runtime ownership and workspace export
 checks protect unfinished work. Neither historical result schemas nor dates
 decide whether disposable output can be discarded. Deletion reuses the locked,
 digest-bound, crash-resumable cycle-cleanup transaction engine.
+
+Two scopes share that engine. ``clean`` is mid-session housekeeping and keeps
+session work and caches. ``close`` ends a session: it refuses while any runtime,
+recovery state, invalid knowledge record or foreign ``.artifacts`` entry
+remains, then leaves only the distilled knowledge base and idle lock files.
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import stat
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 import contrib
+import knowledge
 import tomllib
 
 POLICY_PATH = contrib.AUTOMATION_ROOT / "artifacts.toml"
 WORKSPACES = Path("upstream-tests/workspaces")
+WORK = Path("work")
+CLEAN = "clean"
+CLOSE = "close"
+GROUPS = ("permanent", "infrastructure", "task", "containers")
+IDLE_PROTECTIONS = {"retained lifecycle lock", "cleanup transaction infrastructure"}
+ACTIONS = {
+    "plan": (CLEAN, "plan"),
+    "clean": (CLEAN, "clean"),
+    "check": (CLEAN, "check"),
+    "close-plan": (CLOSE, "plan"),
+    "close": (CLOSE, "clean"),
+    "close-check": (CLOSE, "check"),
+}
 FINAL_SUFFIXES = (".remove.json", ".status.json", ".status", ".log", ".resolution.json")
 LIVE_RUNTIME_SUFFIXES = (
     ".freeze-result.json",
@@ -41,13 +63,19 @@ LIVE_RUNTIME_SUFFIXES = (
 
 @dataclass(frozen=True)
 class Policy:
-    keep: tuple[Path, ...]
+    permanent: tuple[Path, ...]
+    infrastructure: tuple[Path, ...]
+    task: tuple[Path, ...]
     containers: tuple[Path, ...]
     digest: str
 
-    @property
-    def cycle(self) -> str:
-        return f"artifacts-{self.digest}"
+    def keep(self, scope: str) -> tuple[Path, ...]:
+        """Session close discards task state; knowledge and infrastructure stay."""
+        kept = (*self.permanent, *self.infrastructure)
+        return kept if scope == CLOSE else (*kept, *self.task)
+
+    def cycle(self, scope: str) -> str:
+        return f"artifacts-{self.digest}" if scope == CLEAN else f"artifacts-close-{self.digest}"
 
 
 @dataclass(frozen=True)
@@ -79,10 +107,10 @@ def relative_path(value: object) -> Path:
 def load_policy(policy_path: Path = POLICY_PATH) -> Policy:
     payload = policy_path.read_bytes()
     data = tomllib.loads(payload.decode("utf-8"))
-    if set(data) != {"schema", "keep", "containers"} or data["schema"] != 1:
+    if set(data) != {"schema", *GROUPS} or data["schema"] != 2:
         contrib.fail("unsupported artifact policy schema")
     groups = []
-    for key in ("keep", "containers"):
+    for key in GROUPS:
         values = data[key]
         if not isinstance(values, list) or not values:
             contrib.fail(f"artifact policy {key} must be a nonempty array")
@@ -90,15 +118,18 @@ def load_policy(policy_path: Path = POLICY_PATH) -> Policy:
         if len(set(paths)) != len(paths):
             contrib.fail(f"artifact policy repeats a {key} path")
         groups.append(paths)
-    keep, containers = groups
-    if set(keep).intersection(containers):
-        contrib.fail("artifact policy cannot both keep and traverse a path")
-    for path in (*keep, *containers):
+    permanent, infrastructure, task, containers = groups
+    everything = (*permanent, *infrastructure, *task, *containers)
+    if len(set(everything)) != len(everything):
+        contrib.fail("artifact policy assigns a path to more than one class")
+    for path in everything:
         if any(parent not in containers for parent in path.parents if parent != Path(".")):
             contrib.fail(f"artifact policy lacks an explicit structural parent: {path}")
-    if Path("retained") not in keep or WORKSPACES not in containers:
-        contrib.fail("artifact policy must retain operator records and classify workspaces")
-    return Policy(keep, containers, contrib.sha256_bytes(payload))
+    if permanent != (knowledge.ROOT,):
+        contrib.fail("only the distilled knowledge base may survive session close")
+    if WORK not in task or WORKSPACES not in containers:
+        contrib.fail("artifact policy must keep session work until close and classify workspaces")
+    return Policy(permanent, infrastructure, task, containers, contrib.sha256_bytes(payload))
 
 
 def entries(root: Path, relative: Path | str) -> tuple[Path, ...]:
@@ -260,8 +291,66 @@ def tree_bytes(path: Path) -> int:
     return sum(p.lstat().st_size for p in path.rglob("*") if p.is_file() and not p.is_symlink())
 
 
-def inventory_locked(repo: Path, policy: Policy, *, inspect_runtime: bool = True) -> Inventory:
+def busy_paths(path: Path) -> Iterator[Path]:
+    """Yield everything except directories and empty lock files; never follow links."""
+    if not path.exists() and not path.is_symlink():
+        return
+    info = path.lstat()
+    if stat.S_ISDIR(info.st_mode):
+        for child in sorted(path.iterdir()):
+            yield from busy_paths(child)
+    elif not (stat.S_ISREG(info.st_mode) and path.name.endswith(".lock") and info.st_size == 0):
+        yield path
+
+
+def close_blockers(root: Path, policy: Policy, protected: dict[Path, str]) -> dict[Path, str]:
+    """Everything that would outlive the session besides knowledge and idle locks."""
+    blockers = {
+        path: f"session close: {reason}" for path, reason in protected.items() if reason not in IDLE_PROTECTIONS
+    }
+    for relative in policy.infrastructure:
+        for path in busy_paths(root / relative):
+            blockers.setdefault(
+                path.relative_to(root),
+                "session close: lifecycle state is not idle; finish it through its owning target",
+            )
+    for path, reason in knowledge.inspect(root)[1]:
+        blockers[path] = f"session close: knowledge: {reason}"
+    contrib.require_owned_directory(root.parent, "artifact root")
+    for path in sorted(root.parent.iterdir()):
+        if path != root:
+            blockers[Path("..") / path.name] = (
+                "session close: outside .artifacts/fork-maintenance; move it into work/ and re-plan"
+            )
+    return blockers
+
+
+@contextmanager
+def idle_cache_locks(targets: tuple[contrib.CleanupTarget, ...]) -> Iterator[None]:
+    """Hold every lock file a target discards, so no cache publisher is active."""
+    descriptors: list[int] = []
+    try:
+        for target in targets:
+            path = target.path
+            if path.is_symlink() or not path.exists():
+                continue  # already staged by an interrupted transaction
+            for candidate in sorted(path.iterdir()) if path.is_dir() else (path,):
+                if candidate.is_symlink() or not candidate.is_file() or not candidate.name.endswith(".lock"):
+                    continue
+                descriptors.append(os.open(candidate, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW))
+                try:
+                    fcntl.flock(descriptors[-1], fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    contrib.fail(f"cache lock is held by an active process: {candidate}")
+        yield
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def inventory_locked(repo: Path, policy: Policy, scope: str = CLEAN, *, inspect_runtime: bool = True) -> Inventory:
     root = contrib.cleanup_state_root(repo)
+    keep = policy.keep(scope)
     protected = protections(root, inspect_runtime=inspect_runtime)
     targets: list[contrib.CleanupTarget] = []
     blocked: dict[Path, str] = {}
@@ -273,7 +362,7 @@ def inventory_locked(repo: Path, policy: Policy, *, inspect_runtime: bool = True
     def visit(path: Path) -> None:
         nonlocal size
         relative = path.relative_to(root)
-        if relative in policy.keep:
+        if relative in keep:
             if path.is_symlink():
                 contrib.fail(f"retained artifact path must not be a symlink: {path}")
             return
@@ -305,16 +394,18 @@ def inventory_locked(repo: Path, policy: Policy, *, inspect_runtime: bool = True
 
     for path in entries(root, Path(".")):
         visit(path)
+    if scope == CLOSE:
+        blocked.update(close_blockers(root, policy, protected))
     targets.sort(key=lambda target: (target.path.as_posix(), target.kind))
-    provisional = contrib.CleanupPlan(policy.cycle, tuple(targets), "")
-    plan = contrib.CleanupPlan(policy.cycle, tuple(targets), contrib.cleanup_plan_digest(repo, provisional))
+    provisional = contrib.CleanupPlan(policy.cycle(scope), tuple(targets), "")
+    plan = contrib.CleanupPlan(policy.cycle(scope), tuple(targets), contrib.cleanup_plan_digest(repo, provisional))
     return Inventory(
         plan,
         tuple(
             sorted(
                 (str(path), reason)
                 for path, reason in protected.items()
-                if not any(path == keep or keep in path.parents for keep in policy.keep)
+                if not any(path == kept or kept in path.parents for kept in keep)
             )
         ),
         size,
@@ -323,16 +414,19 @@ def inventory_locked(repo: Path, policy: Policy, *, inspect_runtime: bool = True
 
 
 def validate_pending_policy(
-    repo: Path, pending: contrib.CleanupTransaction, policy: Policy, *, inspect_runtime: bool = True
+    repo: Path, pending: contrib.CleanupTransaction, policy: Policy, scope: str = CLEAN, *, inspect_runtime: bool = True
 ) -> None:
-    if pending.plan.cycle != policy.cycle:
-        contrib.fail("pending cleanup belongs to another cycle or policy; restore its policy and resume it first")
+    if pending.plan.cycle != policy.cycle(scope):
+        contrib.fail(
+            "pending cleanup belongs to another cycle, policy or scope; restore its policy and resume it"
+            " with its original command first"
+        )
     root = contrib.cleanup_state_root(repo)
     protected = protections(root, inspect_runtime=inspect_runtime)
     protect_workspace_recovery(root, protected)
     for target in pending.plan.targets:
         relative = target.path.relative_to(root)
-        if relative in policy.containers or any(overlaps(relative, keep) for keep in (*policy.keep, *protected)):
+        if relative in policy.containers or any(overlaps(relative, kept) for kept in (*policy.keep(scope), *protected)):
             contrib.fail(f"pending cleanup target is now retained or runtime-owned: {relative}")
         if target.kind == "workspace" and relative.parent != WORKSPACES:
             contrib.fail("pending artifacts cleanup has an invalid workspace path")
@@ -342,70 +436,56 @@ def validate_pending_policy(
 
 
 def operate(
-    repo: Path, action: str, confirmation: str = "", *, policy_path: Path = POLICY_PATH, inspect_runtime: bool = True
+    repo: Path,
+    action: str,
+    confirmation: str = "",
+    *,
+    scope: str = CLEAN,
+    policy_path: Path = POLICY_PATH,
+    inspect_runtime: bool = True,
 ) -> Inventory:
+    for directory in (repo / ".artifacts", contrib.cleanup_state_root(repo)):
+        if not directory.exists() and not directory.is_symlink():
+            directory.mkdir(mode=0o700)  # a fresh or fully closed checkout
     contrib.validate_cleanup_host(repo)
     policy = load_policy(policy_path)
     with contrib.cleanup_lifecycle_locks(repo):
         pending = contrib.load_pending_cleanup_transaction(repo)
         if pending is not None:
-            validate_pending_policy(repo, pending, policy, inspect_runtime=inspect_runtime)
+            validate_pending_policy(repo, pending, policy, scope, inspect_runtime=inspect_runtime)
             report = Inventory(pending.plan, (), 0)
         else:
-            report = inventory_locked(repo, policy, inspect_runtime=inspect_runtime)
+            report = inventory_locked(repo, policy, scope, inspect_runtime=inspect_runtime)
         if action == "clean" and confirmation:
             if confirmation != report.plan.digest:
-                contrib.fail("CONFIRM does not match artifacts-clean-plan; review the new plan")
+                contrib.fail(f"CONFIRM does not match artifacts-{scope}-plan; review the new plan")
+            if scope == CLOSE and report.blocked:
+                # Never discard caches or session work underneath live state.
+                contrib.fail("artifacts-close deletes nothing while a blocked path remains; resolve it and re-plan")
             if report.plan.targets:
-                if pending is None:
-                    contrib.publish_cleanup_transaction(repo, report.plan)
-                    pending = contrib.load_pending_cleanup_transaction(repo)
-                if pending is None:
-                    contrib.fail("artifact cleanup transaction was not published")
-                contrib.finish_cleanup_transaction(repo, pending)
+                with idle_cache_locks(report.plan.targets):
+                    if pending is None:
+                        contrib.publish_cleanup_transaction(repo, report.plan)
+                        pending = contrib.load_pending_cleanup_transaction(repo)
+                    if pending is None:
+                        contrib.fail("artifact cleanup transaction was not published")
+                    contrib.finish_cleanup_transaction(repo, pending)
         return report
-
-
-def save(repo: Path, item: str, destination: str) -> Path:
-    """Move one unmanaged operator record into retained/, never a runtime tree."""
-    contrib.validate_cleanup_host(repo)
-    policy = load_policy()
-    relative, retained = relative_path(item), relative_path(destination)
-    if len(relative.parts) != 1 or relative in (*policy.keep, *policy.containers):
-        contrib.fail("artifacts-save accepts only an unmanaged top-level item, never managed runtime/results")
-    root = contrib.cleanup_state_root(repo)
-    source, target = root / relative, root / "retained" / retained
-    with contrib.cleanup_lifecycle_locks(repo):
-        if contrib.load_pending_cleanup_transaction(repo) is not None:
-            contrib.fail("finish pending cleanup before retaining an item")
-        contrib.artifact_fingerprint(source)
-        contrib.prepare_cleanup_directory(root, target.parent, "retained operator records")
-        contrib.container_payload.rename_no_replace(source, target)
-        contrib.fsync_directory(source.parent)
-        contrib.fsync_directory(target.parent)
-    return target
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("plan", "clean", "check", "save"))
+    parser.add_argument("action", choices=tuple(ACTIONS))
     args = parser.parse_args()
+    scope, action = ACTIONS[args.action]
     try:
-        if args.action == "save":
-            print(
-                save(
-                    contrib.REPOSITORY_ROOT,
-                    os.environ.get("XPRA_ARTIFACT_ITEM", ""),
-                    os.environ.get("XPRA_ARTIFACT_AS", ""),
-                )
-            )
-            return 0
         confirmation = os.environ.get("XPRA_ARTIFACT_CONFIRM", "")
-        report = operate(contrib.REPOSITORY_ROOT, args.action, confirmation)
+        report = operate(contrib.REPOSITORY_ROOT, action, confirmation, scope=scope)
         print(
             json.dumps(
                 {
                     "policy_sha256": load_policy().digest,
+                    "scope": scope,
                     "targets": [
                         {
                             "path": str(target.path.relative_to(contrib.cleanup_state_root(contrib.REPOSITORY_ROOT))),
@@ -421,12 +501,15 @@ def main() -> int:
                 indent=2,
             )
         )
-        print(f"artifacts_clean_confirm={report.plan.digest}")
-        if args.action == "clean" and confirmation:
+        print(f"artifacts_{scope}_confirm={report.plan.digest}")
+        if action == "clean" and confirmation:
             print(f"removed_targets={len(report.plan.targets)}")
         else:
             print(f"disposable_targets={len(report.plan.targets)}")
-        return 1 if report.blocked or (args.action == "check" and report.plan.targets) else 0
+        incomplete = bool(report.blocked or (action == "check" and report.plan.targets))
+        if scope == CLOSE and action == "check":
+            print(f"session_closed={'no' if incomplete else 'yes'}")
+        return 1 if incomplete else 0
     except (contrib.ContribError, OSError, ValueError, KeyError, TypeError) as error:
         print(f"artifacts: {error}", file=sys.stderr)
         return 2

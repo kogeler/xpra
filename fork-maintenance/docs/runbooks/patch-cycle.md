@@ -29,8 +29,10 @@ applies the production patch to host source. See
 path-change, provenance, and cleanup details.
 
 For a complete cycle containing multiple named workspaces and runs, give every
-identity one common prefix and finish with the digest-confirmed cleanup flow in
-[`cycle-cleanup.md`](cycle-cleanup.md).
+identity the session ID as one common prefix. Cycle cleanup through
+[`cycle-cleanup.md`](cycle-cleanup.md) is optional mid-session; the finished
+task always ends with its distilled record and
+[session close](session-close.md#close-the-session) before any commit.
 
 A new draft starts with `workspace-create ... PATCH_MODE=clean`; its first
 `workspace-update` derives the patch, digest, and owned paths. The quarantine

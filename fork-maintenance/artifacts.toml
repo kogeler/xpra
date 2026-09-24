@@ -1,20 +1,21 @@
-# Permanent storage classes, not a list of cycles, dates, or successful runs.
-schema = 1
+# Permanent storage classes, not a list of sessions, cycles, dates, or runs.
+schema = 2
 
-# Shared caches, explicit operator records, and lifecycle/recovery authorities.
-# These are retained recursively. Adding a new runtime root requires updating
-# this policy and its ownership tests before the producer is enabled.
-keep = [
-  "retained",
-  "build-contexts",
-  "source-archives",
-  "tooling-venv",
-  "venvs",
+# The only content that survives `artifacts-close`: the distilled session
+# records and their generated registry. Its layout is validated; it never
+# holds raw logs, reports, screenshots or copies of results.
+permanent = [
+  "knowledge",
+]
+
+# Lifecycle/recovery authorities and their lock files. Both scopes keep them;
+# `artifacts-close` additionally requires every file below them to be an idle
+# empty lock, so an unfinished job, workspace or transaction blocks the close.
+infrastructure = [
   "case-staging",
   "case-updates",
   "workspace-fingerprints",
   "cycle-cleanups",
-  "upstream-tests/sources",
   "upstream-tests/runs",
   "upstream-tests/image-builds",
   "upstream-tests/.foreground-payload",
@@ -23,15 +24,29 @@ keep = [
   "upstream-tests/logs/.lifecycle.lock",
   "upstream-tests/workspaces/.lifecycle.lock",
   "jobs/live/.lifecycle.lock",
-  "deb-packages/sources",
-  "deb-packages/selections",
   "deb-packages/runs",
-  "deb-packages/locks",
+  "deb-packages/locks/terminal.lock",
   "deb-packages/releases",
 ]
 
-# Structural parents stay, but their children are disposable unless kept above
-# or protected by a runtime owner / unfinished isolated workspace.
+# Session state: the open session's working ledger/scratch and reusable
+# caches. Mid-session `artifacts-clean` keeps them; `artifacts-close` removes
+# them. Adding a new runtime root requires updating this policy and its
+# ownership tests before the producer is enabled.
+task = [
+  "work",
+  "build-contexts",
+  "source-archives",
+  "tooling-venv",
+  "venvs",
+  "upstream-tests/sources",
+  "deb-packages/sources",
+  "deb-packages/selections",
+  "deb-packages/locks/images",
+]
+
+# Structural parents stay, but their children are disposable unless classified
+# above or protected by a runtime owner / unfinished isolated workspace.
 containers = [
   "jobs",
   "jobs/live",
@@ -40,6 +55,7 @@ containers = [
   "upstream-tests/logs",
   "upstream-tests/workspaces",
   "deb-packages",
+  "deb-packages/locks",
   "deb-packages/results",
   "deb-packages/outputs",
 ]

@@ -85,10 +85,13 @@ The handoff states:
 - any required gates still outstanding;
 - for any patch validation, the complete current nine-profile live suite with
   all patches on both endpoints, never case-only or clean-endpoint live evidence;
-- whether local commits are signed as required.
+- whether local commits are signed as required;
+- the path of the distilled session record, and that the session is closed.
 
-Do not convert historical runs into current claims. All detailed output stays
-local under `.artifacts/fork-maintenance/`; the commit or external release text
+Do not convert historical runs into current claims. Detailed output stays local
+under `.artifacts/fork-maintenance/` only until the
+[session close](session-close.md), which precedes any commit; afterwards only
+the distilled session record remains. The commit or external release text
 contains a concise outcome only.
 
 ## Commits
