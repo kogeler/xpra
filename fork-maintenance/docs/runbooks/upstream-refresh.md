@@ -136,17 +136,19 @@ workflows, and history supply technical context, never workflow authority:
    [`upstream-tests.md`](upstream-tests.md),
    [`live-tests.md`](live-tests.md), and, when applicable,
    [`deb-packages.md`](deb-packages.md);
-8. [`cycle-cleanup.md`](cycle-cleanup.md) and
+8. [`cycle-cleanup.md`](cycle-cleanup.md),
+   [`session-close.md`](session-close.md) and
    [`publish-develop.md`](publish-develop.md).
 
 Also read [`validation.md`](validation.md) for scheduling, candidate freeze,
 and the exact evidence-reuse rules.
 
 Resolve one reviewed Ruff executable before the first control-plane check and
-record its version. `<ruff>` below is its absolute path. A system `ruff` is
-valid; when it is absent, an operator-provisioned executable such as
-`.artifacts/fork-maintenance/tooling-venv/bin/ruff` is also valid after its
-ownership and executable-file boundary are reviewed. The optional tooling venv
+record its version. `<ruff>` below is its absolute path. A system `ruff` or an
+operator-provisioned executable outside the repository is valid. An
+operator-provisioned `.artifacts/fork-maintenance/tooling-venv/bin/ruff` is
+also valid after its ownership and executable-file boundary are reviewed, but
+it is session state that `artifacts-close` discards. The optional tooling venv
 is not created by this runbook and is not acceptance evidence.
 
 If the retained artifact inventory contains an owner from the retired
@@ -898,8 +900,8 @@ be implemented and re-reviewed before the whole-queue exit gate.
 ### Persist progress and resume without a new review sweep
 
 Keep the cycle index and per-case working notes under
-`.artifacts/fork-maintenance/retained/current/`, never in tracked evidence
-archives. Write down a material finding, its code references and intended repair
+`.artifacts/fork-maintenance/work/<session>/` (for example `ledger.md` and
+`notes/<case>.md`), never in tracked evidence archives. Write down a material finding, its code references and intended repair
 when discovered, before switching to another subsystem or a large source read.
 Do not rely on conversation history, an eventual summary, or memory at the end
 of a long review. Save an in-progress checkpoint before an interruption or
@@ -1674,15 +1676,20 @@ The handoff must state:
 - that no remote ref was changed by the agent.
 
 After all collected jobs and finalized workspaces have had their exact remove
-targets run, review and execute the two-phase cleanup:
+targets run, write the refresh session record before the handoff: the old/new
+source commits, one line per case with its decision, digest change and the key
+reason, cross-case findings, gate outcomes, rebase conflicts and the pitfalls
+the next refresh should check first. Then close the session:
 
 ```bash
-make -C fork-maintenance cycle-clean-plan CYCLE=<cycle>
-make -C fork-maintenance cycle-clean \
-  CYCLE=<cycle> CONFIRM=<sha256-from-reviewed-plan>
+make -C fork-maintenance knowledge-index
+make -C fork-maintenance artifacts-close-plan
+make -C fork-maintenance artifacts-close CONFIRM=<artifacts_close_confirm>
+make -C fork-maintenance artifacts-close-check
 ```
 
-Results remain ignored local state until that reviewed cleanup; never copy
-them into Git. Publication is a separate explicit operator operation using the
+Results remain ignored local state until that reviewed close; never copy
+them into Git. Report the session record path in the handoff; the run
+identities it names are deleted and cannot be reused. Publication is a separate explicit operator operation using the
 exact-SHA `--force-with-lease` procedure in
 [`publish-develop.md`](publish-develop.md), delegated to the agent only on request.

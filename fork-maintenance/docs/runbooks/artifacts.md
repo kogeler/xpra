@@ -20,10 +20,10 @@ Xpra repository root:
 │   ├── selections/
 │   └── sources/
 ├── jobs/
+├── knowledge/
+│   ├── INDEX.md
+│   └── sessions/
 ├── live-results/
-├── retained/
-│   ├── current/
-│   └── checkpoints/
 ├── source-archives/
 ├── upstream-tests/
 │   ├── image-builds/
@@ -33,21 +33,30 @@ Xpra repository root:
 │   └── workspaces/
 ├── tooling-venv/
 ├── venvs/
+├── work/
+│   └── <session>/
 └── workspace-fingerprints/
 ```
 
+Everything except `knowledge/` is session state. A finished session is closed
+with [`artifacts-close`](session-close.md), which leaves only `knowledge/`
+and idle lock files; `work/<session>/` is the session's free-form ledger,
+notes and scratch area until then.
+
 The exact set may grow only with a corresponding reviewed change to
 `fork-maintenance/artifacts.toml` and its runtime-protection tests. Durable run
-output never moves into the tracked `fork-maintenance/` directory. Transient interpreter or
-tool caches may exist only at another explicitly ignored local path; the root
+output never moves into the tracked `fork-maintenance/` directory, and nothing
+else is created below `.artifacts/` outside `fork-maintenance/`. Only transient
+interpreter caches may exist at another explicitly ignored local path; the root
 `clean` Make target removes the automation's `__pycache__` entries. The root
 `.gitignore` ignores all of `.artifacts/`; the `artifact-boundary` Make target
 verifies that rule and checks that known runtime/result roots are not tracked.
 
 ## Deterministic whole-directory housekeeping
 
-Use this explicit discard operation when local output is no longer needed for
-the current acceptance/reuse cycle. It is independent of the cycle-specific
+Use this explicit mid-session discard operation when local output is no longer
+needed for the current acceptance/reuse cycle. At the end of a session use
+[`artifacts-close`](session-close.md#close-the-session) instead. It is independent of the cycle-specific
 finalization flow below, and can remove obsolete report formats and unmanaged
 diagnostic scratch without interpreting them as current acceptance evidence.
 It does not run Xpra tests, rebuild images, stop jobs, or delete Podman objects.
@@ -62,34 +71,27 @@ finish the cleanup handoff without repeatedly deleting new output. Plan/check
 remain non-destructive. Resume disposal only at a coordinated review boundary.
 
 The permanent allowlist is [`artifacts.toml`](../../artifacts.toml). Its entries
-are storage classes, never current run/cycle names or dates. It keeps shared
-caches, virtual environments, lifecycle/recovery authorities and deliberate
-operator records under `retained/`. Structural parents remain; other safe
-children are disposable. The same policy applies to yesterday's log and a
-newly generated log. No age threshold, newest-success heuristic or agent-made
-list decides retention.
+are storage classes, never current run/cycle/session names or dates:
 
-Keep the current concise handoff at `retained/current/handoff.md`. Put a sealed
-preservation archive under `retained/checkpoints/<checkpoint>/` only when
-explicitly needed. Do not save every run or bulk-move old scratch into
-`retained/`. To migrate an existing unmanaged top-level record without editing
-its bytes or overwriting another item:
+- `permanent`: only `knowledge/`, the distilled session records and their
+  generated registry. The policy loader rejects any other permanent class;
+- `infrastructure`: lifecycle/recovery authorities and their lock files;
+- `task`: session work (`work/`) and every reusable filesystem cache (build
+  contexts, source archives and bundles, DEB sources/selections/image-key
+  locks, virtual environments, the optional tooling venv).
 
-```bash
-make -C fork-maintenance artifacts-save \
-  ITEM=existing-handoff.md AS=current/handoff.md
-make -C fork-maintenance artifacts-save \
-  ITEM=sealed-checkpoint AS=checkpoints/sealed-checkpoint
-```
+Structural `containers` remain; their other safe children are disposable. The
+same policy applies to yesterday's log and a newly generated log. No age
+threshold, newest-success heuristic or agent-made list decides retention.
+Mid-session housekeeping keeps all three classes. Session close keeps only
+`permanent` and `infrastructure`, and requires the latter to be idle.
 
-Managed result/runtime roots and their descendants cannot be moved by this
-target: their recorded absolute provenance must stay intact. `retained/` is
-not a way to relabel a copied report as current acceptance. For new work, write
-the durable operator handoff there directly; probes and ordinary job output
-remain disposable. Delete/update obsolete deliberate records only through a
-separately reviewed exact operation, not by changing the permanent allowlist.
+There is no archive of raw output. A handoff or conclusion that must outlive
+the session is distilled into `knowledge/sessions/<session>.md`; the
+[session runbook](session-close.md) defines its format, size limit and
+registry. Do not copy reports, logs or screenshots into `knowledge/`.
 
-Review and execute the exact plan:
+Review and execute the exact mid-session plan:
 
 ```bash
 make -C fork-maintenance artifacts-clean-plan
@@ -116,8 +118,11 @@ closed. Recovery state is retained, and pending
 case/workspace recovery protects the workspace boundary. A workspace is
 disposable only if the existing finalized-workspace check proves its candidate
 is represented by the current queue. All other workspaces are reported and
-preserved. Unsafe files/trees are reported as blocked, not followed,
-force-deleted or silently considered retained. A blocked path makes the
+preserved. Symlinks inside a disposable tree, including absolute ones such as
+a virtual environment's interpreter link, are fingerprinted by their target
+text and never followed. Other unsafe files/trees (other-writable, hard-linked
+or special files) are reported as blocked, not followed, force-deleted or
+silently considered retained. A blocked path makes the
 command return nonzero even when no other disposable target remains.
 
 Confirmed removal reuses the cycle transaction engine under the reserved
@@ -132,12 +137,29 @@ After success, `artifacts-check` must report `disposable_targets=0` and an empty
 `blocked` list; an immediate
 repeat clean is a no-op. Protected runtime/workspaces remain listed separately,
 not disguised as deleted garbage. Do not claim the folder is entirely empty or
-that every job is removed merely from this result. Caches, operator records and
-recovery infrastructure are the intended clean state.
+that every job is removed merely from this result. Knowledge, session work,
+caches and recovery infrastructure are the intended mid-session clean state.
+
+## Session close
+
+`artifacts-close-plan`, `artifacts-close CONFIRM=<artifacts_close_confirm>` and
+`artifacts-close-check` apply the same policy with the `task` class no longer
+kept. Planning additionally blocks on every protected runtime/workspace/recovery
+path, any file below `infrastructure` other than an empty `*.lock`, any
+`knowledge/` problem reported by `knowledge-check` (including a stale
+`INDEX.md`), and any entry in `.artifacts/` other than `fork-maintenance/`.
+Confirmed execution refuses while anything is blocked, holds every `*.lock`
+file directly inside a discarded cache directory without waiting, and uses the reserved
+identity `artifacts-close-<policy-sha256>`; resume an interruption with the same
+`CONFIRM`. A pending `artifacts-clean` or `cycle-clean` transaction must finish
+through its own command first, and vice versa. `artifacts-close-check` prints
+`session_closed=yes` only when nothing but `knowledge/` and idle lock files
+remains. The prerequisites, record format and blocker table are in the
+[session runbook](session-close.md).
 
 Deleting a named result ends its reuse window in [`validation.md`](validation.md).
-Update the retained handoff to distinguish historical conclusions from still
-available raw evidence. Do not rerun Xpra merely because logs were deleted;
+The session ledger in `work/<session>/` must distinguish historical conclusions
+from still available raw evidence. Do not rerun Xpra merely because logs were deleted;
 if a later task needs unavailable evidence, it must produce a new named result.
 The narrow implementation gate is `make -C fork-maintenance artifact-tests`;
 run the full offline `check` on a stable cleanup-tooling candidate, not Xpra
@@ -483,8 +505,6 @@ retained for operator review; cycle cleanup never treats it as a reusable DEB
 result or deletes it implicitly.
 
 See [`cycle-cleanup.md`](cycle-cleanup.md) for the completion boundary and full
-review sequence.
-
-If local disk policy later requires removing retained results, use an explicit
-owner-reviewed path below `.artifacts/fork-maintenance/`; never add a Git
-commit that archives them first.
+review sequence. Caches preserved by cycle cleanup still belong to the session
+and are discarded by [`artifacts-close`](session-close.md). Never add a Git
+commit that archives results first.

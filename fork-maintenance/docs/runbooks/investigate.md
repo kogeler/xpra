@@ -14,6 +14,10 @@ Stay on `develop` and prove the isolated boundary:
 make -C fork-maintenance isolated-start-check
 ```
 
+Search the [session registry](session-close.md#start-of-a-session) at
+`.artifacts/fork-maintenance/knowledge/INDEX.md` for the symptom, error text,
+symbol or case, and read only the matching session records before exploring.
+
 The gate allows dirty fork-control files but rejects every host Xpra source or
 test change. It records the host branch, HEAD, and unique source merge base
 already embedded in current `develop`; it never fetches, queries moving master

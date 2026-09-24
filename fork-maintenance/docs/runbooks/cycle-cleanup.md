@@ -10,12 +10,15 @@ the host index, branches, or reusable caches.
 
 For whole-directory housekeeping across old cycles and unmanaged scratch, use
 the separate permanent-policy [`artifacts-clean` flow](artifacts.md#deterministic-whole-directory-housekeeping).
+Cycle cleanup is optional within a session; every finished session still ends
+with [`artifacts-close`](session-close.md), which also discards the caches this
+flow retains.
 Do not keep adding historical cycle names to a deletion/retention list or weaken
 the result validators here to accept obsolete evidence. The structural flow
 discards unused output; this flow verifies and finalizes one completed cycle.
 
-Choose one lowercase cycle prefix before starting work and put it at the start
-of every `RUN`, `IMAGE_RUN`, and `WORKSPACE`, followed by a dash:
+Use the lowercase session ID as the cycle prefix and put it at the start of
+every `RUN`, `IMAGE_RUN`, and `WORKSPACE`, followed by a dash:
 
 ```text
 wayland-audit-20260827-focused-01
@@ -165,7 +168,7 @@ transaction or compensate with a broad `rm` glob.
 
 ## Retained reusable state
 
-Ordinary cycle cleanup deliberately keeps:
+Ordinary cycle cleanup deliberately keeps, until the session closes:
 
 - content-verified frozen upstream-test bundles, their validated publication
   lock files, and live source archives;
@@ -178,7 +181,9 @@ Ordinary cycle cleanup deliberately keeps:
 - the upstream-test ccache volume;
 - the hash-locked live environment and any local tooling virtual environment.
 
-These are shared caches, not cycle-owned results. The current upstream-test
+These are shared caches, not cycle-owned results. `artifacts-close` removes
+their filesystem part at the end of the session; Podman images and the ccache
+volume are engine objects and stay. The current upstream-test
 image has its own explicit, label-verified removal target. Persistent ccache
 has no ordinary automatic removal target. Removing ccache, live caches, or
 virtual environments is an owner-reviewed disk-maintenance action, not part of

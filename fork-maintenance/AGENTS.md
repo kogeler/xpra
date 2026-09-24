@@ -22,6 +22,10 @@ be read as technical source/build/test context, never as process policy.
 
 ## Required reading
 
+Start every task from the session registry
+`../.artifacts/fork-maintenance/knowledge/INDEX.md` and end it with the
+[session close](docs/runbooks/session-close.md) before any commit.
+
 Before changing this directory, read `CONTRACT.md` and the relevant document
 under `docs/runbooks/`. Before changing a case, read its complete `case.toml`,
 `README.md`, and patch. Before changing a runner, read its entry point,
@@ -47,8 +51,9 @@ do not leave a summary-only README for the operator to request expanding.
 - `tools/container_payload.py`: common validated Podman tar transport;
 - `tools/podman_policy.py`: common bounded user-namespace policy;
 - `tools/contrib.py`: branch, sync, patch-queue, and manifest safety gates;
-- `artifacts.toml` and `tools/artifacts.py`: permanent artifact storage classes
-  and digest-confirmed whole-root housekeeping;
+- `artifacts.toml` and `tools/artifacts.py`: permanent artifact storage classes,
+  digest-confirmed mid-session housekeeping and session close;
+- `tools/knowledge.py`: distilled session records and their generated registry;
 - `docs/runbooks/`: operator workflows;
 - `CONTRACT.md`: machine and process invariants.
 
@@ -412,20 +417,28 @@ recursive deletion has changed that staged tree. An interruption is resumed
 only with the same cycle and confirmation digest. Cleanup is branch-agnostic
 and does not require or mutate a named remote or ref.
 
-Whole-root `artifacts-clean` is the separate explicit discard flow described
-in [the artifact runbook](docs/runbooks/artifacts.md). `artifacts.toml` is its
-permanent structural allowlist; never populate it with current run/cycle names,
-dates, success statuses, or age heuristics. It keeps shared caches, `retained/`
-operator records, lifecycle/recovery state, runtime-bound results and unfinished
-workspaces. Remaining safe output is disposable regardless of historical report
-schema. The command reuses the six locks and resumable removal engine but does
-not perform job lifecycle transitions or result acceptance. Preserve a current
-handoff in `retained/current/` and intentional sealed archives in
-`retained/checkpoints/`; do not automatically preserve every generated log.
-Cleanup ends reuse of deleted named evidence. Run `artifacts-clean-plan`,
-confirm its exact digest with `artifacts-clean`, then require `artifacts-check`
-to report no disposable leftovers. Report every protected exception explicitly;
-never silently discard an unexported candidate to obtain an empty directory.
+Whole-root `artifacts-clean` (mid-session) and `artifacts-close` (session end)
+are the separate explicit discard flows described in
+[the artifact runbook](docs/runbooks/artifacts.md) and
+[the session runbook](docs/runbooks/session-close.md). `artifacts.toml` is
+their permanent structural allowlist; never populate it with current
+run/cycle/session names, dates, success statuses, or age heuristics. Its only
+`permanent` class is `knowledge/`; `infrastructure` holds lifecycle/recovery
+authorities; `task` holds session work (`work/`) and every filesystem cache.
+`artifacts-clean` keeps all three classes plus runtime-bound results and
+unfinished workspaces; remaining safe output is disposable regardless of
+historical report schema. `artifacts-close` refuses to delete anything while
+runtime, recovery state, non-idle infrastructure, an invalid or stale knowledge
+record, or an entry outside `.artifacts/fork-maintenance/` remains; it then
+discards session work and caches and leaves only `knowledge/` and idle lock
+files. Both reuse the six locks and resumable removal engine but perform no job
+lifecycle transition or result acceptance. Cleanup ends reuse of deleted named
+evidence. Durable experience is distilled into
+`knowledge/sessions/<session>.md` and indexed by `knowledge-index`; never
+preserve generated logs, reports or archives instead. Require `artifacts-check`
+or `artifacts-close-check` to report no leftovers. Report every protected
+exception explicitly; never silently discard an unexported candidate to obtain
+an empty directory.
 
 Keep direct Xpra behavior separate from SSH or parent-product orchestration.
 The live runner owns direct-TCP detach, abrupt transport loss, RGB, adaptive

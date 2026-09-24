@@ -204,8 +204,11 @@ Durable runtime, build, result, publication, and cache state is rooted at:
 
 The repository `.gitignore` must ignore `.artifacts/`. Private-state helpers
 create owned directories and reject symlinks or unsafe permissions. Do not
-copy results into the tracked automation tree. Interpreter and tool caches may
-exist only at another explicitly ignored local path. The root `clean` Make
+copy results into the tracked automation tree. Interpreter caches may
+exist only at another explicitly ignored local path. Everything below the root
+except `knowledge/` is session state discarded by
+[`artifacts-close`](session-close.md), so caches and environments are rebuilt
+on demand in a later session. The root `clean` Make
 target removes the automation's transient `__pycache__` entries.
 
 ## Upstream-test image

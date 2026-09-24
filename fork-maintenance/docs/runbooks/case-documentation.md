@@ -142,7 +142,8 @@ case README. Do not duplicate the full contract, manifest or patch.
 Keep current-source rationale, ownership and durable oracles in the README.
 Run names, timestamps, image/result/selection digests, counts, transient blockers
 and completed/pending acceptance state belong in the ignored cycle ledger under
-`retained/current/`. Label designed/required checks as such; planned tests and
+`work/<session>/`; lasting lessons go into the distilled
+[session record](session-close.md). Label designed/required checks as such; planned tests and
 old results are not current acceptance evidence.
 
 Calibrate analytical depth against

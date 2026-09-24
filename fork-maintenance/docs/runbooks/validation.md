@@ -143,9 +143,10 @@ before freeze, without waiting for another operator request.
 Freeze only after reviewing production source, tests, composed queue, native
 and compiled risks, relevant live fixtures/oracles, and package/build changes.
 An unresolved runtime oracle or known source defect means development continues.
-Create the current ignored cycle ledger below
-`.artifacts/fork-maintenance/retained/current/`, not a
-tracked research archive. For each requirement record:
+Create the current ignored cycle ledger at
+`.artifacts/fork-maintenance/work/<session>/ledger.md`, not a
+tracked research archive. It lives only as long as the
+[session](session-close.md). For each requirement record:
 
 - case/stack selection, patch mode, embedded source and applied candidate;
 - selection/resolution/patch digests and dependencies;
@@ -280,4 +281,7 @@ named run in addition to infrastructure tests before claiming the new path works
 At handoff distinguish development checks passed, final acceptance complete,
 remaining failed/missing gates, and external prerequisites. Keep case READMEs
 about current architecture, invariants, ownership and tests; keep transient
-research history and pause/resume notes in the ignored cycle ledger.
+research history and pause/resume notes in the ignored cycle ledger. Before the
+handoff of a finished task, distill the ledger's lasting conclusions into the
+session record and [close the session](session-close.md#close-the-session);
+the ledger and every named result are then deleted.

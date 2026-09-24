@@ -82,9 +82,12 @@ fork-maintenance/
 All durable runtime, build, result, publication, and cache outputs—logs,
 reports, screenshots, snapshots, status records, virtual environments, and
 caches—live under ignored `.artifacts/fork-maintenance/` at the repository
-root. Transient interpreter/tool caches may use another explicitly ignored
+root. Only transient interpreter caches may use another explicitly ignored
 local path. Podman runtime objects are owned separately by immutable IDs and
-labels.
+labels. That tree is per-session state: a finished session is closed to the
+distilled `knowledge/` base and its generated session registry
+`knowledge/INDEX.md`, which every new session reads first (see
+[the session runbook](docs/runbooks/session-close.md)).
 
 Interrupted case creation/update/removal and workspace
 create/remove/fingerprint publication are stored under ignored `case-staging/`,
@@ -403,8 +406,8 @@ publishes a bound `.<CYCLE>.<index>.rmtree.json` phase for each directory, so an
 interrupted partial deletion resumes by exact device/inode rather than requiring
 the original tree hash.
 
-For all old output and unmanaged scratch, use the permanent storage policy
-instead of maintaining a list of cycle names:
+For all old output and unmanaged scratch during a session, use the permanent
+storage policy instead of maintaining a list of cycle names:
 
 ```bash
 make -C fork-maintenance artifacts-clean-plan
@@ -412,13 +415,28 @@ make -C fork-maintenance artifacts-clean CONFIRM=<artifacts_clean_confirm>
 make -C fork-maintenance artifacts-check
 ```
 
-[`artifacts.toml`](artifacts.toml) keeps shared caches, deliberate `retained/`
-operator records and lifecycle/recovery authorities. Runtime-bound results and
-unfinished workspaces are protected; other safe output is disposable regardless
-of age or report schema. No Podman objects are removed. A repeat on unchanged
-state reports zero disposable targets. Review the
+[`artifacts.toml`](artifacts.toml) classifies `knowledge/` as permanent,
+lifecycle/recovery authorities as infrastructure, and session work plus every
+filesystem cache as task state. Mid-session cleanup keeps all three;
+runtime-bound results and unfinished workspaces are protected; other safe
+output is disposable regardless of age or report schema. No Podman objects are
+removed. A repeat on unchanged state reports zero disposable targets. Review the
 [artifact runbook](docs/runbooks/artifacts.md#deterministic-whole-directory-housekeeping)
 before discarding evidence: a deleted named result cannot be reused later.
+
+Every finished session, before any commit and before its handoff, writes its
+distilled record and closes:
+
+```bash
+make -C fork-maintenance knowledge-new SESSION=<session>   # then fill it in
+make -C fork-maintenance knowledge-index
+make -C fork-maintenance artifacts-close-plan
+make -C fork-maintenance artifacts-close CONFIRM=<artifacts_close_confirm>
+make -C fork-maintenance artifacts-close-check
+```
+
+The close refuses while runtime, recovery state, an invalid record or foreign
+`.artifacts/` entry remains, then leaves only `knowledge/` and idle lock files.
 
 ## DEB packages
 
@@ -544,6 +562,8 @@ the agent then performs the guarded fetch, local-master fast-forward, and
   handoff;
 - [`docs/runbooks/artifacts.md`](docs/runbooks/artifacts.md): local output and
   cleanup;
+- [`docs/runbooks/session-close.md`](docs/runbooks/session-close.md): session
+  registry, distilled session records and the mandatory session close;
 - [`docs/runbooks/cycle-cleanup.md`](docs/runbooks/cycle-cleanup.md): finalize and
   remove one exact work cycle.
 
