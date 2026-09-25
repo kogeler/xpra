@@ -62,6 +62,18 @@ def _get_relative_pointer(event) -> tuple[int, int]:
     return round(event.x), round(event.y)
 
 
+def _x11_scroll_key(event) -> tuple:
+    window = event.window
+    device = event.get_device()
+    source = event.get_source_device()
+    if window is None or device is None or source is None:
+        return ()
+    if window.get_display().__gtype__.name != "GdkX11Display":
+        return ()
+    return (event.time, window, device, source, event.x, event.y,
+            event.x_root, event.y_root, int(event.state))
+
+
 def norm_scroll(value: float):
     if SMOOTH_SCROLL_NORM == 100:
         return value
@@ -78,8 +90,12 @@ class PointerWindow(GtkStubWindow):
         self.button_pressed: dict[int, int] = {}
         self.button_polling_timer = 0
         self.motion_cancels_pointer_overlay = True
+        self._smooth_scroll_key = ()
+        self._smooth_scroll_zero_axes = 0
 
     def cleanup(self) -> None:
+        self._smooth_scroll_key = ()
+        self._smooth_scroll_zero_axes = 0
         self.cancel_show_pointer_overlay_timer()
         self.cancel_remove_pointer_overlay_timer()
 
@@ -268,22 +284,44 @@ class PointerWindow(GtkStubWindow):
         return v
 
     def _do_scroll_event(self, event) -> bool:
-        if self._client.readonly:
+        pointer_sub = self.get_subsystem("pointer")
+        if (not pointer_sub or self._client.readonly or self._client.server_readonly
+                or not pointer_sub.server_pointer or not pointer_sub.wheel_map):
+            self._smooth_scroll_key = ()
+            self._smooth_scroll_zero_axes = 0
             return True
+        if not pointer_sub.wheel_smooth or not SKIP_DUPLICATE_SCROLL_EVENTS:
+            self._smooth_scroll_key = ()
+            self._smooth_scroll_zero_axes = 0
         if event.direction == Gdk.ScrollDirection.SMOOTH:
+            if not pointer_sub.wheel_smooth:
+                return True
+            # X11 delivers the valuator before its emulated buttons. GDK's
+            # first/reset sample may have zero deltas; only those buttons
+            # retain the missing whole steps. Replace even at the same time.
+            self._smooth_scroll_key = _x11_scroll_key(event) if SKIP_DUPLICATE_SCROLL_EVENTS else ()
+            self._smooth_scroll_zero_axes = (
+                int(event.delta_x == 0) | (int(event.delta_y == 0) << 1)
+            ) if self._smooth_scroll_key else 0
             log("smooth scroll event: %s, raw delta: %s,%s", event, event.delta_x, event.delta_y)
             pointer = self.get_pointer_data(event)
             device_id = -1
             norm_x = norm_scroll(event.delta_x)
             norm_y = norm_scroll(event.delta_y)
-            if pointer_sub := self.get_subsystem("pointer"):
-                pointer_sub.wheel_event(device_id, self.wid, norm_x, -norm_y, pointer)
-            return True
-        pointer_sub = self.get_subsystem("pointer")
-        if SKIP_DUPLICATE_SCROLL_EVENTS and pointer_sub and pointer_sub.wheel_smooth and event.get_pointer_emulated():
-            log("ignoring emulated scroll event: direction=%i", event.direction)
+            pointer_sub.wheel_event(device_id, self.wid, norm_x, -norm_y, pointer)
             return True
         button_mapping = GDK_SCROLL_MAP.get(event.direction, -1)
+        # Preserve upstream's opt-out. Wayland has no X11 valuator baseline:
+        # its discrete copy comes first and never borrows an earlier zero.
+        if SKIP_DUPLICATE_SCROLL_EVENTS and pointer_sub.wheel_smooth and event.get_pointer_emulated():
+            axis = 2 if button_mapping in (4, 5) else 1 if button_mapping in (6, 7) else 0
+            if not (self._smooth_scroll_key and self._smooth_scroll_zero_axes & axis
+                    and self._smooth_scroll_key == _x11_scroll_key(event)):
+                log("ignoring emulated scroll event: direction=%i", event.direction)
+                return True
+            # One initial sample may emulate several whole steps. The next
+            # smooth sample replaces this bounded allowance, not this event.
+            log("using discrete scroll for zero X11 valuator: direction=%i", event.direction)
         log("do_scroll_event device=%s, direction=%s, button_mapping=%s",
             _device_info(event), event.direction, button_mapping)
         if button_mapping >= 0:
