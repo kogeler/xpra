@@ -5,6 +5,8 @@
 
 from typing import Any
 from collections.abc import Callable
+from threading import Lock
+from time import monotonic
 
 from xpra.common import noop
 from xpra.net.common import may_log_packet, Packet, PacketHandlerType, BACKWARDS_COMPATIBLE
@@ -12,6 +14,8 @@ from xpra.log import Logger
 from xpra.util.str_fn import repr_ellipsized
 
 log = Logger("network")
+
+PACKET_ERROR_LOG_INTERVAL = 5
 
 
 def find_packet_handler(subsystems: dict[str, Any], packet_type: str) -> tuple[Any, str, Callable, bool] | None:
@@ -170,6 +174,13 @@ class PacketDispatcher:
         # subsystem instances keyed by `PREFIX`: each one owns the handlers
         # for the packet types in its own namespace
         self.subsystems: dict[str, Any] = {}
+        # Shared by network and UI callbacks, with constant-size state even
+        # when a peer alternates packet types or exception messages.
+        self._packet_error_lock = Lock()
+        self._packet_error_count = 0
+        self._packet_errors_suppressed = 0
+        self._packet_errors_pending = 0
+        self._next_packet_error_log = 0.0
 
     def get_info(self) -> dict[str, Any]:
         routed: dict[str, Any] = {}
@@ -183,7 +194,15 @@ class PacketDispatcher:
         }
         if routed:
             handlers["subsystems"] = routed
-        return {"packet-handlers": handlers}
+        info = {"packet-handlers": handlers}
+        with self._packet_error_lock:
+            if self._packet_error_count:
+                info["packet-errors"] = {
+                    "count": self._packet_error_count,
+                    "suppressed": self._packet_errors_suppressed,
+                    "pending": self._packet_errors_pending,
+                }
+        return info
 
     def get_packet_types(self) -> list[str]:
         """ every packet type we can handle once authenticated, flat registry and subsystems """
@@ -265,10 +284,25 @@ class PacketDispatcher:
                 return
 
             self.handle_invalid_packet(proto, packet)
-        except (RuntimeError, AssertionError):
-            log.error(f"Error processing a {packet_type!r} packet")
-            log.error(f" received from {proto}:")
-            log.error(f" using {handler}", exc_info=True)
+        except Exception:
+            # Routing / scheduling can fail before the guarded callback runs.
+            self._log_packet_error(packet_type)
+
+    def _log_packet_error(self, packet_type: str) -> None:
+        with self._packet_error_lock:
+            self._packet_error_count += 1
+            now = monotonic()
+            if now < self._next_packet_error_log:
+                self._packet_errors_suppressed += 1
+                self._packet_errors_pending += 1
+                return
+            suppressed = self._packet_errors_pending
+            self._packet_errors_pending = 0
+            self._next_packet_error_log = now + PACKET_ERROR_LOG_INTERVAL
+        # Retain the current exception's traceback without retaining the
+        # exception or packet in limiter state, or holding a lock during I/O.
+        log.error("Error processing %r packet (%i error reports suppressed)",
+                  packet_type, suppressed, exc_info=True, backtrace=False)
 
     def call_packet_handler(self, main: bool, handler: PacketHandlerType, proto, packet: Packet) -> None:
         args = self.packet_handler_args(proto, packet)
@@ -279,8 +313,10 @@ class PacketDispatcher:
             # it runs, the dispatcher has long returned and is no longer on the stack
             try:
                 handler(*args)
-            except (AssertionError, TypeError, ValueError, RuntimeError):
-                log.error(f"Error processing {packet.get_type()!r} packet", exc_info=True)
+            except Exception:
+                # whatever a malformed packet makes its handler raise stops here,
+                # and a burst of them shares one reporting budget:
+                self._log_packet_error(packet.get_type())
 
         if main:
             self.call_in_main_thread(call)
