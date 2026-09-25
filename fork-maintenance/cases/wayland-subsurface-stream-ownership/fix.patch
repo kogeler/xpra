@@ -874,7 +874,7 @@ index 3d41b65a33e26cbe4ae012f5d8b99b7d7c9c8e81..ce3da596b4c3ebcb9e44c115b50177d9
                  client.cleanup()
  
 diff --git a/tests/unittests/unit/client/opengl_backing_test.py b/tests/unittests/unit/client/opengl_backing_test.py
-index 1d3c21d79c2b757631eb549ad1815873018d1157..33f3cac6e3d76ccc297a6d0d416de5268830f9a5 100755
+index 9e67d287845a8cc00131c7f09270137d00ac5523..629d5075d8b327d6ad3b95cde73280d64348ec57 100755
 --- a/tests/unittests/unit/client/opengl_backing_test.py
 +++ b/tests/unittests/unit/client/opengl_backing_test.py
 @@ -12,6 +12,31 @@ from unittest.mock import MagicMock, patch
@@ -1400,7 +1400,7 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..33f3cac6e3d76ccc297a6d0d416de526
  
  class TestPaintBoxEarlyReturn(unittest.TestCase):
      """paint_box() with line_width=0 returns immediately with no GL calls."""
-@@ -473,6 +961,49 @@ class TestPaintBoxEarlyReturn(unittest.TestCase):
+@@ -533,6 +1021,49 @@ class TestScrollPaints(unittest.TestCase):
  # On macOS / Windows a display is assumed to already be present.
  # ---------------------------------------------------------------------------
  
@@ -1450,7 +1450,7 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..33f3cac6e3d76ccc297a6d0d416de526
  class TestGLInit(unittest.TestCase):
  
      xvfb = None
-@@ -503,17 +1034,51 @@ class TestGLInit(unittest.TestCase):
+@@ -563,17 +1094,51 @@ class TestGLInit(unittest.TestCase):
  
      @classmethod
      def tearDownClass(cls):
@@ -1513,7 +1513,7 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..33f3cac6e3d76ccc297a6d0d416de526
  
      def _make_gl_backing(self, window_alpha=False, pixel_depth=0):
          from xpra.os_util import gi_import
-@@ -545,6 +1110,243 @@ class TestGLInit(unittest.TestCase):
+@@ -605,6 +1170,243 @@ class TestGLInit(unittest.TestCase):
              backing.close()
              win.destroy()
  
@@ -1757,7 +1757,7 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..33f3cac6e3d76ccc297a6d0d416de526
      def test_init_textures(self):
          """init_textures() creates textures and fbos."""
          backing, win = self._make_gl_backing()
-@@ -625,6 +1427,283 @@ class TestGLInit(unittest.TestCase):
+@@ -685,6 +1487,283 @@ class TestGLInit(unittest.TestCase):
              backing.close()
              win.destroy()
  
@@ -2042,14 +2042,12 @@ index 1d3c21d79c2b757631eb549ad1815873018d1157..33f3cac6e3d76ccc297a6d0d416de526
      # Helper
      # ------------------------------------------------------------------
 diff --git a/tests/unittests/unit/client/subsystem/window_test.py b/tests/unittests/unit/client/subsystem/window_test.py
-index 56f7b28d15a1c0dbe16dc5caf55044fe441ad6eb..af144e37a307fe810374eb1eb7f6a49669816e2e 100755
+index 359456d528bc03a1eb8ee5c3664e3915bf838db1..d9e27a99f43f5d60c189244d6f9772f8e328dea3 100755
 --- a/tests/unittests/unit/client/subsystem/window_test.py
 +++ b/tests/unittests/unit/client/subsystem/window_test.py
-@@ -8,11 +8,16 @@ import unittest
- from unittest.mock import Mock, patch
- 
+@@ -10,10 +10,14 @@ from unittest.mock import Mock, patch
  from xpra.os_util import WIN32, OSX
-+from xpra.net.common import Packet
+ from xpra.net.common import Packet
  from xpra.net.packet_type import WINDOW_STACKING
 -from xpra.util.objects import AdHocStruct
 +from xpra.util.objects import AdHocStruct, typedict
@@ -2063,7 +2061,7 @@ index 56f7b28d15a1c0dbe16dc5caf55044fe441ad6eb..af144e37a307fe810374eb1eb7f6a496
  
  class WindowManagerTest(ClientMixinTest):
  
-@@ -174,6 +179,7 @@ class WindowManagerTest(ClientMixinTest):
+@@ -209,6 +213,7 @@ class WindowManagerTest(ClientMixinTest):
              opts.tray_icon = "yes"
              self._test_mixin_class(WindowClient, opts, {"window": {"stacking": True}})
              self.assertNotIn("sync-stacking", self.mixin.get_window_caps())
@@ -2071,7 +2069,7 @@ index 56f7b28d15a1c0dbe16dc5caf55044fe441ad6eb..af144e37a307fe810374eb1eb7f6a496
              self.mixin.send_window_stacking((3, 1, 3, 2))
              self.verify_packet(-1, (WINDOW_STACKING, [3, 1, 2]))
              packet_count = len(self.packets)
-@@ -184,6 +190,471 @@ class WindowManagerTest(ClientMixinTest):
+@@ -219,6 +224,471 @@ class WindowManagerTest(ClientMixinTest):
              self.assertEqual(len(self.packets), packet_count)
  
  
@@ -6991,10 +6989,10 @@ index 0000000000000000000000000000000000000000..70ea449df9173d0d2367fd2f434aca29
 +        unittest.main()
 diff --git a/tests/unittests/unit/wayland/subsurface_stream_test.py b/tests/unittests/unit/wayland/subsurface_stream_test.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90eba94bf8
+index 0000000000000000000000000000000000000000..63ea53e854cfe7900925743e824fc973ac4b316d
 --- /dev/null
 +++ b/tests/unittests/unit/wayland/subsurface_stream_test.py
-@@ -0,0 +1,1992 @@
+@@ -0,0 +1,1980 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 Antoine Martin <antoine@xpra.org>
@@ -7087,10 +7085,6 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +        self.subsurface_parents = {}
 +        self.subsurface_stacking = {}
 +        self.subsurface_topology_errors = {}
-+        self._empty_damage_ack_timer = 0
-+        self._empty_damage_ack_owner = None
-+        self._empty_damage_ack_closed = False
-+        self._empty_damage_ack_windows = {}
 +        self.windows = {}
 +        self.sources = ()
 +        self.client_properties = {}
@@ -7336,7 +7330,7 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +        server.track_toplevel = Mock()
 +        server.update_colourspace = Mock()
 +        server.update_size = Mock()
-+        server.schedule_empty_damage_ack = Mock()
++        window.schedule_empty_acknowledgement = Mock()
 +        window.acknowledge_changes = Mock()
 +
 +        server.commit(
@@ -7344,7 +7338,7 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +            ((7, 0, 0, 100, 80, 100, 80),),
 +        )
 +
-+        server.schedule_empty_damage_ack.assert_called_once_with(7, window)
++        window.schedule_empty_acknowledgement.assert_called_once_with()
 +        window.acknowledge_changes.assert_not_called()
 +
 +    def test_refused_root_without_repair_delegates_empty_damage_pacing(self):
@@ -7355,7 +7349,7 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +        server.track_toplevel = Mock()
 +        server.update_colourspace = Mock()
 +        server.update_size = Mock()
-+        server.schedule_empty_damage_ack = Mock()
++        window.schedule_empty_acknowledgement = Mock()
 +        window.acknowledge_changes = Mock()
 +        connection = self.supporting_connection()
 +        server.sources = (connection,)
@@ -7364,7 +7358,7 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +
 +        connection.refuse_window.assert_called_once()
 +        connection.damage.assert_not_called()
-+        server.schedule_empty_damage_ack.assert_called_once_with(7, window)
++        window.schedule_empty_acknowledgement.assert_called_once_with()
 +        window.acknowledge_changes.assert_not_called()
 +
 +    def test_root_repair_remains_the_only_ordinary_ack_owner(self):
@@ -7375,13 +7369,13 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +        server.track_toplevel = Mock()
 +        server.update_colourspace = Mock()
 +        server.update_size = Mock()
-+        server.schedule_empty_damage_ack = Mock()
++        window.schedule_empty_acknowledgement = Mock()
 +        pending = {"value": False}
 +        events = []
-+        server.cancel_empty_damage_ack = Mock(
-+            side_effect=lambda _wid: events.append("cancel"),
++        window.cancel_empty_ack_timer = Mock(
++            side_effect=lambda: events.append("cancel"),
 +        )
-+        window.mark_wayland_damage_frame_pending = Mock(
++        window.mark_damage_frame_pending = Mock(
 +            side_effect=lambda: (events.append("mark"), pending.__setitem__("value", True)),
 +        )
 +        connection = self.supporting_connection()
@@ -7410,9 +7404,9 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +        )
 +        self.assertEqual(events, ["announce", "cancel", "mark", "damage"])
 +        self.assertFalse(pending["value"])
-+        server.cancel_empty_damage_ack.assert_called_once_with(7)
-+        window.mark_wayland_damage_frame_pending.assert_called_once_with()
-+        server.schedule_empty_damage_ack.assert_not_called()
++        window.cancel_empty_ack_timer.assert_called_once_with()
++        window.mark_damage_frame_pending.assert_called_once_with()
++        window.schedule_empty_acknowledgement.assert_not_called()
 +
 +    def test_child_driven_root_only_repair_guards_before_damage(self):
 +        server = WindowTopologyHarness()
@@ -7424,10 +7418,10 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +        server.sources = (connection,)
 +        pending = {"value": False}
 +        events = []
-+        server.cancel_empty_damage_ack = Mock(
-+            side_effect=lambda _wid: events.append("cancel"),
++        window.cancel_empty_ack_timer = Mock(
++            side_effect=lambda: events.append("cancel"),
 +        )
-+        window.mark_wayland_damage_frame_pending = Mock(
++        window.mark_damage_frame_pending = Mock(
 +            side_effect=lambda: (events.append("mark"), pending.__setitem__("value", True)),
 +        )
 +
@@ -7459,7 +7453,7 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +        server.track_toplevel = Mock()
 +        server.update_colourspace = Mock()
 +        server.update_size = Mock()
-+        server.schedule_empty_damage_ack = Mock()
++        window.schedule_empty_acknowledgement = Mock()
 +        unavailable = self.supporting_connection()
 +        unavailable.uuid = "unavailable"
 +        unavailable.is_window_announced.return_value = False
@@ -7476,7 +7470,7 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +        unavailable.new_window.assert_called_once()
 +        unavailable.damage.assert_not_called()
 +        eligible.damage.assert_not_called()
-+        server.schedule_empty_damage_ack.assert_called_once_with(7, window)
++        window.schedule_empty_acknowledgement.assert_called_once_with()
 +
 +    def test_failed_repair_releases_only_its_new_guard_for_empty_pacing(self):
 +        server = WindowTopologyHarness()
@@ -7486,26 +7480,23 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +        server.track_toplevel = Mock()
 +        server.update_colourspace = Mock()
 +        server.update_size = Mock()
-+        pending = {"value": False}
 +        events = []
-+        window.has_wayland_damage_frame_pending = Mock(
-+            side_effect=lambda: pending["value"],
++        # The model's damage guard is its pending safety timer.
++        window.mark_damage_frame_pending = Mock(
++            side_effect=lambda: (events.append("mark"), setattr(window, "_damage_frame_timer", 1)),
 +        )
-+        window.mark_wayland_damage_frame_pending = Mock(
-+            side_effect=lambda: (events.append("mark"), pending.__setitem__("value", True)),
++        window.cancel_damage_frame_timer = Mock(
++            side_effect=lambda: (events.append("clear"), setattr(window, "_damage_frame_timer", 0)),
 +        )
-+        window.clear_wayland_damage_frame_pending = Mock(
-+            side_effect=lambda: (events.append("clear"), pending.__setitem__("value", False)),
-+        )
-+        server.cancel_empty_damage_ack = Mock(
-+            side_effect=lambda _wid: events.append("cancel"),
++        window.cancel_empty_ack_timer = Mock(
++            side_effect=lambda: events.append("cancel"),
 +        )
 +
-+        def schedule(_wid, _window):
++        def schedule():
 +            events.append("schedule")
-+            self.assertFalse(pending["value"])
++            self.assertFalse(window._damage_frame_timer)
 +
-+        server.schedule_empty_damage_ack = Mock(side_effect=schedule)
++        window.schedule_empty_acknowledgement = Mock(side_effect=schedule)
 +        failing = self.supporting_connection()
 +        failing.uuid = "failing"
 +        failing.is_window_announced.return_value = False
@@ -7529,24 +7520,18 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +            events,
 +            ["announce", "cancel", "mark", "clear", "schedule"],
 +        )
-+        self.assertFalse(pending["value"])
++        self.assertFalse(window._damage_frame_timer)
 +        eligible.damage.assert_not_called()
-+        window.clear_wayland_damage_frame_pending.assert_called_once_with()
++        window.cancel_damage_frame_timer.assert_called_once_with()
 +
 +    def test_failed_repair_preserves_an_existing_damage_guard(self):
 +        server = WindowTopologyHarness()
 +        window = server.add_root(7)
 +        server.subsurface_stacking[7] = (7,)
-+        pending = {"value": True}
-+        window.has_wayland_damage_frame_pending = Mock(
-+            side_effect=lambda: pending["value"],
-+        )
-+        window.mark_wayland_damage_frame_pending = Mock(
-+            side_effect=lambda: pending.__setitem__("value", True),
-+        )
-+        window.clear_wayland_damage_frame_pending = Mock(
-+            side_effect=lambda: pending.__setitem__("value", False),
-+        )
++        # An older damage owner already holds the model's pending timer.
++        window._damage_frame_timer = 1
++        window.mark_damage_frame_pending = Mock()
++        window.cancel_damage_frame_timer = Mock()
 +        connection = self.supporting_connection()
 +        connection.damage.side_effect = RuntimeError("repair failed")
 +        server.sources = (connection,)
@@ -7558,8 +7543,9 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +
 +        self.assertEqual(handled, {connection})
 +        self.assertEqual(repaired, set())
-+        self.assertTrue(pending["value"])
-+        window.clear_wayland_damage_frame_pending.assert_not_called()
++        self.assertEqual(window._damage_frame_timer, 1)
++        window.cancel_damage_frame_timer.assert_not_called()
++        window._damage_frame_timer = 0
 +
 +    def test_root_only_surface_tree_guards_damage_before_fanout(self):
 +        server = WindowTopologyHarness()
@@ -7570,10 +7556,10 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +        server.update_colourspace = Mock()
 +        server.update_size = Mock()
 +        events = []
-+        server.cancel_empty_damage_ack = Mock(
-+            side_effect=lambda *_args: events.append("cancel"),
++        window.cancel_empty_ack_timer = Mock(
++            side_effect=lambda: events.append("cancel"),
 +        )
-+        window.mark_wayland_damage_frame_pending = Mock(
++        window.mark_damage_frame_pending = Mock(
 +            side_effect=lambda: events.append("mark"),
 +        )
 +        window.acknowledge_changes = Mock()
@@ -7587,7 +7573,7 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +        )
 +
 +        self.assertEqual(events, ["cancel", "mark", "damage"])
-+        window.mark_wayland_damage_frame_pending.assert_called_once_with()
++        window.mark_damage_frame_pending.assert_called_once_with()
 +        window.acknowledge_changes.assert_not_called()
 +
 +    def test_other_root_reconciliation_does_not_suppress_root_damage(self):
@@ -7649,8 +7635,8 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +        server.track_toplevel = Mock()
 +        server.update_colourspace = Mock()
 +        server.update_size = Mock()
-+        server.schedule_empty_damage_ack = Mock()
-+        server.cancel_empty_damage_ack = Mock()
++        window.schedule_empty_acknowledgement = Mock()
++        window.cancel_empty_ack_timer = Mock()
 +        window.acknowledge_changes = Mock()
 +        connections = self.supporting_connection(), self.supporting_connection()
 +        server.sources = connections
@@ -7658,8 +7644,8 @@ index 0000000000000000000000000000000000000000..65230c3e924d41e24e4059d71da51a90
 +        server.commit(7, True, (100, 80), ((0, 0, 5, 4),), compositor_tree())
 +
 +        window.acknowledge_changes.assert_called_once_with()
-+        server.schedule_empty_damage_ack.assert_not_called()
-+        server.cancel_empty_damage_ack.assert_called_once_with(7)
++        window.schedule_empty_acknowledgement.assert_not_called()
++        window.cancel_empty_ack_timer.assert_called_once_with()
 +        for connection in connections:
 +            connection.damage.assert_called_once_with(
 +                7, window, 0, 0, 5, 4, {"damage": True, "more": False},
@@ -9299,7 +9285,7 @@ index cac79b68e1f3f8f07f785293fa755ff5b9a75af7..e3c431bff5f8d6debb25b6cdf22530d3
          if not backing:
              fire_paint_callbacks(callbacks, False, message="no backing")
 diff --git a/xpra/client/gtk3/client_base.py b/xpra/client/gtk3/client_base.py
-index 17adae9eb6efe345bdc21f182b7d2662038dea86..bb815ecab6010b21ebf3bcb57d09ac11dc7f18a9 100644
+index 3d221618fd6021636d7c5f39bc35fb3e84273a0e..37738c722820c6c014374ec054c70c3ce58838be 100644
 --- a/xpra/client/gtk3/client_base.py
 +++ b/xpra/client/gtk3/client_base.py
 @@ -9,7 +9,7 @@ import os
@@ -9461,10 +9447,10 @@ index 44be0c55859cd73cbe2a71617fe83fe79960dd99..95ff7c5d333b8f1689fde0831627fe42
      def get_bit_depth(self, pixel_depth=0) -> int:
          return pixel_depth or 24
 diff --git a/xpra/client/gui/ui_client_base.py b/xpra/client/gui/ui_client_base.py
-index a8afdd6201c44f6a6f38631aadfeefab473cd546..a937d5aa29fe244e9c69a691e6f6288588e8f833 100644
+index 224f5718dfb1808223939cd4496832ba759bcbf2..8e1b2452ce6dc10be13808013414286808ea0ba7 100644
 --- a/xpra/client/gui/ui_client_base.py
 +++ b/xpra/client/gui/ui_client_base.py
-@@ -128,6 +128,10 @@ class UIXpraClient(XpraClientBase):
+@@ -131,6 +131,10 @@ class UIXpraClient(XpraClientBase):
      def client_toolkit(self) -> str:
          raise NotImplementedError()
  
@@ -9919,7 +9905,7 @@ index 778f585589ea38004aacc90512f1f589f3008bb3..2a6886673629de5f356789de67efd09b
              if coding == "mmap":
                  self.paint_mmap(img_data, x, y, width, height, rowstride, options, callbacks)
 diff --git a/xpra/client/gui/window_base.py b/xpra/client/gui/window_base.py
-index 9724967d0d9b131bfeaf0b03d8667faa77723432..43a6568ea419d7ed3d693e3a6ad84f6131f0432a 100644
+index a6c1bafbe7f243a596b658f9c90795a3c88b96d7..78ef34d748f921562e5c770d21bdbf5819680670 100644
 --- a/xpra/client/gui/window_base.py
 +++ b/xpra/client/gui/window_base.py
 @@ -8,14 +8,20 @@
@@ -9945,7 +9931,7 @@ index 9724967d0d9b131bfeaf0b03d8667faa77723432..43a6568ea419d7ed3d693e3a6ad84f61
  from xpra.util.colourspace import Colourspace, SRGB
  from xpra.util.parsing import scaleup_value, scaledown_value
  from xpra.util.system import is_Wayland
-@@ -195,6 +201,11 @@ class ClientWindowBase(ClientWidgetBase):
+@@ -196,6 +202,11 @@ class ClientWindowBase(ClientWidgetBase):
          # (ie: when we reposition an OR window to ensure it is visible on screen)
          self.window_offset = None
          self.pending_refresh: list[tuple[int, int, int, int]] = []
@@ -9957,7 +9943,7 @@ index 9724967d0d9b131bfeaf0b03d8667faa77723432..43a6568ea419d7ed3d693e3a6ad84f61
          self.headerbar = headerbar
  
          self.init_window(client, metadata, client_properties)
-@@ -296,11 +307,26 @@ class ClientWindowBase(ClientWidgetBase):
+@@ -297,11 +308,26 @@ class ClientWindowBase(ClientWidgetBase):
          return self.cx(x), self.cy(y)
  
      def new_backing(self, bw: int, bh: int):
@@ -9984,7 +9970,7 @@ index 9724967d0d9b131bfeaf0b03d8667faa77723432..43a6568ea419d7ed3d693e3a6ad84f61
          self._backing.border = self.border
          self._backing.content_types = self.content_types
          # soft dependency on `PointerWindow`:
-@@ -314,6 +340,9 @@ class ClientWindowBase(ClientWidgetBase):
+@@ -315,6 +341,9 @@ class ClientWindowBase(ClientWidgetBase):
          # ensure we clear reference to other windows:
          self.group_leader = None
          self._metadata = typedict()
@@ -9994,7 +9980,7 @@ index 9724967d0d9b131bfeaf0b03d8667faa77723432..43a6568ea419d7ed3d693e3a6ad84f61
          if self._backing:
              self._backing.close()
              self._backing = None
-@@ -857,31 +886,172 @@ class ClientWindowBase(ClientWidgetBase):
+@@ -864,17 +893,153 @@ class ClientWindowBase(ClientWidgetBase):
              log("draw_region: window %s has no backing, gone?", self.wid)
              fire_paint_callbacks(callbacks, -1, "no backing")
              return
@@ -10152,9 +10138,9 @@ index 9724967d0d9b131bfeaf0b03d8667faa77723432..43a6568ea419d7ed3d693e3a6ad84f61
 +
      def after_draw_refresh(self, success, message="") -> None:
          backing = self._backing
-         paintlog(f"after_draw_refresh({success}, {message!r}) pending_refresh={self.pending_refresh}, {backing=}")
-+        pr = self.pending_refresh
-+        self.pending_refresh = []
+         pr = self.pending_refresh
+@@ -882,13 +1047,18 @@ class ClientWindowBase(ClientWidgetBase):
+         paintlog(f"after_draw_refresh({success}, {message!r}) pending_refresh={pr}, {backing=}")
          if not backing:
              return
 +        self._refresh_draw_regions(backing, pr)
@@ -10167,8 +10153,6 @@ index 9724967d0d9b131bfeaf0b03d8667faa77723432..43a6568ea419d7ed3d693e3a6ad84f61
              rw, rh = self.get_size()
              self.idle_add(self.repaint, 0, 0, rw, rh)
              return
--        pr = self.pending_refresh
--        self.pending_refresh = []
          display = self._client.get_subsystem("display")
 -        for x, y, w, h in pr:
 +        for x, y, w, h in regions:
@@ -10332,7 +10316,7 @@ index 6f9bdd90308da8e297cbd8a56a313ab665d4ef81..e2a3bf62d911bd31f0ab192c2cd5d277
      ######################################################################
      # packets:
 diff --git a/xpra/client/subsystem/window/manager.py b/xpra/client/subsystem/window/manager.py
-index 886c857b1928834b22a0be85577da12239803d5e..fdbe07d07819c49bd23506c38e1d679ddabe77d8 100644
+index 4ce30f1309a8136ece303163dad0dc2363fc43c6..912a20b1849c0e34cb40da8a489e99305b63e3cf 100644
 --- a/xpra/client/subsystem/window/manager.py
 +++ b/xpra/client/subsystem/window/manager.py
 @@ -225,7 +225,7 @@ class WindowManagerClient(StubClientSubsystem):
@@ -10399,7 +10383,7 @@ index 0e0af89090bd7be909d7dd000849fd27e0c2dc9f..e70e74dcbcd849cf00f66361b725aa21
  def noop(*_args, **_kwargs) -> None:
      """ do nothing """
 diff --git a/xpra/opengl/backing.py b/xpra/opengl/backing.py
-index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb13652594a92a 100644
+index 793e06c6b0c21bcb75874919cd229262795f038e..4cca80c84413992c5cafb92f524b48d5c45213f2 100644
 --- a/xpra/opengl/backing.py
 +++ b/xpra/opengl/backing.py
 @@ -58,15 +58,17 @@ from xpra.util.str_fn import repr_ellipsized, hexstr, csv
@@ -10593,7 +10577,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
          glBindFramebuffer(GL_FRAMEBUFFER, fbo)
          glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, target, self.textures[texture_index], 0)
          glDrawBuffer(GL_COLOR_ATTACHMENT0)
-@@ -670,58 +742,78 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -670,62 +742,78 @@ class GLWindowBackingBase(WindowBackingBase):
          """
  
      def close(self) -> None:
@@ -10658,6 +10642,10 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
 -            if ofbo is not None:
 -                self.offscreen_fbo = None
 -                glDeleteFramebuffers(1, [ofbo])
+-            tfbo = self.tmp_fbo
+-            if tfbo is not None:
+-                self.tmp_fbo = None
+-                glDeleteFramebuffers(1, [tfbo])
 -            textures = self.textures
 -            if len(textures) > 0:
 -                self.textures = []
@@ -10718,7 +10706,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
          if b := self._backing:
              self._backing = None
              b.destroy()
-@@ -736,10 +828,15 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -740,10 +828,15 @@ class GLWindowBackingBase(WindowBackingBase):
  
      def do_scroll_paints(self, context, scrolls, flush: int, callbacks: PaintCallbacks) -> None:
          log("do_scroll_paints%s", (context, scrolls, flush))
@@ -10734,7 +10722,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
  
          def fail(msg: str) -> None:
              log.error("Error: %s", msg)
-@@ -833,6 +930,44 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -847,6 +940,44 @@ class GLWindowBackingBase(WindowBackingBase):
                            dx, dy, dx + w, dy + h,
                            GL_COLOR_BUFFER_BIT, GL_NEAREST)
  
@@ -10779,7 +10767,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
      def swap_fbos(self) -> None:
          log("swap_fbos()")
          # swap references to tmp and offscreen so tmp becomes the new offscreen:
-@@ -842,6 +977,36 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -856,6 +987,36 @@ class GLWindowBackingBase(WindowBackingBase):
          tmp = self.textures[TEX_FBO]
          self.textures[TEX_FBO] = self.textures[TEX_TMP_FBO]
          self.textures[TEX_TMP_FBO] = tmp
@@ -10816,7 +10804,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
  
      def painted(self, context, x: int, y: int, w: int, h: int, flush=0) -> None:
          if self.draw_needs_refresh:
-@@ -934,7 +1099,7 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -948,7 +1109,7 @@ class GLWindowBackingBase(WindowBackingBase):
              glReadBuffer(GL_COLOR_ATTACHMENT0)
  
              for x, y, w, h in rectangles:
@@ -10825,7 +10813,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
                                    round(x*xscale), round(y*yscale), round((x+w)*xscale), round((y+h)*yscale),
                                    GL_COLOR_BUFFER_BIT, sampling)
  
-@@ -1157,48 +1322,125 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1171,48 +1332,125 @@ class GLWindowBackingBase(WindowBackingBase):
              if not blend_enabled:
                  glDisable(GL_BLEND)
  
@@ -10986,7 +10974,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
  
      def draw_border(self, border) -> None:
          rgba = charclamp(256 * border.red), charclamp(256 * border.green), charclamp(256 * border.blue), charclamp(256 * border.alpha)
-@@ -1230,11 +1472,44 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1244,11 +1482,44 @@ class GLWindowBackingBase(WindowBackingBase):
          # show region being painted if debug paint box is enabled only:
          if self.paint_box_line_width <= 0:
              return
@@ -11032,7 +11020,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
          with TemporaryViewport(0, 0, bw, bh):
              self.draw_rectangle(x, y, w, h, self.paint_box_line_width, r, g, b, a, bh)
  
-@@ -1597,6 +1872,8 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1611,6 +1882,8 @@ class GLWindowBackingBase(WindowBackingBase):
  
      def paint_nvjpeg(self, gl_context, encoding: str, img_data, x: int, y: int, width: int, height: int,
                       options: typedict, callbacks: PaintCallbacks) -> None:
@@ -11041,7 +11029,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
          with self.assign_cuda_context(True):
              # we can import pycuda safely here,
              # because `self.assign_cuda_context` will have imported it with the lock:
-@@ -1684,15 +1961,22 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1698,15 +1971,22 @@ class GLWindowBackingBase(WindowBackingBase):
                       options: typedict, callbacks: PaintCallbacks) -> None:
          log("%s.do_paint_rgb(%s, %s, %s bytes, x=%d, y=%d, width=%d, height=%d, rowstride=%d, options=%s)",
              self, encoding, rgb_format, len(img_data), x, y, width, height, rowstride, options)
@@ -11071,7 +11059,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
              upload, img_data = pixels_for_upload(img_data)
  
              self.gl_init(context)
-@@ -1713,6 +1997,11 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1727,6 +2007,11 @@ class GLWindowBackingBase(WindowBackingBase):
              bpp = PIXEL_FORMAT_BPP.get(rgb_format, 0)
              if not bpp:
                  raise ValueError(f"unknown bytes per pixel for {rgb_format!r}")
@@ -11083,7 +11071,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
              if width > 0 and height > 0:
                  if rowstride < width * bpp:
                      raise ValueError(f"invalid rowstride {rowstride} for {width}x{height} {rgb_format}")
-@@ -1726,7 +2015,13 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1740,7 +2025,13 @@ class GLWindowBackingBase(WindowBackingBase):
              # uploads in an RGB texture discards the X component; framebuffer
              # reads supply the missing alpha component as 1.0 when we blit to
              # an alpha-capable backing.
@@ -11098,7 +11086,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
  
              gl_marker("%s update at (%d,%d) size %dx%d (%s bytes) to %dx%d, using GL %s format=%s / %s to internal=%s",
                        rgb_format, x, y, width, height, len(img_data), render_width, render_height,
-@@ -1736,14 +2031,47 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1750,14 +2041,47 @@ class GLWindowBackingBase(WindowBackingBase):
              # Upload data as temporary RGB texture
              target = GL_TEXTURE_RECTANGLE
              glBindTexture(target, self.textures[TEX_RGB])
@@ -11153,7 +11141,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
              glBindFramebuffer(GL_READ_FRAMEBUFFER, self.tmp_fbo)
              glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, target, self.textures[TEX_RGB], 0)
              glReadBuffer(GL_COLOR_ATTACHMENT0)
-@@ -1770,6 +2098,7 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1784,6 +2108,7 @@ class GLWindowBackingBase(WindowBackingBase):
          except Exception as e:
              message = f"OpenGL {rgb_format} paint error: {e}"
              log("Error in %s paint of %i bytes, options=%s", rgb_format, len(img_data), options, exc_info=True)
@@ -11161,7 +11149,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
          fire_paint_callbacks(callbacks, False, message)
  
      def do_video_paint(self, coding: str, img,
-@@ -1805,7 +2134,21 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1819,7 +2144,21 @@ class GLWindowBackingBase(WindowBackingBase):
      def paint_planar(self, context, shader: str, encoding: str, img,
                       x: int, y: int, enc_width: int, enc_height: int, width: int, height: int,
                       options: typedict, callbacks: PaintCallbacks) -> None:
@@ -11183,7 +11171,7 @@ index 9ac4af4b53f9cd3db52ebf554d079d89cc2ce3c3..c20d3f0e3ad623f1911a2b49cfbb1365
          if pixel_format not in PLANAR_FORMATS:
              img.free()
              raise ValueError(f"the GL backing does not handle pixel format {pixel_format!r} yet!")
-@@ -1814,10 +2157,12 @@ class GLWindowBackingBase(WindowBackingBase):
+@@ -1828,10 +2167,12 @@ class GLWindowBackingBase(WindowBackingBase):
              log("%s.paint_planar(..) no OpenGL context!", self)
              fire_paint_callbacks(callbacks, False, "failed to get a gl context")
              return
@@ -13814,10 +13802,10 @@ index 87c328b0c6e5a982f7b21784111f8d8117efe0e7..dfbcafcfb26abce371c65b8cf2ecfe03
              if bc:
                  bc.match_vrefresh(rrate)
 diff --git a/xpra/server/subsystem/window.py b/xpra/server/subsystem/window.py
-index e118265051a5c90aa3fd11c39adf05858efd8ad6..5871b86edd8898c8bbc87f5abd3937411381c4e7 100644
+index 0f2eb4521ab9280026ded2815cf61173fb3e9411..b851ec41afdb454e63b4fb9d21a44c17f5676332 100644
 --- a/xpra/server/subsystem/window.py
 +++ b/xpra/server/subsystem/window.py
-@@ -881,12 +881,18 @@ class WindowServer(StubSubsystem):
+@@ -883,12 +883,18 @@ class WindowServer(StubSubsystem):
                  else:
                      log(f"window id {wid:#x} does not exist")
          wss = []
@@ -13840,7 +13828,7 @@ index e118265051a5c90aa3fd11c39adf05858efd8ad6..5871b86edd8898c8bbc87f5abd393741
  
      def _set_encoding_property(self, name: str, value, *wids) -> str:
 diff --git a/xpra/server/window/compress.py b/xpra/server/window/compress.py
-index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb9fcb6ea0 100644
+index 76b12da81ed48731f5172d08bbeb1b0b2d57053c..19a556c78e8264bdc8067da18f398d0be806e514 100644
 --- a/xpra/server/window/compress.py
 +++ b/xpra/server/window/compress.py
 @@ -6,6 +6,7 @@
@@ -13868,7 +13856,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
  
  MAX_SEQUENCE = 2**64
  
-@@ -1613,7 +1615,7 @@ class WindowSource(WindowIconSource):
+@@ -1620,7 +1622,7 @@ class WindowSource(WindowIconSource):
          self.update_encoding_options(force_reload)
          self.update_refresh_attributes()
  
@@ -13877,7 +13865,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
          """ decide what to do with the damage area:
              * send it now (if not congested)
              * add it to an existing delayed region
-@@ -1628,12 +1630,12 @@ class WindowSource(WindowIconSource):
+@@ -1635,12 +1637,12 @@ class WindowSource(WindowIconSource):
          """
          check_main_thread()
          if self.suspended:
@@ -13892,7 +13880,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
          now = monotonic()
          if options is None:
              options = {}
-@@ -1645,7 +1647,7 @@ class WindowSource(WindowIconSource):
+@@ -1652,7 +1654,7 @@ class WindowSource(WindowIconSource):
          ww, wh = self.may_update_window_dimensions()
          if ww == 0 or wh == 0:
              damagelog("damage%s window size %ix%i ignored", (x, y, w, h, options), ww, wh)
@@ -13901,7 +13889,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
          if ww > MAX_WINDOW_SIZE or wh > MAX_WINDOW_SIZE:
              if first_time(f"window-oversize-{self.wid:#x}"):
                  damagelog("")
-@@ -1653,7 +1655,7 @@ class WindowSource(WindowIconSource):
+@@ -1660,7 +1662,7 @@ class WindowSource(WindowIconSource):
                  damagelog.warn(" window updates will be dropped until this is corrected")
              else:
                  damagelog("ignoring damage for window %i size %ix%i", self.wid, ww, wh)
@@ -13910,7 +13898,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
          if self.full_frames_only:
              x, y, w, h = 0, 0, ww, wh
          elif DAMAGE_WIDTH_PADDING or DAMAGE_HEIGHT_PADDING or DAMAGE_WIDTH_PADDING_PCT or DAMAGE_HEIGHT_PADDING_PCT:
-@@ -1665,8 +1667,12 @@ class WindowSource(WindowIconSource):
+@@ -1672,8 +1674,12 @@ class WindowSource(WindowIconSource):
              y = max(0, y - h_padding)
              w = min(ww - x, x2 - x)
              h = min(wh - y, y2 - y)
@@ -13923,7 +13911,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
  
      def do_damage(self, ww: int, wh: int, x: int, y: int, w: int, h: int, options: dict) -> None:
          now = monotonic()
-@@ -2174,57 +2180,162 @@ class WindowSource(WindowIconSource):
+@@ -2181,57 +2187,162 @@ class WindowSource(WindowIconSource):
          # WindowVideoSource overrides this method
          return self.full_frames_only
  
@@ -14125,7 +14113,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
          elapsed = int(1000 * (monotonic() - rgb_request_time))
          log("retrieving %s took %ims", image, elapsed)
  
-@@ -2233,45 +2344,60 @@ class WindowSource(WindowIconSource):
+@@ -2240,45 +2351,60 @@ class WindowSource(WindowIconSource):
          h = image.get_height()
          if w == 0 or h == 0:
              log("process_damage_image: invalid dimensions: %ix%i", w, h)
@@ -14203,7 +14191,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
          """
          This method is not actually used in practice,
          as all window sources use the WindowVideoSource subclass.
-@@ -2284,10 +2410,12 @@ class WindowSource(WindowIconSource):
+@@ -2291,10 +2417,12 @@ class WindowSource(WindowIconSource):
          w = image.get_width()
          h = image.get_height()
          item = (w, h, damage_time, now, image, coding, sequence, eoptions, flush)
@@ -14218,7 +14206,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
  
      def scaled_size(self, image: ImageWrapper) -> tuple[int, int] | None:
          crs = self.client_render_size
-@@ -2307,26 +2435,59 @@ class WindowSource(WindowIconSource):
+@@ -2314,26 +2442,59 @@ class WindowSource(WindowIconSource):
          """ This function is called from the damage data thread!
              Extra care must be taken to prevent access to X11 functions on window.
          """
@@ -14296,7 +14284,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
  
      def schedule_auto_refresh(self, packet: Packet, options: typedict) -> None:
          if not self.can_refresh():
-@@ -2551,6 +2712,11 @@ class WindowSource(WindowIconSource):
+@@ -2558,6 +2719,11 @@ class WindowSource(WindowIconSource):
          self.refresh_regions = []
          w, h = self.window_dimensions
          refreshlog("full_quality_refresh() for %sx%s window with pending refresh regions: %s", w, h, refresh_regions)
@@ -14308,7 +14296,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
          new_options = damage_options.copy()
          encoding = self.auto_refresh_encodings[0]
          new_options.update(self.get_refresh_options())
-@@ -2570,7 +2736,8 @@ class WindowSource(WindowIconSource):
+@@ -2577,7 +2743,8 @@ class WindowSource(WindowIconSource):
          }
  
      def queue_damage_packet(self, packet: Packet, damage_time: float,
@@ -14318,7 +14306,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
          """
              Adds the given packet to the packet_queue,
              (warning: this runs from the non-UI 'encode' thread)
-@@ -2592,20 +2759,123 @@ class WindowSource(WindowIconSource):
+@@ -2599,20 +2766,123 @@ class WindowSource(WindowIconSource):
          now = monotonic()
          pixcount = width * height
          bytecount = len(data)
@@ -14455,7 +14443,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
  
      def save_update(self, packet: Packet, damage_time: float) -> None:
          import json
-@@ -2749,59 +3019,77 @@ class WindowSource(WindowIconSource):
+@@ -2756,59 +3026,77 @@ class WindowSource(WindowIconSource):
              (warning: this runs from the non-UI network parse thread,
              don't access the window from here!)
          """
@@ -14578,7 +14566,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
          damage_delayed = self._damage_delayed
          if not damage_delayed:
              self.soft_expired = 0
-@@ -2943,7 +3231,7 @@ class WindowSource(WindowIconSource):
+@@ -2950,7 +3238,7 @@ class WindowSource(WindowIconSource):
          self.statistics.encoding_stats.append((end, coding, w*h, bpp, csize, end-start))
          return self.make_draw_packet(x, y, outw, outh, coding, data, outstride, client_options, options)
  
@@ -14587,7 +14575,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
          # (wid, x, y) used in the outbound draw packet.
          # Subclasses may shift to retarget into a parent window.
          return self.wid, x, y
-@@ -2960,6 +3248,7 @@ class WindowSource(WindowIconSource):
+@@ -2967,6 +3255,7 @@ class WindowSource(WindowIconSource):
  
      def make_draw_packet(self, x: int, y: int, outw: int, outh: int,
                           coding: str, data, outstride: int, client_options, options) -> Packet:
@@ -14595,7 +14583,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
          if not isinstance(coding, str):
              raise RuntimeError(f"invalid type for encoding: {coding} ({type(coding)})")
          for v in (x, y, outw, outh, outstride):
-@@ -2968,21 +3257,80 @@ class WindowSource(WindowIconSource):
+@@ -2975,21 +3264,80 @@ class WindowSource(WindowIconSource):
          ws = options.get("window-size")
          if ws:
              client_options["window-size"] = ws
@@ -14685,7 +14673,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
      def direct_queue_draw(self, coding: str, data: bytes, client_info: dict) -> None:
          # this is a frame from a compressed stream,
          # send it to all the window sources for this window:
-@@ -3002,9 +3350,10 @@ class WindowSource(WindowIconSource):
+@@ -3009,9 +3357,10 @@ class WindowSource(WindowIconSource):
                      self._damage_packet_sequence, client_info, options)
          self.queue_damage_packet(packet, damage_time, process_damage_time, options)
  
@@ -14698,7 +14686,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
          # prepare the pixels in a format accepted by the client:
          pf = image.get_pixel_format()
          if pf not in self.rgb_formats:
-@@ -3021,7 +3370,7 @@ class WindowSource(WindowIconSource):
+@@ -3028,7 +3377,7 @@ class WindowSource(WindowIconSource):
          mmap_data = ()
          try:
              for i in range(5):
@@ -14707,7 +14695,7 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..14045d37ded630cf141037e3b37410bb
                  # elapsed = monotonic()-start+0.000000001 # make sure never zero!
                  # log("%s MBytes/s - %s bytes written to mmap in %.1f ms", int(len(data)/elapsed/1024/1024),
                  #    len(data), 1000*elapsed)
-@@ -3032,15 +3381,24 @@ class WindowSource(WindowIconSource):
+@@ -3039,15 +3388,24 @@ class WindowSource(WindowIconSource):
              if not mmap_data:
                  log("mmap write failed!")
                  return ()
@@ -14927,10 +14915,10 @@ index af4622c6feb1421991155ee7598f346d3b10ff19..87c5d5fbf27898276075167958d27561
 +        # stage set, so an internal source never owns an auto-refresh timer.
          return
 diff --git a/xpra/wayland/server/compositor.pyx b/xpra/wayland/server/compositor.pyx
-index 6edbf6468a1e1e706751156eab1e5a755a970e1e..8fe156caf62669082c180190c2045e42394becef 100644
+index 9847548f2e1dbb5f162d319a1939554afa006472..72065587eda705ff82b811d87ecc2485b46127e0 100644
 --- a/xpra/wayland/server/compositor.pyx
 +++ b/xpra/wayland/server/compositor.pyx
-@@ -558,6 +558,9 @@ cdef class WaylandCompositor(ListenerObject):
+@@ -562,6 +562,9 @@ cdef class WaylandCompositor(ListenerObject):
          log(" configured=%s, initialized=%s, initial_commit=%i", bool(xdg_surf.configured), bool(xdg_surf.initialized), bool(xdg_surf.initial_commit))
          # Pass the Surface instance so consumers can connect per-surface signals.
          self.emit("new-surface", surface, title, app_id, size)
@@ -14941,19 +14929,19 @@ index 6edbf6468a1e1e706751156eab1e5a755a970e1e..8fe156caf62669082c180190c2045e42
      cdef void new_popup(self, wlr_xdg_popup *popup) noexcept:
          if popup == NULL or popup.base == NULL or popup.base.surface == NULL:
 diff --git a/xpra/wayland/server/models/subsurface_window.py b/xpra/wayland/server/models/subsurface_window.py
-index 8ab788fca671acfb00881ffe901432b633226e62..fc34dfcbbefd1261e79b0ebbe08a44c64e97dc69 100644
+index 14821c424e60525054d9e6dc3ab0fa357d7dee27..f706461bd821814e7c51fc82f199d4bc0344b446 100644
 --- a/xpra/wayland/server/models/subsurface_window.py
 +++ b/xpra/wayland/server/models/subsurface_window.py
-@@ -9,17 +9,20 @@ from xpra.codecs.image import ImageWrapper
+@@ -9,17 +9,23 @@ from xpra.codecs.image import ImageWrapper
  from xpra.net.common import BACKWARDS_COMPATIBLE
  from xpra.os_util import gi_import
- from xpra.server.window.model import WindowModelStub
+ from xpra.wayland.server.models.frame import FrameCallbackModel
 +from xpra.wayland.server.models.window import borrow_image_wrapper, retain_image_snapshot
  
  GObject = gi_import("GObject")
  
  
- class SubsurfaceWindow(WindowModelStub):
+ class SubsurfaceWindow(FrameCallbackModel):
 -    """Minimal window-like facade so a WindowSource can be constructed for a
 -    wayland subsurface. The subsurface is not a window in its own right: it
 -    has no title, no parent/transient relationship the client cares about,
@@ -14966,20 +14954,23 @@ index 8ab788fca671acfb00881ffe901432b633226e62..fc34dfcbbefd1261e79b0ebbe08a44c6
 +    region for the connection-owned raw RGB32 transaction.  It is not a client
 +    window and has no independent decoder, title, transient relationship or
 +    presentation lifecycle.  Content hints stay empty so compatibility calls
-+    cannot inherit the parent window's encoding policy.
++    cannot inherit the parent window's encoding policy.  It publishes the
++    child surface and display like every upstream frame-callback model, but
++    WSSO completes each native child commit directly and never arms its
++    frame timers.
 +    """
  
      __gproperties__ = {
-         "depth": (GObject.TYPE_INT, "bit depth", "", -1, 64, -1, GObject.ParamFlags.READABLE),
-@@ -41,6 +44,7 @@ class SubsurfaceWindow(WindowModelStub):
-         self._width = width
-         self._height = height
+         # the child's own `wl_surface` and the display to flush: a subsurface has its own
+@@ -50,6 +56,7 @@ class SubsurfaceWindow(FrameCallbackModel):
          self._image: ImageWrapper | None = None
+         self._internal_set_property("surface", surface)
+         self._internal_set_property("display", display)
 +        self._snapshot_generation = 0
          self._internal_set_property("depth", depth)
          self._internal_set_property("has-alpha", has_alpha)
          self._setup_done = True
-@@ -66,17 +70,22 @@ class SubsurfaceWindow(WindowModelStub):
+@@ -83,17 +90,22 @@ class SubsurfaceWindow(FrameCallbackModel):
          image = self._image
          if image is None:
              return None
@@ -15013,7 +15004,7 @@ index 8ab788fca671acfb00881ffe901432b633226e62..fc34dfcbbefd1261e79b0ebbe08a44c6
  
      def get(self, name: str, default_value: Any = None) -> Any:
          if BACKWARDS_COMPATIBLE and name == "content-type":
-@@ -95,3 +104,69 @@ class SubsurfaceWindow(WindowModelStub):
+@@ -112,3 +124,69 @@ class SubsurfaceWindow(FrameCallbackModel):
  
      def is_shadow(self) -> bool:
          return False
@@ -15084,7 +15075,7 @@ index 8ab788fca671acfb00881ffe901432b633226e62..fc34dfcbbefd1261e79b0ebbe08a44c6
 +    def get_colourspace_snapshot(self):
 +        return getattr(self, "_subsurface_colourspace", None)
 diff --git a/xpra/wayland/server/models/window.py b/xpra/wayland/server/models/window.py
-index a5b455bc2a1f651274a08d372b70648becfffe00..51e215771359b7704f73b8b9b50887befd7c6591 100644
+index c04ed7e4eae13945e3c4f3497c4f833f32c20013..405d439073124b47ecb7ec6b092939408899a7fc 100644
 --- a/xpra/wayland/server/models/window.py
 +++ b/xpra/wayland/server/models/window.py
 @@ -4,7 +4,9 @@
@@ -15096,7 +15087,7 @@ index a5b455bc2a1f651274a08d372b70648becfffe00..51e215771359b7704f73b8b9b50887be
 +from xpra.constants import MAX_WINDOW_SIZE
  from xpra.util.gobject import one_arg_signal
  from xpra.codecs.image import ImageWrapper
- from xpra.server.window.model import WindowModelStub
+ from xpra.wayland.server.models.frame import FrameCallbackModel
 @@ -16,6 +18,162 @@ log = Logger("wayland", "window")
  GObject = gi_import("GObject")
  
@@ -15257,10 +15248,10 @@ index a5b455bc2a1f651274a08d372b70648becfffe00..51e215771359b7704f73b8b9b50887be
 +    return retained
 +
 +
- class Window(WindowModelStub):
+ class Window(FrameCallbackModel):
      __gproperties__ = {
          "display": (
-@@ -192,6 +350,10 @@ class Window(WindowModelStub):
+@@ -193,6 +351,10 @@ class Window(FrameCallbackModel):
          super().__init__()
          for key, prop in props.items():
              self._internal_set_property(key, prop)
@@ -15271,21 +15262,15 @@ index a5b455bc2a1f651274a08d372b70648becfffe00..51e215771359b7704f73b8b9b50887be
  
      def __repr__(self) -> str:  # pylint: disable=arguments-differ
          surface = self._gproperties.get("surface", None)
-@@ -210,7 +372,10 @@ class Window(WindowModelStub):
-         if not self._managed:
-             return
+@@ -213,19 +375,78 @@ class Window(FrameCallbackModel):
          self._managed = False
+         self.cancel_damage_frame_timer()
+         self.cancel_empty_ack_timer()
 -        self.managed_disconnect()
 +        try:
 +            self.clear_image()
 +        finally:
 +            self.managed_disconnect()
- 
-     def acknowledge_changes(self) -> None:
-         if not self._managed:
-@@ -220,17 +385,73 @@ class Window(WindowModelStub):
-         if display := self._gproperties.get("display"):
-             display.flush_clients()
  
 -    def get_image(self, x: int, y: int, width: int, height: int) -> ImageWrapper:
 +    def get_image(self, x: int, y: int, width: int, height: int) -> ImageWrapper | None:
@@ -15606,10 +15591,10 @@ index db44e06e0c0e15782af1de5658ae5dfaf5250698..f843e348356dd616c2cb73f85366acbc
 +    cdef void role_destroy(self) noexcept
      cdef void destroy(self) noexcept
 diff --git a/xpra/wayland/server/subsurface.pyx b/xpra/wayland/server/subsurface.pyx
-index c29c7f77a5b3566ea119c6b4f0808b4297a0d4cc..c64bd9525098f4c45bfb37b6c337d5e291babc30 100644
+index 3edbb9df1e122548453aa2d3775c6b0378c62edf..513a879c212d13ad5dab0593b98e4bd0b8232a36 100644
 --- a/xpra/wayland/server/subsurface.pyx
 +++ b/xpra/wayland/server/subsurface.pyx
-@@ -6,22 +6,93 @@
+@@ -6,22 +6,78 @@
  # cython: language_level=3
  
  from xpra.log import Logger
@@ -15625,10 +15610,9 @@ index c29c7f77a5b3566ea119c6b4f0808b4297a0d4cc..c64bd9525098f4c45bfb37b6c337d5e2
 +    WLR_SURFACE_STATE_VIEWPORT,
 +)
 +from xpra.wayland.server.pixman cimport (
-+    pixman_region32_t, pixman_box32_t, pixman_region32_rectangles,
-+    pixman_region32_init, pixman_region32_fini,
++    pixman_region32_t, pixman_region32_init, pixman_region32_fini,
  )
- from xpra.wayland.server.wayland_surface cimport WaylandSurface, next_wid
+ from xpra.wayland.server.wayland_surface cimport WaylandSurface, next_wid, get_damage_areas
 +from xpra.wayland.server.wayland_surface import surfaces
  
  
@@ -15684,20 +15668,6 @@ index c29c7f77a5b3566ea119c6b4f0808b4297a0d4cc..c64bd9525098f4c45bfb37b6c337d5e2
 +    return tuple(result)
 +
 +
-+cdef tuple effective_damage_rectangles(pixman_region32_t *damage):
-+    cdef int n_rects = 0
-+    cdef pixman_box32_t *rects = pixman_region32_rectangles(damage, &n_rects)
-+    result = []
-+    cdef int i
-+    for i in range(n_rects):
-+        result.append((
-+            rects[i].x1, rects[i].y1,
-+            rects[i].x2 - rects[i].x1,
-+            rects[i].y2 - rects[i].y1,
-+        ))
-+    return tuple(result)
-+
-+
 +# Listener slots for Subsurface.  A subsurface may itself be the parent of a
 +# nested subsurface, so its wl_surface lifetime includes new-subsurface events.
  cdef enum SubsurfaceListener:
@@ -15706,7 +15676,7 @@ index c29c7f77a5b3566ea119c6b4f0808b4297a0d4cc..c64bd9525098f4c45bfb37b6c337d5e2
      L_DESTROY            # underlying wl_surface destroy
      L_SUB_DESTROY        # subsurface-role destroy (role unassigned but wl_surface may live on)
      N_LISTENERS
-@@ -36,13 +107,35 @@ cdef class Subsurface(WaylandSurface):
+@@ -36,13 +92,35 @@ cdef class Subsurface(WaylandSurface):
      def get_parent(self):
          return self.parent
  
@@ -15746,7 +15716,7 @@ index c29c7f77a5b3566ea119c6b4f0808b4297a0d4cc..c64bd9525098f4c45bfb37b6c337d5e2
          self.parent = parent
          self.wlr_subsurface = subsurface
          self.wlr_surface = subsurface.surface
-@@ -53,49 +146,192 @@ cdef class Subsurface(WaylandSurface):
+@@ -53,56 +131,192 @@ cdef class Subsurface(WaylandSurface):
          # Listen for the underlying wl_surface's commit and destroy, and the
          # subsurface-role destroy.
          self.add_listener(L_COMMIT, &subsurface.surface.events.commit)
@@ -15790,6 +15760,13 @@ index c29c7f77a5b3566ea119c6b4f0808b4297a0d4cc..c64bd9525098f4c45bfb37b6c337d5e2
              return
 -        if not self.wlr_surface.mapped:
 -            self.update_source_format(NULL)
+-            return
+-        if not get_damage_areas(&self.wlr_surface.buffer_damage):
+-            # The client committed without damaging anything, just to get another
+-            # frame callback. The previous buffer is still attached, so capturing
+-            # would re-encode an identical image as a full-surface update:
+-            # answer the callback instead, if we do not owe one for real damage.
+-            self._emit("subsurface-empty-commit", self.wid)
 +        image = None
 +        try:
 +            mapped = bool(self.wlr_surface.mapped)
@@ -15808,7 +15785,7 @@ index c29c7f77a5b3566ea119c6b4f0808b4297a0d4cc..c64bd9525098f4c45bfb37b6c337d5e2
 +            pixman_region32_init(&effective_damage)
 +            try:
 +                wlr_surface_get_effective_damage(self.wlr_surface, &effective_damage)
-+                damage = effective_damage_rectangles(&effective_damage)
++                damage = tuple(get_damage_areas(&effective_damage))
 +            finally:
 +                pixman_region32_fini(&effective_damage)
 +            if has_buffer and sampling_changed and size[0] > 0 and size[1] > 0:
@@ -16078,7 +16055,7 @@ index 764e86656ae320fd15d13af67bcbb21f6b882f41..01be0fa55b890acbf0641f83b4762618
      def get_pointer_target(self, proto, wid: int, pos, props=None) -> tuple[int, int]:
          # wayland surfaces are fed surface-relative coordinates:
 diff --git a/xpra/wayland/server/subsystem/window.py b/xpra/wayland/server/subsystem/window.py
-index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcfc1e8f6a3 100644
+index 067156fde5e7b8f07303c70a15cd16ee0eec3744..55b0052150229a7681d3133e95a497708bc44e3d 100644
 --- a/xpra/wayland/server/subsystem/window.py
 +++ b/xpra/wayland/server/subsystem/window.py
 @@ -15,6 +15,7 @@ from xpra.net.packet_type import WINDOW_CREATE
@@ -16089,8 +16066,8 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
  from xpra.util.objects import typedict
  from xpra.wayland.server.models.subsurface_window import SubsurfaceWindow
  from xpra.wayland.server.models.window import Window
-@@ -31,19 +32,54 @@ PER_SURFACE_EVENTS: Final[Sequence[str]] = (
-     "map", "unmap", "commit", "destroy",
+@@ -32,18 +33,53 @@ PER_SURFACE_EVENTS: Final[Sequence[str]] = (
+     "title", "app-id",
      "minimize", "maximize", "fullscreen",
      "move", "resize",
 -    "surface-image",
@@ -16099,7 +16076,7 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
      "new-subsurface",
  )
  PER_SUBSURFACE_EVENTS: Final[Sequence[str]] = (
--    "commit", "destroy", "subsurface-image",
+-    "commit", "destroy", "subsurface-image", "subsurface-empty-commit",
 +    "destroy", "new-subsurface", "subsurface-commit",
 +    "subsurface-role-destroy",
  )
@@ -16141,21 +16118,21 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
  class WaylandWindowServer(WindowServer):
      __slots__ = (
          "focused", "pending_popups", "pointer_focus", "subsurface_facades", "subsurface_info",
--        "toplevel_wid",
 +        "subsurface_parents", "subsurface_stacking", "subsurface_topology_errors",
-+        "subsurfaces", "toplevel_wid",
+         "subsurfaces", "toplevel_wid",
      )
  
-     def __init__(self, server=None):
-@@ -56,6 +92,19 @@ class WaylandWindowServer(WindowServer):
+@@ -57,9 +93,19 @@ class WaylandWindowServer(WindowServer):
          self.subsurface_info: dict[int, tuple[int, int, int, int, int, int, int]] = {}
          # subsurface wid -> SubsurfaceWindow facade kept alive across the subsurface lifetime.
          self.subsurface_facades: dict[int, SubsurfaceWindow] = {}
+-        # subsurface wid -> the native Subsurface: a child has its own frame callbacks,
+-        # which only `frame_done` on its own surface can answer
 +        # WSSO stores the root wire parent in the first `subsurface_info` item;
 +        # native direct-parent identity remains separate below for nested trees.
 +        # Every wl_surface-owned wrapper remains registered through temporary
 +        # role loss and effective unmap; only wl_surface destroy removes it.
-+        self.subsurfaces: dict[int, Subsurface] = {}
+         self.subsurfaces: dict[int, Subsurface] = {}
 +        # subsurface wid -> direct Wayland parent wid (which may itself be a child).
 +        self.subsurface_parents: dict[int, int] = {}
 +        # root WID -> full mapped wlroots bottom-to-top paint order, including
@@ -16167,7 +16144,7 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
  
      def connect_compositor(self, compositor) -> None:
          compositor.connect("new-surface", self.new_surface)
-@@ -69,6 +118,29 @@ class WaylandWindowServer(WindowServer):
+@@ -73,6 +119,29 @@ class WaylandWindowServer(WindowServer):
              return None
          return window._gproperties.get("surface")
  
@@ -16197,7 +16174,7 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
      def _register_surface_events(self, surface, events: Sequence[str]) -> None:
          for event in events:
              handler = getattr(self, event.replace("-", "_"))
-@@ -217,14 +289,27 @@ class WaylandWindowServer(WindowServer):
+@@ -221,9 +290,16 @@ class WaylandWindowServer(WindowServer):
          if not window:
              log.warn("Warning: cannot map window %i: not found!", wid)
              return
@@ -16212,7 +16189,9 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
 +            if surface_tree:
 +                self._update_subsurface_topology(wid, surface_tree)
  
-     def unmap(self, wid: int) -> None:
+     def title(self, wid: int, title: str) -> None:
+         window = self.get_window(wid)
+@@ -239,6 +315,12 @@ class WaylandWindowServer(WindowServer):
          window = self.get_window(wid)
          if window:
              window.set_property("iconic", True)
@@ -16225,7 +16204,7 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
  
      def minimize(self, wid: int) -> None:
          self._toggle_state(wid, "iconic")
-@@ -249,7 +334,7 @@ class WaylandWindowServer(WindowServer):
+@@ -263,7 +345,7 @@ class WaylandWindowServer(WindowServer):
      def commit(self, wid: int, mapped: bool,
                 size: tuple[int, int],
                 rects: Sequence[tuple[int, int, int, int]],
@@ -16234,7 +16213,7 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
          log(f"commit wid {wid} {mapped=}, {size=}, {rects=}, {subsurfaces=}")
          window = self.get_window(wid)
          if not window:
-@@ -260,6 +345,12 @@ class WaylandWindowServer(WindowServer):
+@@ -274,6 +356,12 @@ class WaylandWindowServer(WindowServer):
          self.update_content_types(window, surface)
          self.update_size(window, size)
          self.update_opaque_region(window, surface)
@@ -16247,30 +16226,24 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
          for sub_wid, sx, sy, logical_w, logical_h, native_w, native_h in subsurfaces:
              self.subsurface_info[sub_wid] = (wid, sx, sy, logical_w, logical_h, native_w, native_h)
              facade = self.subsurface_facades.get(sub_wid)
-@@ -278,6 +369,78 @@ class WaylandWindowServer(WindowServer):
+@@ -297,6 +385,72 @@ class WaylandWindowServer(WindowServer):
              options["more"] = i != last
              self.refresh_window_area(window, x, y, w, h, options=options)
  
-+    def _cancel_ordinary_empty_damage_ack(self, wid: int) -> None:
-+        """Cancel only an optional WEDT-owned ordinary toplevel timer entry."""
-+        cancel = getattr(self, "cancel_empty_damage_ack", None)
-+        if cancel:
-+            cancel(wid)
++    @staticmethod
++    def _cancel_ordinary_empty_damage_ack(window) -> None:
++        """Cancel the model's paced answer to an earlier undamaged root commit."""
++        window.cancel_empty_ack_timer()
 +
 +    @staticmethod
 +    def _mark_ordinary_damage_frame_pending(window) -> None:
-+        """Join the optional WEDT model guard before ordinary damage fanout."""
-+        mark = getattr(window, "mark_wayland_damage_frame_pending", None)
-+        if mark:
-+            mark()
++        """Join the model's frame guard before ordinary damage fanout."""
++        window.mark_damage_frame_pending()
 +
-+    def _acknowledge_ordinary_empty_commit(self, wid: int, window) -> None:
-+        """Delegate an ordinary root-only empty commit to WEDT when present."""
-+        schedule = getattr(self, "schedule_empty_damage_ack", None)
-+        if schedule:
-+            schedule(wid, window)
-+        else:
-+            window.acknowledge_changes()
++    @staticmethod
++    def _acknowledge_ordinary_empty_commit(window) -> None:
++        """Pace an ordinary root-only undamaged commit through its model."""
++        window.schedule_empty_acknowledgement()
 +
 +    def _commit_surface_tree(
 +            self, wid: int, mapped: bool,
@@ -16296,13 +16269,13 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
 +        )
 +        if mapped and not rects and not repaired_sources:
 +            if composite_owned:
-+                self._cancel_ordinary_empty_damage_ack(wid)
++                self._cancel_ordinary_empty_damage_ack(window)
 +                window.acknowledge_changes()
 +            else:
-+                self._acknowledge_ordinary_empty_commit(wid, window)
++                self._acknowledge_ordinary_empty_commit(window)
 +            return
 +        if not repaired_sources and (not mapped or composite_owned or rects):
-+            self._cancel_ordinary_empty_damage_ack(wid)
++            self._cancel_ordinary_empty_damage_ack(window)
 +        if mapped and not composite_owned and rects and not repaired_sources:
 +            self._mark_ordinary_damage_frame_pending(window)
 +        sources = self._subsurface_window_sources()
@@ -16325,10 +16298,10 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
 +
      def subsurface_image(self, wid: int, image: ImageWrapper,
                           logical_w: int, logical_h: int, native_w: int, native_h: int) -> None:
-         info = self.subsurface_info.get(wid)
-@@ -305,6 +468,154 @@ class WaylandWindowServer(WindowServer):
-                                                logical_w, logical_h, native_w, native_h)
-             sub_ws.damage(0, 0, logical_w, logical_h, {})
+         """Handle ``subsurface-image`` signals dynamically connected in ``new_subsurface``.
+@@ -341,6 +495,156 @@ class WaylandWindowServer(WindowServer):
+         if facade:
+             facade.schedule_empty_acknowledgement()
  
 +    def surface_snapshot(self, wid: int, image: ImageWrapper | None) -> None:
 +        """Copy one borrowed WSSO toplevel snapshot generation.
@@ -16353,7 +16326,9 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
 +        try:
 +            facade = self.subsurface_facades.get(wid)
 +            if facade is None:
-+                facade = SubsurfaceWindow(logical_w, logical_h, has_alpha=True, depth=32)
++                facade = SubsurfaceWindow(logical_w, logical_h, has_alpha=True, depth=32,
++                                          surface=self.subsurfaces.get(wid),
++                                          display=self.server.compositor.get_display())
 +                self.subsurface_facades[wid] = facade
 +            else:
 +                facade.replace_dimensions(logical_w, logical_h)
@@ -16481,16 +16456,17 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
      @staticmethod
      def update_colourspace(window, surface) -> None:
          # the `wp_color_management_surface_v1` tag is double buffered state,
-@@ -394,6 +705,8 @@ class WaylandWindowServer(WindowServer):
+@@ -430,7 +734,8 @@ class WaylandWindowServer(WindowServer):
      def destroy(self, wid: int) -> None:
          # The wlroots xdg surface is being freed. Drop every server-side
          # surface reference before delayed focus or encoder callbacks can use it.
+-        self.subsurfaces.pop(wid, None)
 +        if self._destroy_surface_tree_state(wid):
 +            return
          if wid in self.subsurface_info:
              self.subsurface_info.pop(wid, None)
-             self.subsurface_facades.pop(wid, None)
-@@ -413,6 +726,521 @@ class WaylandWindowServer(WindowServer):
+             if facade := self.subsurface_facades.pop(wid, None):
+@@ -452,6 +757,521 @@ class WaylandWindowServer(WindowServer):
          if self.pointer_focus == wid:
              self.pointer_focus = 0
  
@@ -16518,9 +16494,6 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
 +        self.subsurface_topology_errors.pop(wid, None)
 +        if window is not None:
 +            surface = None
-+            clear_pending = getattr(window, "clear_wayland_damage_frame_pending", None)
-+            if clear_pending:
-+                clear_pending()
 +            try:
 +                surface = window.get_property("surface")
 +                if surface:
@@ -16575,6 +16548,12 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
 +                facade.clear_image()
 +            except BaseException:
 +                log.error("Error releasing Wayland subsurface %#x image", wid, exc_info=True)
++            try:
++                # Release the terminal child surface reference held by the
++                # upstream frame-callback model; WSSO never arms its timers.
++                facade.unmanage()
++            except BaseException:
++                log.error("Error unmanaging Wayland subsurface %#x facade", wid, exc_info=True)
 +
 +    def _deactivate_subsurface_tree(self, wid: int, *, reconcile: bool = True) -> set[int]:
 +        """Detach a branch for unmap or reparent while retaining wrappers."""
@@ -16790,8 +16769,8 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
 +            self, root_wid: int, window, composite_owned: bool,
 +            mapped_root: bool | None,
 +    ) -> bool:
-+        """Join WEDT ownership before the first repair request for one root."""
-+        self._cancel_ordinary_empty_damage_ack(root_wid)
++        """Join the model's frame guard before the first repair request for one root."""
++        self._cancel_ordinary_empty_damage_ack(window)
 +        if composite_owned:
 +            return False
 +        mapped = mapped_root
@@ -16799,20 +16778,17 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
 +            mapped = not bool(window.get_property("iconic"))
 +        if not mapped:
 +            return False
-+        pending = getattr(window, "has_wayland_damage_frame_pending", None)
-+        already_pending = bool(pending()) if pending else False
++        # The upstream frame model has no public predicate: its damage guard is
++        # the pending safety timer which `mark_damage_frame_pending` arms.
++        already_pending = bool(window._damage_frame_timer)
 +        self._mark_ordinary_damage_frame_pending(window)
-+        clear = getattr(window, "clear_wayland_damage_frame_pending", None)
-+        return not already_pending and bool(clear)
++        return not already_pending
 +
 +    @staticmethod
 +    def _rollback_reconciliation_damage(window, acquired_guard: bool) -> None:
 +        """Release only a guard acquired for a repair which accepted no work."""
-+        if not acquired_guard:
-+            return
-+        clear = getattr(window, "clear_wayland_damage_frame_pending", None)
-+        if clear:
-+            clear()
++        if acquired_guard:
++            window.cancel_damage_frame_timer()
 +
 +    def _announce_source_root(self, ss, root_wid: int, window) -> None:
 +        if self._source_announced(ss, root_wid, window):
@@ -17012,7 +16988,7 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
      def set_parent(self, wid: int, parent_wid: int) -> None:
          log("set_parent: wid=%i, parent_wid=%i", wid, parent_wid)
          window = self.get_window(wid)
-@@ -422,10 +1250,50 @@ class WaylandWindowServer(WindowServer):
+@@ -461,11 +1281,50 @@ class WaylandWindowServer(WindowServer):
          window._updateprop("transient-for", parent_wid)
  
      def new_subsurface(self, wid: int, subsurface: Subsurface,
@@ -17024,6 +17000,7 @@ index 64e2b99e8a749ac3980843a18a591b4129f6bfdd..ac7d51960d84bc48e4c6365ec69ddfcf
 +                       colourspace=None) -> None:
          log.info("new subsurface of %i: %s %ix%i native=%ix%i",
                   wid, subsurface, width, height, native_width, native_height)
+-        self.subsurfaces[subsurface.wid] = subsurface
 -        self._register_surface_events(subsurface, PER_SUBSURFACE_EVENTS)
 +        child_wid = subsurface.wid
 +        existing = self.subsurfaces.get(child_wid)
@@ -17077,7 +17054,7 @@ index f4f9565a9a44edc4c69e1be88415710b0bb7f4d0..04a81e9f9c79f72429e2cdd99bd56b76
      cdef void new_subsurface(self, wlr_subsurface *subsurface) noexcept
      cdef void unregister_toplevel_handlers(self) noexcept nogil
 diff --git a/xpra/wayland/server/surface.pyx b/xpra/wayland/server/surface.pyx
-index cc18b33ae54bcce6436d7f3b4973b8519a225296..a9579acbc7829fe5abc8d18a3f043cad60ff1d8d 100644
+index 8f81ffaec7497ee743c02d3676a20a304d4ffc30..825a954775b99917559101ce7920526bbdd02bc7 100644
 --- a/xpra/wayland/server/surface.pyx
 +++ b/xpra/wayland/server/surface.pyx
 @@ -9,11 +9,12 @@ from typing import Dict
@@ -17088,7 +17065,7 @@ index cc18b33ae54bcce6436d7f3b4973b8519a225296..a9579acbc7829fe5abc8d18a3f043cad
  
  from libc.stdint cimport uintptr_t, uint32_t, int32_t
  
- from xpra.wayland.server.wayland_surface cimport WaylandSurface, next_wid
+ from xpra.wayland.server.wayland_surface cimport WaylandSurface, next_wid, get_damage_areas
 -from xpra.wayland.server.subsurface cimport Subsurface
 +from xpra.wayland.server.subsurface cimport Subsurface, undiscovered_subsurfaces
  # `surfaces` is the shared registry (Python dict) defined in wayland_surface.pyx
@@ -17178,7 +17155,7 @@ index cc18b33ae54bcce6436d7f3b4973b8519a225296..a9579acbc7829fe5abc8d18a3f043cad
  
      cdef void request_move(self, uint32_t serial) noexcept:
          log("Surface REQUEST MOVE")
-@@ -359,52 +378,183 @@ cdef class Surface(WaylandSurface):
+@@ -360,52 +379,183 @@ cdef class Surface(WaylandSurface):
              else:
                  self.apply_decoration_mode()
  
@@ -17393,7 +17370,7 @@ index cc18b33ae54bcce6436d7f3b4973b8519a225296..a9579acbc7829fe5abc8d18a3f043cad
          cdef int i
          for i in range(L_TOPLEVEL_DESTROY, L_REQUEST_SHOW_WINDOW_MENU + 1):
              self._detach_slot(i)
-@@ -492,58 +642,65 @@ cdef tuple get_clipped_opaque_region(pixman_region32_t *region,
+@@ -478,58 +628,65 @@ cdef tuple get_clipped_opaque_region(pixman_region32_t *region,
  
  cdef struct collect_ctx:
      wlr_surface *root
@@ -17492,7 +17469,7 @@ index cc18b33ae54bcce6436d7f3b4973b8519a225296..a9579acbc7829fe5abc8d18a3f043cad
 +        result.clear()
      return result
 diff --git a/xpra/wayland/server/wayland_surface.pyx b/xpra/wayland/server/wayland_surface.pyx
-index 51f3c03d3c5d27d65ed08cccdf71dd65fbfd888c..eb6351f8d101c96eb70be66e540bda24085cc6a3 100644
+index 802fdc4e1a3fc276445dd2a1f47484a3a6900148..1f7ecaf32a3b4699edfacb2ee6f75a0d33dd77e5 100644
 --- a/xpra/wayland/server/wayland_surface.pyx
 +++ b/xpra/wayland/server/wayland_surface.pyx
 @@ -8,6 +8,8 @@
@@ -17504,7 +17481,7 @@ index 51f3c03d3c5d27d65ed08cccdf71dd65fbfd888c..eb6351f8d101c96eb70be66e540bda24
  from xpra.log import Logger
  from xpra.util.str_fn import Ellipsizer
  from xpra.util.env import first_time
-@@ -18,11 +20,15 @@ from xpra.common import CONTENT_TYPE_PICTURE, CONTENT_TYPE_VIDEO
+@@ -18,12 +20,16 @@ from xpra.common import CONTENT_TYPE_PICTURE, CONTENT_TYPE_VIDEO
  from xpra.wayland.server.colourspace import get_colourspace as parse_colourspace
  
  from libc.string cimport memset
@@ -17515,12 +17492,13 @@ index 51f3c03d3c5d27d65ed08cccdf71dd65fbfd888c..eb6351f8d101c96eb70be66e540bda24
  
  from xpra.buffers.membuf cimport getbuf, MemBuf
  from xpra.wayland.server.events cimport ListenerObject
+ from xpra.wayland.server.pixman cimport pixman_region32_t, pixman_box32_t, pixman_region32_rectangles
 +from xpra.wayland.server.models.window import wayland_sampling_affine
 +from xpra.constants import MAX_WINDOW_SIZE
  
  cdef extern from "time.h":
      int clock_gettime(int clk_id, timespec *tp)
-@@ -93,6 +99,106 @@ cdef unsigned long next_wid() noexcept:
+@@ -110,6 +116,106 @@ cdef unsigned long next_wid() noexcept:
      return _wid_counter
  
  
@@ -17627,7 +17605,7 @@ index 51f3c03d3c5d27d65ed08cccdf71dd65fbfd888c..eb6351f8d101c96eb70be66e540bda24
  cdef class WaylandSurface(ListenerObject):
  
      def __cinit__(self):
-@@ -282,6 +388,50 @@ cdef class WaylandSurface(ListenerObject):
+@@ -299,6 +405,50 @@ cdef class WaylandSurface(ListenerObject):
      def get_buffer_source_size(self) -> tuple[int, int]:
          return self.get_buffer_source_geometry()[2:4]
  
@@ -17678,7 +17656,7 @@ index 51f3c03d3c5d27d65ed08cccdf71dd65fbfd888c..eb6351f8d101c96eb70be66e540bda24
      def capture_pixels(self, int x=-1, int y=-1, int width=0, int height=0):
          """Copy the current buffer's pixels out as an ImageWrapper.
          Returns None if the surface is destroyed or has no committed buffer."""
-@@ -374,7 +524,9 @@ cdef class WaylandSurface(ListenerObject):
+@@ -391,7 +541,9 @@ cdef class WaylandSurface(ListenerObject):
              if first_time("read-format-%#x" % read_format):
                  log.warn("Warning: unsupported preferred pixel read format %#x, using ABGR8888", read_format)
              read_format = DRM_FORMAT_ABGR8888

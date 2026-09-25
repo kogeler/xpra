@@ -212,6 +212,10 @@ class CiImageTest(unittest.TestCase):
         install = next(command for command in commands if "apt-get -y install" in command)
         self.assertIn("rsync", shlex.split(install, comments=True))
         self.assertIn("xterm", shlex.split(install, comments=True))
+        # upstream's unit-test job installs these for its Wayland clipboard/input
+        # and asyncssh transport tests:
+        for package in ("python3-asyncssh", "weston", "wl-clipboard", "wtype"):
+            self.assertIn(package, shlex.split(install, comments=True))
         compiler = next(command for command in commands if "-m pip install" in command)
         self.assertEqual(
             shlex.split(compiler, comments=True),

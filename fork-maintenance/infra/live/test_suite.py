@@ -110,7 +110,7 @@ class LiveSuiteTest(unittest.TestCase):
                 patch.object(suite.job, "RESULT_ROOT", Path(raw) / "results"),
                 patch.object(suite.subprocess, "run", side_effect=lambda argv, **kw: commands.append(argv) or Mock(returncode=0)),
             ):
-                args = Namespace(run="fresh-suite", network_profile=suite.DEFAULT_NETWORK_PROFILE, render_node=None, zed_directory=None)
+                args = Namespace(run="fresh-suite", network_profile=suite.DEFAULT_NETWORK_PROFILE, render_node=None, zed_directory=None, from_gate=None)
                 self.assertEqual(suite.run_all(args), 0)
                 self.assertEqual(validate.call_count, 9)
             self.assertEqual(len(commands), 27)
@@ -130,10 +130,35 @@ class LiveSuiteTest(unittest.TestCase):
             patch.object(suite.job, "RESULT_ROOT", Path(raw) / "results"),
             patch.object(suite.subprocess, "run", return_value=Mock(returncode=23)) as run,
         ):
-            args = Namespace(run="failed-suite", network_profile=suite.DEFAULT_NETWORK_PROFILE, render_node=None, zed_directory=None)
+            args = Namespace(run="failed-suite", network_profile=suite.DEFAULT_NETWORK_PROFILE, render_node=None, zed_directory=None, from_gate=None)
             self.assertEqual(suite.run_all(args), 23)
             self.assertEqual(run.call_count, 1)
             check.assert_not_called()
+
+    def test_continuation_runs_from_the_failed_gate_and_is_never_acceptance(self):
+        members = suite.members("continued-suite")
+        gate = suite.LIVE_PROFILE_REQUIRED_GATES[members[6][1]]
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch.object(suite, "current_inputs", return_value=("source", "queue", "harness")),
+            patch.object(suite, "check") as check,
+            patch.object(suite, "retained_record", return_value={}),
+            patch.object(suite, "validate_member") as validate,
+            patch.object(suite.job, "JOB_ROOT", Path(raw) / "jobs"),
+            patch.object(suite.job, "RESULT_ROOT", Path(raw) / "results"),
+            patch.object(suite.subprocess, "run", return_value=Mock(returncode=0)) as run,
+        ):
+            args = Namespace(run="continued-suite", network_profile=suite.DEFAULT_NETWORK_PROFILE,
+                             render_node=None, zed_directory=None, from_gate=gate)
+            self.assertEqual(suite.run_all(args), 0)
+            started = [call.args[0] for call in run.call_args_list[::3]]
+            self.assertEqual([f"RUN={name}" for name, _profile in members[6:]],
+                             [next(value for value in argv if value.startswith("RUN=")) for argv in started])
+            self.assertEqual(validate.call_count, 3)
+            check.assert_not_called()
+            args.from_gate = "live-unknown"
+            with self.assertRaisesRegex(suite.job.JobError, "unknown live suite gate"):
+                suite.run_all(args)
 
     def test_peer_warning_stops_before_the_next_profile(self):
         with (
@@ -147,7 +172,7 @@ class LiveSuiteTest(unittest.TestCase):
             patch.object(suite.subprocess, "run", return_value=Mock(returncode=0)) as run,
         ):
             args = Namespace(run="warning-suite", network_profile=suite.DEFAULT_NETWORK_PROFILE,
-                             render_node=None, zed_directory=None)
+                             render_node=None, zed_directory=None, from_gate=None)
             with self.assertRaisesRegex(suite.job.JobError, "peer warning"):
                 suite.run_all(args)
             self.assertEqual(run.call_count, 3)

@@ -80,7 +80,7 @@ index 0e4e5c6946c755b6022f167ae400e08f16631af9..03836c1d37a06a68a37793b5ae541cf8
          gate.set()
          ss.encode_thread.join(10)
 diff --git a/tests/unittests/unit/server/source/encoding_lifecycle_test.py b/tests/unittests/unit/server/source/encoding_lifecycle_test.py
-new file mode 100755
+new file mode 100644
 index 0000000000000000000000000000000000000000..5a342776af17517c4a0e4eb0337266b53b4c01be
 --- /dev/null
 +++ b/tests/unittests/unit/server/source/encoding_lifecycle_test.py
@@ -617,28 +617,28 @@ index 0000000000000000000000000000000000000000..5a342776af17517c4a0e4eb0337266b5
 +if __name__ == "__main__":
 +    unittest.main(failfast=True)
 diff --git a/tests/unittests/unit/server/window/video_compress_test.py b/tests/unittests/unit/server/window/video_compress_test.py
-index 410ce7295e68cd490472601dfac23a95eeef402f..97a046593b67ec8b2cf2c17de300eec792679120 100644
+index c4c905e99e6c98a29ed44d4d1fcebc7c329ad055..acdccf69166093fcd4fec8ea79b5eaec0ba589d3 100644
 --- a/tests/unittests/unit/server/window/video_compress_test.py
 +++ b/tests/unittests/unit/server/window/video_compress_test.py
-@@ -4,9 +4,596 @@
+@@ -4,12 +4,597 @@
  # later version. See the file COPYING for details.
  
  import unittest
--from unittest.mock import Mock
 +import warnings
 +from queue import Queue
 +from threading import Event, Lock, RLock, Thread
 +from time import monotonic
-+from types import SimpleNamespace
-+from unittest.mock import Mock, patch
+ from types import SimpleNamespace
+ from unittest.mock import Mock, patch
  
 +from xpra.codecs.image import ImageWrapper
 +from xpra.net.packet_type import WINDOW_EOS
 +from xpra.server.source import client_connection
 +from xpra.server.window import compress, video_compress, video_subregion
+ from xpra.server.window.compress import WindowSource
  from xpra.server.window.video_compress import WindowVideoSource
 +from xpra.server.window.video_subregion import VideoSubregion
-+from xpra.util.objects import typedict
+ from xpra.util.objects import typedict
 +from xpra.util.rectangle import rectangle
 +
 +from unit.server.source.encoding_lifecycle_test import make_encoding_connection, finish_encoding_connection
@@ -1218,7 +1218,7 @@ index 410ce7295e68cd490472601dfac23a95eeef402f..97a046593b67ec8b2cf2c17de300eec7
  
  
  class VideoContextCleanTest(unittest.TestCase):
-@@ -14,6 +601,11 @@ class VideoContextCleanTest(unittest.TestCase):
+@@ -17,6 +602,11 @@ class VideoContextCleanTest(unittest.TestCase):
      @staticmethod
      def make_source(csc=None, encoder=None) -> WindowVideoSource:
          source = WindowVideoSource.__new__(WindowVideoSource)
@@ -1230,7 +1230,7 @@ index 410ce7295e68cd490472601dfac23a95eeef402f..97a046593b67ec8b2cf2c17de300eec7
          source._csc_encoder = csc
          source._video_encoder = encoder
          source.cancel_video_encoder_flush = Mock()
-@@ -76,6 +668,26 @@ class VideoContextCleanTest(unittest.TestCase):
+@@ -79,6 +669,26 @@ class VideoContextCleanTest(unittest.TestCase):
          source.csc_clean.assert_called_once_with(csc)
          source.ve_clean.assert_called_once_with(encoder)
  
@@ -1257,8 +1257,8 @@ index 410ce7295e68cd490472601dfac23a95eeef402f..97a046593b67ec8b2cf2c17de300eec7
      def test_ve_clean_still_cancels_its_timer(self) -> None:
          encoder = Mock()
          source = self.make_source()
-@@ -116,8 +728,1037 @@ class VideoContextCleanTest(unittest.TestCase):
-         source.schedule_video_encoder_timer.assert_not_called()
+@@ -195,8 +805,1037 @@ class ScalingCacheTest(unittest.TestCase):
+         self.assertEqual(get_pipeline_score.call_args.args[5], (2, 3))
  
  
 +class VideoPipelineLifecycleTest(unittest.TestCase):
@@ -2822,7 +2822,7 @@ index 86779bd279888f4d4c0712372fe93326e0d1a853..5bc60c96fde6745bde5c2c26c64d5581
          def send_hello(self, server_capabilities: dict) -> None:
              capabilities = server_capabilities.copy()
 diff --git a/xpra/server/window/video_compress.py b/xpra/server/window/video_compress.py
-index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315d617c1c8 100644
+index 0169b910a1907945fa9e7414b5f9ad4f45c8c39c..bb4ef961e8efd2fc13af46706cd4d74e835e967d 100644
 --- a/xpra/server/window/video_compress.py
 +++ b/xpra/server/window/video_compress.py
 @@ -8,6 +8,7 @@ import time
@@ -3149,7 +3149,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
      def set_new_encoding(self, encoding : str, strict=None) -> None:
          if self.encoding != encoding:
              # ensure we re-init the codecs asap:
-@@ -661,16 +802,24 @@ class WindowVideoSource(WindowSource):
+@@ -666,16 +807,24 @@ class WindowVideoSource(WindowSource):
          # first of all, mark the sequences as cancelled,
          # so that the encode thread will not try to use
          # the images we are about to free below:
@@ -3182,7 +3182,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
  
      def full_quality_refresh(self, damage_options: dict) -> None:
          vs = self.video_subregion
-@@ -943,8 +1092,6 @@ class WindowVideoSource(WindowSource):
+@@ -948,8 +1097,6 @@ class WindowVideoSource(WindowSource):
                                  image: ImageWrapper,
                                  coding: str, sequence: int, eoptions: typedict, flush=0):
          """
@@ -3191,7 +3191,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
              Actual damage region processing:
              we extract the rgb data from the pixmap and:
              * if doing av-sync, we place the data on the encode queue with a timer,
-@@ -975,20 +1122,28 @@ class WindowVideoSource(WindowSource):
+@@ -980,20 +1127,28 @@ class WindowVideoSource(WindowSource):
                  image.freeze()
  
          def call_encode(ew: int, eh: int, eimage: ImageWrapper, encoding: str, flush: int) -> None:
@@ -3230,7 +3230,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
          # now figure out if we need to send edges separately:
          ee = self.edge_encoding
          ow = w
-@@ -996,25 +1151,38 @@ class WindowVideoSource(WindowSource):
+@@ -1001,25 +1156,38 @@ class WindowVideoSource(WindowSource):
          w = w & self.width_mask
          h = h & self.height_mask
          regions = []
@@ -3288,7 +3288,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
          return True
  
      def get_frame_encode_delay(self, options: dict) -> int:
-@@ -1038,43 +1206,77 @@ class WindowVideoSource(WindowSource):
+@@ -1043,43 +1211,77 @@ class WindowVideoSource(WindowSource):
          return self.av_sync_delay
  
      def cancel_encode_from_queue(self) -> None:
@@ -3387,7 +3387,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
          # note: we use a queue here to ensure we preserve the order
          # (so we encode frames in the same order they were grabbed)
          # this runs in the UI thread: it is the only thread allowed to modify the queue,
-@@ -1085,7 +1287,6 @@ class WindowVideoSource(WindowSource):
+@@ -1090,7 +1292,6 @@ class WindowVideoSource(WindowSource):
          avsynclog("encode_from_queue: %s items for wid=%#x", len(eq), self.wid)
          if not eq:
              return      # nothing to encode, must have been picked off already
@@ -3395,7 +3395,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
          # find the first item which is due
          # in seconds, same as monotonic():
          if len(self.encode_queue) >= self.encode_queue_max_size:
-@@ -1096,34 +1297,34 @@ class WindowVideoSource(WindowSource):
+@@ -1101,34 +1302,34 @@ class WindowVideoSource(WindowSource):
              av_delay = self.av_sync_delay/1000.0
          now = monotonic()
          still_due = []
@@ -3439,7 +3439,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
          # if there are still some items left in the queue, re-schedule:
          if not still_due:
              avsynclog("encode_from_queue: nothing due")
-@@ -1735,8 +1936,7 @@ class WindowVideoSource(WindowSource):
+@@ -1743,8 +1944,7 @@ class WindowVideoSource(WindowSource):
          videolog("check_pipeline%s setting up a new pipeline as check failed - encodings=%s",
                   (encodings, width, height, src_format), encodings)
          # cleanup existing one if needed:
@@ -3449,7 +3449,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
          # and make a new one:
          w = width & self.width_mask
          h = height & self.height_mask
-@@ -1890,8 +2090,7 @@ class WindowVideoSource(WindowSource):
+@@ -1898,8 +2098,7 @@ class WindowVideoSource(WindowSource):
                      return False
                  videolog.warn("Warning: failed to setup video pipeline %s", option, exc_info=True)
              # we're here because an exception occurred, cleanup before trying again:
@@ -3459,7 +3459,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
          end = monotonic()
          videolog("setup_pipeline(..) failed! took %.2fms", (end-start) * 1000)
          return False
-@@ -1939,11 +2138,15 @@ class WindowVideoSource(WindowSource):
+@@ -1947,11 +2146,15 @@ class WindowVideoSource(WindowSource):
              csc_options["full-range"] = encoder_spec.full_range
              csc_start = monotonic()
              csce = csc_spec.make_instance()
@@ -3480,7 +3480,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
          else:
              csce = None
              # use the encoder's mask directly since that's all we have to worry about!
-@@ -1958,41 +2161,55 @@ class WindowVideoSource(WindowSource):
+@@ -1966,41 +2169,55 @@ class WindowVideoSource(WindowSource):
                  videolog("scaling is now enabled, so skipping %s", encoder_spec)
                  return False
          enc_start = monotonic()
@@ -3571,7 +3571,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
  
      def get_video_encoder_options(self, encoding, width, height) -> dict[str, Any]:
          # tweaks for "real" video:
-@@ -2034,7 +2251,9 @@ class WindowVideoSource(WindowSource):
+@@ -2042,7 +2259,9 @@ class WindowVideoSource(WindowSource):
          return packet
  
      def free_scroll_data(self) -> None:
@@ -3582,7 +3582,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
  
      def do_free_scroll_data(self) -> None:
          sd = self.scroll_data
-@@ -2472,6 +2691,7 @@ class WindowVideoSource(WindowSource):
+@@ -2480,6 +2699,7 @@ class WindowVideoSource(WindowSource):
              if SAVE_VIDEO_PATH:
                  stream_filename = os.path.join(SAVE_VIDEO_PATH, stream_filename)
              self.video_stream_file = open(stream_filename, "wb")
@@ -3590,7 +3590,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
              log.info("saving new %s stream for window %i to %s", ve.get_encoding(), self.wid, stream_filename)
          if self.video_stream_file and data:
              self.video_stream_file.write(data)
-@@ -2518,33 +2738,72 @@ class WindowVideoSource(WindowSource):
+@@ -2526,33 +2746,72 @@ class WindowVideoSource(WindowSource):
          return actual_encoding, Compressed(actual_encoding, data), client_options, width, height, 0, 24
  
      def cancel_video_encoder_flush(self) -> None:
@@ -3675,7 +3675,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
          videolog("do_flush_video_encoder: %s", flush_data)
          if not flush_data:
              return
-@@ -2553,10 +2812,10 @@ class WindowVideoSource(WindowSource):
+@@ -2561,10 +2820,10 @@ class WindowVideoSource(WindowSource):
              return
          if frame == 0 and ve.get_type() == "x264":
              # x264 has problems if we try to re-use a context after flushing the first IDR frame
@@ -3688,7 +3688,7 @@ index 8aac38e996f354d3015988f7beac347fcbd3603d..ab45e28b52fcdd6fc3447f028a1b0315
                  videolog("flushed frame 0, novideo refresh requested")
              return
          w = ve.get_width()
-@@ -2601,25 +2860,83 @@ class WindowVideoSource(WindowSource):
+@@ -2609,25 +2868,83 @@ class WindowVideoSource(WindowSource):
              if closed:
                  self.video_context_clean(True)
  

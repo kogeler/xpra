@@ -85,7 +85,7 @@ The handoff states:
 - any required gates still outstanding;
 - for any patch validation, the complete current nine-profile live suite with
   all patches on both endpoints, never case-only or clean-endpoint live evidence;
-- whether local commits are signed as required;
+- that agent-created commits are unsigned by operator policy;
 - the path of the distilled session record, and that the session is closed.
 
 Do not convert historical runs into current claims. Detailed output stays local

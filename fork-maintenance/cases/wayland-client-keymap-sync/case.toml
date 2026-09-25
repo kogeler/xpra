@@ -3,7 +3,7 @@ slug = "wayland-client-keymap-sync"
 kind = "production"
 title = "Synchronize Wayland keymaps with clients"
 commit_subject = "Synchronize Wayland keymaps with clients"
-patch_sha256 = "cae763c5c2e9f8824fa86d44408fda84bc70da4e7bcda476b790045ee7e2b12e"
+patch_sha256 = "58b621a395bd84607ca65763f789daf738a15fc87982ea16ee5bd78269b322a0"
 dependencies = []
 paths = [
   "tests/unittests/unit/client/keyboard_helper_test.py",

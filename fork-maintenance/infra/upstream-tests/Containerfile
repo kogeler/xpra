@@ -8,9 +8,9 @@ ARG DEBIAN_FRONTEND=noninteractive
 # NumPy exercises PyOpenGL's native array output alongside ctypes containers.
 # rsync is required by upstream's unit-test install-tree merge.
 # xterm is the actual application in the upstream position/color regression.
-# Cython 3.3.0 rejects repeated local annotations in clean upstream backing.py.
-# Keep clean and patched legs on the same compatible compiler; reassess this
-# exact pin when that upstream boundary changes (see runbooks/upstream-tests.md).
+# Cython 3.2.9 is the reviewed compiler for clean and patched legs; upstream
+# removed its original 3.3.0 trigger in e7da3a4e42, so moving the pin needs its
+# own compiled-leg evidence (see runbooks/upstream-tests.md).
 RUN apt-get update \
     && apt-get -y install \
         binutils \
@@ -62,6 +62,7 @@ RUN apt-get update \
         pkg-config \
         python-gi-dev \
         python3-aioquic \
+        python3-asyncssh \
         python3-cairo \
         python3-cairo-dev \
         python3-coverage \
@@ -90,6 +91,9 @@ RUN apt-get update \
         tigervnc-standalone-server \
         tigervnc-viewer \
         wayland-protocols \
+        weston \
+        wl-clipboard \
+        wtype \
         x11-xkb-utils \
         x11-xserver-utils \
         xauth \
@@ -113,7 +117,7 @@ COPY --chown=ubuntu:ubuntu \
     /opt/xpra-fork-maintenance/upstream-tests/
 
 COPY --chown=ubuntu:ubuntu \
-    neutral/pointer_scroll_test.py neutral/pointer_scroll_client.c \
+    neutral/pointer_scroll_test.py neutral/pointer_scroll_client.c neutral/codec_startup_test.py \
     /opt/xpra-fork-maintenance/upstream-tests/neutral/
 
 RUN mkfifo /opt/xpra-fork-maintenance/upstream-tests/payload-ready.fifo \

@@ -19,7 +19,7 @@ RECORD = """# Popup keeps a modal grab
 
 - Date: 2026-09-12
 - Kind: patch
-- Cases: client-popup-modal-lifecycle
+- Cases: example-popup-grab
 - Keywords: gtk3, popup, modal grab
 - Summary: The popup release path must drop the modal grab before unmap.
 

@@ -40,7 +40,7 @@ class KnowledgeTest(unittest.TestCase):
         index = (self.state / knowledge.ROOT / knowledge.INDEX).read_text(encoding="utf-8")
         rows = [line for line in index.splitlines() if line.startswith("| [")]
         self.assertEqual([row.split("]")[0] for row in rows], ["| [refresh-20260920", "| [popup-20260912"])
-        self.assertIn("| client-popup-modal-lifecycle | gtk3, popup, modal grab |", rows[1])
+        self.assertIn("| example-popup-grab | gtk3, popup, modal grab |", rows[1])
         self.assertEqual(self.problems(), {})
         (self.state / knowledge.ROOT / knowledge.INDEX).write_text(index + "| hand | edit |\n", encoding="utf-8")
         self.assertIn("hand-edited", self.problems()["knowledge/INDEX.md"])
@@ -71,7 +71,7 @@ class KnowledgeTest(unittest.TestCase):
             "placeholder-title": RECORD.replace("# Popup keeps a modal grab", "# <one-line problem statement>"),
             "bad-date": RECORD.replace("2026-09-12", "2026-13-40"),
             "bad-kind": RECORD.replace("- Kind: patch", "- Kind: misc"),
-            "bad-case": RECORD.replace("client-popup-modal-lifecycle", "Client Popup"),
+            "bad-case": RECORD.replace("example-popup-grab", "Client Popup"),
             "empty-keyword": RECORD.replace("gtk3, popup", "gtk3, , popup"),
             "pipe": RECORD.replace("before unmap.", "before | unmap."),
             "placeholder": RECORD.replace("- Summary: The", "- Summary: <one sentence> The"),
@@ -89,8 +89,8 @@ class KnowledgeTest(unittest.TestCase):
                     knowledge.parse_record(path)
                 path.unlink()
         record = knowledge.parse_record(self.write("valid", RECORD + "\n## Extra\n\nAllowed.\n"))
-        self.assertEqual((record.kind, record.cases), ("patch", ("client-popup-modal-lifecycle",)))
-        unowned = self.write("none", RECORD.replace("client-popup-modal-lifecycle", "none"))
+        self.assertEqual((record.kind, record.cases), ("patch", ("example-popup-grab",)))
+        unowned = self.write("none", RECORD.replace("example-popup-grab", "none"))
         self.assertEqual(knowledge.parse_record(unowned).cases, ())
 
     def test_only_records_and_registry_may_live_in_knowledge(self) -> None:

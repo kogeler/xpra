@@ -13,8 +13,13 @@ import subprocess
 import sys
 
 ASSET_ROOT = Path(__file__).with_name("neutral")
-ASSETS = ("pointer_scroll_test.py", "pointer_scroll_client.c")
-TARGET_ROOT = Path("tests/unittests/unit/wayland")
+# every runner-owned input, and the upstream test package it is installed into:
+ASSET_TARGETS = {
+    "pointer_scroll_test.py": Path("tests/unittests/unit/wayland"),
+    "pointer_scroll_client.c": Path("tests/unittests/unit/wayland"),
+    "codec_startup_test.py": Path("tests/unittests/unit/client/subsystem"),
+}
+ASSETS = tuple(ASSET_TARGETS)
 
 
 class NeutralTestError(ValueError):
@@ -43,17 +48,20 @@ def install(source: Path, commit: str, asset_root: Path = ASSET_ROOT) -> tuple[t
     if asset_root.is_symlink() or not asset_root.is_dir():
         raise NeutralTestError("neutral-test asset directory is not a real directory")
 
-    parent = source
-    for part in TARGET_ROOT.parts:
-        parent /= part
-        if parent.is_symlink() or not parent.is_dir():
-            raise NeutralTestError(f"neutral-test parent is not a real directory: {parent}")
+    parents = {}
+    for target_root in dict.fromkeys(ASSET_TARGETS.values()):
+        parent = source
+        for part in target_root.parts:
+            parent /= part
+            if parent.is_symlink() or not parent.is_dir():
+                raise NeutralTestError(f"neutral-test parent is not a real directory: {parent}")
+        parents[target_root] = parent
     payloads = []
-    for name in ASSETS:
+    for name, target_root in ASSET_TARGETS.items():
         asset = asset_root / name
         if asset.is_symlink() or not asset.is_file():
             raise NeutralTestError(f"neutral-test input is not a regular file: {asset}")
-        target = parent / name
+        target = parents[target_root] / name
         if target.exists() or target.is_symlink():
             raise NeutralTestError(f"neutral-test target already exists; reassess ownership: {target}")
         payloads.append((target, asset.read_bytes()))
@@ -64,7 +72,7 @@ def install(source: Path, commit: str, asset_root: Path = ASSET_ROOT) -> tuple[t
         with target.open("xb") as stream:
             os.fchmod(stream.fileno(), 0o644)
             stream.write(data)
-    paths = tuple((TARGET_ROOT / name).as_posix() for name in ASSETS)
+    paths = tuple((target_root / name).as_posix() for name, target_root in ASSET_TARGETS.items())
     git(source, "add", "--", *paths)
     return tuple(
         (target.relative_to(source).as_posix(), hashlib.sha256(data).hexdigest())

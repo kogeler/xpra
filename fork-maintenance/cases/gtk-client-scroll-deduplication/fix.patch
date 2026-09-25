@@ -1,9 +1,9 @@
 diff --git a/tests/unittests/unit/wayland/gtk_scroll_test.py b/tests/unittests/unit/wayland/gtk_scroll_test.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..3ec3c1d95d09d0b05d2edf93a0ead4551ff53a02
+index 0000000000000000000000000000000000000000..d778d6235d0a1292ac34690694dc6a7f71e768a2
 --- /dev/null
 +++ b/tests/unittests/unit/wayland/gtk_scroll_test.py
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,441 @@
 +#!/usr/bin/env python3
 +# This file is part of Xpra.
 +# Copyright (C) 2026 kogeler
@@ -54,6 +54,11 @@ index 0000000000000000000000000000000000000000..3ec3c1d95d09d0b05d2edf93a0ead455
 +
 +        def get_subsystem(self, name):
 +            return self._client.subsystems.get(name)
++
++        def cancel_moveresize_cursor(self):
++            # The full client window restores its move/resize drag cursor when
++            # the last button is released; this harness never starts a drag.
++            pass
 +
 +        @staticmethod
 +        def cp(x, y):
@@ -441,10 +446,12 @@ index 0000000000000000000000000000000000000000..3ec3c1d95d09d0b05d2edf93a0ead455
 +    else:
 +        unittest.main()
 diff --git a/xpra/client/gtk3/window/pointer.py b/xpra/client/gtk3/window/pointer.py
-index 3018e08515e90863b75cb5e267a4003dfda47617..12488384bc1828af9608ea9a707cefa2ea2940d1 100644
+index b78766746f9b408772cf9a36179e342df6fb785b..2ef159d6213175d558ea7a2af680ef927d7dfccf 100644
 --- a/xpra/client/gtk3/window/pointer.py
 +++ b/xpra/client/gtk3/window/pointer.py
-@@ -64,2 +64,14 @@ def _get_relative_pointer(event) -> tuple[int, int]:
+@@ -62,6 +62,18 @@ def _get_relative_pointer(event) -> tuple[int, int]:
+     return round(event.x), round(event.y)
+ 
  
 +def _x11_scroll_key(event) -> tuple:
 +    window = event.window
@@ -459,7 +466,11 @@ index 3018e08515e90863b75cb5e267a4003dfda47617..12488384bc1828af9608ea9a707cefa2
 +
 +
  def norm_scroll(value: float):
-@@ -80,4 +92,8 @@ class PointerWindow(GtkStubWindow):
+     if SMOOTH_SCROLL_NORM == 100:
+         return value
+@@ -78,8 +90,12 @@ class PointerWindow(GtkStubWindow):
+         self.button_pressed: dict[int, int] = {}
+         self.button_polling_timer = 0
          self.motion_cancels_pointer_overlay = True
 +        self._smooth_scroll_key = ()
 +        self._smooth_scroll_zero_axes = 0
@@ -468,7 +479,11 @@ index 3018e08515e90863b75cb5e267a4003dfda47617..12488384bc1828af9608ea9a707cefa2
 +        self._smooth_scroll_key = ()
 +        self._smooth_scroll_zero_axes = 0
          self.cancel_show_pointer_overlay_timer()
-@@ -270,5 +286,21 @@ class PointerWindow(GtkStubWindow):
+         self.cancel_remove_pointer_overlay_timer()
+ 
+@@ -268,22 +284,44 @@ class PointerWindow(GtkStubWindow):
+         return v
+ 
      def _do_scroll_event(self, event) -> bool:
 -        if self._client.readonly:
 +        pointer_sub = self.get_subsystem("pointer")
@@ -491,7 +506,9 @@ index 3018e08515e90863b75cb5e267a4003dfda47617..12488384bc1828af9608ea9a707cefa2
 +                int(event.delta_x == 0) | (int(event.delta_y == 0) << 1)
 +            ) if self._smooth_scroll_key else 0
              log("smooth scroll event: %s, raw delta: %s,%s", event, event.delta_x, event.delta_y)
-@@ -278,10 +310,16 @@ class PointerWindow(GtkStubWindow):
+             pointer = self.get_pointer_data(event)
+             device_id = -1
+             norm_x = norm_scroll(event.delta_x)
              norm_y = norm_scroll(event.delta_y)
 -            if pointer_sub := self.get_subsystem("pointer"):
 -                pointer_sub.wheel_event(device_id, self.wid, norm_x, -norm_y, pointer)
@@ -514,3 +531,5 @@ index 3018e08515e90863b75cb5e267a4003dfda47617..12488384bc1828af9608ea9a707cefa2
 +            # smooth sample replaces this bounded allowance, not this event.
 +            log("using discrete scroll for zero X11 valuator: direction=%i", event.direction)
          log("do_scroll_event device=%s, direction=%s, button_mapping=%s",
+             _device_info(event), event.direction, button_mapping)
+         if button_mapping >= 0:

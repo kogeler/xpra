@@ -163,9 +163,20 @@ def check(prefix: str) -> dict[str, object]:
     }
 
 
+def continuation(prefix: str, gate: str | None) -> list[tuple[str, tuple[str, str, str, str, str]]]:
+    """The ordered members to run: all nine, or those from one gate to the last."""
+    runs = members(prefix)
+    if not gate:
+        return runs
+    gates = [LIVE_PROFILE_REQUIRED_GATES[profile] for _run, profile in runs]
+    if gate not in gates:
+        raise job.JobError(f"unknown live suite gate: {gate}")
+    return runs[gates.index(gate):]
+
+
 def run_all(args: argparse.Namespace) -> int:
     expected = current_inputs()
-    runs = members(args.run)
+    runs = continuation(args.run, args.from_gate)
     for run, _profile in runs:
         for path in (
             job.record_path(run), job.freeze_record_path(run), job.freeze_prelaunch_path(run),
@@ -202,6 +213,14 @@ def run_all(args: argparse.Namespace) -> int:
         # A rendering/paste pass cannot conceal a late startup or conversion
         # warning. Stop before launching another physical profile.
         validate_member(run, retained_record(run))
+    if args.from_gate:
+        # the profiles before the gate ran under another prefix, or on another candidate:
+        print(
+            f"live suite continued from {args.from_gate} through the last profile; "
+            "this is not acceptance: run a complete suite under a fresh prefix",
+            flush=True,
+        )
+        return 0
     print(json.dumps(check(args.run), indent=2, sort_keys=True))
     return 0
 
@@ -210,14 +229,20 @@ def main() -> int:
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("run", "check"))
-    parser.add_argument("run", help="fresh prefix for all nine named jobs")
+    parser.add_argument("run", help="fresh prefix for the named jobs")
     parser.add_argument("--network-profile", default=DEFAULT_NETWORK_PROFILE)
     parser.add_argument("--render-node")
     parser.add_argument("--zed-directory")
+    parser.add_argument(
+        "--from", dest="from_gate",
+        help="continue with this gate and the ones after it (run only, never acceptance)",
+    )
     args = parser.parse_args()
     try:
         if args.action == "run":
             return run_all(args)
+        if args.from_gate:
+            raise job.JobError("live suite check always verifies all nine profiles")
         print(json.dumps(check(args.run), indent=2, sort_keys=True))
         return 0
     except (job.JobError, OSError, ValueError) as error:
