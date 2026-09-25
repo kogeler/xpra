@@ -1,8 +1,8 @@
 # Copyright (C) 2026 kogeler
 """Permanent-policy filesystem garbage collection, separate from acceptance.
 
-The policy selects storage classes; runtime ownership and workspace export
-checks protect unfinished work. Neither historical result schemas nor dates
+The policy selects storage classes; runtime ownership checks protect
+unfinished work. Neither historical result schemas nor dates
 decide whether disposable output can be discarded. Deletion reuses the locked,
 digest-bound, crash-resumable cycle-cleanup transaction engine.
 
@@ -18,6 +18,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import stat
 import sys
 from collections.abc import Iterator
@@ -30,7 +31,7 @@ import knowledge
 import tomllib
 
 POLICY_PATH = contrib.AUTOMATION_ROOT / "artifacts.toml"
-WORKSPACES = Path("upstream-tests/workspaces")
+IDENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 WORK = Path("work")
 CLEAN = "clean"
 CLOSE = "close"
@@ -127,8 +128,8 @@ def load_policy(policy_path: Path = POLICY_PATH) -> Policy:
             contrib.fail(f"artifact policy lacks an explicit structural parent: {path}")
     if permanent != (knowledge.ROOT,):
         contrib.fail("only the distilled knowledge base may survive session close")
-    if WORK not in task or WORKSPACES not in containers:
-        contrib.fail("artifact policy must keep session work until close and classify workspaces")
+    if WORK not in task:
+        contrib.fail("artifact policy must keep session work until close")
     return Policy(permanent, infrastructure, task, containers, contrib.sha256_bytes(payload))
 
 
@@ -141,7 +142,7 @@ def entries(root: Path, relative: Path | str) -> tuple[Path, ...]:
 
 
 def identity(value: str) -> str:
-    if not contrib.WORKSPACE_RE.fullmatch(value):
+    if not IDENTITY_RE.fullmatch(value):
         contrib.fail(f"unrecognized artifact runtime identity: {value!r}")
     return value
 
@@ -270,21 +271,6 @@ def overlaps(left: Path, right: Path) -> bool:
     return left == right or left in right.parents or right in left.parents
 
 
-def protect_workspace_recovery(root: Path, protected: dict[Path, str]) -> None:
-    authorities = tuple(
-        path
-        for directory in ("case-staging", "case-updates", "workspace-fingerprints")
-        for path in entries(root, directory)
-        if path.name != ".lifecycle.lock"
-    ) + tuple(
-        path for path in entries(root, WORKSPACES) if path.name.startswith(".") and path.name != ".lifecycle.lock"
-    )
-    for path in authorities:
-        protected[path.relative_to(root)] = "case/workspace recovery authority"
-    if authorities:
-        protected[WORKSPACES] = "case/workspace recovery pending: use case-recover/workspace-recover"
-
-
 def tree_bytes(path: Path) -> int:
     if not path.is_dir():
         return path.lstat().st_size
@@ -355,9 +341,6 @@ def inventory_locked(repo: Path, policy: Policy, scope: str = CLEAN, *, inspect_
     targets: list[contrib.CleanupTarget] = []
     blocked: dict[Path, str] = {}
     size = 0
-    # Recovery authorities can bind an entire workspace, not just their own
-    # staging. Leave all workspaces intact until exact recovery is complete.
-    protect_workspace_recovery(root, protected)
 
     def visit(path: Path) -> None:
         nonlocal size
@@ -374,23 +357,14 @@ def inventory_locked(repo: Path, policy: Policy, scope: str = CLEAN, *, inspect_
             return
         try:
             contrib.require_cleanup_parent_chain(root, path)
-            if relative.parent == WORKSPACES:
-                fingerprint = contrib._finalized_workspace_fingerprint_locked(repo, path.name)
-                # Validate physical tree safety now, before publishing a plan.
-                contrib.secure_tree_fingerprint(path)
-                kind = "workspace"
-            else:
-                fingerprint = contrib.artifact_fingerprint(path)
-                kind = "artifact-tree" if stat.S_ISDIR(path.lstat().st_mode) else "artifact-file"
+            fingerprint = contrib.artifact_fingerprint(path)
+            kind = "artifact-tree" if stat.S_ISDIR(path.lstat().st_mode) else "artifact-file"
             size += tree_bytes(path)
             targets.append(contrib.CleanupTarget(kind, path, fingerprint))
         except (contrib.ContribError, OSError) as error:
             # Do not silently downgrade an unfinished candidate or unsafe tree
             # to garbage. The report makes every exception visible.
-            if relative.parent == WORKSPACES:
-                protected[relative] = str(error)
-            else:
-                blocked[relative] = str(error)
+            blocked[relative] = str(error)
 
     for path in entries(root, Path(".")):
         visit(path)
@@ -423,14 +397,11 @@ def validate_pending_policy(
         )
     root = contrib.cleanup_state_root(repo)
     protected = protections(root, inspect_runtime=inspect_runtime)
-    protect_workspace_recovery(root, protected)
     for target in pending.plan.targets:
         relative = target.path.relative_to(root)
         if relative in policy.containers or any(overlaps(relative, kept) for kept in (*policy.keep(scope), *protected)):
             contrib.fail(f"pending cleanup target is now retained or runtime-owned: {relative}")
-        if target.kind == "workspace" and relative.parent != WORKSPACES:
-            contrib.fail("pending artifacts cleanup has an invalid workspace path")
-        if target.kind not in {"workspace", "artifact-file", "artifact-tree"}:
+        if target.kind not in {"artifact-file", "artifact-tree"}:
             contrib.fail("pending artifacts cleanup has an invalid target kind")
     contrib.validate_cleanup_plan_state(repo, pending.plan)
 

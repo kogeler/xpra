@@ -8,8 +8,6 @@ Xpra repository root:
 ```text
 .artifacts/fork-maintenance/
 ├── build-contexts/
-├── case-staging/
-├── case-updates/
 ├── cycle-cleanups/
 ├── deb-packages/
 │   ├── locks/
@@ -29,13 +27,11 @@ Xpra repository root:
 │   ├── image-builds/
 │   ├── logs/
 │   ├── runs/
-│   ├── sources/
-│   └── workspaces/
+│   └── sources/
 ├── tooling-venv/
 ├── venvs/
-├── work/
-│   └── <session>/
-└── workspace-fingerprints/
+└── work/
+    └── <session>/
 ```
 
 Everything except `knowledge/` is session state. A finished session is closed
@@ -63,12 +59,12 @@ It does not run Xpra tests, rebuild images, stop jobs, or delete Podman objects.
 
 Coordinate whole-root disposal with every agent/operator writing artifacts.
 Lifecycle locks protect registered jobs, not an agent editing an unmanaged
-probe or a newly created workspace whose tree still equals the queue. Do not
-run global disposal as a background janitor during concurrent development.
-An unexpected diff or new artifact is not permission to discard another
-writer's work: keep the reviewed plan, let a changed confirmation fail, and
-finish the cleanup handoff without repeatedly deleting new output. Plan/check
-remain non-destructive. Resume disposal only at a coordinated review boundary.
+probe. Do not run global disposal as a background janitor during concurrent
+development. An unexpected diff or new artifact is not permission to discard
+another writer's work: keep the reviewed plan, let a changed confirmation fail,
+and finish the cleanup handoff without repeatedly deleting new output.
+Plan/check remain non-destructive. Resume disposal only at a coordinated review
+boundary.
 
 The permanent allowlist is [`artifacts.toml`](../../artifacts.toml). Its entries
 are storage classes, never current run/cycle/session names or dates:
@@ -106,24 +102,21 @@ targets. A changed target, new disposable file, policy change or newly owned
 result invalidates the old confirmation. Filesystem allocation, compression and
 shared extents can make actual freed disk space differ from apparent bytes.
 
-Both planning and removal hold the same six lifecycle locks as `cycle-clean`.
+Both planning and removal hold the same four lifecycle locks as `cycle-clean`.
 An existing runtime record protects its exact job family even when the owner
 is old, exited or not collectable by today's schema. Read-only Podman inspection
 also protects owned containers/networks without a local owner. Remaining job
 state is finished through `test-*`, `test-image-*`, `live-*` or `deb-*`; the
 housekeeping command neither signals processes nor unlinks their authority.
-Runtime/recovery authorities and the six locks remain protected even if an
+Runtime/recovery authorities and the four locks remain protected even if an
 accidental policy edit omits their keep entry. Unknown runtime layouts fail
-closed. Recovery state is retained, and pending
-case/workspace recovery protects the workspace boundary. A workspace is
-disposable only if the existing finalized-workspace check proves its candidate
-is represented by the current queue. All other workspaces are reported and
-preserved. Symlinks inside a disposable tree, including absolute ones such as
-a virtual environment's interpreter link, are fingerprinted by their target
-text and never followed. Other unsafe files/trees (other-writable, hard-linked
-or special files) are reported as blocked, not followed, force-deleted or
-silently considered retained. A blocked path makes the
-command return nonzero even when no other disposable target remains.
+closed. Recovery state is retained. Symlinks inside a disposable tree,
+including absolute ones such as a virtual environment's interpreter link, are
+fingerprinted by their target text and never followed. Other unsafe
+files/trees (other-writable, hard-linked or special files) are reported as
+blocked, not followed, force-deleted or silently considered retained. A
+blocked path makes the command return nonzero even when no other disposable
+target remains.
 
 Confirmed removal reuses the cycle transaction engine under the reserved
 identity `artifacts-<policy-sha256>`. Directory staging is no-replace and binds
@@ -135,7 +128,7 @@ must instead finish through its original cycle interface first.
 
 After success, `artifacts-check` must report `disposable_targets=0` and an empty
 `blocked` list; an immediate
-repeat clean is a no-op. Protected runtime/workspaces remain listed separately,
+repeat clean is a no-op. Protected runtime state remains listed separately,
 not disguised as deleted garbage. Do not claim the folder is entirely empty or
 that every job is removed merely from this result. Knowledge, session work,
 caches and recovery infrastructure are the intended mid-session clean state.
@@ -144,8 +137,8 @@ caches and recovery infrastructure are the intended mid-session clean state.
 
 `artifacts-close-plan`, `artifacts-close CONFIRM=<artifacts_close_confirm>` and
 `artifacts-close-check` apply the same policy with the `task` class no longer
-kept. Planning additionally blocks on every protected runtime/workspace/recovery
-path, any file below `infrastructure` other than an empty `*.lock`, any
+kept. Planning additionally blocks on every protected runtime/recovery path,
+any file below `infrastructure` other than an empty `*.lock`, any
 `knowledge/` problem reported by `knowledge-check` (including a stale
 `INDEX.md`), and any entry in `.artifacts/` other than `fork-maintenance/`.
 Confirmed execution refuses while anything is blocked, holds every `*.lock`
@@ -215,25 +208,8 @@ The durable and transient subtrees have these exact ownership boundaries:
   assets, `release-notes.md`, `publication.json`, and the two hidden
   distribution container ownership records; it is review state outside local
   cycle cleanup;
-- interrupted `case-new` publication is marker-owned below `case-staging/`;
-  interrupted `patch-update` or `workspace-update` publication is owned below
-  `case-updates/<slug>.update{,.owner.json}` under retained
-  `case-updates/.lifecycle.lock`; its incomplete preparation may contain only
-  the recoverable `candidate-lab/source` verification tree and exact old/new
-  payloads, while a completed preparation contains `transaction.json` and no
-  candidate lab; recursive cleanup owns `<slug>.update.remove.json` plus
-  `.<slug>.update.remove` staging, then removes the update owner and finally the
-  phase marker;
-- all workspace operations and fingerprint publication are serialized by retained
-  `upstream-tests/workspaces/.lifecycle.lock`; interrupted creation uses
-  `upstream-tests/workspaces/.<name>.create.{owner.json,partial}`, while an
-  interrupted direct removal uses `.<name>.remove.owner.json` plus
-  `.<name>.remove` staging; fingerprint work uses
-  `workspace-fingerprints/<name>.fingerprint{,.owner.json}`, and its recursive
-  cleanup uses `<name>.fingerprint.remove.json` plus
-  `.<name>.fingerprint.remove` staging;
 - cycle cleanup owns schema-2 `cycle-cleanups/<CYCLE>.remove.json` and may
-  temporarily stage a workspace or live result tree at
+  temporarily stage a live result tree at
   `cycle-cleanups/.<CYCLE>.<index>.remove`; the transaction binds its exact
   device, inode, and fingerprint, and a matching
   `.<CYCLE>.<index>.rmtree.json` phase authorizes partial recursive-deletion
@@ -298,8 +274,9 @@ builds embedded in live and DEB jobs are owned by their parent `RUN`. Names are
 no-clobber identities and are never reused for a retry.
 
 An acceptance-capable completed local result binds the exact source commit,
-selection and patch digests, runner/build inputs, actual immutable image ID,
-target/profile, final timestamp, complete log hash, and owned-object status. An
+the selection digest (which covers every selected case commit's frozen diff),
+runner/build inputs, actual immutable image ID, target/profile, final
+timestamp, complete log hash, and owned-object status. An
 input-keyed image tag is a cache lookup; it never replaces binding the image ID
 actually executed. A failed result may stop before later provenance exists; its
 status and complete log retain that exact failed boundary but never become
@@ -364,8 +341,8 @@ Cleanup verifies owner records, PID/start-time/process-group identity plus the
 private 256-bit owner token for host jobs, and immutable container IDs plus
 Podman labels. The token is bound into both owner and completion records and is
 inherited by the supervised payload. Cleanup does not use broad globs and does
-not remove retained local logs/reports, patches, cases, unrelated containers,
-networks, images, or volumes.
+not remove retained local logs/reports, case commits or case directories,
+unrelated containers, networks, images, or volumes.
 
 Use an abort target for a running or lost job without collected output, or to
 exact-discard a completed uncollected job only when its recorded runner digest
@@ -430,31 +407,11 @@ updated while a job existed, its recorded digest remains usable only for
 `status`, exact-owned `abort` of uncollected state, or removal of already
 collected evidence; do not accept or newly collect that stale job.
 
-Interrupted case or workspace lifecycle state is not a cycle result. Inspect
-its exact marker-backed state and use only the corresponding recovery target:
-
-```bash
-make -C fork-maintenance case-recover CASE=case-slug
-make -C fork-maintenance workspace-recover WORKSPACE=workspace-name
-```
-
-Case recovery preserves an already published valid case, clears an owner-only
-boundary only after validating that case and any bound workspace, aborts only
-an incomplete update preparation, or finishes a complete `transaction.json` to
-its recorded new state. Before deleting a preparation or completed transaction,
-it publishes `<slug>.update.remove.json`, atomically stages the tree at
-`.<slug>.update.remove`, and completes that exact removal before deleting the
-external update owner and, last, the phase marker. Its canonical target array
-keeps validating every published case and bound-workspace output by path, mode,
-and SHA-256 even during phase-only retry. Workspace recovery preserves an
-already published valid
-workspace and resolves only its exact create, remove, or fingerprint
-transaction. Direct removal uses `.<name>.remove.owner.json` and
-`.<name>.remove`; fingerprint cleanup uses external
-`<name>.fingerprint.owner.json`, `<name>.fingerprint.remove.json`, and
-`.<name>.fingerprint.remove`. The fingerprint phase binds the owner operation ID
-and digest, outlives that owner, and is deleted last. Unowned or ambiguous state
-fails closed for operator review.
+Case work is not artifact state: each case is one commit on `develop` plus its
+tracked directory (see [`case-commits.md`](case-commits.md)), so nothing below
+`.artifacts/` records or recovers it. An interrupted rewrite is Git state in
+the checkout, finished or rolled back with Git itself (`git rebase --continue`
+or `--abort`, `git reset --keep <recorded tip>`, the reflog).
 
 `test-image-cache-remove` is a separate explicit operation for the exact
 label-verified current cache. Persistent ccache has no ordinary automatic
@@ -463,13 +420,11 @@ unverifiable maintenance/test images are discarded under that runbook's exact
 identity/reference checks without asking again, and rebuilt only if needed by
 the reviewed current candidate. Missing historical migration reports do not
 block this disposal or justify keeping an obsolete test image indefinitely.
-The same runbook defines the only direct directory-cleanup exception: a proven
-[empty unowned remnant](upstream-refresh.md#empty-unowned-directory-remnants),
-removed non-recursively under the lifecycle locks. These exceptions do not
-change the artifact planner's protection of owned or nonempty workspaces.
+This exception does not change the artifact planner's protection of owned or
+nonempty runtime state.
 
-After the complete patch cycle is finalized, remove its retained results and
-isolated workspaces through the digest-confirmed cycle flow:
+After the complete work cycle is finalized, remove its retained results
+through the digest-confirmed cycle flow:
 
 ```bash
 make -C fork-maintenance cycle-clean-plan CYCLE=cycle-prefix
@@ -477,18 +432,16 @@ make -C fork-maintenance cycle-clean \
   CYCLE=cycle-prefix CONFIRM=<sha256-from-plan>
 ```
 
-Every `RUN`, `IMAGE_RUN`, and `WORKSPACE` in that cycle must begin with
-`cycle-prefix-`. The planner blocks on transient owner/partial/abort records,
-unsafe retained lock files, owned process records or Podman objects, incomplete
-or modified evidence, foreground payload or DEB validation scratch, case
-creation/update/removal or workspace create/remove/fingerprint staging, and an
-unexported workspace candidate. It preserves
+Every `RUN` and `IMAGE_RUN` in that cycle must begin with `cycle-prefix-`. The
+planner blocks on transient owner/partial/abort records, unsafe retained lock
+files, owned process records or Podman objects, incomplete or modified
+evidence, and foreground payload or DEB validation scratch. It preserves
 content-verified frozen source bundles and archives, immutable DEB selection
 snapshots, input-keyed build contexts and label-verified images, ccache, and
 virtual environments by default.
 Plan and execution acquire the retained upstream-test lifecycle, upstream
-image-cache, live lifecycle, DEB terminal, workspace lifecycle, and case-update
-locks in that fixed order. Before its first deletion, `cycle-clean` publishes
+image-cache, live lifecycle, and DEB terminal locks in that fixed order.
+Before its first deletion, `cycle-clean` publishes
 schema-2 `cycle-cleanups/<CYCLE>.remove.json`. It binds directory target
 device/inode/fingerprint state and atomically stages those targets at
 `cycle-cleanups/.<CYCLE>.<index>.remove`. Before recursive deletion it publishes

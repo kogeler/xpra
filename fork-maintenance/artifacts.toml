@@ -10,11 +10,8 @@ permanent = [
 
 # Lifecycle/recovery authorities and their lock files. Both scopes keep them;
 # `artifacts-close` additionally requires every file below them to be an idle
-# empty lock, so an unfinished job, workspace or transaction blocks the close.
+# empty lock, so an unfinished job or transaction blocks the close.
 infrastructure = [
-  "case-staging",
-  "case-updates",
-  "workspace-fingerprints",
   "cycle-cleanups",
   "upstream-tests/runs",
   "upstream-tests/image-builds",
@@ -22,7 +19,6 @@ infrastructure = [
   "upstream-tests/.foreground-payload.owner.json",
   "upstream-tests/.foreground-payload.lock",
   "upstream-tests/logs/.lifecycle.lock",
-  "upstream-tests/workspaces/.lifecycle.lock",
   "jobs/live/.lifecycle.lock",
   "deb-packages/runs",
   "deb-packages/locks/terminal.lock",
@@ -46,14 +42,13 @@ task = [
 ]
 
 # Structural parents stay, but their children are disposable unless classified
-# above or protected by a runtime owner / unfinished isolated workspace.
+# above or protected by a runtime owner.
 containers = [
   "jobs",
   "jobs/live",
   "live-results",
   "upstream-tests",
   "upstream-tests/logs",
-  "upstream-tests/workspaces",
   "deb-packages",
   "deb-packages/locks",
   "deb-packages/results",

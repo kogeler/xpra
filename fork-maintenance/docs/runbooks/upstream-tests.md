@@ -10,8 +10,11 @@ invalidated results.
 ## Frozen source model
 
 Every local acceptance job archives the unique source merge base already
-embedded in current `develop`, resolves the selected case or stack, and applies
-only forward-applicable patches inside an isolated container source tree.
+embedded in current `develop`, resolves the selected case or stack, freezes
+the diff of each selected case commit from committed `HEAD` into its private
+payload (see [`case-commits.md`](case-commits.md#runners)), and applies those
+diffs to the base inside an isolated container source tree. Product paths must
+be clean at start; uncommitted control paths are allowed.
 Local jobs use local `master` as the history anchor, falling back to cached
 `origin/master` only when it is absent. `SOURCE_REMOTE=local` records the actual
 `refs/heads/master` bundle ref; no remote or network operation is involved.
@@ -178,19 +181,21 @@ clean and patched compiled gates before replacing it. The live and real DEB
 builders retain their separately bound toolchains; these unit-test results do
 not establish those build outcomes.
 
-### Patch applicability
+### Case applicability
 
 ```bash
-make -C fork-maintenance patch-check CASE=wayland-initial-window-state
+make -C fork-maintenance case-check CASE=wayland-initial-window-state
 make -C fork-maintenance stack-check STACK=develop
 ```
 
-Resolution must report only `apply` or exact `already-present`. A divergent or
-ambiguous patch stops the ladder.
+Both must pass: each case commit applies to the embedded base on its own after
+its declared dependencies and is neither already present nor ambiguous, and
+the base plus all case diffs reproduces the product tree of `HEAD` (see
+[checks](case-commits.md#checks)). A failure stops the ladder.
 
-For an explicit upstream refresh, applicability is followed by the mandatory
+For an explicit upstream refresh, the rebase is followed by the mandatory
 whole-queue manual review in [upstream refresh](upstream-refresh.md), not a
-test start. Review correctness and necessity equally deeply for every patch,
+test start. Review correctness and necessity equally deeply for every case,
 implement and re-review all initial keep/adapt/retire decisions and regression
 migrations, and record its manual-review exit gate before image preparation
 or any runtime control/test. Even a green suite cannot replace this analysis.
@@ -201,19 +206,18 @@ Before `test-start`, compare the exact old and new applied trees. Do not start
 container tests when the embedded source is unchanged and the only differences
 are comments, copyright notices, or documentation, with identical paths,
 modes, executable data, configuration, test assertions, source
-selection/application, build commands, and runner behavior. Refresh derived
-digests, resolve the selection, run whitespace and fork-control checks, and
-report the proof instead. This exception concerns the unchanged unit-test
-inputs only: accepting any patch still requires the complete nine-profile live
-suite with all patches at both endpoints. Any uncertainty or semantic difference
-requires the
-affected development checks and final coverage. This exception never spans an
-upstream rebase. After adaptation and candidate freeze following
+selection/application, build commands, and runner behavior. Run `case-check`,
+`stack-check`, whitespace and fork-control checks, and report the proof
+instead. This exception concerns the unchanged unit-test inputs only:
+accepting any case change still requires the complete nine-profile live suite
+with all case commits at both endpoints. Any uncertainty or semantic difference
+requires the affected development checks and final coverage. This exception
+never spans an upstream rebase. After adaptation and candidate freeze following
 `develop-rebase`, complete the clean quarantine reassessment, tests-only controls
 for cases which own retained tests, case-specific no-test semantic inspection
 for those which do not, patched focused/native gates, every case-specific
 durable package boundary against the complete resulting stack, and every full
-leg even when the patch files did not change. The canonical complete sequence
+leg even when no case commit changed. The canonical complete sequence
 is
 [`upstream-refresh.md`](upstream-refresh.md).
 
@@ -255,10 +259,11 @@ make -C fork-maintenance test-wait RUN=wayland-master-regression-01
 ```
 
 This is the non-vacuous control for deciding whether upstream replaced a case.
-`PATCH_MODE=clean` applies no case patch and therefore cannot supply a newly
+`PATCH_MODE=clean` applies no case diff and therefore cannot supply a newly
 introduced case-owned focused module; the fixed neutral inventory below is
-independent of case patch mode. `PATCH_MODE=patched` applies the complete selected patch.
-When a production patch owns no test path, `PATCH_MODE=tests-only` fails closed
+independent of case patch mode. `PATCH_MODE=patched` applies the complete
+selected case diff. When a production case commit changes no test path,
+`PATCH_MODE=tests-only` fails closed
 instead of pretending to provide a regression. The focused runner also rejects
 `PATCH_MODE=clean`; do not classify either guard failure as a clean test. Perform
 the semantic inspection required by that case's README, run its existing
@@ -344,8 +349,8 @@ The complete stack also declares the neutral modules and adjacent pointer tests
 for its focused variants. The codec-startup module has no native gate and the
 focused runner rejects `PATCH_MODE=clean`, so its clean-source proof is the
 clean full leg described below. This supported ownership survives case retirement
-without reviving historical verification selections or introducing a test-only
-production case. Full-stack live coverage remains mandatory and unchanged.
+without a separate test-only selection or a test-only production case.
+Full-stack live coverage remains mandatory and unchanged.
 
 The test image explicitly installs NumPy so PyOpenGL's array-returning path is
 available to the case-owned OpenGL regressions. Exercise both NumPy and ctypes
@@ -412,11 +417,12 @@ in the workflow YAML. See [`ci.md`](ci.md).
 
 There is currently no active duty case. In that state record reassessment as
 not applicable and omit the case-specific commands below. Preserve its permanent
-`draft = true` scaffold, zero-byte patch, description and commented TOML queue
-and gate entries; never delete the infrastructure when all tests pass or
-restore historical skips. Production controls and the full three-leg upstream
-matrix remain mandatory. Deactivation retains its exact clean/direct results
-as evidence while available, without test-selecting an inactive draft. Follow
+case directory without a commit: the manifest with empty lists and commented
+gate entries, and the README; never delete the infrastructure when all tests
+pass or restore historical skips. Production controls and the full three-leg
+upstream matrix remain mandatory. Deactivation retains its exact clean/direct
+results as evidence while available, without test-selecting the inactive case.
+Follow
 [`test-quarantine.md`](test-quarantine.md) for both lifecycle transitions.
 
 Before applying `upstream-test-quarantine` after an explicitly selected upstream
@@ -459,7 +465,7 @@ Stop escalation at the first unexplained failure. Inspect the affected module
 and surrounding source; matching upstream Actions output for the exact base
 and leg is technical diagnostic context, not a scheduling authority or a
 substitute for the current clean reproduction required for quarantine.
-Keep an unrelated failure out of the current production patch. Admission to
+Keep an unrelated failure out of the current production case. Admission to
 the single duty quarantine requires existing task authority (including the
 autonomous refresh directive) and a non-vacuous same-mode clean control; ask
 for scope only when that authority is absent.

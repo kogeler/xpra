@@ -1,20 +1,6 @@
-schema = 1
+schema = 2
 slug = "develop"
-description = "The complete active downstream patch queue"
-series = [
-  "window-source-timer-lifecycle",
-  "video-pipeline-cleanup-race",
-  "wayland-subsurface-stream-ownership",
-  "wayland-initial-window-state",
-  "wayland-client-keymap-sync",
-  "x11-client-clipboard-events",
-  "packet-handler-error-boundary",
-  "gtk-client-scroll-deduplication",
-  "server-shutdown-disconnect-flush",
-  # Enable only to disable currently broken upstream tests after clean-source proof.
-  # Keep the inactive case infrastructure and empty patch even when all tests pass.
-  # "upstream-test-quarantine",
-]
+description = "Stack-level tests of the develop case commits (the series is their commit order)"
 
 [tests]
 list = [

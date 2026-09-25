@@ -1,7 +1,7 @@
 # Video and connection lifecycle regressions
 
-Both focused modules are exported inside `../fix.patch`; this directory does
-not contain duplicate test sources. `../case.toml` is the authoritative module
+Both focused modules are added by the case commit; this directory does not
+contain duplicate test sources. `../case.toml` is the authoritative module
 and gate list, and the main case README maps their production ownership.
 
 - `unit.server.window.video_compress_test` exercises native-pair publication

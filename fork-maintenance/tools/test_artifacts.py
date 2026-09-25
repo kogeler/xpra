@@ -229,35 +229,6 @@ class ArtifactsTest(unittest.TestCase):
             artifacts.operate(self.repo, "clean", "0" * 64)
         self.assertTrue(path.exists())
 
-    def test_dirty_workspace_is_protected_without_blocking_unrelated_cleanup(self) -> None:
-        workspace = self.file("upstream-tests/workspaces/candidate/unique.patch")
-        disposable = self.file("scratch")
-        with patch.object(
-            contrib, "_finalized_workspace_fingerprint_locked", side_effect=contrib.ContribError("unexported candidate")
-        ):
-            report = self.clean()
-        self.assertTrue(workspace.exists())
-        self.assertFalse(disposable.exists())
-        self.assertIn("unexported candidate", dict(report.protected)["upstream-tests/workspaces/candidate"])
-
-    def test_finalized_workspace_uses_existing_finalization_boundary(self) -> None:
-        workspace = self.file("upstream-tests/workspaces/final/source/test")
-        with patch.object(contrib, "_finalized_workspace_fingerprint_locked", return_value="a" * 64) as check:
-            self.clean()
-        check.assert_called_with(self.repo, "final")
-        self.assertFalse(workspace.exists())
-
-    def test_recovery_state_protects_workspaces_and_staging(self) -> None:
-        workspace = self.file("upstream-tests/workspaces/candidate/unique")
-        recovery = self.file("case-updates/case.update.owner.json")
-        live = self.file("live-results/.run.freeze-abort-result/input")
-        deb = self.file("deb-packages/outputs/.out.tar.validate.owner.json")
-        output = self.file("deb-packages/outputs/out.tar")
-        self.file("scratch")
-        with patch.object(contrib, "_finalized_workspace_fingerprint_locked") as check:
-            self.clean()
-        check.assert_not_called()
-        self.assertTrue(all(path.exists() for path in (workspace, recovery, live, deb, output)))
 
     def test_nonprivate_legacy_modes_are_bound_not_normalized(self) -> None:
         self.file("directory/file", mode=0o664)
@@ -294,18 +265,17 @@ class ArtifactsTest(unittest.TestCase):
 
     def test_runtime_and_locks_survive_an_accidental_policy_omission(self) -> None:
         owner = self.file("upstream-tests/runs/run.owner")
-        recovery = self.file("case-updates/case.update.owner.json")
         lock = self.file("upstream-tests/logs/.lifecycle.lock", "")
         disposable = self.file("scratch")
         policy = self.repo / ".artifacts/policy.toml"
         payload = artifacts.POLICY_PATH.read_bytes()
-        for entry in ("upstream-tests/runs", "upstream-tests/logs/.lifecycle.lock", "case-updates", "cycle-cleanups"):
+        for entry in ("upstream-tests/runs", "upstream-tests/logs/.lifecycle.lock", "cycle-cleanups"):
             self.assertIn(f'  "{entry}",\n'.encode(), payload)
             payload = payload.replace(f'  "{entry}",\n'.encode(), b"")
         policy.write_bytes(payload)
         report = artifacts.operate(self.repo, "plan", policy_path=policy, inspect_runtime=False)
         artifacts.operate(self.repo, "clean", report.plan.digest, policy_path=policy, inspect_runtime=False)
-        self.assertTrue(all(path.exists() for path in (owner, recovery, lock)))
+        self.assertTrue(all(path.exists() for path in (owner, lock)))
         self.assertFalse(disposable.exists())
 
     def test_check_never_calls_unsafe_leftovers_clean(self) -> None:
@@ -440,7 +410,6 @@ class ArtifactsTest(unittest.TestCase):
     def test_close_refuses_to_delete_anything_while_state_is_live(self) -> None:
         for name in (
             "upstream-tests/runs/run.owner",
-            "case-updates/case.update.owner.json",
             "deb-packages/releases/run-1-attempt-1/publication.json",
             "knowledge/sessions/Bad Name.md",
         ):

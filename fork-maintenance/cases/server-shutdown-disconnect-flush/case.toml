@@ -1,17 +1,8 @@
-schema = 1
+schema = 2
 slug = "server-shutdown-disconnect-flush"
 kind = "production"
 title = "Flush the shutdown disconnect before closing client protocols"
-commit_subject = "Send the shutdown disconnect before closing the connection"
-patch_sha256 = "e9690d662a9b5eb5f9d8ea42d02263fa633fc9e124e533d0ebf1da25dd03c26a"
 dependencies = []
-paths = [
-  "tests/unittests/unit/net/protocol_flush_test.py",
-  "tests/unittests/unit/server/shutdown_flush_test.py",
-  "xpra/net/protocol/socket_handler.py",
-  "xpra/server/base.py",
-  "xpra/server/core.py",
-]
 
 [tests]
 list = [

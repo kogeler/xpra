@@ -69,16 +69,17 @@ If CI stops in `ci-prepare` before `ci_target=` appears, treat it as a pre-test
 control-plane failure. After changing only that guard, run its narrow unit test
 and reproduce `ci-prepare` with the GitHub environment variables. Do not spend
 the three-leg container matrix on that verification when the exact frozen fork
-source commit, queue digests, image inputs, entrypoint, and test commands did not
-change; the matrix has no coverage of a guard that has already returned.
+source commit, selection digests, image inputs, entrypoint, and test commands
+did not change; the matrix has no coverage of a guard that has already returned.
 
 The CI target uses the checkout's cached `origin/master` only to locate the
 merge base already embedded in pushed `develop`. It freezes that exact commit
-without querying moving live master refs, validates `XPRA_CI_TARGET`, the queue,
-and the source bundle before building or verifying the input-keyed,
-label-verified Ubuntu 26.04 container image, applies the complete
-`stacks/develop` patch queue, and
-runs exactly one of these upstream-authored unit-test modes:
+without querying moving live master refs, validates `XPRA_CI_TARGET`, the
+selection, and the source bundle before building or verifying the input-keyed,
+label-verified Ubuntu 26.04 container image, applies the frozen diffs of all
+case commits of `STACK=develop` from the pushed checkout (see
+[`case-commits.md`](case-commits.md#runners)), and runs exactly one of these
+upstream-authored unit-test modes:
 
 1. `full`;
 2. `full-cython`;
@@ -102,8 +103,8 @@ embedded in `develop`, even if a master ref advances later. Neither ordinary
 testing nor publication requires live fork/canonical equality or a new rebase.
 The hosted job does not add an `upstream` remote and never fetches, syncs,
 switches, merges, or rebases after `actions/checkout`. If the operator chooses
-to adapt the queue to a different upstream base, that is a separate local
-refresh cycle; CI cannot and must not select or rewrite the base.
+to adapt the case commits to a different upstream base, that is a separate
+local refresh cycle; CI cannot and must not select or rewrite the base.
 
 ## Disabled upstream workflows
 
@@ -169,7 +170,7 @@ XPRA_CI_TARGET=full-no-compat make -C fork-maintenance ci-upstream-tests
 ```
 
 Each invocation deliberately runs one heavy leg and may build the container
-image. For ordinary patch acceptance use the named `test-start`/`test-wait`
+image. For ordinary case acceptance use the named `test-start`/`test-wait`
 lifecycle from [`upstream-tests.md`](upstream-tests.md); the CI foreground
 target is not durable local evidence.
 

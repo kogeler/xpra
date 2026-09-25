@@ -85,11 +85,11 @@ identity, stop for owner review rather than rewriting it automatically.
 
 ## Optional fork-master refresh
 
-The normal workspace, test, live, CI-reproduction, and publication paths use
+The normal case, test, live, CI-reproduction, and publication paths use
 the unique source merge base already embedded in current `develop`. They do not
 fetch or compare live master refs, and an older fork/local master does not block
 them. The operator alone decides when to move that embedded base and begin a
-new patch-adaptation cycle; only that explicit decision activates the refresh
+new case-adaptation cycle; only that explicit decision activates the refresh
 steps below.
 
 The hosted `master-sync.yml` workflow normally fast-forwards
@@ -144,15 +144,19 @@ git switch --no-track -c develop refs/remotes/origin/master
 ```
 
 After the operator prepares local `master` and invokes the refresh runbook,
-stay on clean `develop` and rebase it onto that existing local branch:
+stay on the clean `develop` (commit or discard every change first; the rebase
+refuses a dirty tree) and rebase it onto that existing local branch in the
+checkout:
 
 ```bash
 make -C fork-maintenance develop-rebase
 ```
 
 If Git stops for conflicts, inspect each one against current fork-master source
-and the fork-maintenance intent, edit it, and continue only after staging the
-exact resolution:
+and the intent of the case commit being replayed, resolve it inside that
+commit, and continue only after staging the exact resolution. Mid-rebase the
+control files may be old or absent; read runbooks with
+`git show ORIG_HEAD:<path>` and run tooling only after the rebase ends:
 
 ```bash
 git status --short
@@ -168,37 +172,41 @@ step alone. Make targets export `GIT_NO_LAZY_FETCH=1`, so no command lazily
 contacts the SSH promisor or opens a key prompt.
 
 Repeat until the rebase completes. If a correct resolution cannot be proved,
-run `git rebase --abort` and stop. Do not begin patch work in a conflicted or
+run `git rebase --abort` and stop; `git reset --keep <recorded tip>` or the
+reflog restores the old tip. Do not begin case work in a conflicted or
 partially rebased checkout.
 
 Merging `master`, `upstream/master`, or any equivalent upstream ref into
-`develop` is forbidden. After the rebase, prove the start boundary and resolve
-the active patch queue against the new base:
+`develop` is forbidden. After the rebase, prove the start boundary and verify
+every case commit against the new base:
 
 ```bash
 make -C fork-maintenance patch-start-check
 make -C fork-maintenance stack-check STACK=develop
 ```
 
-When published fork-only commits were replayed, the operator later publishes
-the reviewed branch with the exact-SHA `--force-with-lease` procedure in
-[`publish-develop.md`](publish-develop.md). Publication requires a separate
-explicit operator instruction.
+A rebase, like any other case rewrite, replaces commits that may already be
+published. The operator later publishes the reviewed branch with the exact-SHA
+`--force-with-lease` procedure in [`publish-develop.md`](publish-develop.md);
+the agent never pushes.
 
-For ordinary work on the unchanged embedded base, when fork-control files are
-uncommitted, do not switch or rebase the dirty checkout. Use
-`isolated-start-check` and the named workspace flow. When the operator instead
-invokes the upstream-refresh runbook, dirty work remains preserved until an
-explicit operator disposition makes the checkout ready. No preservation or
-result commit is implicit; new changes remain uncommitted for review. A clean rebase is required only
-when the operator intentionally changes the source boundary, not before
-testing, editing, committing, or publishing the unchanged current base.
+For ordinary work on the unchanged embedded base, do not switch branches or
+rebase onto a new base. Use `isolated-start-check` and the case-commit flow in
+[`case-commits.md`](case-commits.md#everyday-operations): product changes
+become case commits (new commits, or fixups folded by `develop-squash`), while
+uncommitted fork-control work may stay in the tree and survives those
+rewrites through `--autostash`. Control commits still follow operator
+instructions; no preservation or result control commit is implicit. A rebase
+onto a new base is required only when the operator intentionally changes the
+source boundary, not before testing, editing, committing, or publishing the
+unchanged current base.
 
 After each explicitly selected rebase, reassess the single test-quarantine case
 on the new clean source in all three matrix modes before applying it. Follow
 [`test-quarantine.md`](test-quarantine.md); a module which becomes green in an
 assigned gate must leave that gate in the same reviewed cycle. Remove the
-module and its patch path only when no gate still assigns it.
+module and its disabled test file from the quarantine commit only when no gate
+still assigns it.
 
 That clean reassessment does not block independent production-case development.
 Retain its current results across unrelated production-only edits; the complete

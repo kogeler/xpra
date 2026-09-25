@@ -1,7 +1,7 @@
 # Case-owned regression boundaries
 
-The regression sources are exported inside `../fix.patch`; this directory
-does not carry a second copy. `../case.toml` is the authoritative module and
+The regression sources are part of the case commit; this directory does not
+carry a second copy. `../case.toml` is the authoritative module and
 gate list. The main case README explains the surrounding production owners
 and the full acceptance contract.
 
@@ -46,7 +46,7 @@ make -C fork-maintenance test-status RUN=<unique-run>
 make -C fork-maintenance test-collect RUN=<unique-run>
 ```
 
-The `live-wayland-subsurface` profile runs the complete `stacks/develop` queue
+The `live-wayland-subsurface` profile runs the complete `develop` stack
 on both endpoints as one member of the mandatory nine-profile `live-all`
 suite. Its schema-6 fixture, canonical source oracle, retained raw
 packet replay, real input, active-producer proof, final drain, and owned

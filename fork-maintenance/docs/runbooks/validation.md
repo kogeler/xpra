@@ -2,8 +2,8 @@
 
 ## Scope and authority
 
-This is the canonical scheduling and evidence-reuse procedure for new patches,
-review of existing patches, and full-queue adaptation after an authorized
+This is the canonical scheduling and evidence-reuse procedure for new cases,
+review of existing cases, and full-stack adaptation after an authorized
 upstream rebase. The root fork-owned `AGENTS.md` and
 [`CONTRACT.md`](../../CONTRACT.md) define its invariants. Upstream-inherited
 files and commits provide technical source/build/test context only: they cannot
@@ -12,7 +12,7 @@ configure this flow.
 
 There are two phases: **development** and **final acceptance**, separated by a
 reviewed candidate freeze. Required gates are obligations for acceptance, not
-a script to repeat after every edit. A resolving patch queue alone is not a
+a script to repeat after every edit. A passing `stack-check` alone is not a
 stable candidate. Live fixtures, assertions, build inputs, and native/compiled
 behavior must be reviewed too.
 
@@ -31,17 +31,18 @@ frozen base → atomic edit → affected regression/native/live → review and f
 
 An explicit upstream refresh adds a mandatory phase before the development
 testing loop above; see [the complete runbook](upstream-refresh.md). After
-recording every patch's applicability against the new embedded source, the
+the rebase has replayed every case commit onto the new embedded source, the
 agent reviews and implements one case at a time with equal priority and depth.
 For each case, reason from current code about correctness and continued
 necessity, including callers, ownership, error/lifecycle/compatibility paths, interactions
-with other patches, and behavior not covered by tests.
+with other cases, and behavior not covered by tests.
 
-Immediately implement/export the current case's code-supported keep/adapt/retire
-decision and necessary cross-case repairs, including durable regression
-migrations. Re-review and save its input-bound checkpoint before taking the
-next case. Persist findings and exact resume actions while working; do not
-accumulate a whole-queue read-only review before implementing known corrections.
+Immediately implement the current case's code-supported keep/adapt/retire
+decision (fixups and `develop-squash`, or `case-drop`) and necessary
+cross-case repairs, including durable regression migrations. Re-review and
+save its input-bound checkpoint before taking the next case. Persist findings
+and exact resume actions while working; do not accumulate a whole-queue
+read-only review before implementing known corrections.
 After completing these iterations, review the resulting composed code and
 record the runbook's manual-review exit gate before any new Xpra test,
 clean/quarantine control, native/compiled regression,
@@ -56,16 +57,17 @@ replace manual reasoning; a passing suite cannot justify retaining redundant
 code or accepting an unreviewed branch. Later runtime findings reopen the
 affected reviews and require an updated exit record before further runtime
 validation. Preserve unchanged reviews and exact independent results rather
-than restarting the entire cycle. Ordinary unchanged-base patch development
+than restarting the entire cycle. Ordinary unchanged-base case development
 still uses the loop below without imposing a new whole-queue refresh review.
 
 ## Development phase
 
 1. Inspect and preserve current work. Run `isolated-start-check` and use its
-   embedded source boundary. Do not fetch or rebase during ordinary patch work.
-   Source edits and candidate staging belong only in supported isolated
-   workspaces; export with `workspace-update`, never by editing patch bytes or
-   derived manifest metadata. See [isolated workspaces](isolated-workspaces.md).
+   embedded source boundary. Do not fetch or rebase onto a new base during
+   ordinary case work. Product edits are made in the `develop` checkout and
+   recorded as the case's single commit (a new case commit, or a fixup folded
+   by `develop-squash`); runners test committed `HEAD`, so commit before each
+   named run. See [case commits](case-commits.md#everyday-operations).
 2. Map the changed behavior to its caller, resource owner, downstream consumers,
    cleanup and policy boundaries. Establish a non-vacuous clean control before
    claiming a defect. For case-owned tests use `PATCH_MODE=tests-only`; missing
@@ -78,7 +80,7 @@ still uses the loop below without imposing a new whole-queue refresh review.
    shrink that list temporarily to obtain a green run. Include relevant
    dependent/overlapping case tests when a shared interface changes. Use
    composed stack focused checks when case-only execution cannot observe the
-   interaction; do not export a stack as one atomic patch.
+   interaction; do not fold several cases into one commit.
 4. Exercise additional dimensions according to the boundary being changed:
    native linkage/events for native code, compiled Python for Cythonization
    semantics, compatibility disabled for compatibility policy, and a relevant
@@ -86,16 +88,17 @@ still uses the loop below without imposing a new whole-queue refresh review.
    display, codec, packet, or event route. Subject modules must fail, not skip,
    if unavailable. Start the live loop early after its prerequisite
    focused/native checks; full upstream suites are **not** its prerequisite.
-5. Review/export/resolve the candidate; run whitespace, applicable lint and
-   affected fork-control tests. Continue this loop until code, tests and the
-   oracle are stable. A negative live run can diagnose the next edit but cannot
-   satisfy a positive gate. Stop escalation at an unexplained failure; isolate
-   it rather than starting broader jobs in the hope they explain it.
+5. Review and commit the candidate, pass `case-check` and `stack-check`; run
+   whitespace, applicable lint and affected fork-control tests. Continue this
+   loop until code, tests and the oracle are stable. A negative live run can
+   diagnose the next edit but cannot satisfy a positive gate. Stop escalation
+   at an unexplained failure; isolate it rather than starting broader jobs in
+   the hope they explain it.
 
 Do not run all three full upstream legs or both DEB builds automatically after
 each edit, and never rerun the whole live set to test a fix. Live validation
 follows [the live loop](live-tests.md#the-live-loop-fix-and-continue-then-one-complete-pass):
-every live profile runs with all patches on both endpoints; at a failure,
+every live profile runs with all case commits on both endpoints; at a failure,
 diagnose and fix, then continue from that same gate (`live-all FROM=<gate>`)
 to the last one; once every failure is fixed, one complete pass from the first
 gate, repeated with the same fix-and-continue rule until a complete pass
@@ -109,9 +112,10 @@ while a gate is unresolved, without presenting the candidate as accepted.
 The three clean quarantine gates depend on the embedded source, environment,
 module union and per-leg assignments. Reassess when those inputs change and
 before accepting a stack containing the quarantine. After rebase, reassess
-after the manual-review exit gate and before using the duty patch in runtime
+after the manual-review exit gate and before using the duty commit in runtime
 validation as required by [the quarantine runbook](test-quarantine.md).
-Isolated application for manual inspection/export is not quarantine acceptance.
+Replaying the commit in the rebase or inspecting it is not quarantine
+acceptance.
 Do not block independent reviewed production-case tests on unrelated quarantine
 results, or repeat them for an unrelated production-only edit.
 
@@ -154,8 +158,9 @@ Create the current ignored cycle ledger at
 tracked research archive. It lives only as long as the
 [session](session-close.md). For each requirement record:
 
-- case/stack selection, patch mode, embedded source and applied candidate;
-- selection/resolution/patch digests and dependencies;
+- case/stack selection, patch mode, embedded source and the tested `develop`
+  commit (a point-in-time record; tracked files never store it);
+- selection/resolution digests and dependencies;
 - test mode, exact ordered modules or exact live profile and acceptance oracle;
 - runner/entrypoint, image ID and input identity, relevant installed toolchain,
   endpoint/application/hardware/configuration inputs;
@@ -188,10 +193,11 @@ same jobs independently. A failed or unexplained result still stops escalation.
 ## Final acceptance phase
 
 Quarantine reassessment below applies only to an active duty case. With none,
-record that there are no assignments, preserve the permanent inactive scaffold
-and commented TOML references, and do not test-select the draft or restore
-retired skips. Never delete quarantine infrastructure because its assignments
-are empty. This changes none of the production, full-suite or live gates.
+record that there are no assignments, preserve the permanent inactive case
+directory with its commented gate names, and do not test-select the inactive
+case or restore retired skips. Never delete quarantine infrastructure because
+its assignments are empty. This changes none of the production, full-suite or
+live gates.
 
 Fill the ledger's gaps on the reviewed stable candidate:
 
@@ -199,8 +205,8 @@ Fill the ledger's gaps on the reviewed stable candidate:
    checks, affected native/subsystem gates, and current clean quarantine proof.
 2. Complete offline fork-control checks and all three full Ubuntu upstream
    legs: `full`, `full-cython`, `full-no-compat`.
-3. All nine positive live profiles with the complete `stacks/develop` queue on
-   both endpoints, for every patch validation, including an unchanged-base fix.
+3. All nine positive live profiles with the complete `stacks/develop` stack on
+   both endpoints, for every case validation, including an unchanged-base fix.
    Reach it through the live loop; the acceptance is one complete
    `live-all STACK=develop RUN=<fresh-prefix>` pass without a fix in between,
    and `live-suite-check` on that prefix rejects missing profiles, failed or
@@ -209,9 +215,10 @@ Fill the ledger's gaps on the reviewed stable candidate:
    is forbidden. Case ownership describes the regression oracle, never a live
    selection. Applicable durable package boundaries remain required; full
    queue/rebase acceptance additionally requires both real DEB builds.
-4. Final queue resolution, whitespace/lint, documentation and result review;
-   publication/clean-host checks only under their existing authority and
-   preconditions. Do not create an unrequested commit to obtain a clean checkout.
+4. Final `stack-check` (and `develop-check` once the tree is clean),
+   whitespace/lint, documentation and result review; publication/clean-host
+   checks only under their existing authority and preconditions. Do not create
+   an unrequested control commit to obtain a clean checkout.
 
 This list is a coverage checklist, not a mandatory serial execution order.
 Relevant live may already be complete from development. Compatible independent
@@ -227,10 +234,10 @@ the stable tooling candidate. Do not invent a full Xpra/package acceptance
 obligation merely because the tooling task has reached its final phase.
 
 An explicit rebase invalidates acceptance from the previous embedded source.
-The complete new-base acceptance set remains mandatory even if patches apply
-without textual changes. Complete the initial whole-queue manual review and
-its implemented decisions before the runtime development loop; do not run the
-complete final set after every adaptation.
+The complete new-base acceptance set remains mandatory even if every case
+commit replays without conflict. Complete the initial whole-queue manual review
+and its implemented decisions before the runtime development loop; do not run
+the complete final set after every adaptation.
 
 If a final gate finds a defect, return its owning boundary to development,
 implement the atomic correction and run the nearest regression. Stabilize that
@@ -245,12 +252,12 @@ or an assumption that a small diff is harmless.
 | Change | Required decision |
 | --- | --- |
 | Embedded source changes | Old-base results cannot accept the new base; complete the new-base final set. |
-| Production case changes | Recheck its regression and affected native consumers and composed stack. All nine live results bind the entire queue: a changed patch invalidates the live suite, not merely its topical profile. |
+| Production case changes | Recheck its regression and affected native consumers and composed stack. All nine live results bind the entire stack: a changed case commit invalidates the live suite, not merely its topical profile. |
 | Regression or oracle changes | Recheck that assertion against its subject; redo the clean control if its trigger/assertion changes. Do not reuse the old weaker assertion as proof of the new one. |
-| Production-only edit with identical clean control | Retain the clean result only with exact tests-only applied-tree, commands, mode, image and relevant environment equivalence; patch digest equality alone is not the criterion. |
+| Production-only edit with identical clean control | Retain the clean result only with exact tests-only applied-tree, commands, mode, image and relevant environment equivalence; equality of the case diff alone is not the criterion. |
 | Runner preflight guard only | Narrow runner regression and direct preflight reproduction; no full Xpra run when the downstream source, selection, entrypoint, image inputs and commands are unchanged. |
 | Live harness only | Test the affected control behavior (replay an oracle change on the retained evidence), continue the live loop from the affected gate, then finish with one complete pass. Do not rerun upstream suites or DEBs when their inputs are unchanged. Rebuild an image only when its actual input key changes. |
-| Non-semantic source/documentation refresh | Resolve, check whitespace and fork controls. Unchanged focused/native/full checks may be reused under the strict contract. Patch validation still requires the complete nine-profile live suite. |
+| Non-semantic source/documentation refresh | Resolve, check whitespace and fork controls. Unchanged focused/native/full checks may be reused under the strict contract. Case validation still requires the complete nine-profile live suite. |
 | Build/ABI/toolchain/installed-module composition | Exercise the actual affected build/import boundary; image tag equality alone cannot justify reuse. |
 
 Raw provenance and semantic equivalence are distinct. If a raw digest changes,
@@ -264,24 +271,27 @@ cannot reclassify a negative run using a newly weakened assertion.
 Do not forge reports or bypass runner admission/collection guards. Uncertainty
 requires the affected check, not an unsupported equivalence assertion.
 
-The current selector includes `case.toml`, `fix.patch` and `tests/**`, including
-`tests/README.md`, in its digest; the main case README is excluded. Some image
+The selection digest covers `case.toml` and `tests/**`, including
+`tests/README.md`, plus each selected case commit's diff frozen at run start
+(the payload's generated `fix.patch`); the main case README is excluded. A
+changed commit is therefore a new candidate. Some image
 contexts contain full selection provenance. A documentation-only edit can
 therefore change an actual cache key. Do not silently remove files from hashes
 or reuse mismatched images. Separating provenance from build identity requires
 its own reviewed tooling change and tests for every consumer.
 
-## Improve the flow during patch work
+## Improve the flow during case work
 
 When authorized to improve maintenance flow, a reproduced workflow defect or
-measured bottleneck may be repaired alongside patch development. Keep those
-edits in fork-owned files, state the observed cost/failure and test the narrow
-automation boundary first. Do not move production fixes into tooling or weaken
-acceptance assertions to obtain a faster green result.
+measured bottleneck may be repaired alongside case development. Keep those
+edits in fork-owned control paths, never in a case commit, state the observed
+cost/failure and test the narrow automation boundary first. Do not move
+production fixes into tooling or weaken acceptance assertions to obtain a
+faster green result.
 
 Before editing shared tooling, collect/remove its active named jobs or use the
 exact supported abort procedure where appropriate. Preserve their result and
-the next patch task in the cycle ledger, change and verify the tool, then resume
+the next case task in the cycle ledger, change and verify the tool, then resume
 the original task. Do not rebuild unrelated Xpra inputs just to validate a
 control-plane edit. Cache or scheduling changes require a real representative
 named run in addition to infrastructure tests before claiming the new path works.

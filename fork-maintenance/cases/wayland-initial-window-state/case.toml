@@ -1,21 +1,7 @@
-schema = 1
+schema = 2
 slug = "wayland-initial-window-state"
 title = "Select Wayland codecs from current frame state"
-commit_subject = "Select Wayland codecs from current frame state"
-patch_sha256 = "8f6881a8ac1b8e4c3e37561c667c0c6a631612e2a28e638fc138051e020f1a53"
 dependencies = []
-paths = [
-  "tests/unittests/unit/server/window/initial_damage_test.py",
-  "tests/unittests/unit/server/window/make_metadata_test.py",
-  "tests/unittests/unit/wayland/window_metadata_test.py",
-  "tests/unittests/unit/wayland/window_test.py",
-  "xpra/server/window/compress.py",
-  "xpra/server/window/metadata.py",
-  "xpra/server/window/video_compress.py",
-  "xpra/wayland/server/models/subsurface_window.py",
-  "xpra/wayland/server/models/window.py",
-  "xpra/wayland/server/subsystem/window.py",
-]
 
 [tests]
 list = [

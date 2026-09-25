@@ -1,4 +1,4 @@
-# Investigate A Downstream Patch
+# Investigate A Downstream Case
 
 Use the development loop in [`validation.md`](validation.md): nearest real
 regression after each atomic edit, affected upstream/case/dependency modules,
@@ -8,7 +8,7 @@ and candidate freeze, not to every investigative edit.
 
 ## Establish current state without switching branches
 
-Stay on `develop` and prove the isolated boundary:
+Stay on `develop` and prove the start boundary:
 
 ```bash
 make -C fork-maintenance isolated-start-check
@@ -18,12 +18,17 @@ Search the [session registry](session-close.md#start-of-a-session) at
 `.artifacts/fork-maintenance/knowledge/INDEX.md` for the symptom, error text,
 symbol or case, and read only the matching session records before exploring.
 
-The gate allows dirty fork-control files but rejects every host Xpra source or
-test change. It records the host branch, HEAD, and unique source merge base
-already embedded in current `develop`; it never fetches, queries moving master
-refs, switches, merges, rebases, resets, stashes, stages, or commits. Old logs
-and previous patch applicability are leads, not evidence about that recorded
+The gate allows dirty fork-control files but rejects every uncommitted product
+change. It records the branch, HEAD, and unique source merge base already
+embedded in current `develop`; it never fetches, queries moving master refs,
+switches, merges, rebases, resets, stashes, stages, or commits. Old logs and
+previous `case-check` results are leads, not evidence about that recorded
 source commit.
+
+The `develop` checkout is the patched product: the embedded base plus every
+case commit (see [`case-commits.md`](case-commits.md#model)). Read the clean
+upstream version of a file with `git show <base>:<path>`, using the base the
+gate printed, and a case's own change with `case-show`.
 
 Read the current affected source, adjacent tests, recent maintainer-authored
 history, `CLAUDE.md`, `CONTRIBUTING.md`, the current test workflow, and lint
@@ -39,89 +44,68 @@ Use a behavior-based lowercase slug:
 make -C fork-maintenance case-new CASE=short-behavior-name
 ```
 
-If an interrupted `case-new` left marker-backed staging, inspect it and recover
-only that case identity before retrying:
-
-```bash
-make -C fork-maintenance case-recover CASE=short-behavior-name
-```
-
-Recovery removes the exact stale marker/partial, or validates an already
-published draft and removes only its marker. Unowned or ambiguous staging is an
-operator-review boundary.
-
-The draft is intentionally unselectable by test jobs. Complete its
-human-authored kind, title, commit subject, dependencies, focused tests,
+`case-new` only creates `cases/<slug>/` with a schema-2 manifest template and
+the README skeleton. Complete its kind, title, dependencies, focused tests,
 required gates, and README. Apply the mandatory
 [case documentation standard](case-documentation.md) in this same pass,
-including the mechanism, ownership/failure paths and real regression limits;
-the generated headings alone do not complete it. Leave `draft`, `patch_sha256`, and `paths`
-unchanged. Create a clean isolated workspace for the first candidate:
+including the reference line, the mechanism, ownership/failure paths and real
+regression limits; the generated headings alone do not complete it. Then
+implement the change and the smallest regression directly in the checkout and
+record them as the case's single commit:
 
 ```bash
-make -C fork-maintenance workspace-create \
-  CASE=short-behavior-name WORKSPACE=short-behavior-01 PATCH_MODE=clean
-# edit only the printed workspace source and add the smallest regression
-make -C fork-maintenance workspace-stage WORKSPACE=short-behavior-01
-make -C fork-maintenance workspace-update WORKSPACE=short-behavior-01
+# edit only the product files of this case and add the smallest regression
+git add -- <paths>
+git -c commit.gpgsign=false commit -m "<subject>" -m "<body>" \
+  --trailer "Fork-Case: short-behavior-name"
+make -C fork-maintenance case-check CASE=short-behavior-name
 ```
 
-Draft promotion is an exact case-update transaction: it binds the new patch and
-manifest together with the promoted workspace metadata and resolution. If the
-export is interrupted, run `case-recover CASE=short-behavior-name`; it discards
-only an incomplete preparation, finishes a complete `transaction.json`, or
-clears an owner-only boundary after validating the published case and workspace.
-Before recursively deleting a preparation or completed transaction, recovery
-publishes `<slug>.update.remove.json`, stages the exact tree at
-`.<slug>.update.remove`, deletes the update owner after the tree, and deletes
-the removal phase last. Its canonical target array continues to validate the
-published case and bound workspace outputs during phase-only retry. Never
-hand-edit `case-updates/`; unresolved update state blocks further updates and
-cycle cleanup.
+Follow the [commit message](case-commits.md#commit-message) format. Runners
+test committed `HEAD`, so commit before each named run. Every later edit of the
+case is a fixup folded into that commit
+([change a case](case-commits.md#change-a-case)); never add a second commit
+with the same trailer. The case directory and its commit belong together:
+`develop-check` fails while one exists without the other.
 
 For every source or test file created by the candidate, use the file's native
-comment syntax to add `Copyright (C) <current-year> kogeler` before staging.
+comment syntax to add `Copyright (C) <current-year> kogeler` before committing.
 Do not name an upstream maintainer as the author of a downstream-created file.
 If the file copies or derives protected content, retain its required notices
 and add the `kogeler` line.
 
-Add the completed case to `stacks/develop.toml` in dependency order. Do not
-create a tracked report or history directory for the investigation.
+The stack order is the order of the case commits in `develop`; a new commit
+lands on top, after every case it declares in `dependencies`. Do not create a
+tracked report or history directory for the investigation.
 
 An upstream-only failing test is the exception to behavior-based case
 creation: update the single `upstream-test-quarantine` duty case under the
 rules in [`test-quarantine.md`](test-quarantine.md); do not create a production
 case for it.
 
-## Reassess an existing patch
+## Reassess an existing case
 
-Resolve it before creating a workspace:
-
-```bash
-make -C fork-maintenance patch-check CASE=short-behavior-name
-```
-
-If resolution is `apply` or exact `already-present`, create the audit
-workspace:
+Its code is already applied in the checkout. Inspect and check it first:
 
 ```bash
-make -C fork-maintenance workspace-create \
-  CASE=short-behavior-name WORKSPACE=short-behavior-audit-01 PATCH_MODE=patched
+make -C fork-maintenance case-show CASE=short-behavior-name
+make -C fork-maintenance case-check CASE=short-behavior-name
 ```
 
-- `apply` means the stored patch remains forward-applicable;
-- `already-present` means the embedded source contains that exact diff;
-- `ambiguous` stops before workspace creation. During an explicitly authorized
-  upstream refresh, a proven `diverged` case uses the provenance-bound isolated
-  `PATCH_MODE=reconstruct` flow in
-  [`upstream-refresh.md`](upstream-refresh.md); ordinary patched workspace and
-  host `patch-apply` modes deliberately cannot force that state. Reconstruction
-  keeps host source/index untouched and does not create an intermediate commit.
+`case-check` proves that exactly one commit carries the trailer, that it
+touches only product paths, and that its diff applies to the embedded base on
+its own (after its declared dependencies), is neither already present nor
+ambiguous, and can be removed from `HEAD` without conflict. A failure stops
+the reassessment. During an explicitly authorized upstream refresh, a diff
+already upstream byte for byte disappears in the rebase and conflicts are
+resolved inside the replayed case commit, as described in
+[`upstream-refresh.md`](upstream-refresh.md).
 
 For a claimed upstream replacement, map each original trigger, production
 path, state transition, and postcondition to current code. Then run the retained
-focused regression on the clean embedded source. Do not retire a patch from
-commit-message similarity alone.
+focused regression on the clean embedded source. Do not retire a case from
+commit-message similarity alone; a proven replacement is retired with
+`case-drop` ([retire a case](case-commits.md#retire-a-case)).
 
 If existing tests do not observe the disputed path, improve the case-owned test
 or durable runner first. A copied test, temporary source rewrite, or one-off

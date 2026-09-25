@@ -1,5 +1,8 @@
 # Video pipeline lifecycle ownership
 
+Code: the `Fork-Case: video-pipeline-cleanup-race` commit on `develop`
+(`make -C fork-maintenance case-show CASE=video-pipeline-cleanup-race`).
+
 ## Boundary
 
 Each `WindowVideoSource` owns a native video pipeline and the asynchronous
@@ -102,8 +105,8 @@ This patch does not replace the absorbed policies. It supplies the ownership sta
 around them. On an upstream refresh, retention is behavioral: the resolved
 source must still provide one-time video ownership, atomic pair publication,
 exception-complete retirement, exact timer cancellation, and the same
-encode-tail order. Patch applicability alone is not proof that the case is
-still needed or correct.
+encode-tail order. That the case commit still applies is not proof that the
+case is still needed or correct.
 
 ## Surrounding code and ownership map
 
@@ -440,8 +443,9 @@ That original is still the final handoff and is not freed by local derived-image
 cleanup after acceptance.
 
 WIS owns whether coding is alpha-safe and whether dimension masks apply at all.
-It does not rewrite this ownership loop. Keep one-line export context around
-the adjacent mask/fanout boundary and inspect the actual composed method.
+It does not rewrite this ownership loop. Keep the two case commits' hunks
+around the adjacent mask/fanout boundary separable (`case-check` for each case)
+and inspect the actual composed method.
 
 The UI list owns one retained `GLib.Source`, one due time and
 `_encode_from_queue_generation`. Scheduling keeps an already earlier deadline.
@@ -681,7 +685,7 @@ calculator consumer: when `window_source_items`, `get_pixel_source` and
 `pixel_source_operation` are available, it borrows each exact source across
 statistics/batch/reconfigure and each final root-only weight sample. Without
 those providers it retains ordinary upstream sources and a null context.
-The two patches do not separately replace the same calculation body.
+The two case commits do not separately replace the same calculation body.
 
 CUDA publication has its own local-construction boundary. Both capability
 negotiation and later codec initialization/configuration may request a context.
@@ -810,12 +814,13 @@ terminal subregion cleanup waits for an already claimed callback. Video code
 does not enter subregion mutation while holding `_video_state_lock`; the two
 terminal transitions are ordered by releasing the video lock first.
 
-## Patch-queue and responsibility boundaries
+## Case stack and responsibility boundaries
 
-The case has `dependencies = []` and remains independently selectable against
-the frozen embedded source. Other active cases touch
+The case has `dependencies = []`: its commit applies alone on the upstream
+base and is removable from `HEAD` (`case-check`). Other case commits touch
 `xpra/server/window/video_compress.py`, so complete-stack resolution must prove
-both textual application and the combined state machine.
+both textual composition in stack order (`stack-check`) and the combined state
+machine.
 
 Responsibility is divided as follows:
 
@@ -825,7 +830,7 @@ Responsibility is divided as follows:
 | `window-source-timer-lifecycle` | Generic `WindowSource` timer leases, callback completion accounting, terminal idempotence, icon timer, and exception-complete generic cleanup. |
 | `wayland-initial-window-state` | Current Wayland buffer format, frame-alpha selector, CSC readiness, popup publication order, and opaque-region/dimension rebinding. |
 | `wayland-subsurface-stream-ownership` | Retained normalized root/child rasters, stable surface identity, authoritative topology, ordered raw RGB32 parent-backing transactions, exact packet ownership and client draw-ACK routing, atomic Cairo/OpenGL staging, native pointer targeting, composite-root acknowledgement, child frame completion, and its live gate. |
-| Upstream `FrameCallbackModel` (formerly `wayland-empty-damage-throttle`) | Ordinary toplevel frame-callback acknowledgement, pending-damage guard and paced empty acknowledgement; not a queue case. |
+| Upstream `FrameCallbackModel` (formerly `wayland-empty-damage-throttle`) | Ordinary toplevel frame-callback acknowledgement, pending-damage guard and paced empty acknowledgement; not a fork case. |
 
 The timer case and this case both modify video call sites, but neither is a
 production dependency of the other. The timer case must retain the inherited
@@ -840,13 +845,15 @@ to traverse only `all_window_sources` because a WSSO child is a direct
 `WindowSource` and cannot own a video pipeline. That type boundary must remain
 intact.
 
-Refresh or conflict resolution must use an isolated workspace and
-`workspace-stage` / `workspace-update`. Never hand-edit `fix.patch`, its
-manifest digest, or its derived path list.
+Refresh or conflict resolution changes only this case's commit: resolve a
+rebase conflict inside it while it is replayed, or add a fixup and run
+`develop-squash` (see
+[case commits](../../docs/runbooks/case-commits.md#change-a-case)). Never fold
+another case's change into it.
 
-## Patch ownership and non-goals
+## Commit scope and non-goals
 
-`fix.patch` owns exactly the paths derived by `case.toml`:
+The case commit changes exactly these paths:
 
 - `xpra/server/source/client_connection.py`;
 - `xpra/server/source/encoding.py`;
@@ -1045,8 +1052,9 @@ presentation boundary.
 `case.toml` deliberately declares `required_gates = []`. There is no honest
 standalone `CASE=video-pipeline-cleanup-race` live profile: the fixed hardware
 validators require per-window frame-alpha and packet correlation owned by
-`wayland-initial-window-state`. Applying only this cleanup patch cannot produce
-that oracle, and a weaker startup/exit check would not prove the lifecycle.
+`wayland-initial-window-state`. Applying only this cleanup case commit cannot
+produce that oracle, and a weaker startup/exit check would not prove the
+lifecycle.
 
 The complete `develop` stack nevertheless requires both hardware-H.264
 profiles because this case owns the real pipeline resources they exercise:
@@ -1078,7 +1086,7 @@ interleavings. The full-stack `live-wayland-subsurface` gate belongs to the
 subsurface stream case and verifies ordered raw parent-backing composition by
 non-video child sources; it is not a substitute for either hardware profile.
 
-For every patch validation, the complete queue must pass all nine fixed positive
+For every case validation, the complete stack must pass all nine fixed positive
 stack profiles. Their rendering, RGB/H.264, detach, transport-loss, input,
 clipboard, subsurface, hardware, lifecycle, and cleanup boundaries ensure this connection-tail change
 does not regress unrelated live ownership.
@@ -1198,14 +1206,14 @@ failed local construction, retained-producer admission and real GLib source
 lifetime are non-vacuous negative boundaries; absence of a new private helper
 is not a valid clean failure. |
 | Patched standalone focused run | All three complete declared focused modules pass with only this case selected. |
-| Complete-stack focused run | All three focused modules pass after frame-state, generic timer, subsurface, and other active patches compose. |
+| Complete-stack focused run | All three focused modules pass after frame-state, generic timer, subsurface, and other case commits compose. |
 | Composition-specific focused runs | Generic timer and subsurface modules pass with the unlocked timer callback body, exact cleanup order, direct ordinary video EOS behavior, and connection-tail behavior retained. |
-| Patch and fork controls | Standalone/stack apply and reverse resolution, manifest-derived paths/digest, whitespace, lint, and repository controls pass. |
+| Case and fork controls | `case-check` (standalone application and removability), `stack-check`, `develop-check`, whitespace, lint, and repository controls pass. |
 | Clean quarantine reassessment | If a duty case is active, all three clean-source quarantine gates reproduce only their assigned subsets before patched results are interpreted. With no active duty case, record that absence and do not restore retired skips. |
-| `full`, `full-cython`, `full-no-compat` | The complete queue passes all maintained upstream unit-test legs. |
+| `full`, `full-cython`, `full-no-compat` | The complete stack passes all maintained upstream unit-test legs. |
 | Complete-stack `live-wayland-h264-hardware` | The Vulkan/RADV primary and alpha auxiliary complete the real codec, presentation, input, exit, and cleanup contract. |
 | Complete-stack `live-wayland-opengl-h264-hardware` | The independent native OpenGL/render-node/viewport primary completes the same resource lifecycle. |
-| Mandatory complete-stack live suite | Every profile, including subsurface and clipboard, contains VPC and all other active patches on both endpoints. Every patch validation requires all nine profiles; isolated live products are forbidden. |
+| Mandatory complete-stack live suite | Every profile, including subsurface and clipboard, contains VPC and all other case commits on both endpoints. Every case validation requires all nine profiles; isolated live products are forbidden. |
 | All nine complete-stack positive live profiles | Use `live-all STACK=develop RUN=<fresh-prefix>` and require `live-suite-check`: RGB, H.264, detach, transport loss, keymap, both hardware paths, clipboard and subsurface remain green. |
 
 Retain the exact clean failure and every named patched result below

@@ -13,11 +13,12 @@ import typecheck
 
 
 class TypecheckScopeTest(unittest.TestCase):
-    def test_only_explicit_patch_owned_python_files_are_admitted(self):
+    def test_only_explicit_case_commit_python_files_are_admitted(self):
         owned = "xpra/server/source/queued_packet.py"
+        mapping = SimpleNamespace(cases=(SimpleNamespace(paths=(owned,)),))
         with (
             tempfile.TemporaryDirectory() as raw,
-            patch.object(typecheck.contrib, "selected_cases", return_value=[SimpleNamespace(paths=[owned])]),
+            patch.object(typecheck.contrib, "develop_map", return_value=mapping),
         ):
             config = Path(raw) / "mypy.ini"
             config.write_text(f"[mypy]\nfiles = {owned}\n", encoding="utf-8")
@@ -28,27 +29,25 @@ class TypecheckScopeTest(unittest.TestCase):
                     typecheck.scoped_files(config)
 
 
-class TypecheckWorkspaceTest(unittest.TestCase):
+class TypecheckCheckoutTest(unittest.TestCase):
+    """mypy runs on the committed develop checkout, never on a copy."""
+
     def setUp(self):
         self.context = ExitStack()
         self.addCleanup(self.context.close)
-        source = Path(self.context.enter_context(tempfile.TemporaryDirectory()))
-        self.path = source / "queued_packet.py"
+        self.repo = Path(self.context.enter_context(tempfile.TemporaryDirectory()))
+        self.path = self.repo / "queued_packet.py"
         self.path.write_text("# test-owned source\n", encoding="utf-8")
-        self.workspace = SimpleNamespace(
-            selection="stacks/develop", patch_mode="patched", source=source,
-            source_commit="a" * 40, selection_sha256="b" * 64,
-        )
+        self.context.enter_context(patch.object(typecheck.contrib, "REPOSITORY_ROOT", self.repo))
         self.version = self.context.enter_context(patch.object(
             typecheck.importlib.metadata, "version", return_value=typecheck.VERSION,
         ))
-        self.context.enter_context(patch.object(typecheck.contrib, "isolated_start_check"))
-        self.context.enter_context(patch.object(typecheck.contrib, "load_workspace", return_value=self.workspace))
-        self.digest = self.context.enter_context(patch.object(
-            typecheck.contrib, "run", return_value=SimpleNamespace(stdout=self.workspace.selection_sha256),
+        self.state = SimpleNamespace(source_commit="a" * 40, head="b" * 40)
+        self.start = self.context.enter_context(patch.object(
+            typecheck.contrib, "isolated_start_check", return_value=self.state,
         ))
-        self.fingerprint = self.context.enter_context(patch.object(
-            typecheck.contrib, "finalized_workspace_fingerprint", return_value="c" * 64,
+        self.head = self.context.enter_context(patch.object(
+            typecheck.contrib, "rev_parse", return_value=self.state.head,
         ))
         self.context.enter_context(patch.object(typecheck, "scoped_files", return_value=(self.path.name,)))
         self.run = self.context.enter_context(patch.object(
@@ -56,45 +55,36 @@ class TypecheckWorkspaceTest(unittest.TestCase):
         ))
         self.output = self.context.enter_context(redirect_stdout(io.StringIO()))
 
-    def test_runs_real_configuration_in_finalized_stack_and_propagates_failure(self):
+    def test_runs_real_configuration_in_the_checkout_and_propagates_failure(self):
         for returncode in (0, 1, 2):
             self.run.return_value.returncode = returncode
-            self.assertEqual(typecheck.check("scope-control"), returncode)
+            self.assertEqual(typecheck.check(), returncode)
             self.assertEqual(self.run.call_args.args[0], [
                 typecheck.sys.executable, "-m", "mypy", "--config-file", str(typecheck.CONFIG),
             ])
-            self.assertEqual(self.run.call_args.kwargs["cwd"], self.workspace.source)
-        self.assertEqual(self.fingerprint.call_count, 6)
+            self.assertEqual(self.run.call_args.kwargs["cwd"], self.repo)
+        # committed product paths are checked before and after mypy
+        self.assertEqual(self.start.call_count, 6)
 
-    def test_rejects_wrong_version_selection_mode_and_stale_metadata_before_mypy(self):
+    def test_rejects_a_wrong_version_before_mypy(self):
         self.version.return_value = "wrong-version"
         with self.assertRaisesRegex(ValueError, "requires mypy"):
-            typecheck.check("scope-control")
-        self.version.return_value = typecheck.VERSION
-        for selection, mode in (("cases/example", "patched"), ("stacks/partial", "patched"),
-                                ("stacks/develop", "tests-only")):
-            self.workspace.selection, self.workspace.patch_mode = selection, mode
-            with self.subTest(selection=selection, mode=mode), self.assertRaisesRegex(ValueError, "full stacks/develop"):
-                typecheck.check("scope-control")
-        self.workspace.selection, self.workspace.patch_mode = "stacks/develop", "patched"
-        self.digest.return_value.stdout = "changed"
-        with self.assertRaisesRegex(ValueError, "metadata is stale"):
-            typecheck.check("scope-control")
+            typecheck.check()
         self.run.assert_not_called()
 
     def test_rejects_missing_or_symlinked_source_without_a_skip(self):
         self.path.unlink()
         with self.assertRaisesRegex(ValueError, "missing or unsafe"):
-            typecheck.check("scope-control")
+            typecheck.check()
         self.path.symlink_to(typecheck.CONFIG)
         with self.assertRaisesRegex(ValueError, "missing or unsafe"):
-            typecheck.check("scope-control")
+            typecheck.check()
         self.run.assert_not_called()
 
-    def test_changed_workspace_cannot_publish_success(self):
-        self.fingerprint.side_effect = ("before", "after")
+    def test_a_moved_head_cannot_publish_success(self):
+        self.head.return_value = "c" * 40
         with self.assertRaisesRegex(ValueError, "inputs changed"):
-            typecheck.check("scope-control")
+            typecheck.check()
         self.assertNotIn('"result": "passed"', self.output.getvalue())
 
 

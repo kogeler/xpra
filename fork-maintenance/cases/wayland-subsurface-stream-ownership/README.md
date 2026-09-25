@@ -1,5 +1,8 @@
 # Atomic native Wayland surface-tree composition
 
+Code: the `Fork-Case: wayland-subsurface-stream-ownership` commit on `develop`
+(`make -C fork-maintenance case-show CASE=wayland-subsurface-stream-ownership`).
+
 ## Boundary
 
 A native Wayland surface tree and the Xpra window protocol have different
@@ -76,14 +79,14 @@ any subsequent child commit to restore it. Buffer detach and terminal surface
 destruction still clear the format. The native mapped-pixel regression binds
 this first-map ordering, format replacement and null-buffer reset.
 
-The complete queue's VPC case owns calculator/CUDA consumer integration.
+The complete stack's VPC case owns calculator/CUDA consumer integration.
 WSSO supplies its source views and exact-operation provider without rewriting
 the calculator algorithm. Isolated provider/native/rendering checks do not
 replace the required complete-stack consumer checks.
 
 On an operator-selected upstream refresh, review the complete ownership chain
-rather than judging the case by patch applicability. A replacement is complete
-only if it preserves:
+rather than judging the case by whether its commit still applies. A replacement
+is complete only if it preserves:
 
 - stable native `wl_surface` identity across subsurface-role loss and reattach;
 - authoritative topology and paint order, including children below the root;
@@ -99,8 +102,9 @@ only if it preserves:
 - bounded retry, watchdog, and cleanup ownership; and
 - the full-stack live oracle described below.
 
-Patch metadata, path lists, and digests must be regenerated from the complete
-staged isolated workspace. They are not documentation fields to edit by hand.
+Change the case only through its own commit: a fixup followed by
+`develop-squash`, or conflict resolution while a rebase replays it. Its paths
+and diff are read from that commit (`case-show`), never recorded by hand.
 
 ## Architecture and ownership map
 
@@ -1640,8 +1644,9 @@ conversely, WSSO's leases do not stop a connection's calculator producer or
 define when its shared encode queue and CUDA context may close. The calculator
 body and late CUDA publisher belong entirely to VPC and consume WSSO's optional
 borrow/view providers. WSSO owns those providers and other generic fanouts,
-without duplicating the algorithm. The cases remain independently selectable;
-provider and consumer regressions must also run on the resulting complete queue.
+without duplicating the algorithm. Both case commits remain independently
+applicable and removable (`case-check`); provider and consumer regressions must
+also run on the resulting complete stack.
 
 A WSSO child is directly a `WindowSource` and never owns any of those objects.
 An active composite forces the root and children through the base raw capture
@@ -1692,7 +1697,7 @@ the root-to-leaf pointer coordinates.
 
 ## Patch responsibility
 
-The final case patch owns one atomic native-tree-to-client-backing behavior.
+The case commit owns one atomic native-tree-to-client-backing behavior.
 Its production responsibility is grouped as follows.
 
 Native Wayland ownership:
@@ -1738,15 +1743,16 @@ Client protocol and renderer ownership:
 - `xpra/opengl/backing.py`; and
 - `xpra/opengl/shaders.py`.
 
-The patch also owns the focused regressions listed below. The durable live
-fixture and runner are maintained infrastructure and are required acceptance
-authority; their changes remain in the appropriate tracked infra boundary
-rather than being copied into production source.
+The case commit also carries the focused regressions listed below. The
+durable live fixture and runner are maintained infrastructure and are required
+acceptance authority; their changes remain in the tracked
+`fork-maintenance/infra` boundary, changed by control commits, rather than
+being copied into production source.
 
-Overlapping files must resolve in active stack dependency order. Preserve the
-semantic ownership above when refreshing or splitting hunks. Never copy an
-adjacent case's production change into WSSO merely to make a standalone patch
-apply.
+Overlapping files must resolve in the stack order of the case commits
+(`stack-check`). Preserve the semantic ownership above when refreshing or
+splitting hunks. Never copy an adjacent case's production change into the
+WSSO commit merely to make it apply standalone (`case-check`).
 
 ## Non-goals
 
@@ -1931,18 +1937,18 @@ make -C fork-maintenance live-suite-check STACK=develop RUN=<fresh-prefix>
 Its member wrapper `live-wayland-subsurface STACK=develop` fixes
 `APPLICATION=subsurface`, `LIFECYCLE=application-exit`, `ENCODING=rgb`,
 strict H.264 policy and the default alpha scenario. Every live profile applies
-ALL patches to both endpoints. Case-only, partial-stack and clean-endpoint live
-tests are forbidden; a single profile cannot accept any patch change.
+ALL case commits to both endpoints. Case-only, partial-stack and clean-endpoint
+live tests are forbidden; a single profile cannot accept any case change.
 
 The native-Wayland server owns topology and transactions; the GTK X11 client
 owns capability advertisement and rendering. The fixed live client uses Cairo.
 The mapped OpenGL NumPy/ctypes regressions run in every Debian client build and
 the remaining GL tests retain focused/native coverage.
 
-The complete queue includes the clipboard and keymap patches. Therefore this
-live profile exercises their real integration with WSSO, together with
-upstream's ordinary empty-root frame pacing. Standalone compatibility fallbacks remain unit-test
-subjects, never alternative live products.
+The complete stack includes the clipboard and keymap case commits. Therefore
+this live profile exercises their real integration with WSSO, together with
+upstream's ordinary empty-root frame pacing. Standalone compatibility fallbacks
+remain unit-test subjects, never alternative live products.
 
 ### Fixture schema and geometry
 
@@ -2401,9 +2407,10 @@ escalation at the first unexplained failure. The development boundaries are:
    scheduler, pending-damage guard and cleanup owner while preserving the
    ordinary compatibility path. Run
    VPC's calculator/CUDA consumer regressions and WSSO's exact-source provider
-   regressions on the complete queue as well.
-6. Run case resolution, whitespace, manifest/path/digest, fork-control, and
-   isolated-workspace checks required by the current repository contract.
+   regressions on the complete stack as well.
+6. Run `case-check CASE=wayland-subsurface-stream-ownership`,
+   `stack-check STACK=develop`, `develop-check`, whitespace and fork-control
+   checks required by the current repository contract.
 7. Exercise the real compiled implementation and compatibility-disabled packet
    route when those boundaries change; Python-only tests do not substitute.
 8. Run all nine profiles through `live-all STACK=develop RUN=<fresh-prefix>`
@@ -2427,7 +2434,7 @@ development check does not replace the case-owned RGB transaction proof.
 
 After reviewing and freezing source, fixtures and the packet/pixel oracle,
 fill missing or invalidated final requirements: current clean quarantine,
-the three full legs and all nine complete-stack live profiles for any patch validation. A full-queue adaptation or upstream
+the three full legs and all nine complete-stack live profiles for any case validation. A full-stack adaptation or upstream
 rebase requires all nine positive stack profiles and both DEB builds; a
 narrow unchanged-base repair still requires all nine live profiles. Reuse valid development-stage named results only
 with the input proof required by the validation runbook; do not repeat the whole

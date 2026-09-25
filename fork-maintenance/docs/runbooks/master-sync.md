@@ -8,7 +8,7 @@ fast-forward it from `Xpra-org/xpra:master` at 00:37 and 12:37 UTC and supports
 an operator-triggered `workflow_dispatch`. Equality with upstream is guaranteed
 by a successful sync run, not continuously between runs. The workflow updates
 only remote fork `master`; it never changes `develop` or any local branch. Its
-freshness or equality with upstream is not a prerequisite for workspace work,
+freshness or equality with upstream is not a prerequisite for case work,
 tests, live acceptance, CI reproduction, or publication of current `develop`.
 
 GitHub evaluates scheduled workflows from the repository's default branch, so
@@ -90,32 +90,35 @@ Execute autonomous-upstream-refresh against the current fork master.
 This is an agent directive, not a shell command. The exhaustive procedure is
 [`upstream-refresh.md`](upstream-refresh.md); every case receives equal-depth
 manual review. The older optional `PRIMARY_CASE=<slug>` spelling affects only
-starting order, never depth or scope. Require clean local `develop` and
-existing local `master`; preserve dirty work pending operator disposition.
-All adaptation and validation results remain uncommitted. The autonomous
-Git operation is only the local rebase:
+starting order, never depth or scope. Require a clean local `develop`
+(`develop-rebase` refuses any uncommitted change) and existing local `master`.
+The agent rebases and adapts the case
+commits itself ([commit authority](case-commits.md#commit-authority)); control
+changes and validation results remain uncommitted unless the operator asks
+otherwise. After recording the case map and the old tip, the local rebase is:
 
 ```bash
 make -C fork-maintenance develop-rebase
 make -C fork-maintenance patch-start-check
 ```
 
-Resolve every rebase conflict and record every patch's applicability. Then
-deeply review all patches in the current code, record correctness/necessity
-conclusions, implement all initial adaptations/removals and regression
-migrations, and re-review the resulting queue before runtime validation.
+Resolve every rebase conflict inside the case commit being replayed. Then
+deeply review all cases in the current code, record correctness/necessity
+conclusions, implement all initial adaptations (fixups and `develop-squash`),
+retirements (`case-drop`) and regression migrations, and re-review the
+resulting stack before runtime validation.
 After that manual-review exit gate, reassess quarantine and follow development
 then frozen-candidate final acceptance in
-[`validation.md`](validation.md) before publishing the rewritten `develop`
-with an exact-SHA force-with-lease. Final coverage is mandatory even when
-the queue applies unchanged: offline fork checks, clean quarantine reassessment,
-tests-only controls for cases which own retained tests, case-specific no-test
-semantic inspection, durable package boundaries against the resulting stack,
-including both real Ubuntu 26.04 and Debian 13 builds, patched focused/native
-gates, all three full author-test legs and all nine fixed positive live
-profiles with the complete stack selection. Do not execute that complete set
-after each intermediate case adaptation; retain input-verified development
-results and fill final gaps. If the operator does not choose
-this refresh,
-current `develop` continues to be tested and published against its existing
-embedded source regardless of later master movement.
+[`validation.md`](validation.md) before the operator publishes the rewritten
+`develop` with an exact-SHA force-with-lease. Final coverage is mandatory even
+when every case commit replays unchanged: offline fork checks, clean quarantine
+reassessment, tests-only controls for cases which own retained tests,
+case-specific no-test semantic inspection, durable package boundaries against
+the resulting stack, including both real Ubuntu 26.04 and Debian 13 builds,
+patched focused/native gates, all three full author-test legs and all nine
+fixed positive live profiles with the complete stack selection. Do not execute
+that complete set after each intermediate case adaptation; retain
+input-verified development results and fill final gaps. If the operator does
+not choose this refresh, current `develop` continues to be tested and
+published against its existing embedded source regardless of later master
+movement.

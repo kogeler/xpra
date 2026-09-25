@@ -11,7 +11,7 @@ from pathlib import Path
 
 PRIVATE_MODE = 0o700
 STATE_CHAIN = (".artifacts", "fork-maintenance", "upstream-tests")
-STATE_CHILDREN = ("logs", "runs", "image-builds", "sources", "workspaces")
+STATE_CHILDREN = ("logs", "runs", "image-builds", "sources")
 
 
 class PrivateStateError(RuntimeError):

@@ -1,6 +1,6 @@
 # Generic timer regression ownership
 
-The regression is exported in `../fix.patch` as
+The case commit carries the regression as
 `tests/unittests/unit/server/window/compress_test.py`; this directory does not
 hold a second copy. `../case.toml` declares `unit.server.window.compress_test`
 and the three upstream unit-test legs. The main case README describes the
@@ -16,7 +16,7 @@ sources before and after publication: fake registries cannot prove safe
 destruction of an already-completed native source.
 
 Retain a non-vacuous tests-only clean-source control, run the complete patched
-standalone module, then repeat it through the resolved `stacks/develop` queue.
+standalone module, then repeat it through the complete `develop` stack.
 The ordered suite starts with the existing `queue_damage_packet()` refresh
 producer across cleanup and uses fail-fast in both modes. Its ready-source
 fixture must clear the constructor's initial damage-cancelled sentinel. Clean
