@@ -1,5 +1,8 @@
 # Restore X11 client clipboard synchronization
 
+Code: the `Fork-Case: x11-client-clipboard-events` commit on `develop`
+(`make -C fork-maintenance case-show CASE=x11-client-clipboard-events`).
+
 ## Boundary
 
 Cross-backend clipboard synchronization requires one complete ownership and
@@ -80,7 +83,7 @@ changes instead serialize with the following data without invalidating fresh
 packets already queued behind an enable notification.
 
 The case has no other downstream production dependency. Every live run installs
-the complete `stacks/develop` queue at both endpoints. The clipboard fixture
+the complete `develop` stack at both endpoints. The clipboard fixture
 owns the cross-backend oracle, but acceptance requires all nine profiles through
 `live-all STACK=develop` and a current `live-suite-check`.
 
@@ -580,7 +583,7 @@ register `clipboard-token`.  Focused assertions therefore recognize the
 representation selected by the test process rather than hard-coding the
 legacy name; `focused-no-compat` exercises the modern `clipboard-data`
 announcement and absence of the legacy handler during development, while
-`full-no-compat` retains complete-queue final coverage. An upstream
+`full-no-compat` retains complete-stack final coverage. An upstream
 adaptation must preserve behavior across both representations instead of
 making the X11 event fix depend on one packet layout.
 
@@ -903,7 +906,7 @@ The following observations are controls, not proposed fixes:
 - keyboard/focus activity proves connection liveness but says nothing about
   the X11 event filter.
 
-## Patch-queue and integration traps
+## Case stack and integration traps
 
 This remains one end-to-end production case spanning the residual X11 helper,
 token scheduling, shared request completion and native source/listener lifetime.
@@ -926,9 +929,9 @@ selection listeners remain independent of the optional Xpra clipboard helper.
 
 Keep these maintenance constraints:
 
-- edit Xpra source only in the case's isolated workspace and export with
-  `workspace-stage` / `workspace-update`; never hand-edit `fix.patch`, its
-  digest, or `paths`;
+- change Xpra source for this case only through its own commit (a fixup
+  followed by `develop-squash`, or conflict resolution while a rebase replays
+  it), never inside a neighboring case's commit;
 - preserve the package condition for both GTK X11 client-only and server
   builds, and verify an installed client rather than only a source checkout;
 - preserve upstream native-loop/GTK routing and installed error-bridge setup;
@@ -962,26 +965,30 @@ Keep these maintenance constraints:
   is false; do not move the optional data-control or primary-selection
   facilities outside their gate;
 - keep extension debug-name ordering and generic `send_event` policy out of
-  this patch unless new protocol evidence changes the first failing boundary;
+  this case commit unless new protocol evidence changes the first failing
+  boundary;
 - never retain arbitrary clipboard bytes in tracked or ignored acceptance
   evidence, and never allowlist a cancellation or teardown warning which was
   produced by an incomplete selection lifecycle.
 
-The case has no source dependency on another active downstream patch.  It is
-listed in `stacks/develop.toml` in deterministic queue order. Every live test
-uses that complete queue on both endpoints. Its ownership of the clipboard
-oracle does not authorize an isolated live product or waive the other eight
-profiles. Focused unit controls may still isolate the atomic source behavior.
+The case has no source dependency on another case commit: its commit applies
+alone on the upstream base and is removable from `HEAD` (`case-check`). It
+takes a deterministic place in the order of the case commits on `develop`.
+Every live test uses that complete stack on both endpoints. Its ownership of
+the clipboard oracle does not authorize an isolated live product or waive the
+other eight profiles. Focused unit controls may still isolate the atomic source
+behavior.
 
-Retirement after an upstream refresh requires behavior, not textual patch
+Retirement after an upstream refresh requires behavior, not a textual rebase
 conflict: the clean embedded source must package the client adapter, acquire and
 balance the clipboard filter lease, retain a safe GDK mapping, deliver one
 owner-change token, publish ordinary and primary set/clear/send operations
 without incidental input, preserve local standard data-device ownership with
 forwarding disabled, and pass the case's real X11 plus cross-backend live
-controls.  A patch which merely applies in reverse is not sufficient evidence.
+controls.  A case commit whose diff is merely already present upstream, or
+which Git drops during the rebase, is not sufficient evidence by itself.
 
-## Patch ownership and non-goals
+## Commit scope and non-goals
 
 The patch owns the smallest coherent cross-backend clipboard lifecycle exposed
 by the X11-client failure:
@@ -1207,7 +1214,7 @@ live case below.
 The RGB-based `live-x11-clipboard` profile is one of nine mandatory full-stack
 profiles. Its wrapper requires `STACK=develop` and rejects every `CASE`.
 Both the Debian 13 X11 client and Ubuntu 26.04 native-Wayland server use the
-complete queue, including the subsurface packet filter. For any patch validation
+complete stack, including the subsurface packet filter. For any case validation
 run `live-all STACK=develop RUN=<fresh-prefix>` and require `live-suite-check`;
 isolated live products are forbidden. Both builds include clipboard support.
 The client runs with YAML-owned `xsettings=no` and
@@ -1222,7 +1229,7 @@ the owner of the affected contract rather than duplicating it in the runner:
 | Owner | Live responsibility |
 | --- | --- |
 | `infra/live/profiles.py` and the `live-x11-clipboard` Make wrapper | Admit the fixed RGB/application-exit profile only with the complete `stacks/develop` selection. |
-| `infra/live/job.py` | Owns durable start/wait/status/abort/remove state, freezes inputs, validates endpoint-selection provenance, and requires the complete production queue on both endpoints for every profile. |
+| `infra/live/job.py` | Owns durable start/wait/status/abort/remove state, freezes inputs, validates endpoint-selection provenance, and requires the complete production stack on both endpoints for every profile. |
 | `infra/live/run.py` | Resolves and freezes the two build contexts, constructs the three policy scenarios, drives the ordered cross-peer interaction, reconstructs evidence from collected artifacts, and publishes the aggregate oracle. |
 | `profiles.yml`, `live-cli.yml`, and `infra/live/live_config.py` | Own network quality and the exact role-specific `both`, `to-server`, and `off` Xpra arguments; Python orchestration does not duplicate those values. |
 | `infra/live/Containerfile` | Builds the Ubuntu native-Wayland server and Debian X11 client packages.  Every full-stack client receives both the ordinary GTK import preflight and the installed-package error-bridge/retained-wrapper/X11 helper preflight, plus the mapped GL regressions. |
@@ -1359,8 +1366,8 @@ conversions, all three forward-policy outcomes, reverse policy and owner,
 stable owner XID, advancing timestamp, exact event sequence, survival through
 repeated changes, fixture cleanup, and absence of plaintext markers.  The three
 scenario reports must appear in `both`, `to-server`, `off` order and the
-aggregate report must bind each scenario name to its policy.  The profile is one of nine mandatory full-stack gates; all apply every patch
-to both endpoints.
+aggregate report must bind each scenario name to its policy.  The profile is one of nine mandatory full-stack gates; all apply every case
+commit to both endpoints.
 
 Acceptance requires a named `live-x11-clipboard` result in which every scenario
 and the aggregate report are positive on the required inputs. Input callbacks,
@@ -1459,7 +1466,7 @@ regression after each atomic edit, affected upstream/case/composed modules,
 relevant native/compiled/compatibility modes, and early clipboard live after
 focused/native prerequisites. The table lists final obligations, not an
 instruction to run full suites before every live iteration. During an explicit
-refresh, first finish the queue-wide incremental manual review, implemented
+refresh, first finish the stack-wide incremental manual review, implemented
 checkpoints and composed-review exit; no runtime gate starts before that exit:
 
 | Validation | Purpose |
@@ -1467,14 +1474,14 @@ checkpoints and composed-review exit; no runtime gate starts before that exit:
 | Clean tests-only case run | Applies the case-owned tests without the production correction to the frozen embedded source.  It must reach real Xvfb/XFixes or native-pipe assertions and fail for duplicate work or the residual owned lifecycle, not because the image, import, or test discovery is broken. |
 | Patched focused modules `unit.clipboard_core_test`, `unit.clipboard_timeout_test`, `unit.client.subsystem.clipboard_test`, `unit.server.subsystem.clipboard_test`, `unit.x11.common_test`, and `unit.wayland.clipboard_test` | Prove wire-request completion/reset, peer admission and deferred lifetimes, the real X11 owner-change/conversion route, GDK XID lifetime, filter leases, token scheduling, native/GTK routing, Wayland source/generation isolation and backpressure, and bounded rollback/cleanup on the atomic case. |
 | Atomic `wayland` gate | Freshly compiles and linkage-checks the modified Wayland clipboard/compositor extensions and runs the native Wayland unit boundary, preventing a focused pass against absent or stale `.so` files. |
-| The same focused modules and `wayland` gate through `STACK=develop` | Prove that earlier and later queue cases do not change those semantics, take accidental ownership of the filter, or break the Wayland lifecycle contract. |
-| `patch-check`, `stack-check`, whitespace, lint, and fork-control units | Prove exact patch digest/path ownership, forward/reverse applicability, dependency order, and automation contracts; they do not prove runtime clipboard delivery. |
+| The same focused modules and `wayland` gate through `STACK=develop` | Prove that earlier and later case commits do not change those semantics, take accidental ownership of the filter, or break the Wayland lifecycle contract. |
+| `case-check`, `stack-check`, `develop-check`, whitespace, lint, and fork-control units | Prove that the case is exactly one product-only commit which applies alone on the base and is removable from `HEAD`, dependency order, that the stack reproduces `HEAD`, and automation contracts; they do not prove runtime clipboard delivery. |
 | Clean quarantine reassessment | Separates currently assigned upstream failures from this case before patched results are interpreted. |
-| `full` | Runs the complete applied queue under the normal compatibility setting, including the legacy `clipboard-token` registration and default compiled-runtime behavior. |
+| `full` | Runs the complete applied stack under the normal compatibility setting, including the legacy `clipboard-token` registration and default compiled-runtime behavior. |
 | `full-cython` | Rebuilds the current upstream X11 filter and modified Wayland selection/compositor `.pyx` implementations rather than trusting stale generated binaries or cached extensions, then runs the complete Cython-enabled author suite. |
 | `full-no-compat` | Sets the process-wide compatibility mode before imports and exercises the modern `clipboard-data` path without the legacy token handler. |
-| Full-stack `live-x11-clipboard` | Proves the installed Debian client-only package contains and executes `xpra.x11.gtk.__init__`, both endpoints use the complete queue, every permitted new offer and native source request is delivered without incidental input, `off` retains standard native ownership without a forwarding helper, and real X11 owner events cross to a native-Wayland compositor and back under the exact `both` / `to-server` / `off` oracle while rendering, input, stderr, process, privacy, and cleanup remain positive. |
-| Mandatory nine-profile live suite | Every patch validation runs all profiles, including clipboard and subsurface, with the full queue on both endpoints. A topical profile cannot replace complete-suite acceptance. |
+| Full-stack `live-x11-clipboard` | Proves the installed Debian client-only package contains and executes `xpra.x11.gtk.__init__`, both endpoints use the complete stack, every permitted new offer and native source request is delivered without incidental input, `off` retains standard native ownership without a forwarding helper, and real X11 owner events cross to a native-Wayland compositor and back under the exact `both` / `to-server` / `off` oracle while rendering, input, stderr, process, privacy, and cleanup remain positive. |
+| Mandatory nine-profile live suite | Every case validation runs all profiles, including clipboard and subsurface, with the full stack on both endpoints. A topical profile cannot replace complete-suite acceptance. |
 
 The client stage of the case live image is the essential package-composition
 control because it installs with client, GTK/X11, and clipboard enabled but

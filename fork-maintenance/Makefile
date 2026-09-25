@@ -23,7 +23,6 @@ CASE ?=
 STACK ?= $(if $(strip $(CASE)),,develop)
 RUN ?=
 IMAGE_RUN ?=
-WORKSPACE ?=
 CYCLE ?=
 CONFIRM ?=
 SESSION ?=
@@ -39,7 +38,6 @@ NETWORK_PROFILE ?= $(shell $(LIVE_CONFIG) default-profile)
 RENDER_NODE ?=
 ZED_DIRECTORY ?=
 FROM ?=
-ALLOW_PATH_CHANGE ?= 0
 
 SELECTOR = $(if $(strip $(CASE)),cases/$(strip $(CASE)),$(if $(strip $(STACK)),stacks/$(strip $(STACK))))
 export XPRA_FORK_CASE := $(CASE)
@@ -74,10 +72,8 @@ AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_waylan
 .PHONY: help check lint typecheck contributor-tests clean artifact-boundary doctor \
 	live-venv live-venv-check list repo-status repo-sync master-update develop-rebase objects-backfill \
 	patch-start-check isolated-start-check develop-check ci-layout-check ci-prepare ci-master-sync ci-upstream-tests ci-deb-release \
-	case-new case-recover case-name-check stack-name-check selector-check workspace-selector-check optional-selector-check \
-	patch-check patch-apply patch-unapply patch-update stack-check stack-apply stack-unapply \
-	workspace-name-check workspace-create workspace-status workspace-diff workspace-stage \
-	workspace-update workspace-remove workspace-recover \
+	case-list case-new case-show case-commit case-check case-drop develop-squash stack-check \
+	case-name-check stack-name-check selector-check optional-selector-check \
 	cycle-name-check cycle-clean-plan cycle-clean \
 	artifacts-clean-plan artifacts-clean artifacts-check artifact-tests \
 	knowledge-new knowledge-index knowledge-check artifacts-close-plan artifacts-close artifacts-close-check \
@@ -109,21 +105,22 @@ help:
 		'make -C fork-maintenance objects-backfill' \
 		'    Complete partial-clone objects of local master and HEAD from public upstream HTTPS' \
 		'make -C fork-maintenance patch-start-check' \
-		'    Verify the local rebase boundary before explicit host patch integration' \
+		'    Verify that develop is completely rebased onto local master' \
 		'make -C fork-maintenance isolated-start-check' \
-		'    Locate the source commit already embedded in current develop; no network access' \
+		'    Locate the upstream base embedded in develop; product paths must be committed' \
+		'make -C fork-maintenance case-list' \
+		'make -C fork-maintenance case-show CASE=name' \
+		'make -s -C fork-maintenance case-commit CASE=name' \
+		'    Every case with its Fork-Case commit; show one; print only its SHA' \
 		'make -C fork-maintenance case-new CASE=short-behavior-name' \
-		'make -C fork-maintenance case-recover CASE=short-behavior-name' \
-		'    Create a draft case or recover exact interrupted create, update, or update-removal state' \
-		'make -C fork-maintenance workspace-create CASE=name WORKSPACE=unique-name' \
-		'    Export the embedded source and apply a case, start a clean draft, or reconstruct a diverged case' \
-		'make -C fork-maintenance workspace-{status,diff,stage,update,remove} WORKSPACE=name' \
-		'    Inspect, refresh, or remove the exact isolated workspace' \
-		'make -C fork-maintenance workspace-recover WORKSPACE=name' \
-		'    Recover exact marker-backed interrupted create, direct removal, or fingerprint cleanup state' \
+		'    Create a case directory (schema-2 manifest template, README skeleton)' \
+		'make -C fork-maintenance develop-squash' \
+		'    Fold pending fixup!/amend!/squash! commits into their case commits' \
+		'make -C fork-maintenance case-drop CASE=name' \
+		'    Remove one case commit from develop history (retire it)' \
 		'make -C fork-maintenance cycle-clean-plan CYCLE=cycle-name' \
 		'make -C fork-maintenance cycle-clean CYCLE=cycle-name CONFIRM=printed-sha256' \
-		'    Review, then remove exact finalized cycle results and workspaces' \
+		'    Review, then remove exact finalized cycle results' \
 		'make -C fork-maintenance artifacts-clean-plan' \
 		'make -C fork-maintenance artifacts-clean CONFIRM=printed-sha256' \
 		'make -C fork-maintenance artifacts-check' \
@@ -136,7 +133,7 @@ help:
 		'make -C fork-maintenance artifacts-close-check' \
 		'    End a session: discard everything below .artifacts except the knowledge base' \
 		'make -C fork-maintenance develop-check' \
-		'    Verify clean linear develop, embedded source boundary, queue, and ignore boundary' \
+		'    Verify every case-commit invariant, each case, the whole stack and the ignore boundary' \
 		'make -C fork-maintenance ci-layout-check' \
 		'    Verify byte-identical disabled upstream workflows and all thin fork workflows' \
 		'make -C fork-maintenance ci-master-sync' \
@@ -146,16 +143,10 @@ help:
 		'    and run that one Ubuntu 26.04 unit-test leg' \
 		'make -C fork-maintenance ci-deb-release' \
 		'    Hosted manual workflow: build patched Ubuntu 26.04 and Debian 13 DEB tars and publish a release' \
-		'make -C fork-maintenance patch-check CASE=name' \
+		'make -C fork-maintenance case-check CASE=name' \
+		'    One case commit applies alone on the base and can be removed from develop' \
 		'make -C fork-maintenance stack-check STACK=develop' \
-		'    Resolve one patch or the active queue against the embedded source' \
-		'make -C fork-maintenance patch-apply CASE=name' \
-		'make -C fork-maintenance patch-update CASE=name' \
-		'make -C fork-maintenance patch-unapply CASE=name' \
-		'    Apply to the current non-master branch, refresh from its staged diff, remove it' \
-		'make -C fork-maintenance stack-apply STACK=develop' \
-		'make -C fork-maintenance stack-unapply STACK=develop' \
-		'    Apply or remove the complete queue in declared order' \
+		'    Every case commit resolves in order and base + cases reproduces develop' \
 		'make -C fork-maintenance test-start STACK=develop TARGET=focused RUN=unique-name' \
 		'    focused, focused-cython and focused-no-compat build Xpra and run selected modules' \
 		'make -C fork-maintenance test-wait RUN=unique-name' \
@@ -174,7 +165,7 @@ help:
 		'    After a fix, continue with the failed gate and the ones after it (never acceptance)' \
 		'make -C fork-maintenance live-suite-check STACK=develop RUN=unique-prefix' \
 		'    Every patch validation requires all nine profiles with all patches on both endpoints' \
-		'make -C fork-maintenance typecheck WORKSPACE=complete-stack-workspace' \
+		'make -C fork-maintenance typecheck' \
 		'    Strict mypy for explicitly scoped downstream files, not the upstream project' \
 		'make -C fork-maintenance live-x11-clipboard STACK=develop RUN=unique-name' \
 		'make -C fork-maintenance live-wayland-subsurface STACK=develop RUN=unique-name' \
@@ -213,9 +204,9 @@ lint:
 	@command -v "$(RUFF)" >/dev/null 2>&1 || { printf 'ruff is required for lint\n' >&2; exit 2; }
 	@$(RUFF) check tools infra cases
 
-typecheck: workspace-name-check
-	@"$(MYPY_PYTHON)" tools/typecheck.py "$(WORKSPACE)"
-	@"$(MYPY_PYTHON)" infra/typecheck/test_contract.py "$(WORKSPACE)"
+typecheck:
+	@"$(MYPY_PYTHON)" tools/typecheck.py
+	@"$(MYPY_PYTHON)" infra/typecheck/test_contract.py
 
 contributor-tests:
 	@$(PYTHON) tools/test_contrib.py
@@ -339,15 +330,6 @@ selector-check:
 	@$(PYTHON) infra/upstream-tests/selection.py \
 		--lab-root "$(AUTOMATION_ROOT)" --selection "$${XPRA_FORK_SELECTOR}" validate
 
-workspace-selector-check:
-	@case "$${XPRA_FORK_CASE:+case}:$${XPRA_FORK_STACK:+stack}" in \
-		case:|:stack) ;; \
-		*) printf 'set exactly one of CASE or STACK\n' >&2; exit 2 ;; \
-	esac
-	@[[ "$${XPRA_FORK_SELECTOR}" =~ ^(cases|stacks)/[a-z0-9]+(-[a-z0-9]+)*$$ ]] || { \
-		printf 'invalid workspace selector: %s\n' "$${XPRA_FORK_SELECTOR}" >&2; exit 2; \
-	}
-
 optional-selector-check:
 	@case "$${XPRA_FORK_CASE:+case}:$${XPRA_FORK_STACK:+stack}" in \
 		:|case:|:stack) ;; \
@@ -358,47 +340,17 @@ optional-selector-check:
 			--lab-root "$(AUTOMATION_ROOT)" --selection "$${XPRA_FORK_SELECTOR}" validate; \
 	fi
 
-case-new: case-name-check
-	@$(CONTRIB) case-new "$${XPRA_FORK_CASE}"
+case-list:
+	@$(CONTRIB) case-list
 
-case-recover: case-name-check
-	@$(CONTRIB) case-recover "$${XPRA_FORK_CASE}"
-
-patch-check patch-apply patch-unapply: case-name-check
+case-new case-show case-commit case-check case-drop: case-name-check
 	@$(CONTRIB) $@ "$${XPRA_FORK_CASE}"
 
-patch-update: case-name-check
-	@set -- $(CONTRIB) patch-update "$${XPRA_FORK_CASE}"; \
-	case "$(ALLOW_PATH_CHANGE)" in \
-		0) ;; \
-		1) set -- "$$@" --allow-path-change ;; \
-		*) printf 'ALLOW_PATH_CHANGE must be 0 or 1\n' >&2; exit 2 ;; \
-	esac; \
-	"$$@"
+develop-squash:
+	@$(CONTRIB) develop-squash
 
-stack-check stack-apply stack-unapply: stack-name-check
+stack-check: stack-name-check
 	@$(CONTRIB) $@ "$${XPRA_FORK_STACK}"
-
-workspace-name-check:
-	@[[ "$(WORKSPACE)" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$$ ]] || { \
-		printf 'WORKSPACE must contain only letters, digits, dot, underscore, and dash\n' >&2; exit 2; \
-	}
-
-workspace-create: workspace-selector-check workspace-name-check
-	@$(CONTRIB) workspace-create "$(WORKSPACE)" "$${XPRA_FORK_SELECTOR}" \
-		--patch-mode "$(PATCH_MODE)"
-
-workspace-status workspace-diff workspace-remove workspace-recover: workspace-name-check
-	@$(CONTRIB) $@ "$(WORKSPACE)"
-
-workspace-stage workspace-update: workspace-name-check
-	@set -- $(CONTRIB) $@ "$(WORKSPACE)"; \
-	case "$(ALLOW_PATH_CHANGE)" in \
-		0) ;; \
-		1) set -- "$$@" --allow-path-change ;; \
-		*) printf 'ALLOW_PATH_CHANGE must be 0 or 1\n' >&2; exit 2 ;; \
-	esac; \
-	"$$@"
 
 cycle-name-check:
 	@[[ "$(CYCLE)" =~ ^[a-z0-9]+(-[a-z0-9]+)*$$ ]] || { \

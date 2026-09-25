@@ -1,5 +1,8 @@
 # Client-driven Wayland keymap synchronization
 
+Code: the `Fork-Case: wayland-client-keymap-sync` commit on `develop`
+(`make -C fork-maintenance case-show CASE=wayland-client-keymap-sync`).
+
 ## Boundary
 
 The native Wayland server maintains one shared wlroots virtual keyboard whose
@@ -28,9 +31,9 @@ and later layouts, and selects a symbol's first matching group. It also mutates
 the seat during hello parsing and records the proposed configuration before
 native installation succeeds.
 
-The retained patch replaces that policy with exact owner-map installation and
-source-local translation. It does not layer a second installer underneath the
-new upstream `set_current_config()` path. The upstream public native bool
+The retained case commit replaces that policy with exact owner-map installation
+and source-local translation. It does not layer a second installer underneath
+the new upstream `set_current_config()` path. The upstream public native bool
 refusal and tuple lookup interfaces, generic `key_events` accounting, and
 canonical `setting-changed` / `client-exited` signals remain intact. No
 separate `readonly-changed` signal is needed.
@@ -634,23 +637,25 @@ supersede the actual application text. An invalid update must be visible as a
 bounded rejection while the last-known-good native and per-source runtime state
 remains usable.
 
-## Patch-queue and test integration traps
+## Case stack and test integration traps
 
 This case has no semantic dependency on another production case and declares
-the native `wayland` gate itself. It must apply and test standalone. The
-maintained stack nevertheless places it after
-`wayland-subsurface-stream-ownership` and `wayland-initial-window-state`. These cases touch
+the native `wayland` gate itself. Its commit must apply and test standalone
+(`case-check`, `CASE=wayland-client-keymap-sync`). In the `develop` stack it
+nevertheless follows the `wayland-subsurface-stream-ownership` and
+`wayland-initial-window-state` commits. These cases touch
 `xpra/wayland/server/subsystem/window.py` and the shared Wayland test boundary;
 WSSO additionally overlaps `wlroots.pxd` and the pointer subsystem.
 
 `WaylandWindowServerFocusTest` must remain a top-level class alongside the
 initial-state and upstream frame-callback test classes after the whole stack is applied.
 Its `Packet` import is intentionally local to `focus_packet()`: moving it into
-the module import block creates avoidable clean-base patch overlap with the
-earlier case. Textual apply/reverse success cannot prove class ownership or
-test discovery when neighboring patches use short context. Inspect the applied
-class order and run the focused window test through both the standalone case
-and `stacks/develop` after any adjacent edit.
+the module import block creates avoidable overlap with the earlier case
+commit on the clean base. Conflict-free application and removal (`case-check`,
+`stack-check`) cannot prove class ownership or test discovery when neighboring
+case commits edit adjacent lines. Inspect the composed class order and run the
+focused window test through both the standalone case and `STACK=develop` after
+any adjacent edit.
 
 The shared paths have this strict semantic split:
 
@@ -669,7 +674,7 @@ same server subsystem classes.
 
 That focus test runs under the native gate, but its autospec signature trap
 requires `focused-cython` during development and `full-cython` for final
-complete-queue coverage: `CYTHONIZE_MORE` compiles the inherited
+complete-stack coverage: `CYTHONIZE_MORE` compiles the inherited
 generic window subsystem. A call arriving through that compiled parent and a
 pure-Python call do not expose identical autospec arguments; the compiled call
 may omit an explicit positional `self`. Keep the robust assertion as one call
@@ -714,13 +719,14 @@ old signatures or adding duplicate signals. Generic X11 key injection and
 event accounting remain unchanged, while the Wayland subclass consumes the
 extra identity and exact-source lifecycle callbacks.
 
-The case-owned live scenario is tracked outside `fix.patch`; production patches
-must never contain `fork-maintenance/` paths. New case-owned upstream test files
-must keep their `kogeler` copyright notice. Do not hand-edit `fix.patch`, its
-digest, or manifest paths when resolving any of these overlaps; use the
-isolated workspace transaction required by the fork contract.
+The case-owned live scenario is tracked in this case directory, outside the
+case commit; case commits must never contain `fork-maintenance/` paths, which
+belong to control commits. New case-owned upstream test files must keep their
+`kogeler` copyright notice. Resolve any of these overlaps inside this case's
+commit, while a rebase replays it or with a fixup and `develop-squash`, never
+in a neighboring case's commit.
 
-## Patch ownership and non-goals
+## Commit scope and non-goals
 
 This case owns a presence-aware, bounded RMLVO representation for every
 keyboard client; compatible nested, flat, and legacy packet parsing; stable
@@ -900,28 +906,29 @@ accepted until the migrated complete-stack boundary passes.
 - Do not let repeat-timer admission failure orphan an already injected press.
 - Do not destroy the native keyboard after its seat, and do not trust an
   optional linkage-test skip in place of the native `wayland` gate.
-- Do not trust patch applicability alone when adjacent queue cases touch the
+- Do not trust a clean `case-check` alone when adjacent case commits touch the
   same window subsystem and test module.
 
 ## Required validation
 
 Follow [development and final acceptance](../../docs/runbooks/validation.md)
-and the current isolated-workspace, upstream-test, and live-test runbooks;
-do not apply the production source to the host checkout or use ad hoc output as
-acceptance. In an explicit refresh, complete the recorded incremental manual
-review/export and whole-queue composition gate before any runtime tests.
+and the current [case-commit](../../docs/runbooks/case-commits.md),
+upstream-test, and live-test runbooks; runners test the committed `HEAD`, so
+uncommitted product edits and ad hoc output are not acceptance. In an explicit
+refresh, complete the recorded incremental manual review and whole-stack
+composition gate before any runtime tests.
 The retained tests-only regression must fail non-vacuously against
 the embedded clean source. Run all focused modules declared by `case.toml`
 with the standalone case after atomic changes, including affected upstream
 modules and the real compiled mixin boundary when relevant, then run the native
 `wayland` boundary. Exercise the affected focused and native boundaries through
-`stacks/develop` so adjacent Wayland patches and generic interface changes are
-exercised together.
+`STACK=develop` so adjacent Wayland case commits and generic interface changes
+are exercised together.
 
 Start all nine positive profiles early through
 `live-all STACK=develop RUN=<fresh-prefix>`, after the relevant focused/native
 prerequisites and without waiting for full upstream suites. Both endpoints
-always carry the entire queue; no isolated or partial live run accepts this
+always carry the entire stack; no isolated or partial live run accepts this
 case. Require `live-suite-check`. Its keyboard member's live result
 must retain the exact versioned scenario digest, both four-group maps, every
 press/release observation, authoritative eight-character application sequence,

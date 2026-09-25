@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import atexit
 import hashlib
 import json
 import math
@@ -3437,9 +3438,39 @@ def selection_output(selector: str, action: str, *arguments: str) -> str:
     return selection_output_at(MAINTENANCE_ROOT, selector, action, *arguments)
 
 
+_SELECTION_LABS: dict[str, Path] = {}
+
+
+def selection_lab(selector: str) -> Path:
+    """A private frozen selection: manifests plus each case commit's diff.
+
+    Cases are commits on develop; ``selection.py snapshot`` writes their diffs
+    as ``cases/<slug>/fix.patch`` below this lab only, never in the tracked tree.
+    """
+    lab = _SELECTION_LABS.get(selector)
+    if lab is None:
+        parent = Path(tempfile.mkdtemp(prefix="xpra-live-selection-"))
+        atexit.register(shutil.rmtree, parent, True)
+        lab = parent / "lab"
+        selection_output(selector, "snapshot", "--destination", str(lab))
+        if selection_output_at(lab, selector, "digest") != selection_output(selector, "digest"):
+            raise LabFailure(f"selection changed while it was frozen: {selector}")
+        _SELECTION_LABS[selector] = lab
+    return lab
+
+
+def patch_relative(patch: Path) -> Path:
+    """``cases/<slug>/fix.patch``: the lab-independent name of a frozen case diff."""
+    relative = Path(*patch.parts[-3:])
+    if len(patch.parts) < 3 or relative.parts[0] != "cases" or relative.parts[2] != "fix.patch":
+        raise LabFailure(f"not a frozen case patch: {patch}")
+    return relative
+
+
 def selected_patch_paths(selector: str) -> tuple[Path, ...]:
+    lab = selection_lab(selector)
     paths: list[Path] = []
-    for value in selection_output(selector, "patches").splitlines():
+    for value in selection_output_at(lab, selector, "patches").splitlines():
         relative = Path(value)
         if (
             len(relative.parts) != 3
@@ -3449,7 +3480,7 @@ def selected_patch_paths(selector: str) -> tuple[Path, ...]:
             or ".." in relative.parts
         ):
             raise LabFailure(f"selection returned an unsafe patch path: {value!r}")
-        path = MAINTENANCE_ROOT / relative
+        path = lab / relative
         if path.is_symlink() or not path.is_file():
             raise LabFailure(f"selection patch is not a regular file: {relative}")
         paths.append(path)
@@ -3643,7 +3674,7 @@ def resolve_selection_at_source(
     expected_patches = [
         {
             "case": case_slug,
-            "patch": patch.relative_to(MAINTENANCE_ROOT).as_posix(),
+            "patch": patch_relative(patch).as_posix(),
             "patch_sha256": sha256_file(patch),
         }
         for case_slug, patch in zip(
@@ -3905,7 +3936,7 @@ def prepare_build_context(
                 series.append(destination_name)
             else:
                 already_present.append(destination_name)
-            patch_manifest[patch.relative_to(MAINTENANCE_ROOT).as_posix()] = sha256_file(patch)
+            patch_manifest[patch_relative(patch).as_posix()] = sha256_file(patch)
         dependency_entries = resolution["base_dependencies"]
         if not isinstance(dependency_entries, list):
             raise LabFailure("selection resolution base dependencies are invalid")
@@ -3919,7 +3950,7 @@ def prepare_build_context(
                 or relative.as_posix() != dependency_entry.get("patch")
             ):
                 raise LabFailure("selection resolution dependency path is unsafe")
-            patch = MAINTENANCE_ROOT / relative
+            patch = selection_lab(selection.name) / relative
             if (
                 patch.is_symlink()
                 or not patch.is_file()
@@ -3944,7 +3975,7 @@ def prepare_build_context(
             "patches": patch_manifest,
             "patch_series": [
                 {
-                    "path": patch.relative_to(MAINTENANCE_ROOT).as_posix(),
+                    "path": patch_relative(patch).as_posix(),
                     "sha256": sha256_file(patch),
                 }
                 for patch in patches
@@ -4025,7 +4056,7 @@ def snapshot_patch_selection(
                 "kind": selection.kind,
                 "name": selection.name,
                 "patches": [
-                    path.relative_to(MAINTENANCE_ROOT).as_posix() for path in selection.patches
+                    patch_relative(path).as_posix() for path in selection.patches
                 ],
                 "required_gates": selection.required_gates,
                 "resolution": context.resolution,

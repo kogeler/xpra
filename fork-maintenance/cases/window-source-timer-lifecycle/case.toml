@@ -1,16 +1,8 @@
-schema = 1
+schema = 2
 slug = "window-source-timer-lifecycle"
 kind = "production"
 title = "Own window source timers through terminal cleanup"
-commit_subject = "Own window source timers through terminal cleanup"
-patch_sha256 = "cce937c922ab9eea149e850279d07e249c42aec78a3c5e5cfc7e68587e33d2f1"
 dependencies = []
-paths = [
-  "tests/unittests/unit/server/window/compress_test.py",
-  "xpra/server/window/compress.py",
-  "xpra/server/window/video_compress.py",
-  "xpra/server/window/windowicon.py",
-]
 
 [tests]
 list = [

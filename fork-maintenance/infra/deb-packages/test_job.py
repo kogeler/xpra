@@ -2453,11 +2453,10 @@ class SelectionCacheTests(unittest.TestCase):
         (case / "case.toml").write_text(
             "\n".join(
                 (
-                    "schema = 1",
+                    "schema = 2",
                     'slug = "test-case"',
+                    'title = "Synthetic test case"',
                     "dependencies = []",
-                    f'patch_sha256 = "{job.hashlib.sha256(patch_payload).hexdigest()}"',
-                    'paths = ["xpra/synthetic.py"]',
                     "",
                     "[tests]",
                     'list = ["full"]',
@@ -2470,12 +2469,24 @@ class SelectionCacheTests(unittest.TestCase):
             encoding="utf-8",
         )
         stack.write_text(
-            "schema = 1\n"
+            "schema = 2\n"
             'slug = "develop"\n'
-            'series = ["test-case"]\n'
             "\n"
             "[tests]\n"
             'list = ["full"]\n',
+            encoding="utf-8",
+        )
+        # a frozen selection: the case diff is its fix.patch, bound by the marker
+        (lab_root / "selection-source.json").write_text(
+            job.json.dumps(
+                {
+                    "schema": 1,
+                    "base": "a" * 40,
+                    "head": "c" * 40,
+                    "series": ["test-case"],
+                    "commits": {"test-case": "b" * 40},
+                }
+            ),
             encoding="utf-8",
         )
         return lab_root

@@ -169,7 +169,7 @@ class UpstreamMakeContractTest(unittest.TestCase):
         self.assertIn("clean|tests-only|patched", entrypoint)
         self.assertIn("--include='tests/**'", entrypoint)
         self.assertIn("patched|tests-only", entrypoint)
-        self.assertIn("tests-only workspace", CONTRACT.read_text(encoding="utf-8"))
+        self.assertIn("`PATCH_MODE=tests-only` applies only the paths below `tests/`", CONTRACT.read_text(encoding="utf-8"))
 
     def test_wayland_build_and_linkage_are_gate_driven(self) -> None:
         entrypoint = ENTRYPOINT.read_text(encoding="utf-8")

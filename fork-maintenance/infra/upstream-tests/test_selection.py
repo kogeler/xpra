@@ -33,148 +33,118 @@ diff --git a/tests/unittests/unit/client/cython_only_test.py b/tests/unittests/u
 +# cython-only quarantine
  VALUE = 2
 """
+FAKE_SHA = "b" * 40
+LINES = "".join(f"line {number}\n" for number in range(1, 21))
 
 
-class VerificationSelectionTest(unittest.TestCase):
+def write_marker(lab: Path, series: tuple[str, ...]) -> None:
+    """Make ``lab`` a frozen selection whose diffs are its fix.patch files."""
+    (lab / selection.SNAPSHOT_MARKER).write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "base": "a" * 40,
+                "head": "c" * 40,
+                "series": list(series),
+                "commits": {slug: FAKE_SHA for slug in series},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def load(lab: Path, name: str) -> selection.Selection:
+    return selection.load_selection(selection.open_source(lab), name)
+
+
+def case_manifest(slug: str, *, tests: str = '"full"', gates: str = "", dependencies: str = "[]") -> str:
+    return (
+        f'schema = 2\nslug = "{slug}"\nkind = "production"\ntitle = "Case {slug}"\n'
+        f"dependencies = {dependencies}\n\n[tests]\nlist = [{tests}]\n\n"
+        f"[evidence]\nrequired_gates = [{gates}]\n"
+    )
+
+
+STACK_MANIFEST = 'schema = 2\nslug = "develop"\ndescription = "stack"\n\n[tests]\nlist = ["full"]\n'
+
+
+class CaseSnapshotSelectionTest(unittest.TestCase):
+    """A frozen payload: manifests, one fix.patch per case and its marker."""
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.lab = Path(self.temporary.name)
-        self.directory = self.lab / "verifications" / "current-behavior"
+        self.directory = self.lab / "cases" / "probe"
         tests = self.directory / "tests"
         tests.mkdir(parents=True)
         (tests / "probe.py").write_text("VALUE = 1\n", encoding="utf-8")
-        (self.directory / "tests.patch").write_bytes(TEST_PATCH)
-        self.write_manifest(TEST_PATCH)
+        (self.directory / "fix.patch").write_bytes(TEST_PATCH)
+        self.write_manifest()
+        write_marker(self.lab, ("probe",))
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def write_manifest(self, patch: bytes) -> None:
-        digest = hashlib.sha256(patch).hexdigest()
-        (self.directory / "verification.toml").write_text(
-            "\n".join(
-                (
-                    "schema = 1",
-                    'slug = "current-behavior"',
-                    'subjects = ["first-fix", "second-fix"]',
-                    f'patch_sha256 = "{digest}"',
-                    "",
-                    "[tests]",
-                    "list = [",
-                    '  "unit.server.probe_test",',
-                    '  "verifications/current-behavior/tests/probe.py",',
-                    '  "full",',
-                    "]",
-                    "",
-                    "[evidence]",
-                    "required_gates = []",
-                    "",
-                )
+    def write_manifest(self, gates: str = "") -> None:
+        (self.directory / "case.toml").write_text(
+            case_manifest(
+                "probe",
+                tests='"unit.server.probe_test", "cases/probe/tests/probe.py", "full"',
+                gates=gates,
             ),
             encoding="utf-8",
         )
 
-    def test_verification_is_test_only_and_exposes_subjects(self) -> None:
-        selected = selection.load_selection(self.lab, "verifications/current-behavior")
-
-        self.assertEqual(selected.kind, "verification")
-        self.assertEqual(selected.subjects, ("first-fix", "second-fix"))
+    def test_frozen_case_exposes_tests_and_patch_paths(self) -> None:
+        selected = load(self.lab, "cases/probe")
+        self.assertEqual(selected.kind, "case")
+        self.assertEqual(selected.subjects, ("probe",))
+        self.assertEqual(tuple(selection.iter_unit_tests(selected)), ("unit.server.probe_test",))
         self.assertEqual(
-            tuple(selection.iter_unit_tests(selected)),
-            ("unit.server.probe_test",),
-        )
-        self.assertEqual(
-            tuple(
-                path.as_posix()
-                for path in selection.patch_source_paths(selected.cases[0])
-            ),
+            tuple(path.as_posix() for path in selection.patch_source_paths(selected.cases[0])),
             ("tests/probe_test.py",),
         )
+        self.assertEqual(selected.cases[0].commit, FAKE_SHA)
 
-    def test_verification_rejects_production_paths(self) -> None:
-        production_patch = TEST_PATCH.replace(
-            b"tests/probe_test.py", b"xpra/server/probe.py"
-        )
-        (self.directory / "tests.patch").write_bytes(production_patch)
-        self.write_manifest(production_patch)
+    def test_unknown_or_removed_manifest_fields_are_rejected(self) -> None:
+        for field in ('patch_sha256 = "x"', "paths = []", 'commit_subject = "x"', "draft = true"):
+            with self.subTest(field=field):
+                self.write_manifest()
+                manifest = self.directory / "case.toml"
+                manifest.write_text(field + "\n" + manifest.read_text(encoding="utf-8"), encoding="utf-8")
+                with self.assertRaisesRegex(selection.SelectionError, "unsupported fields"):
+                    load(self.lab, "cases/probe")
 
-        with self.assertRaisesRegex(selection.SelectionError, "may only modify tests/"):
-            selection.load_selection(self.lab, "verifications/current-behavior")
+    def test_a_case_outside_the_frozen_series_is_not_selectable(self) -> None:
+        write_marker(self.lab, ())
+        with self.assertRaises(selection.SelectionError):
+            load(self.lab, "cases/probe")
 
     def test_required_gate_projection_excludes_tests_list_gates(self) -> None:
-        manifest = self.directory / "verification.toml"
-        manifest.write_text(
-            manifest.read_text(encoding="utf-8").replace(
-                "required_gates = []",
-                'required_gates = ["live-rgb"]',
-            ),
-            encoding="utf-8",
-        )
-        selected = selection.load_selection(
-            self.lab,
-            "verifications/current-behavior",
-        )
+        self.write_manifest('"live-rgb"')
+        selected = load(self.lab, "cases/probe")
         self.assertEqual(tuple(selection.iter_required_gates(selected)), ("live-rgb",))
         self.assertEqual(tuple(selection.iter_gates(selected)), ("full", "live-rgb"))
-
-        arguments = (
-            "selection.py",
-            "--lab-root",
-            str(self.lab),
-            "--selection",
-            "verifications/current-behavior",
-            "required-gates",
-        )
+        arguments = ("selection.py", "--lab-root", str(self.lab), "--selection", "cases/probe", "required-gates")
         with patch("sys.argv", arguments), redirect_stdout(StringIO()) as stdout:
             self.assertEqual(selection.main(), 0)
         self.assertEqual(stdout.getvalue(), "live-rgb\n")
 
     def test_wayland_subsurface_live_gate_is_a_supported_evidence_gate(self) -> None:
-        manifest = self.directory / "verification.toml"
-        manifest.write_text(
-            manifest.read_text(encoding="utf-8").replace(
-                "required_gates = []",
-                'required_gates = ["live-wayland-subsurface"]',
-            ),
-            encoding="utf-8",
-        )
-
-        selected = selection.load_selection(
-            self.lab,
-            "verifications/current-behavior",
-        )
-        self.assertEqual(
-            tuple(selection.iter_required_gates(selected)),
-            ("live-wayland-subsurface",),
-        )
-
-        manifest.write_text(
-            manifest.read_text(encoding="utf-8").replace(
-                "live-wayland-subsurface",
-                "live-wayland-subsurface-typo",
-            ),
-            encoding="utf-8",
-        )
-        with self.assertRaisesRegex(selection.SelectionError, "invalid verification.*gate"):
-            selection.load_selection(
-                self.lab,
-                "verifications/current-behavior",
-            )
+        self.write_manifest('"live-wayland-subsurface"')
+        selected = load(self.lab, "cases/probe")
+        self.assertEqual(tuple(selection.iter_required_gates(selected)), ("live-wayland-subsurface",))
+        self.write_manifest('"live-wayland-subsurface-typo"')
+        with self.assertRaisesRegex(selection.SelectionError, "invalid case.*gate"):
+            load(self.lab, "cases/probe")
 
     def write_resolution(self) -> tuple[Path, Path, str, str]:
-        selected = selection.load_selection(
-            self.lab,
-            "verifications/current-behavior",
-        )
-        source = self.lab / "source"
-        source.mkdir()
+        source_state = selection.open_source(self.lab)
+        selected = selection.load_selection(source_state, "cases/probe")
+        tree = self.lab / "source"
+        tree.mkdir()
         source_commit = "a" * 40
-        document = selection.resolve_selection(
-            selected,
-            self.lab,
-            source,
-            source_commit,
-        )
+        document = selection.resolve_selection(selected, source_state, tree, source_commit)
         resolution = self.lab / "resolution.json"
         resolution.write_text(json.dumps(document), encoding="utf-8")
         digest = self.lab / "resolution.sha256"
@@ -184,39 +154,22 @@ class VerificationSelectionTest(unittest.TestCase):
     def test_resolution_patch_projection_is_counted_ordered_and_verified(self) -> None:
         resolution, digest, source_commit, selection_sha = self.write_resolution()
         arguments = (
-            "selection.py",
-            "--lab-root",
-            str(self.lab),
-            "--selection",
-            "verifications/current-behavior",
-            "resolution-patches",
-            "--resolution",
-            str(resolution),
-            "--digest-file",
-            str(digest),
-            "--source-commit",
-            source_commit,
-            "--selection-sha256",
-            selection_sha,
+            "selection.py", "--lab-root", str(self.lab), "--selection", "cases/probe",
+            "resolution-patches", "--resolution", str(resolution), "--digest-file", str(digest),
+            "--source-commit", source_commit, "--selection-sha256", selection_sha,
         )
-
         with patch("sys.argv", arguments), redirect_stdout(StringIO()) as stdout:
             self.assertEqual(selection.main(), 0)
-
         self.assertEqual(
             stdout.getvalue(),
-            "count\t1\n"
-            "0\tcurrent-behavior\tapply\t"
-            "verifications/current-behavior/tests.patch\t"
+            "count\t1\n0\tprobe\tapply\tcases/probe/fix.patch\t"
             f"{hashlib.sha256(TEST_PATCH).hexdigest()}\n",
         )
 
     def test_resolution_validation_rejects_extra_patch_fields(self) -> None:
         resolution, _digest, source_commit, selection_sha = self.write_resolution()
-        selected = selection.load_selection(
-            self.lab,
-            "verifications/current-behavior",
-        )
+        source_state = selection.open_source(self.lab)
+        selected = selection.load_selection(source_state, "cases/probe")
         document = json.loads(resolution.read_text(encoding="utf-8"))
         document["patches"][0]["unexpected"] = True
         payload = dict(document)
@@ -224,14 +177,138 @@ class VerificationSelectionTest(unittest.TestCase):
         document["resolution_sha256"] = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
-
         with self.assertRaisesRegex(selection.SelectionError, "patch identity"):
-            selection.validate_resolution_document(
-                selected,
-                self.lab,
-                document,
-                source_commit,
-                selection_sha,
+            selection.validate_resolution_document(selected, source_state, document, source_commit, selection_sha)
+
+
+def git(repo: Path, *arguments: str) -> str:
+    return subprocess.run(
+        ("git", "-c", "commit.gpgsign=false", "-C", str(repo), *arguments),
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+class GitModeSelectionTest(unittest.TestCase):
+    """On the host every case diff comes from its Fork-Case commit."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temporary.name)
+        git(self.repo, "init", "-q", "-b", "develop")
+        git(self.repo, "config", "user.name", "Selection Test")
+        git(self.repo, "config", "user.email", "selection@example.invalid")
+        self.write({"xpra/a.py": LINES})
+        self.base = self.commit("base")
+        git(self.repo, "update-ref", "refs/heads/master", self.base)
+        self.lab = self.repo / "fork-maintenance"
+        self.write({"fork-maintenance/stacks/develop.toml": STACK_MANIFEST})
+        self.commit("control plane")
+        self.add_case("one", "line 5\n", "line five\n")
+        self.add_case("two", "line 7\n", "line seven\n")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write(self, files: dict[str, str]) -> None:
+        for relative, text in files.items():
+            path = self.repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+
+    def commit(self, message: str, *arguments: str) -> str:
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", message, *arguments)
+        return git(self.repo, "rev-parse", "HEAD")
+
+    def add_case(self, slug: str, old: str, new: str) -> None:
+        self.write({f"fork-maintenance/cases/{slug}/case.toml": case_manifest(slug)})
+        self.commit(f"document {slug}")
+        text = (self.repo / "xpra/a.py").read_text(encoding="utf-8")
+        self.write({"xpra/a.py": text.replace(old, new, 1)})
+        self.commit(f"implement {slug}", "--trailer", f"Fork-Case: {slug}")
+
+    def test_stack_diffs_follow_commit_order_and_reproduce_head(self) -> None:
+        source_state = selection.open_source(self.lab)
+        selected = selection.load_selection(source_state, "stacks/develop")
+        self.assertEqual(selected.subjects, ("one", "two"))
+        with tempfile.TemporaryDirectory() as raw:
+            tree = Path(raw)
+            (tree / "xpra").mkdir()
+            (tree / "xpra/a.py").write_text(LINES, encoding="utf-8")
+            for case in selected.cases:
+                subprocess.run(("git", "apply", "-"), cwd=tree, input=case.patch_bytes, check=True)
+            self.assertEqual((tree / "xpra/a.py").read_bytes(), (self.repo / "xpra/a.py").read_bytes())
+
+    def test_a_case_alone_is_cherry_picked_onto_the_base(self) -> None:
+        # the commit diff of "two" carries "line five" as context, which the
+        # bare base does not have: the case selection merges it instead
+        source_state = selection.open_source(self.lab)
+        alone = selection.load_selection(source_state, "cases/two").cases[0].patch_bytes
+        self.assertNotIn(b"line five", alone)
+        stacked = selection.load_selection(source_state, "stacks/develop").cases[1].patch_bytes
+        self.assertIn(b"line five", stacked)
+        with tempfile.TemporaryDirectory() as raw:
+            tree = Path(raw)
+            (tree / "xpra").mkdir()
+            (tree / "xpra/a.py").write_text(LINES, encoding="utf-8")
+            subprocess.run(("git", "apply", "--check", "-"), cwd=tree, input=alone, check=True)
+
+    def test_snapshot_round_trip_keeps_the_digest(self) -> None:
+        for name in ("stacks/develop", "cases/two"):
+            with self.subTest(selection=name):
+                source_state = selection.open_source(self.lab)
+                selected = selection.load_selection(source_state, name)
+                with tempfile.TemporaryDirectory() as raw:
+                    destination = Path(raw) / "lab"
+                    selection.snapshot(selected, source_state, destination)
+                    frozen = load(destination, name)
+                    self.assertEqual(frozen.subjects, selected.subjects)
+                    self.assertEqual(
+                        selection.selection_digest(frozen, destination),
+                        selection.selection_digest(selected, self.lab),
+                    )
+
+    def test_stored_patches_and_invalid_history_are_refused(self) -> None:
+        stray = self.lab / "cases" / "one" / "fix.patch"
+        stray.write_text("stale\n", encoding="utf-8")
+        with self.assertRaisesRegex(selection.SelectionError, "stored case patches"):
+            selection.open_source(self.lab)
+        stray.unlink()
+        self.write({"xpra/b.py": "untrailed\n"})
+        self.commit("untrailed product change")
+        with self.assertRaisesRegex(selection.SelectionError, "without a Fork-Case trailer"):
+            selection.open_source(self.lab)
+
+    def test_develop_map_document_lists_cases_in_order(self) -> None:
+        arguments = ("selection.py", "--lab-root", str(self.lab), "develop-map")
+        with patch("sys.argv", arguments), redirect_stdout(StringIO()) as stdout:
+            self.assertEqual(selection.main(), 0)
+        document = json.loads(stdout.getvalue())
+        self.assertEqual(document["base"], self.base)
+        self.assertEqual([case["slug"] for case in document["cases"]], ["one", "two"])
+
+
+class RepositorySelectionTest(unittest.TestCase):
+    """The real develop checkout: the inactive quarantine has no commit."""
+
+    lab = Path(__file__).resolve().parents[2]
+
+    def test_inactive_quarantine_is_not_selectable_and_not_in_the_stack(self) -> None:
+        source_state = selection.open_source(self.lab)
+        with self.assertRaisesRegex(selection.SelectionError, "inactive test-quarantine case"):
+            selection.load_selection(source_state, "cases/upstream-test-quarantine")
+        selected = selection.load_selection(source_state, "stacks/develop")
+        self.assertNotIn("upstream-test-quarantine", selected.subjects)
+        self.assertEqual(tuple(selection.iter_quarantined_tests(selected)), ())
+        with tempfile.TemporaryDirectory() as raw:
+            destination = Path(raw) / "snapshot"
+            selection.snapshot(selected, source_state, destination)
+            self.assertFalse((destination / "cases" / "upstream-test-quarantine").exists())
+            frozen = load(destination, "stacks/develop")
+            self.assertEqual(frozen.subjects, selected.subjects)
+            self.assertEqual(
+                selection.selection_digest(frozen, destination),
+                selection.selection_digest(selected, self.lab),
             )
 
 
@@ -486,31 +563,6 @@ python3() {
                 self.assertIn(authority, prepare)
 
 
-class InactiveQuarantineSelectionTest(unittest.TestCase):
-    def test_actual_inactive_scaffold_cannot_be_selected(self) -> None:
-        lab = Path(__file__).resolve().parents[2]
-        with self.assertRaisesRegex(selection.SelectionError, "draft case is not test-selectable"):
-            selection.load_selection(lab, "cases/upstream-test-quarantine")
-
-    def test_complete_stack_snapshot_excludes_the_preserved_scaffold(self) -> None:
-        lab = Path(__file__).resolve().parents[2]
-        scaffold = lab / "cases" / "upstream-test-quarantine"
-        self.assertTrue((scaffold / "case.toml").is_file())
-        selected = selection.load_selection(lab, "stacks/develop")
-        self.assertNotIn("upstream-test-quarantine", selected.subjects)
-        self.assertEqual(tuple(selection.iter_quarantined_tests(selected)), ())
-        with tempfile.TemporaryDirectory() as raw:
-            destination = Path(raw) / "snapshot"
-            selection.snapshot(selected, lab, destination)
-            self.assertFalse((destination / "cases" / "upstream-test-quarantine").exists())
-            frozen = selection.load_selection(destination, "stacks/develop")
-            self.assertEqual(frozen.subjects, selected.subjects)
-            self.assertEqual(
-                selection.selection_digest(frozen, destination),
-                selection.selection_digest(selected, lab),
-            )
-
-
 class QuarantineSelectionTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -518,19 +570,15 @@ class QuarantineSelectionTest(unittest.TestCase):
         self.directory = self.lab / "cases" / "upstream-test-quarantine"
         self.directory.mkdir(parents=True)
         (self.directory / "fix.patch").write_bytes(QUARANTINE_PATCH)
-        digest = hashlib.sha256(QUARANTINE_PATCH).hexdigest()
+        write_marker(self.lab, ("upstream-test-quarantine",))
         (self.directory / "case.toml").write_text(
             "\n".join(
                 (
-                    "schema = 1",
+                    "schema = 2",
                     'slug = "upstream-test-quarantine"',
                     'kind = "test-quarantine"',
-                    f'patch_sha256 = "{digest}"',
+                    'title = "Quarantine failing upstream test modules"',
                     "dependencies = []",
-                    "paths = [",
-                    '  "tests/unittests/unit/client/broken_test.py",',
-                    '  "tests/unittests/unit/client/cython_only_test.py",',
-                    "]",
                     "",
                     "[tests]",
                     "list = [",
@@ -568,7 +616,7 @@ class QuarantineSelectionTest(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_quarantine_exposes_exact_modules_and_reassessment_gates(self) -> None:
-        selected = selection.load_selection(self.lab, "cases/upstream-test-quarantine")
+        selected = load(self.lab, "cases/upstream-test-quarantine")
 
         self.assertEqual(
             tuple(selection.iter_quarantined_tests(selected)),
@@ -605,28 +653,31 @@ class QuarantineSelectionTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(selection.SelectionError, "only upstream-test-quarantine"):
-            selection.load_selection(self.lab, "cases/foreign-quarantine")
+            load(self.lab, "cases/foreign-quarantine")
 
-    def test_even_a_populated_draft_cannot_be_selected_directly_or_by_a_stack(self) -> None:
+    def test_an_inactive_quarantine_is_not_selectable(self) -> None:
         manifest = self.directory / "case.toml"
-        # A valid nonempty candidate must still wait for explicit draft promotion.
+        text = manifest.read_text(encoding="utf-8")
+        for old in (
+            '  "unit.client.broken_test",\n  "unit.client.cython_only_test",\n',
+            'quarantine = ["unit.client.broken_test"]',
+            'quarantine-no-compat = ["unit.client.broken_test"]',
+            '  "quarantine",\n  "quarantine-cython",\n  "quarantine-no-compat",\n',
+        ):
+            text = text.replace(old, "" if old.startswith("  ") else old.split(" = ")[0] + " = []")
+        manifest.write_text(text, encoding="utf-8")
+        with self.assertRaisesRegex(selection.SelectionError, "inactive test-quarantine case"):
+            load(self.lab, "cases/upstream-test-quarantine")
+
+    def test_old_schema_one_manifest_is_rejected(self) -> None:
+        manifest = self.directory / "case.toml"
         manifest.write_text(
-            "draft = true\n" + manifest.read_text(encoding="utf-8"),
+            manifest.read_text(encoding="utf-8").replace("schema = 2", "schema = 1", 1)
+            + 'patch_sha256 = "x"\n',
             encoding="utf-8",
         )
-        stacks = self.lab / "stacks"
-        stacks.mkdir()
-        (stacks / "develop.toml").write_text(
-            'schema = 1\nslug = "develop"\nseries = ["upstream-test-quarantine"]\n'
-            '[tests]\nlist = ["full"]\n',
-            encoding="utf-8",
-        )
-        for name in ("cases/upstream-test-quarantine", "stacks/develop"):
-            with (
-                self.subTest(selection=name),
-                self.assertRaisesRegex(selection.SelectionError, "draft case is not test-selectable"),
-            ):
-                selection.load_selection(self.lab, name)
+        with self.assertRaisesRegex(selection.SelectionError, "expected 2"):
+            load(self.lab, "cases/upstream-test-quarantine")
 
     def test_the_reserved_quarantine_slug_cannot_become_production(self) -> None:
         manifest = self.directory / "case.toml"
@@ -640,7 +691,7 @@ class QuarantineSelectionTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(selection.SelectionError, "must use kind=test-quarantine"):
-            selection.load_selection(self.lab, "cases/upstream-test-quarantine")
+            load(self.lab, "cases/upstream-test-quarantine")
 
     def test_cli_emits_union_without_gate_and_exact_gate_subset(self) -> None:
         base = (
@@ -758,7 +809,7 @@ selection_tool() {
             encoding="utf-8",
         )
         with self.assertRaisesRegex(selection.SelectionError, "paths do not match"):
-            selection.load_selection(self.lab, "cases/upstream-test-quarantine")
+            load(self.lab, "cases/upstream-test-quarantine")
 
     def test_quarantine_requires_every_exact_gate(self) -> None:
         manifest = self.directory / "case.toml"
@@ -770,7 +821,7 @@ selection_tool() {
             encoding="utf-8",
         )
         with self.assertRaisesRegex(selection.SelectionError, "must contain exactly"):
-            selection.load_selection(self.lab, "cases/upstream-test-quarantine")
+            load(self.lab, "cases/upstream-test-quarantine")
 
     def test_quarantine_rejects_the_old_modules_only_schema(self) -> None:
         manifest = self.directory / "case.toml"
@@ -782,7 +833,7 @@ selection_tool() {
             encoding="utf-8",
         )
         with self.assertRaisesRegex(selection.SelectionError, "modules and gates"):
-            selection.load_selection(self.lab, "cases/upstream-test-quarantine")
+            load(self.lab, "cases/upstream-test-quarantine")
 
     def test_quarantine_gate_must_be_an_ordered_subset(self) -> None:
         manifest = self.directory / "case.toml"
@@ -797,7 +848,7 @@ selection_tool() {
             encoding="utf-8",
         )
         with self.assertRaisesRegex(selection.SelectionError, "must preserve"):
-            selection.load_selection(self.lab, "cases/upstream-test-quarantine")
+            load(self.lab, "cases/upstream-test-quarantine")
 
     def test_quarantine_gate_rejects_duplicates_and_foreign_modules(self) -> None:
         original = (self.directory / "case.toml").read_text(encoding="utf-8")
@@ -821,7 +872,7 @@ selection_tool() {
                     encoding="utf-8",
                 )
                 with self.assertRaisesRegex(selection.SelectionError, error):
-                    selection.load_selection(self.lab, "cases/upstream-test-quarantine")
+                    load(self.lab, "cases/upstream-test-quarantine")
 
     def test_every_quarantine_module_requires_a_gate(self) -> None:
         manifest = self.directory / "case.toml"
@@ -836,19 +887,8 @@ selection_tool() {
             encoding="utf-8",
         )
         with self.assertRaisesRegex(selection.SelectionError, "assigned to at least one"):
-            selection.load_selection(self.lab, "cases/upstream-test-quarantine")
+            load(self.lab, "cases/upstream-test-quarantine")
 
-    def test_case_rejects_manifest_paths_that_differ_from_the_patch(self) -> None:
-        manifest = self.directory / "case.toml"
-        manifest.write_text(
-            manifest.read_text(encoding="utf-8").replace(
-                "tests/unittests/unit/client/broken_test.py",
-                "tests/unittests/unit/client/other_test.py",
-            ),
-            encoding="utf-8",
-        )
-        with self.assertRaisesRegex(selection.SelectionError, "manifest paths do not match"):
-            selection.load_selection(self.lab, "cases/upstream-test-quarantine")
 
 
 if __name__ == "__main__":

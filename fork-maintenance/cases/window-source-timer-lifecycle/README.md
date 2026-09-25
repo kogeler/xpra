@@ -1,5 +1,8 @@
 # Window-source timer lifecycle
 
+Code: the `Fork-Case: window-source-timer-lifecycle` commit on `develop`
+(`make -C fork-maintenance case-show CASE=window-source-timer-lifecycle`).
+
 ## Boundary
 
 Every GLib timeout owned by a `WindowSource` is a leased asynchronous resource.
@@ -364,18 +367,19 @@ an inherited timer producer only after releasing its video lock. The locks
 must not be aliased and neither case may publish the other case's timer by
 writing a numeric slot directly.
 
-## Patch-queue and integration ownership
+## Case-commit and integration ownership
 
-This case applies to the frozen embedded source without another production
-dependency. It owns `compress.py`, the icon mixin, the inherited
-`expire_timer` producer in `video_compress.py`, and its focused regression in
-`compress_test.py`.
+The case commit applies alone to the frozen embedded source without another
+production dependency and is removable from `HEAD` (`case-check`). It owns
+`compress.py`, the icon mixin, the inherited `expire_timer` producer in
+`video_compress.py`, and its focused regression in `compress_test.py`.
 
-`video-pipeline-cleanup-race` is independently selectable against the same
-clean source and adds ownership for video-only timers and queued resources.
-The stack orders and composes the two patches explicitly because both touch the
-video source. The base case must not absorb codec-pair, B-frame, encode-queue,
-or `VideoSubregion` lifecycle changes merely to avoid that overlap.
+`video-pipeline-cleanup-race` applies independently to the same clean source
+and adds ownership for video-only timers and queued resources. The `develop`
+stack orders the timer commit before the VPC commit and composes them because
+both touch the video source. The base case must not absorb codec-pair, B-frame,
+encode-queue, or `VideoSubregion` lifecycle changes merely to avoid that
+overlap.
 
 The complete stack also contains `wayland-subsurface-stream-ownership`. Its
 internal `SubsurfaceWindowSource` derives directly from `WindowSource`, so it
@@ -402,12 +406,13 @@ bytecode compilation does not cover this boundary. Use the real
 `focused-cython` build and runtime regressions during development, and retain
 the complete `full-cython` leg for final integration coverage.
 
-Use the isolated workspace transaction for every patch refresh. Do not
-hand-edit `fix.patch`, its digest, or manifest paths. After changing any
-overlapping case, prove its standalone ownership and resolve and run the
-focused modules through the complete stack.
+Refresh the case only through its own commit: a fixup followed by
+`develop-squash`, or conflict resolution while a rebase replays it. After
+changing any overlapping case, prove its standalone ownership (`case-check`),
+check the stack (`stack-check`) and run the focused modules through the
+complete stack.
 
-## Patch ownership and non-goals
+## Commit scope and non-goals
 
 The production patch owns:
 
@@ -562,8 +567,9 @@ controlled races.
 ## Required validation
 
 Follow [development and final acceptance](../../docs/runbooks/validation.md)
-with the isolated-workspace and upstream-test interfaces. During development,
-retain a non-vacuous tests-only control and run the complete
+with the [case-commit](../../docs/runbooks/case-commits.md) and upstream-test
+interfaces. During development, retain a non-vacuous tests-only control and
+run the complete
 `unit.server.window.compress_test` module immediately after an atomic timer
 edit. Include affected upstream modules and the VPC/WSSO composed regressions
 when their shared lifecycle changes. Verify the real compiled callback path
@@ -576,6 +582,6 @@ under review; this case declares no standalone live gate. At candidate freeze,
 ensure standalone and composed focused coverage, then fill the final contract's
 missing or invalidated quarantine, full-matrix and stack-live requirements.
 Do not repeat the complete set after each timer edit. The final handoff must
-bind exact case/stack resolution digests and retain every named
+bind exact case/stack selection digests and retain every named
 result below `.artifacts/fork-maintenance/`; ad hoc output and a plausible live
 shutdown do not replace the deterministic lease interleavings.

@@ -21,9 +21,11 @@ boundary before downstream fork-control commits.
 The gate never fetches, syncs, switches, merges, or rebases. It neither
 requires nor hard-codes a remote name. The selected exact master ref and its
 commit are recorded only as immutable snapshot provenance. The range after the
-clean boundary must contain no merge commit, and every downstream commit may
-touch only the allowed fork-control paths; a committed or dirty Xpra source copy
-fails closed. Detached `HEAD` is supported.
+clean boundary must contain no merge commit, and every downstream commit must
+be a valid control commit (fork-control paths only) or case commit (product
+paths only, one `Fork-Case` trailer), as defined in
+[`case-commits.md`](case-commits.md#model); dirty product paths fail closed.
+Detached `HEAD` is supported.
 
 The internal source-snapshot step used by `deb-start` and `ci-deb-release`
 creates
@@ -31,9 +33,10 @@ creates
 The private Git bundle contains the selected master ref; `source.json` binds the
 checkout commit, clean boundary, selected ref and tip, workflow digest, bundle
 path, and snapshot digest. The container checks out the recorded clean boundary,
-verifies the exact frozen source test-workflow digest, and applies the complete
-`stacks/develop` queue from a separately frozen selection snapshot. The host
-branch, `HEAD`, index, source tree, and refs remain unchanged.
+verifies the exact frozen source test-workflow digest, and applies the frozen
+diffs of every `STACK=develop` case commit from a separately frozen selection
+snapshot. The host branch, `HEAD`, index, source tree, and refs remain
+unchanged.
 
 The immutable queue cache is
 `deb-packages/selections/<selection-sha>-<metadata-sha>/{lab,selection.json}`.
@@ -115,7 +118,7 @@ bounded; each xz decoder uses a 256 MiB memory limit.
 
 ## Complete package validation
 
-The downstream Debian patch runs `dh_missing --fail-missing`. This turns the
+The Debian package rules run `dh_missing --fail-missing`. This turns the
 whole `debian/tmp` install tree into a packaging boundary: every result must be
 owned by one binary package or listed in the exact reviewed
 `packaging/debian/xpra/not-installed` file. The exclusions are limited to the
@@ -177,7 +180,7 @@ therefore rewritten from `<base>-1` to `<base>-r<revision>-1`, where `<base>` is
 the current source version. The generated `xpra/src_info.py` records
 `BRANCH = 'HEAD'`, the clean commit marker, one local modification layer, and
 that revision. This generated build metadata is container-local; no extra
-downstream source patch is required.
+downstream source change is required.
 The build also installs the two dependency shims supplied by upstream under
 `packaging/debian/` before resolving `Build-Depends`, matching upstream's
 `build.sh` sequence on amd64. It deliberately invokes
