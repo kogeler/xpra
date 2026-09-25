@@ -6,6 +6,7 @@
 # later version. See the file COPYING for details.
 
 import os
+from collections.abc import Mapping
 from math import sqrt, ceil
 from collections import deque
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from threading import Condition, Lock, get_ident
 from typing import ContextManager, Any
 from collections.abc import Callable, Iterable, Sequence
 
-from xpra.common import noop
+from xpra.common import SUBSURFACE_COMPOSITE_FORMATS, SUBSURFACE_COMPOSITE_MODE, noop
 from xpra.os_util import POSIX, OSX, gi_import
 from xpra.util.objects import typedict
 from xpra.util.str_fn import csv, repr_ellipsized, decode_str
@@ -107,6 +108,7 @@ FORCE_PILLOW = envbool("XPRA_FORCE_PILLOW", False)
 HARDCODED_ENCODING: str = os.environ.get("XPRA_HARDCODED_ENCODING", "")
 
 SCREEN_UPDATES_DIRECTORY = os.environ.get("XPRA_SCREEN_UPDATES_DIRECTORY", "")
+MMAP_DRAIN_DATA = "_mmap-drain-data"
 
 MAX_SEQUENCE = 2**64
 
@@ -1927,7 +1929,7 @@ class WindowSource(WindowIconSource):
         self.update_encoding_options(force_reload)
         self.update_refresh_attributes()
 
-    def damage(self, x: int, y: int, w: int, h: int, options=None) -> None:
+    def damage(self, x: int, y: int, w: int, h: int, options=None) -> bool:
         """ decide what to do with the damage area:
             * send it now (if not congested)
             * add it to an existing delayed region
@@ -1942,12 +1944,12 @@ class WindowSource(WindowIconSource):
         """
         check_main_thread()
         if self.suspended:
-            return
+            return False
         if w == 0 or h == 0:
             damagelog("damage%-24s ignored zero size", (x, y, w, h, options))
             # we may fire damage ourselves,
             # in which case the dimensions may be zero (if so configured by the client)
-            return
+            return False
         now = monotonic()
         if options is None:
             options = {}
@@ -1959,7 +1961,7 @@ class WindowSource(WindowIconSource):
         ww, wh = self.may_update_window_dimensions()
         if ww == 0 or wh == 0:
             damagelog("damage%s window size %ix%i ignored", (x, y, w, h, options), ww, wh)
-            return
+            return False
         if ww > MAX_WINDOW_SIZE or wh > MAX_WINDOW_SIZE:
             if first_time(f"window-oversize-{self.wid:#x}"):
                 damagelog("")
@@ -1967,7 +1969,7 @@ class WindowSource(WindowIconSource):
                 damagelog.warn(" window updates will be dropped until this is corrected")
             else:
                 damagelog("ignoring damage for window %i size %ix%i", self.wid, ww, wh)
-            return
+            return False
         if self.full_frames_only:
             x, y, w, h = 0, 0, ww, wh
         elif DAMAGE_WIDTH_PADDING or DAMAGE_HEIGHT_PADDING or DAMAGE_WIDTH_PADDING_PCT or DAMAGE_HEIGHT_PADDING_PCT:
@@ -1979,8 +1981,12 @@ class WindowSource(WindowIconSource):
             y = max(0, y - h_padding)
             w = min(ww - x, x2 - x)
             h = min(wh - y, y2 - y)
+        if self.defer_damage(self, x, y, w, h):
+            self.statistics.last_damage_event_time = now
+            return True
         self.do_damage(ww, wh, x, y, w, h, options)
         self.statistics.last_damage_event_time = now
+        return True
 
     def do_damage(self, ww: int, wh: int, x: int, y: int, w: int, h: int, options: dict) -> None:
         now = monotonic()
@@ -2482,57 +2488,162 @@ class WindowSource(WindowIconSource):
         # WindowVideoSource overrides this method
         return self.full_frames_only
 
+    def subsurface_composite_eligibility(self) -> tuple[tuple[str, ...], str]:
+        """Return the exact packed formats usable by a composite stage."""
+        from xpra.server.source.image_filter import NoFilter
+        if self.image_filter is not NoFilter:
+            return (), "a configured image filter cannot preserve the composite canvas"
+        if "rgb32" not in self._encoders:
+            return (), "the raw RGB32 encoder is not installed"
+        if "rgb32" not in self.core_encodings:
+            return (), "the client does not support raw RGB32"
+        # Per-window transparency and RGB formats describe the top-level
+        # backing.  An opaque backing still accepts alpha-bearing internal
+        # layers through the independently negotiated composite mode.
+        return SUBSURFACE_COMPOSITE_FORMATS, ""
+
+    def capture_damage_image(self, x: int, y: int, width: int, height: int) -> ImageWrapper | None:
+        """Return one UI-thread image wrapper owned by the caller."""
+        check_main_thread()
+        return self.window.get_image(x, y, width, height)
+
     def process_damage_region(self, damage_time: float, x: int, y: int, w: int, h: int,
-                              coding: str, options: dict, flush=0) -> None:
+                              coding: str, options: dict, flush=0,
+                              packet_complete: Callable[[bool], None] | None = None,
+                              force_basic_picture: bool = False, *,
+                              captured_image: ImageWrapper | None = None) -> bool:
         """
             Called by 'damage' or 'send_delayed_regions' to process a damage region.
 
             Requests the `ImageWrapper` then calls `process_damage_image` on it.
             The damage thread will call `make_data_packet_cb` which does the actual compression.
             This runs in the UI thread.
+
+            A connection-owned composite transaction may supply an image which
+            it captured with all of the transaction's other layers in one UI
+            iteration.  This method consumes that wrapper on every path and
+            must not read the newer live model in its place.
         """
-        if not coding:
-            raise RuntimeError("no encoding specified")
-        check_main_thread()
-        rgb_request_time = monotonic()
+        supplied_image = captured_image is not None
+        owned_image = captured_image
+        try:
+            if not coding:
+                raise RuntimeError("no encoding specified")
+            if options.get("subsurface-composite") == SUBSURFACE_COMPOSITE_MODE:
+                rgb_formats, error = self.subsurface_composite_eligibility()
+                if error:
+                    raise ValueError(
+                        f"composite source {self.wid:#x} is ineligible: {error}"
+                    )
+                if coding != "rgb32":
+                    raise ValueError(
+                        f"composite source {self.wid:#x} requires raw RGB32, not {coding!r}"
+                    )
+                # The direct basic-picture path does not merge the ordinary RGB
+                # encoding options. Bind the encoder to the mode's exact packed
+                # formats and retain an immutable, uncompressed packet payload.
+                options = dict(options)
+                options.update({
+                    "alpha": True,
+                    "lz4": False,
+                    "preserve-premultiplied-alpha": True,
+                    "rgb_formats": rgb_formats,
+                    "zstd": False,
+                })
+            # Geometry and connection-owned backing identity must be fixed before
+            # pixel capture.  Encoding may finish after a move, restack or child
+            # teardown has advanced the target backing to another epoch.
+            options = self.snapshot_damage_options(self, options)
+            if packet_complete:
+                options["_damage-packet-complete"] = packet_complete
+            check_main_thread()
+            rgb_request_time = monotonic()
 
-        if not self.window.is_managed():
-            log("process_damage_region: the window %s is not managed", self.window)
-            return
-        ww, wh = self.may_update_window_dimensions()
-        if x + w < 0 or y + h < 0:
-            log("process_damage_region: dropped, window is offscreen at %i%,%i", x, y)
-            return
-        if x + w > ww or y + h > wh:
-            # window is now smaller than the region we're trying to request
-            w = ww - x
-            h = wh - y
-        if w <= 0 or h <= 0:
-            log("process_damage_region: dropped, invalid dimensions %ix%i", w, h)
-            return
-        self._sequence += 1
-        sequence = self._sequence
-        if self.is_cancelled(sequence):
-            log("process_damage_region: sequence %s is cancelled", sequence)
-            return
-        image = self.window.get_image(x, y, w, h)
-        if image is None:
-            log("process_damage_region: no pixel data for window %s, wid=%#x", self.window, self.wid)
-            return
-        if x == 0 and y == 0 and (image.get_width(), image.get_height()) != (w, h):
-            # Some backends can return native-size pixels for a logical
-            # full-window damage region. Preserve the requested destination
-            # size so the draw packet can carry `scaled_size` metadata.
-            options["scaled-damage-size"] = (w, h)
+            if not self.window.is_managed():
+                log("process_damage_region: the window %s is not managed", self.window)
+                return False
+            ww, wh = self.may_update_window_dimensions()
+            if x + w < 0 or y + h < 0:
+                log("process_damage_region: dropped, window is offscreen at %i%,%i", x, y)
+                return False
+            if x + w > ww or y + h > wh:
+                # window is now smaller than the region we're trying to request
+                w = ww - x
+                h = wh - y
+            if w <= 0 or h <= 0:
+                log("process_damage_region: dropped, invalid dimensions %ix%i", w, h)
+                return False
+            # Every producer path must join the connection-owned composition
+            # transaction once a native subsurface tree owns this backing.  This
+            # final capture boundary also covers delayed/automatic refreshes,
+            # control requests and decode-error recovery which do not re-enter
+            # damage().  Only the exact transaction mode may capture directly.
+            if (options.get("subsurface-composite") != SUBSURFACE_COMPOSITE_MODE
+                    and self.defer_damage(self, x, y, w, h)):
+                self.complete_damage_options(options, False)
+                return False
+            self._sequence += 1
+            sequence = self._sequence
+            if self.is_cancelled(sequence):
+                log("process_damage_region: sequence %s is cancelled", sequence)
+                return False
+            if owned_image is None:
+                owned_image = self.capture_damage_image(x, y, w, h)
+            if owned_image is None:
+                log("process_damage_region: no pixel data for window %s, wid=%#x", self.window, self.wid)
+                return False
+            image_size = owned_image.get_width(), owned_image.get_height()
+            if supplied_image and image_size != (w, h):
+                log.error(
+                    "Error: captured image for window %#x has size %sx%s, expected %sx%s",
+                    self.wid, image_size[0], image_size[1], w, h,
+                )
+                return False
+            if x == 0 and y == 0 and image_size != (w, h):
+                # Some backends can return native-size pixels for a logical
+                # full-window damage region. Preserve the requested destination
+                # size so the draw packet can carry `scaled_size` metadata.
+                options["scaled-damage-size"] = (w, h)
 
-        def process_damage_image(img: ImageWrapper) -> None:
-            self.process_damage_image(damage_time, rgb_request_time, img, coding, sequence, options, flush)
+            def process_damage_image(img: ImageWrapper) -> None:
+                try:
+                    if force_basic_picture:
+                        queued = WindowSource.process_damage_image(
+                            self, damage_time, rgb_request_time, img, coding, sequence, options, flush,
+                            force_basic_picture=True,
+                        )
+                    else:
+                        queued = self.process_damage_image(
+                            damage_time, rgb_request_time, img, coding, sequence, options, flush,
+                        )
+                except BaseException:
+                    # The encode queue did not accept ownership of this wrapper.
+                    # This is intentionally idempotent for inner paths which may
+                    # already have rejected and freed the same wrapper.
+                    free_image_wrapper(img)
+                    self.complete_damage_options(options, False)
+                    raise
+                if not queued:
+                    self.complete_damage_options(options, False)
 
-        self.image_filter.process_image(image, process_damage_image)
+            image = owned_image
+            owned_image = None
+            self.image_filter.process_image(image, process_damage_image)
+            return True
+        finally:
+            if owned_image is not None:
+                free_image_wrapper(owned_image)
+
+    @staticmethod
+    def complete_damage_options(options: dict, published: bool) -> None:
+        callback = options.pop("_damage-packet-complete", None)
+        if callback:
+            callback(published)
 
     def process_damage_image(self, damage_time: float, rgb_request_time: float,
                              image: ImageWrapper,
-                             coding: str, sequence: int, options: dict, flush=0):
+                             coding: str, sequence: int, options: dict, flush=0,
+                             force_basic_picture: bool = False) -> bool:
         elapsed = int(1000 * (monotonic() - rgb_request_time))
         log("retrieving %s took %ims", image, elapsed)
 
@@ -2541,45 +2652,60 @@ class WindowSource(WindowIconSource):
         h = image.get_height()
         if w == 0 or h == 0:
             log("process_damage_image: invalid dimensions: %ix%i", w, h)
-            return
+            free_image_wrapper(image)
+            return False
         if self.is_cancelled(sequence):
             free_image_wrapper(image)
             log("process_damage_image: sequence %i is cancelled", sequence)
-            return
+            return False
 
         # record the current window depth / format:
         pixel_format = image.get_pixel_format()
         image_depth = image.get_depth()
         if image_depth == 32 and self.has_alpha and pixel_format.find("A") >= 0:
-            # we may want to discard alpha, either globally, or just for this update:
-            if self.discard_alpha:
-                # update globally:
-                pixel_format = pixel_format.replace("A", "X")   # ie: BGRA -> BGRX
-                image.set_pixel_format(pixel_format)
-                image_depth = 24
-            else:
-                x = image.get_target_x()
-                y = image.get_target_y()
-                if self.opaque_contains(x, y, w, h):
-                    # only this image can be stripped of alpha, the global pixel_format still has it
-                    image.set_pixel_format(pixel_format.replace("A", "X"))
+            # A composite transaction owns the exact premultiplied source
+            # representation.  Neither the generic discard policy nor an
+            # opaque-region optimization may relabel those bytes before the
+            # client performs source-over. Ordinary frames retain both paths.
+            if not options.get("preserve-premultiplied-alpha"):
+                # we may want to discard alpha, either globally, or just for this update:
+                if self.discard_alpha:
+                    # update globally:
+                    pixel_format = pixel_format.replace("A", "X")   # ie: BGRA -> BGRX
+                    image.set_pixel_format(pixel_format)
                     image_depth = 24
+                else:
+                    x = image.get_target_x()
+                    y = image.get_target_y()
+                    if self.opaque_contains(x, y, w, h):
+                        # only this image can be stripped of alpha, the global pixel_format still has it
+                        image.set_pixel_format(pixel_format.replace("A", "X"))
+                        image_depth = 24
         self.image_depth = image_depth
         self.pixel_format = pixel_format
 
         # prepare encoding options:
         eoptions = typedict(options)
-        eoptions["window-size"] = self.window_dimensions
+        # A subsurface source may target an existing parent backing. The
+        # connection snapshots that target size in the transaction options;
+        # only standalone/toplevel work derives it from this source.
+        eoptions.setdefault("window-size", self.window_dimensions)
         if resize := self.scaled_size(image):
             sw, sh = resize
             eoptions["scaled-width"] = sw
             eoptions["scaled-height"] = sh
 
-        self.do_process_damage_image(damage_time, rgb_request_time, image, coding, sequence, eoptions, flush)
+        if force_basic_picture:
+            return WindowSource.do_process_damage_image(
+                self, damage_time, rgb_request_time, image, coding, sequence, eoptions, flush,
+            )
+        return bool(self.do_process_damage_image(
+            damage_time, rgb_request_time, image, coding, sequence, eoptions, flush,
+        ))
 
     def do_process_damage_image(self, damage_time: float, rgb_request_time: float,
                                 image: ImageWrapper,
-                                coding: str, sequence: int, eoptions: typedict, flush=0):
+                                coding: str, sequence: int, eoptions: typedict, flush=0) -> bool:
         """
         This method is not actually used in practice,
         as all window sources use the WindowVideoSource subclass.
@@ -2592,10 +2718,12 @@ class WindowSource(WindowIconSource):
         w = image.get_width()
         h = image.get_height()
         item = (w, h, damage_time, now, image, coding, sequence, eoptions, flush)
-        # the encode thread now owns this image and must free it:
-        self.call_in_encode_thread(self.make_data_packet_cb, *item)
         log("process_damage_region: wid=%#x, sequence=%i, adding pixel data to encode queue (%4ix%-4i - %5s), elapsed time: %3.1f ms, request time: %3.1f ms",
             self.wid, sequence, w, h, coding, 1000 * (now - damage_time), elapsed)
+        # A successful queue return transfers ownership. No fallible diagnostic
+        # may make process_damage_image free this worker-owned image afterward.
+        self.call_in_encode_thread(self.make_data_packet_cb, *item)
+        return True
 
     def scaled_size(self, image: ImageWrapper) -> tuple[int, int] | None:
         crs = self.client_render_size
@@ -2615,26 +2743,59 @@ class WindowSource(WindowIconSource):
         """ This function is called from the damage data thread!
             Extra care must be taken to prevent access to X11 functions on window.
         """
-        self.statistics.encoding_pending[sequence] = (damage_time, w, h)
+        completion = options.pop("_damage-packet-complete", None)
+        published = False
+        publication_lease = None
+        mmap_drain_data = None
+        if coding == "mmap":
+            publication_lease = self.claim_damage_packet_publication(self)
+            if publication_lease is None:
+                free_image_wrapper(image)
+                if completion:
+                    completion(False)
+                return
         try:
-            packet = self.make_data_packet(damage_time, process_damage_time, image, coding, sequence, options, flush)
-        except Exception:
-            log("make_data_packet%s", (damage_time, process_damage_time, image, coding, sequence, options, flush),
-                exc_info=True)
-            if not self.is_cancelled(sequence):
-                log.error("Error: failed to create data packet", exc_info=True)
-            packet = None
+            try:
+                self.statistics.encoding_pending[sequence] = (damage_time, w, h)
+                packet = self.make_data_packet(
+                    damage_time, process_damage_time, image, coding, sequence, options, flush,
+                )
+            except Exception:
+                log("make_data_packet%s", (damage_time, process_damage_time, image, coding, sequence, options, flush),
+                    exc_info=True)
+                if not self.is_cancelled(sequence):
+                    log.error("Error: failed to create data packet", exc_info=True)
+                packet = None
+            finally:
+                mmap_drain_data = options.pop(MMAP_DRAIN_DATA, None)
+                free_image_wrapper(image)
+                del image
+                # may have been cancelled whilst we processed it:
+                self.statistics.encoding_pending.pop(sequence, None)
+            # NOTE: we MUST send an encoded mmap descriptor even if the window
+            # is cancelled now, because the client releases shared ring space.
+            if not packet:
+                return
+            published = self.queue_damage_packet(
+                packet, damage_time, process_damage_time, options,
+                publication_lease=publication_lease,
+            )
+            # queue_damage_packet has now either published the packet, sent
+            # its terminal no-paint form, or rejected it because the whole
+            # connection is closing.  In all cases it consumed responsibility
+            # for any mmap chunks represented by this packet.
+            mmap_drain_data = None
         finally:
-            free_image_wrapper(image)
-            del image
-            # may have been cancelled whilst we processed it:
-            self.statistics.encoding_pending.pop(sequence, None)
-        # NOTE: we MUST send it (even if the window is cancelled by now..)
-        # because the code may rely on the client having received this frame
-        if not packet:
-            return
-        # queue packet for sending:
-        self.queue_damage_packet(packet, damage_time, process_damage_time, options)
+            try:
+                try:
+                    if publication_lease is not None and mmap_drain_data is not None:
+                        self.queue_mmap_drain(mmap_drain_data, publication_lease)
+                finally:
+                    if publication_lease is not None:
+                        self.release_damage_packet_publication(self, publication_lease)
+            finally:
+                if completion:
+                    completion(published)
 
     def schedule_auto_refresh(self, packet: Packet, options: typedict) -> None:
         if not self.can_refresh():
@@ -2858,6 +3019,11 @@ class WindowSource(WindowIconSource):
         self.refresh_regions = []
         w, h = self.window_dimensions
         refreshlog("full_quality_refresh() for %sx%s window with pending refresh regions: %s", w, h, refresh_regions)
+        if self.defer_damage(self, 0, 0, w, h):
+            # The connection-owned composite repair replaces this source-only
+            # refresh.  Pending refresh regions were deliberately consumed by
+            # the full-window request above.
+            return
         new_options = damage_options.copy()
         encoding = self.auto_refresh_encodings[0]
         new_options.update(self.get_refresh_options())
@@ -2877,7 +3043,8 @@ class WindowSource(WindowIconSource):
         }
 
     def queue_damage_packet(self, packet: Packet, damage_time: float,
-                            process_damage_time: float, options: typedict) -> None:
+                            process_damage_time: float, options: typedict, *,
+                            publication_lease: object | None = None) -> bool:
         """
             Adds the given packet to the packet_queue,
             (warning: this runs from the non-UI 'encode' thread)
@@ -2899,20 +3066,123 @@ class WindowSource(WindowIconSource):
         now = monotonic()
         pixcount = width * height
         bytecount = len(data)
-        stats = self.statistics
-        stats.damage_ack_pending[damage_packet_sequence] = (
-            now, coding, pixcount, bytecount, client_options, damage_time,
+        wire_wid = packet.get_wid()
+
+        def queue() -> None:
+            self.queue_packet(packet, self.wid, pixcount, client_options.get("flush", 0) > 0)
+            if self.wid != wire_wid:
+                try:
+                    damagelog(
+                        "subsurface draw packet sequence %s from source window %#x "
+                        "published as wire window %#x using %s",
+                        damage_packet_sequence, self.wid, wire_wid, coding,
+                    )
+                except BaseException:
+                    # Logging is downstream of the authoritative deque append.
+                    compresslog.error("Error recording subsurface packet publication", exc_info=True)
+
+        def publish() -> None:
+            # Preserve upstream's real auto-refresh producer while the packet
+            # is still source-owned. The connection operation pins this source;
+            # its publication lock is not held across generic timer scheduling.
+            self.schedule_auto_refresh(packet, options)
+            stats = self.statistics
+            stats.damage_ack_pending[damage_packet_sequence] = (
+                now, coding, pixcount, bytecount, client_options, damage_time,
+            )
+            try:
+                queue()
+            except BaseException:
+                stats.damage_ack_pending.pop(damage_packet_sequence, None)
+                raise
+            # Everything below describes a packet which is already owned by
+            # the connection and present in its outbound queue. Diagnostic
+            # accounting or artifact capture must never roll that publication
+            # back or orphan its later acknowledgement.
+            try:
+                if process_damage_time > 0:
+                    damage_in_latency = now-process_damage_time
+                    stats.damage_in_latency.append((now, width*height, actual_batch_delay, damage_in_latency))
+                stats.last_packet_time = monotonic()
+                self.global_statistics.packet_count += 1
+                stats.packet_count += 1
+                totals = stats.encoding_totals.setdefault(coding, [0, 0])
+                totals[0] += 1
+                totals[1] += pixcount
+                self.encoding_last_used = coding
+            except BaseException:
+                compresslog.error("Error recording published damage packet statistics", exc_info=True)
+            if SCREEN_UPDATES_DIRECTORY:
+                try:
+                    self.save_update(packet, damage_time)
+                except BaseException:
+                    compresslog.error("Error saving published damage packet", exc_info=True)
+
+        # Ordinary late work loses publication rights with its source.  A
+        # completed mmap encode is different: its descriptor must still reach
+        # a live connection so the client can release the shared ring space.
+        def terminal_mmap_publisher() -> None:
+            # The mmap descriptor must reach the live client so its read
+            # pointer advances, but a stale/detached source no longer owns any
+            # pixels in the target backing.  A deliberately unknown WID takes
+            # the client's draw-abort path, which releases the exact chunks
+            # without painting them.  Its acknowledgement has no registered
+            # owner and is therefore harmless.
+            drain_packet = Packet(packet.get_type(), -1, *packet[2:])
+            self.queue_packet(drain_packet, self.wid, 0, False)
+            try:
+                damagelog(
+                    "draining stale mmap packet sequence %s from source window %#x",
+                    damage_packet_sequence, self.wid,
+                )
+            except BaseException:
+                compresslog.error("Error recording stale mmap drain", exc_info=True)
+
+        terminal_publisher = terminal_mmap_publisher if coding == "mmap" else None
+        return self.publish_damage_packet(
+            wire_wid, damage_packet_sequence, self, publish, terminal_publisher,
+            publication_lease,
+            lambda: self.validate_damage_packet(self, packet) and self.can_publish_damage_packet(packet),
         )
-        if process_damage_time > 0:
-            damage_in_latency = now-process_damage_time
-            stats.damage_in_latency.append((now, width*height, actual_batch_delay, damage_in_latency))
-        stats.last_packet_time = monotonic()
-        if SCREEN_UPDATES_DIRECTORY:
-            self.save_update(packet, damage_time)
-        # whilst the packet is still ours: lossy updates schedule a refresh,
-        # lossless ones clear the regions they have covered
-        self.schedule_auto_refresh(packet, options)
-        self.queue_packet(packet, self.wid, pixcount, client_options.get("flush", 0) > 0)
+
+    def queue_mmap_drain(self, drain_data, publication_lease: object) -> bool:
+        """Publish an already-written mmap descriptor without painting it.
+
+        The marker is created immediately after the shared-ring write, before
+        any packet metadata or diagnostic operation which can fail.  Using an
+        unknown wire WID makes the live client advance its mmap read pointer
+        through the normal draw-abort path without creating backing pixels or
+        an ACK owner for this source.
+        """
+        bdata, rgb_format, chunks = drain_data
+        sequence = self.allocate_damage_packet_sequence()
+        packet = Packet(
+            WINDOW_DRAW, -1, 0, 0, 1, 1, "mmap", bdata, sequence, 0,
+            {"rgb_format": rgb_format, "chunks": chunks},
+        )
+
+        def terminal_publisher() -> None:
+            self.queue_packet(packet, 0, 0, False)
+            try:
+                damagelog(
+                    "draining mmap packet sequence %s after packet construction failed for source window %#x",
+                    sequence, self.wid,
+                )
+            except BaseException:
+                compresslog.error("Error recording terminal mmap publication", exc_info=True)
+
+        drained = False
+
+        def mark_terminal_published() -> None:
+            nonlocal drained
+            terminal_publisher()
+            drained = True
+
+        self.publish_damage_packet(
+            -1, sequence, self, lambda: None, mark_terminal_published,
+            publication_lease, lambda: False,
+        )
+        return drained
 
     def save_update(self, packet: Packet, damage_time: float) -> None:
         import json
@@ -3056,59 +3326,77 @@ class WindowSource(WindowIconSource):
             (warning: this runs from the non-UI network parse thread,
             don't access the window from here!)
         """
-        statslog("packet decoding sequence %s for window %s: %sx%s took %.1fms",
-                 damage_packet_sequence, self.wid, width, height, decode_time/1000.0)
-        if decode_time > 0:
-            self.statistics.client_decode_time.append((monotonic(), width*height, int(decode_time)))
-        elif decode_time == WINDOW_DECODE_SKIPPED:
-            log(f"client skipped decoding sequence {damage_packet_sequence} for window {self.wid:#x}")
-        elif decode_time == WINDOW_NOT_FOUND:
-            log.warn("Warning: client cannot find window %#x", self.wid)
-        elif decode_time == WINDOW_DECODE_ERROR:
-            self.client_decode_error(decode_time, message)
         pending = self.statistics.damage_ack_pending.pop(damage_packet_sequence, None)
+        try:
+            statslog("packet decoding sequence %s for window %s: %sx%s took %.1fms",
+                     damage_packet_sequence, self.wid, width, height, decode_time/1000.0)
+            if decode_time > 0:
+                self.statistics.client_decode_time.append((monotonic(), width*height, int(decode_time)))
+            elif decode_time == WINDOW_DECODE_SKIPPED:
+                log(f"client skipped decoding sequence {damage_packet_sequence} for window {self.wid:#x}")
+            elif decode_time == WINDOW_NOT_FOUND:
+                log.warn("Warning: client cannot find window %#x", self.wid)
+            elif decode_time == WINDOW_DECODE_ERROR:
+                self.client_decode_error(decode_time, message)
+        except BaseException:
+            log.error("Error recording source draw acknowledgement diagnostics", exc_info=True)
         if pending is None:
-            log("cannot find sent time for sequence %s", damage_packet_sequence)
+            try:
+                log("cannot find sent time for sequence %s", damage_packet_sequence)
+            except BaseException:
+                pass
             return
         gs = self.global_statistics
         # pending = (now, coding, pixcount, bytecount, client_options, damage_time)
         queued_at, coding, pixels, bytecount, client_options, damage_time = pending
         now = monotonic()
         if decode_time > 0:
-            latency = int(1000 * (now - damage_time))
-            self.global_statistics.record_latency(self.wid, damage_packet_sequence, int(decode_time), queued_at,
-                                                  pixels, bytecount, latency)
-        # we can ignore some packets:
-        # * the first frame (frame=0) of video encoders can take longer to decode
-        #   as we have to create a decoder context
-        frame_no = client_options.get("frame", -1)
-        # when flushing a screen update as multiple packets (network layer aggregation),
-        # we could ignore all but the last one (flush=0):
-        # flush = client_options.get("flush", 0)
-        if frame_no != 0:
-            netlatency = int(1000 * gs.min_client_latency * (100 + ACK_JITTER) // 100)
-            sendlatency = min(200, self.estimate_send_delay(bytecount))
-            # decode = pixels//100000         # 0.1MPixel/s: 2160p -> 8MPixels, 80ms budget
-            live_time = int(1000 * (now - self.statistics.init_time))
-            ack_tolerance = self.jitter + ACK_TOLERANCE + max(0, 200-live_time//10)
-            latency = netlatency + sendlatency + decode_time + ack_tolerance
-            # late_by and latency are in ms, timestamps are in seconds:
-            actual = int(1000 * (now - queued_at))
-            late_by = actual - latency
-            if late_by > 0 and (live_time >= 1000 or pixels >= 4096):
-                actual_send_latency = round(actual - netlatency - decode_time)
-                late_pct = actual_send_latency * 100 // (1 + sendlatency)
-                if pixels <= 4096 or actual_send_latency <= 0:
-                    # small packets can really skew things, don't bother
-                    # (this also filters out scroll packets which are tiny)
-                    send_speed = 0
-                else:
-                    send_speed = bytecount * 8 * 1000 // actual_send_latency
-                # statslog("send latency: expected up to %3i, got %3i, %6iKB sent in %3i ms: %5iKbps",
-                #    latency, actual, bytecount//1024, actual_send_latency, send_speed//1024)
-                self.networksend_congestion_event("late-ack for sequence %6i: %s frame late by %3ims, target latency=%3i (%s)" % (
-                    damage_packet_sequence, coding, late_by, latency, (netlatency, sendlatency, decode_time, ack_tolerance)),
-                    late_pct, send_speed)
+            try:
+                latency = int(1000 * (now - damage_time))
+                self.global_statistics.record_latency(
+                    self.wid, damage_packet_sequence, int(decode_time), queued_at,
+                    pixels, bytecount, latency,
+                )
+            except BaseException:
+                log.error("Error recording source draw acknowledgement latency", exc_info=True)
+        try:
+            # we can ignore some packets:
+            # * the first frame (frame=0) of video encoders can take longer to decode
+            #   as we have to create a decoder context
+            frame_no = client_options.get("frame", -1)
+            # when flushing a screen update as multiple packets (network layer aggregation),
+            # we could ignore all but the last one (flush=0):
+            # flush = client_options.get("flush", 0)
+            if frame_no != 0:
+                netlatency = int(1000 * gs.min_client_latency * (100 + ACK_JITTER) // 100)
+                sendlatency = min(200, self.estimate_send_delay(bytecount))
+                # decode = pixels//100000         # 0.1MPixel/s: 2160p -> 8MPixels, 80ms budget
+                live_time = int(1000 * (now - self.statistics.init_time))
+                ack_tolerance = self.jitter + ACK_TOLERANCE + max(0, 200-live_time//10)
+                latency = netlatency + sendlatency + decode_time + ack_tolerance
+                # late_by and latency are in ms, timestamps are in seconds:
+                actual = int(1000 * (now - queued_at))
+                late_by = actual - latency
+                if late_by > 0 and (live_time >= 1000 or pixels >= 4096):
+                    actual_send_latency = round(actual - netlatency - decode_time)
+                    late_pct = actual_send_latency * 100 // (1 + sendlatency)
+                    if pixels <= 4096 or actual_send_latency <= 0:
+                        # small packets can really skew things, don't bother
+                        # (this also filters out scroll packets which are tiny)
+                        send_speed = 0
+                    else:
+                        send_speed = bytecount * 8 * 1000 // actual_send_latency
+                    # statslog("send latency: expected up to %3i, got %3i, %6iKB sent in %3i ms: %5iKbps",
+                    #    latency, actual, bytecount//1024, actual_send_latency, send_speed//1024)
+                    self.networksend_congestion_event(
+                        "late-ack for sequence %6i: %s frame late by %3ims, target latency=%3i (%s)" % (
+                            damage_packet_sequence, coding, late_by, latency,
+                            (netlatency, sendlatency, decode_time, ack_tolerance),
+                        ),
+                        late_pct, send_speed,
+                    )
+        except BaseException:
+            log.error("Error updating source draw acknowledgement statistics", exc_info=True)
         damage_delayed = self._damage_delayed
         if not damage_delayed:
             self.soft_expired = 0
@@ -3243,7 +3531,7 @@ class WindowSource(WindowIconSource):
         self.statistics.encoding_stats.append((end, coding, w*h, bpp, csize, end-start))
         return self.make_draw_packet(x, y, outw, outh, coding, data, outstride, client_options, options)
 
-    def _draw_packet_target(self, x: int, y: int) -> tuple[int, int, int]:
+    def _draw_packet_target(self, x: int, y: int, _options=None) -> tuple[int, int, int]:
         # (wid, x, y) used in the outbound draw packet.
         # Subclasses may shift to retarget into a parent window.
         return self.wid, x, y
@@ -3260,6 +3548,7 @@ class WindowSource(WindowIconSource):
 
     def make_draw_packet(self, x: int, y: int, outw: int, outh: int,
                          coding: str, data, outstride: int, client_options, options) -> Packet:
+        options = self.snapshot_damage_options(self, options)
         if not isinstance(coding, str):
             raise RuntimeError(f"invalid type for encoding: {coding} ({type(coding)})")
         for v in (x, y, outw, outh, outstride):
@@ -3268,20 +3557,79 @@ class WindowSource(WindowIconSource):
         ws = options.get("window-size")
         if ws:
             client_options["window-size"] = ws
+        if "backing-epoch" in options:
+            client_options["backing-epoch"] = options["backing-epoch"]
+        if "subsurface-backing-epoch" in options:
+            client_options["subsurface-backing-epoch"] = options["subsurface-backing-epoch"]
+        if options.get("subsurface-composite"):
+            client_options["subsurface-composite"] = options["subsurface-composite"]
+        if reset_region := options.get("subsurface-reset"):
+            client_options["subsurface-reset"] = reset_region
+        if "subsurface-topology-epoch" in options:
+            client_options["subsurface-topology-epoch"] = options["subsurface-topology-epoch"]
+        for key in (
+                "subsurface-transaction-id",
+                "subsurface-stage-index",
+                "subsurface-stage-count",
+        ):
+            if key in options:
+                client_options[key] = options[key]
         outw, outh = self.scaled_damage_packet_size(outw, outh, client_options, options)
-        pwid, px, py = self._draw_packet_target(x, y)
+        pwid, px, py = self._draw_packet_target(x, y, options)
+        damage_packet_sequence = self.allocate_damage_packet_sequence()
         packet = Packet(WINDOW_DRAW, pwid, px, py, outw, outh, coding, data,
-                        self._damage_packet_sequence, outstride, client_options)
-        self.global_statistics.packet_count += 1
-        self.statistics.packet_count += 1
+                        damage_packet_sequence, outstride, client_options)
         self._damage_packet_sequence += 1
-        # record number of frames and pixels:
-        totals = self.statistics.encoding_totals.setdefault(coding, [0, 0])
-        totals[0] = totals[0] + 1
-        totals[1] = totals[1] + outw*outh
-        self.encoding_last_used = coding
         # log("make_data_packet: returning packet=%s", packet[:7]+[".."]+packet[8:])
         return packet
+
+    def allocate_damage_packet_sequence(self) -> int:
+        """Return the next standalone sequence; a connection shadows this method."""
+        return self._damage_packet_sequence
+
+    @staticmethod
+    def defer_damage(_source: "WindowSource", _x=0, _y=0, _width=0, _height=0) -> bool:
+        """Standalone sources have no connection-owned composition transaction."""
+        return False
+
+    @staticmethod
+    def snapshot_damage_options(_source: "WindowSource", options: Mapping[str, Any]) -> dict:
+        # Packet construction also passes typedict. Cython's builtin dict
+        # annotation rejects that subclass before we can take the owned copy.
+        return dict(options)
+
+    @staticmethod
+    def validate_damage_packet(_source: "WindowSource", _packet: Packet) -> bool:
+        return True
+
+    @staticmethod
+    def can_publish_damage_packet(_packet: Packet) -> bool:
+        return True
+
+    def claim_damage_packet_publication(self, _source: "WindowSource") -> object:
+        """Standalone sources retain publication rights for their own lifetime."""
+        return object()
+
+    @staticmethod
+    def release_damage_packet_publication(_source: "WindowSource", _lease: object) -> None:
+        """A standalone publication lease has no external registry."""
+
+    @staticmethod
+    def publish_damage_packet(_wid: int, _sequence: int, _source: "WindowSource",
+                              publisher: Callable[[], None],
+                              terminal_publisher: Callable[[], None] | None = None,
+                              publication_lease: object | None = None,
+                              validator: Callable[[], bool] | None = None) -> bool:
+        if validator and not validator():
+            if terminal_publisher and publication_lease is not None:
+                terminal_publisher()
+            return False
+        publisher()
+        return True
+
+    @staticmethod
+    def unregister_damage_packets(_source: "WindowSource") -> None:
+        """Standalone sources do not have a connection-owned ACK registry."""
 
     def direct_queue_draw(self, coding: str, data: bytes, client_info: dict) -> None:
         # this is a frame from a compressed stream,
@@ -3302,9 +3650,10 @@ class WindowSource(WindowIconSource):
                     self._damage_packet_sequence, client_info, options)
         self.queue_damage_packet(packet, damage_time, process_damage_time, options)
 
-    def mmap_encode(self, coding: str, image: ImageWrapper, _options) -> tuple:
+    def mmap_encode(self, coding: str, image: ImageWrapper, options) -> tuple:
         assert coding == "mmap"
-        assert self._mmap
+        mmap_area = self._mmap
+        assert mmap_area
         # prepare the pixels in a format accepted by the client:
         pf = image.get_pixel_format()
         if pf not in self.rgb_formats:
@@ -3321,7 +3670,7 @@ class WindowSource(WindowIconSource):
         mmap_data = ()
         try:
             for i in range(5):
-                mmap_data = self._mmap.write_data(data)
+                mmap_data = mmap_area.write_data(data)
                 # elapsed = monotonic()-start+0.000000001 # make sure never zero!
                 # log("%s MBytes/s - %s bytes written to mmap in %.1f ms", int(len(data)/elapsed/1024/1024),
                 #    len(data), 1000*elapsed)
@@ -3332,15 +3681,24 @@ class WindowSource(WindowIconSource):
             if not mmap_data:
                 log("mmap write failed!")
                 return ()
-            self.global_statistics.mmap_bytes_sent += len(data)
-            self.global_statistics.mmap_free_size = self._mmap.get_free_size()
+            # Record the exact terminal representation before any later image,
+            # statistics or packet operation can fail.  make_data_packet_cb
+            # owns this private marker until queue_damage_packet takes over.
+            bdata = mmap_data if BACKWARDS_COMPATIBLE else b""
+            options[MMAP_DRAIN_DATA] = (bdata, pf, mmap_data)
+            try:
+                self.global_statistics.mmap_bytes_sent += len(data)
+                self.global_statistics.mmap_free_size = mmap_area.get_free_size()
+            except BaseException:
+                compresslog.error("Error recording mmap write statistics", exc_info=True)
         except MmapPointerError as e:
             # the client has corrupted the control header of its own mmap area:
             # stop using it, the other encodings will still work
             log("write_data(%i bytes)", len(data), exc_info=True)
             log.error("Error: %s", e)
             log.error(" the client is not using the mmap area correctly, mmap is now disabled")
-            self._mmap = None
+            if self._mmap is mmap_area:
+                self._mmap = None
             return ()
         client_options = {"rgb_format": pf, "chunks": mmap_data}
         # the data we send is the index within the mmap area

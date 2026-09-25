@@ -1416,9 +1416,13 @@ cdef extern from "wlr/types/wlr_compositor.h":
 
     ctypedef void (*wlr_surface_iterator_func_t)(wlr_surface *surface, int sx, int sy, void *user_data)
     void wlr_surface_for_each_surface(wlr_surface *surface, wlr_surface_iterator_func_t iterator, void *user_data)
+    wlr_surface *wlr_surface_surface_at(wlr_surface *surface, double sx, double sy,
+                                        double *sub_x, double *sub_y)
 
     wlr_compositor *wlr_compositor_create(wl_display *display, int version, wlr_renderer *renderer)
     void wlr_surface_send_frame_done(wlr_surface *surface, const timespec *when)
+    bint wlr_surface_has_buffer(wlr_surface *surface)
+    void wlr_surface_get_effective_damage(wlr_surface *surface, pixman_region32_t *damage)
     void wlr_surface_get_buffer_source_box(wlr_surface *surface, wlr_fbox *box)
 
 

@@ -131,6 +131,10 @@ class UIXpraClient(XpraClientBase):
     def client_toolkit(self) -> str:
         raise NotImplementedError()
 
+    def get_window_backing_caps(self) -> dict[str, Any]:
+        """Capabilities implemented by every window backing of this client."""
+        return {}
+
     def run(self) -> ExitValue:
         if FORCE_ALERT:
             self.schedule_timer_redraw()

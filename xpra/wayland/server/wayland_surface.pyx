@@ -8,6 +8,8 @@
 from typing import Dict
 from math import ceil, floor
 
+cimport cython
+
 from xpra.log import Logger
 from xpra.util.str_fn import Ellipsizer
 from xpra.util.env import first_time
@@ -18,12 +20,16 @@ from xpra.common import CONTENT_TYPE_PICTURE, CONTENT_TYPE_VIDEO
 from xpra.wayland.server.colourspace import get_colourspace as parse_colourspace
 
 from libc.string cimport memset
+from libc.math cimport floor as c_floor
 from libc.stdint cimport uintptr_t, uint32_t
 from libc.time cimport timespec
+from cpython.pyport cimport PY_SSIZE_T_MAX
 
 from xpra.buffers.membuf cimport getbuf, MemBuf
 from xpra.wayland.server.events cimport ListenerObject
 from xpra.wayland.server.pixman cimport pixman_region32_t, pixman_box32_t, pixman_region32_rectangles
+from xpra.wayland.server.models.window import wayland_sampling_affine
+from xpra.constants import MAX_WINDOW_SIZE
 
 cdef extern from "time.h":
     int clock_gettime(int clk_id, timespec *tp)
@@ -108,6 +114,106 @@ cdef unsigned long next_wid() noexcept:
     global _wid_counter
     _wid_counter += 1
     return _wid_counter
+
+
+cdef inline int clamp_int(int value, int minimum, int maximum) noexcept nogil:
+    if value < minimum:
+        return minimum
+    if value > maximum:
+        return maximum
+    return value
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef object normalize_texture_image(object image, int logical_width, int logical_height,
+                                    tuple source_box, int buffer_transform):
+    """Sample one raw buffer texture into an exact surface-local raster."""
+    if image is None or logical_width <= 0 or logical_height <= 0:
+        return None
+    if logical_width > MAX_WINDOW_SIZE or logical_height > MAX_WINDOW_SIZE:
+        raise ValueError(f"Wayland logical raster exceeds maximum size: {logical_width}x{logical_height}")
+    cdef int source_width = image.get_width()
+    cdef int source_height = image.get_height()
+    cdef Py_ssize_t source_stride = image.get_rowstride()
+    if source_width <= 0 or source_height <= 0:
+        return None
+    if source_width > MAX_WINDOW_SIZE or source_height > MAX_WINDOW_SIZE:
+        raise ValueError(f"Wayland source raster exceeds maximum size: {source_width}x{source_height}")
+    if image.get_bytesperpixel() != 4 or image.get_planes() != ImageWrapper.PACKED:
+        raise ValueError(f"cannot normalize non-packed Wayland image {image}")
+    cdef Py_ssize_t source_row_bytes = <Py_ssize_t> source_width * 4
+    if source_stride < source_row_bytes:
+        raise ValueError("Wayland source rowstride is shorter than its packed row")
+    if source_height > 1 and source_stride > (PY_SSIZE_T_MAX - source_row_bytes) // (source_height - 1):
+        raise ValueError("Wayland source raster size overflows")
+    cdef Py_ssize_t source_bytes = source_stride * (source_height - 1) + source_row_bytes
+    cdef const unsigned char[::1] source = image.get_pixels()
+    if source.shape[0] < source_bytes:
+        raise ValueError("Wayland source pixel storage is shorter than its raster")
+    cdef Py_ssize_t output_stride = <Py_ssize_t> logical_width * 4
+    if logical_height > PY_SSIZE_T_MAX // output_stride:
+        raise ValueError("Wayland normalized raster size overflows")
+
+    affine = wayland_sampling_affine(buffer_transform, source_box, logical_width, logical_height)
+    source_x, source_y, source_w, source_h = source_box
+    if (source_x < 0 or source_y < 0
+            or source_x + source_w > source_width or source_y + source_h > source_height):
+        raise ValueError(f"Wayland sampling box {source_box} exceeds its source raster")
+    cdef double sx_dx = affine[0]
+    cdef double sx_dy = affine[1]
+    cdef double sx_origin = affine[2]
+    cdef double sy_dx = affine[3]
+    cdef double sy_dy = affine[4]
+    cdef double sy_origin = affine[5]
+
+    # Avoid a copy for the common identity path.  Texture readback is already
+    # tightly packed and has surface-local origin zero in this case.
+    if (buffer_transform == 0 and logical_width == source_width and logical_height == source_height
+            and source_box == (0.0, 0.0, float(source_width), float(source_height))):
+        return image
+
+    output = bytearray(output_stride * logical_height)
+    cdef unsigned char[::1] destination = output
+    cdef int x, y, channel, x0, x1, y0, y1
+    cdef double sx, sy, wx, wy, top, bottom, value
+    cdef Py_ssize_t p00, p10, p01, p11, target
+    with nogil:
+        for y in range(logical_height):
+            for x in range(logical_width):
+                sx = sx_origin + x * sx_dx + y * sx_dy
+                sy = sy_origin + x * sy_dx + y * sy_dy
+                x0 = <int> c_floor(sx)
+                y0 = <int> c_floor(sy)
+                wx = sx - x0
+                wy = sy - y0
+                x1 = clamp_int(x0 + 1, 0, source_width - 1)
+                y1 = clamp_int(y0 + 1, 0, source_height - 1)
+                x0 = clamp_int(x0, 0, source_width - 1)
+                y0 = clamp_int(y0, 0, source_height - 1)
+                p00 = y0 * source_stride + x0 * 4
+                p10 = y0 * source_stride + x1 * 4
+                p01 = y1 * source_stride + x0 * 4
+                p11 = y1 * source_stride + x1 * 4
+                target = y * output_stride + <Py_ssize_t> x * 4
+                for channel in range(4):
+                    top = source[p00 + channel] * (1.0 - wx) + source[p10 + channel] * wx
+                    bottom = source[p01 + channel] * (1.0 - wx) + source[p11 + channel] * wx
+                    value = top * (1.0 - wy) + bottom * wy
+                    if value <= 0:
+                        destination[target + channel] = 0
+                    elif value >= 255:
+                        destination[target + channel] = 255
+                    else:
+                        destination[target + channel] = <unsigned char> (value + 0.5)
+    normalized = ImageWrapper(
+        0, 0, logical_width, logical_height, output,
+        image.get_pixel_format(), image.get_depth(), output_stride,
+        planes=image.get_planes(), thread_safe=True,
+        palette=image.get_palette(), full_range=image.get_full_range(),
+    )
+    normalized.set_timestamp(image.get_timestamp())
+    return normalized
 
 
 cdef class WaylandSurface(ListenerObject):
@@ -299,6 +405,50 @@ cdef class WaylandSurface(ListenerObject):
     def get_buffer_source_size(self) -> tuple[int, int]:
         return self.get_buffer_source_geometry()[2:4]
 
+    def capture_logical_pixels(self):
+        """Capture and normalize the current committed buffer once at ingest.
+
+        wlroots supplies a buffer-local source box and exact surface-local
+        destination dimensions.  Sampling the complete raw texture here also
+        ensures every later partial crop is byte-identical to the same region
+        of a full capture.
+        """
+        if self.wlr_surface == NULL:
+            self.update_source_format(NULL)
+            return None
+        cdef wlr_client_buffer *client_buffer = self.wlr_surface.buffer
+        if not client_buffer:
+            self.update_source_format(NULL)
+            return None
+        self.update_source_format(client_buffer.source)
+        if not client_buffer.texture:
+            return None
+        cdef int logical_width = self.wlr_surface.current.width
+        cdef int logical_height = self.wlr_surface.current.height
+        if logical_width <= 0 or logical_height <= 0:
+            return None
+        if logical_width > MAX_WINDOW_SIZE or logical_height > MAX_WINDOW_SIZE:
+            raise ValueError(f"Wayland logical raster exceeds maximum size: {logical_width}x{logical_height}")
+        cdef wlr_texture *texture = client_buffer.texture
+        if texture.width > MAX_WINDOW_SIZE or texture.height > MAX_WINDOW_SIZE:
+            raise ValueError(f"Wayland texture exceeds maximum size: {texture.width}x{texture.height}")
+        raw = self.download_texture_pixels(0, 0, texture.width, texture.height)
+        if raw is None:
+            return None
+        cdef wlr_fbox source
+        wlr_surface_get_buffer_source_box(self.wlr_surface, &source)
+        source_box = (source.x, source.y, source.width, source.height)
+        normalized = None
+        try:
+            normalized = normalize_texture_image(
+                raw, logical_width, logical_height,
+                source_box, self.wlr_surface.current.transform,
+            )
+            return normalized
+        finally:
+            if normalized is not raw:
+                raw.free()
+
     def capture_pixels(self, int x=-1, int y=-1, int width=0, int height=0):
         """Copy the current buffer's pixels out as an ImageWrapper.
         Returns None if the surface is destroyed or has no committed buffer."""
@@ -391,7 +541,9 @@ cdef class WaylandSurface(ListenerObject):
             if first_time("read-format-%#x" % read_format):
                 log.warn("Warning: unsupported preferred pixel read format %#x, using ABGR8888", read_format)
             read_format = DRM_FORMAT_ABGR8888
-            pixel_format = get_capture_pixel_format(read_format)
+            pixel_format = get_capture_pixel_format(
+                read_format, self._source_format if self._has_source_format else None,
+            )
 
         cdef wlr_texture_read_pixels_options opts
         opts.data = <void*> texture_buffer.get_mem()

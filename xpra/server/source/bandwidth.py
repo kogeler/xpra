@@ -4,6 +4,7 @@
 # later version. See the file COPYING for details.
 
 from typing import Any
+from contextlib import nullcontext
 
 from xpra.net.common import BACKWARDS_COMPATIBLE
 from xpra.util.objects import typedict
@@ -119,19 +120,28 @@ class BandwidthConnection(StubClientConnection):
         # we use the window size,
         # (we should use the number of bytes actually sent: framerate, compression, etc..)
         window_weight = {}
-        for wid, ws in self.window_sources.items():
-            weight = 0
-            if not ws.suspended:
-                ww, wh = ws.window_dimensions
-                # try to reserve bandwidth for at least one screen update,
-                # and add the number of pixels damaged:
-                weight = ww * wh + ws.statistics.get_damage_pixels()
-            window_weight[wid] = weight
+        get_window_sources = getattr(self, "window_source_items", lambda: tuple(self.window_sources.items()))
+        sources = get_window_sources()
+        source_operation = getattr(self, "pixel_source_operation", nullcontext)
+        for wid, source in sources:
+            with source_operation(source) as ws:
+                if ws is None:
+                    continue
+                weight = 0
+                if not ws.suspended:
+                    ww, wh = ws.window_dimensions
+                    # try to reserve bandwidth for at least one screen update,
+                    # and add the number of pixels damaged:
+                    weight = ww * wh + ws.statistics.get_damage_pixels()
+                window_weight[wid] = weight
         log("update_bandwidth_limits() window weights=%s", window_weight)
         total_weight = max(1, sum(window_weight.values()))
-        for wid, ws in self.window_sources.items():
-            if bandwidth_limit == 0:
-                ws.bandwidth_limit = 0
-            else:
-                weight = window_weight.get(wid, 0)
-                ws.bandwidth_limit = max(MIN_BANDWIDTH // 10, bandwidth_limit * weight // total_weight)
+        for wid, source in sources:
+            with source_operation(source) as ws:
+                if ws is None:
+                    continue
+                if bandwidth_limit == 0:
+                    ws.bandwidth_limit = 0
+                else:
+                    weight = window_weight.get(wid, 0)
+                    ws.bandwidth_limit = max(MIN_BANDWIDTH // 10, bandwidth_limit * weight // total_weight)

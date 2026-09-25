@@ -9,17 +9,23 @@ from xpra.codecs.image import ImageWrapper
 from xpra.net.common import BACKWARDS_COMPATIBLE
 from xpra.os_util import gi_import
 from xpra.wayland.server.models.frame import FrameCallbackModel
+from xpra.wayland.server.models.window import borrow_image_wrapper, retain_image_snapshot
 
 GObject = gi_import("GObject")
 
 
 class SubsurfaceWindow(FrameCallbackModel):
-    """Minimal window-like facade so a WindowSource can be constructed for a
-    wayland subsurface. The subsurface is not a window in its own right: it
-    has no title, no parent/transient relationship the client cares about,
-    and content-type is intentionally left unset so `content_guesser` decides
-    from the pixel stream (a video subsurface should not inherit its parent
-    GTK frame's "text" content-type)."""
+    """Retain one wl_subsurface's normalized logical raster for WSSO.
+
+    This facade exists only so an internal WindowSource can capture a bounded
+    region for the connection-owned raw RGB32 transaction.  It is not a client
+    window and has no independent decoder, title, transient relationship or
+    presentation lifecycle.  Content hints stay empty so compatibility calls
+    cannot inherit the parent window's encoding policy.  It publishes the
+    child surface and display like every upstream frame-callback model, but
+    WSSO completes each native child commit directly and never arms its
+    frame timers.
+    """
 
     __gproperties__ = {
         # the child's own `wl_surface` and the display to flush: a subsurface has its own
@@ -50,6 +56,7 @@ class SubsurfaceWindow(FrameCallbackModel):
         self._image: ImageWrapper | None = None
         self._internal_set_property("surface", surface)
         self._internal_set_property("display", display)
+        self._snapshot_generation = 0
         self._internal_set_property("depth", depth)
         self._internal_set_property("has-alpha", has_alpha)
         self._setup_done = True
@@ -83,17 +90,22 @@ class SubsurfaceWindow(FrameCallbackModel):
         image = self._image
         if image is None:
             return None
-        if x == 0 and y == 0 and width == self._width and height == self._height:
-            return image
-        # Viewport-scaled subsurfaces deliberately keep a native-size image
-        # while exposing logical dimensions. Partial logical damage needs
-        # proportional source mapping; for now callers send full subsurface
-        # damage, so return the native image as the conservative fallback.
-        if image.get_width() != self._width or image.get_height() != self._height:
-            return image
-        iw = min(width, self._width - x)
-        ih = min(height, self._height - y)
-        return image.get_sub_image(x, y, iw, ih)
+        logical_width = self._width
+        logical_height = self._height
+        if logical_width <= 0 or logical_height <= 0:
+            return None
+        left = max(0, x)
+        top = max(0, y)
+        right = min(logical_width, x + width)
+        bottom = min(logical_height, y + height)
+        if right <= left or bottom <= top:
+            return None
+        if left == 0 and top == 0 and right == logical_width and bottom == logical_height:
+            return borrow_image_wrapper(image)
+        cropped = image.get_sub_image(left, top, right - left, bottom - top)
+        cropped.set_target_x(left)
+        cropped.set_target_y(top)
+        return cropped
 
     def get(self, name: str, default_value: Any = None) -> Any:
         if BACKWARDS_COMPATIBLE and name == "content-type":
@@ -112,3 +124,69 @@ class SubsurfaceWindow(FrameCallbackModel):
 
     def is_shadow(self) -> bool:
         return False
+
+    def replace_image_snapshot(self, image: ImageWrapper) -> None:
+        """Copy one borrowed normalized raster into retained model state."""
+        # Native ingest has already normalized transform, scale and viewport
+        # state into this exact surface-local logical raster.
+        if (image.get_width(), image.get_height()) != (self._width, self._height):
+            raise ValueError(
+                f"Wayland subsurface raster {image.get_width()}x{image.get_height()} "
+                f"does not match logical size {self._width}x{self._height}"
+            )
+        retained = retain_image_snapshot(image)
+        retained.set_target_x(0)
+        retained.set_target_y(0)
+        previous = self._image
+        previous_frame_alpha = self._gproperties.get("frame-has-alpha", True)
+        has_pixel_format = "pixel-format" in self.get_internal_property_names()
+        previous_pixel_format = self._gproperties.get("pixel-format")
+        try:
+            # Keep this call as the composition point for the WIS-owned
+            # pixel-format update added independently to `set_image`.
+            self.set_image(retained)
+        except BaseException:
+            if self._image is retained:
+                self._image = previous
+            self._gproperties["frame-has-alpha"] = previous_frame_alpha
+            if has_pixel_format:
+                self._gproperties["pixel-format"] = previous_pixel_format
+            retained.free()
+            raise
+        self._snapshot_generation += 1
+        if previous:
+            previous.free()
+
+    def replace_dimensions(self, width: int, height: int) -> None:
+        """Update logical dimensions and invalidate an incompatible snapshot."""
+        if (width, height) != (self._width, self._height):
+            self.clear_image()
+        self.update_dimensions(width, height)
+
+    def has_image(self) -> bool:
+        return self._image is not None
+
+    def get_snapshot_generation(self) -> int:
+        return self._snapshot_generation
+
+    def clear_image(self) -> None:
+        image = self._image
+        self._image = None
+        self._snapshot_generation += 1
+        try:
+            if "pixel-format" in self.get_internal_property_names():
+                self._updateprop("pixel-format", "")
+        finally:
+            try:
+                self._updateprop("frame-has-alpha", True)
+            finally:
+                self._gproperties["frame-has-alpha"] = True
+                if image:
+                    image.free()
+
+    def replace_colourspace_snapshot(self, colourspace) -> None:
+        """Retain authoritative child colourspace outside WIS GObject state."""
+        self._subsurface_colourspace = dict(colourspace) if isinstance(colourspace, dict) else colourspace
+
+    def get_colourspace_snapshot(self):
+        return getattr(self, "_subsurface_colourspace", None)

@@ -562,6 +562,9 @@ cdef class WaylandCompositor(ListenerObject):
         log(" configured=%s, initialized=%s, initial_commit=%i", bool(xdg_surf.configured), bool(xdg_surf.initialized), bool(xdg_surf.initial_commit))
         # Pass the Surface instance so consumers can connect per-surface signals.
         self.emit("new-surface", surface, title, app_id, size)
+        # wl_surface may already own a committed subtree before acquiring its
+        # XDG role. Discover it after observers have connected to this wrapper.
+        surface.discover_subsurfaces()
 
     cdef void new_popup(self, wlr_xdg_popup *popup) noexcept:
         if popup == NULL or popup.base == NULL or popup.base.surface == NULL:

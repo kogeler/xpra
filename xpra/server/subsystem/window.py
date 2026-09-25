@@ -883,12 +883,18 @@ class WindowServer(StubSubsystem):
                 else:
                     log(f"window id {wid:#x} does not exist")
         wss = []
+        seen = set()
         for csource in tuple(control_get_sources(self.server)):
             for wid in wids:
-                ws = csource.window_sources.get(wid)
                 window = self.get_window(wid)
-                if window and ws:
-                    wss.append(ws)
+                if not window:
+                    continue
+                get_sources = getattr(csource, "get_window_pixel_sources", None)
+                sources = get_sources(wid) if get_sources else (csource.window_sources.get(wid), )
+                for ws in sources:
+                    if ws and id(ws) not in seen:
+                        seen.add(id(ws))
+                        wss.append(ws)
         return wss
 
     def _set_encoding_property(self, name: str, value, *wids) -> str:

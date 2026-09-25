@@ -8,14 +8,20 @@
 import os
 import re
 from typing import Any, Final
-from collections.abc import Callable, MutableSequence
+from collections.abc import Callable, MutableSequence, Sequence
 
 from xpra.os_util import OSX, WIN32
 from xpra.client.gui.widget_base import ClientWidgetBase
 from xpra.client.gui.window.backing import fire_paint_callbacks, get_backing_client_properties
 from xpra.client.gui.window_border import WindowBorder
 from xpra.net.common import PacketElement, BACKWARDS_COMPATIBLE
-from xpra.common import gravity_str, force_size_constraint
+from xpra.common import (
+    SUBSURFACE_STAGE_COUNT,
+    SUBSURFACE_STAGE_INDEX,
+    SUBSURFACE_TRANSACTION_ID,
+    gravity_str,
+    force_size_constraint,
+)
 from xpra.util.colourspace import Colourspace, SRGB
 from xpra.util.parsing import scaleup_value, scaledown_value
 from xpra.util.system import is_Wayland
@@ -196,6 +202,11 @@ class ClientWindowBase(ClientWidgetBase):
         # (ie: when we reposition an OR window to ensure it is visible on screen)
         self.window_offset = None
         self.pending_refresh: list[tuple[int, int, int, int]] = []
+        self._subsurface_pending_refresh: tuple[
+            int, object, tuple[int, int], int, int, list[tuple[int, int, int, int]]
+        ] | None = None
+        self._subsurface_refresh_floor = 0
+        self._subsurface_backing_generation = 0
         self.headerbar = headerbar
 
         self.init_window(client, metadata, client_properties)
@@ -297,11 +308,26 @@ class ClientWindowBase(ClientWidgetBase):
         return self.cx(x), self.cy(y)
 
     def new_backing(self, bw: int, bh: int):
+        # A callback from an old backing must never repaint transaction regions
+        # after that backing has been replaced.
+        self._subsurface_backing_generation += 1
+        if backing := self._backing:
+            # `make_new_backing` may reuse this exact instance when its size is
+            # unchanged, so backend staging cannot rely on `init` or `close`
+            # to observe this lifecycle boundary.
+            invalidate = getattr(backing, "invalidate_subsurface_transaction", None)
+            if callable(invalidate):
+                invalidate()
+        self._clear_subsurface_pending_refresh()
+        self.pending_refresh = []
         backing_class = self.get_backing_class()
         log("new_backing(%s, %s) backing_class=%s", bw, bh, backing_class)
         assert backing_class is not None
         w, h = self._size
         self._backing = self.make_new_backing(backing_class, w, h, bw, bh)
+        # Bind decode/UI delivery tokens to this logical backing generation.
+        # `make_new_backing` may reuse the same Python object and dimensions.
+        self._backing._subsurface_client_backing_generation = self._subsurface_backing_generation
         self._backing.border = self.border
         self._backing.content_types = self.content_types
         # soft dependency on `PointerWindow`:
@@ -315,6 +341,9 @@ class ClientWindowBase(ClientWidgetBase):
         # ensure we clear reference to other windows:
         self.group_leader = None
         self._metadata = typedict()
+        self._subsurface_backing_generation += 1
+        self._clear_subsurface_pending_refresh()
+        self.pending_refresh = []
         if self._backing:
             self._backing.close()
             self._backing = None
@@ -864,16 +893,152 @@ class ClientWindowBase(ClientWidgetBase):
             log("draw_region: window %s has no backing, gone?", self.wid)
             fire_paint_callbacks(callbacks, -1, "no backing")
             return
+        # Any packet which claims a composition mode stays out of the ordinary
+        # refresh accumulator. The backing rejects unknown modes, and its
+        # failure callback must not repaint an uncommitted rectangle.
+        subsurface_composite = "subsurface-composite" in options
+        backing_key = self._subsurface_refresh_backing_key(backing)
         # only register this callback if we actually need it:
         if backing.draw_needs_refresh:
-            if not backing.repaint_all:
-                self.pending_refresh.append((x, y, width, height))
-            if options.intget("flush", 0) == 0 or FORCE_FLUSH:
-                callbacks.append(self.after_draw_refresh)
+            if subsurface_composite:
+                self._queue_subsurface_draw_refresh(
+                    backing, backing_key, (x, y, width, height), options, callbacks,
+                )
+            else:
+                # Backing paint happens asynchronously on GTK clients.  Clear
+                # private transaction damage only when the ordinary paint has
+                # actually superseded it, not when decode merely queues it.
+                callbacks.insert(
+                    0, lambda success, message="": self._after_ordinary_draw(
+                        backing, backing_key, success, message,
+                    ),
+                )
+                if not backing.repaint_all:
+                    self.pending_refresh.append((x, y, width, height))
+                if options.intget("flush", 0) == 0 or FORCE_FLUSH:
+                    callbacks.append(
+                        lambda success, message="": self._after_draw_refresh_for(
+                            backing, backing_key, success, message,
+                        )
+                    )
         if coding == "void":
-            fire_paint_callbacks(callbacks)
+            if subsurface_composite:
+                backing.reject_subsurface_composite(
+                    options.get(SUBSURFACE_TRANSACTION_ID), callbacks,
+                    "void cannot be a subsurface transaction stage",
+                )
+            else:
+                backing.paint_void(callbacks)
             return
         backing.draw_region(x, y, width, height, coding, img_data, rowstride, options, callbacks)
+
+    def _queue_subsurface_draw_refresh(
+            self, backing, backing_key: tuple[int, int], rect: tuple[int, int, int, int],
+            options: typedict, callbacks: MutableSequence[Callable],
+    ) -> None:
+        """Keep transaction damage private until its backing is atomically committed."""
+        raw_transaction_id = options.get(SUBSURFACE_TRANSACTION_ID)
+        transaction_id = raw_transaction_id if type(raw_transaction_id) is int and raw_transaction_id > 0 else 0
+        raw_stage_index = options.get(SUBSURFACE_STAGE_INDEX)
+        raw_stage_count = options.get(SUBSURFACE_STAGE_COUNT)
+        valid_stage = (
+            type(raw_stage_index) is int
+            and type(raw_stage_count) is int
+            and 0 <= raw_stage_index < raw_stage_count
+        )
+        stage_index = raw_stage_index if valid_stage else -1
+        final_stage = valid_stage and stage_index + 1 == raw_stage_count
+
+        def refresh(success, message="") -> None:
+            self._after_subsurface_draw_refresh(
+                backing, backing_key, transaction_id, stage_index, raw_stage_count,
+                rect, final_stage, success, message,
+            )
+
+        # Every stage owns one lifecycle callback: a failed middle stage must
+        # discard its pending damage without waiting for a final packet.
+        callbacks.insert(0, refresh)
+
+    def _subsurface_refresh_backing_key(self, backing) -> tuple[int, int]:
+        return (
+            self._subsurface_backing_generation,
+            getattr(backing, "_subsurface_local_backing_epoch", 0),
+        )
+
+    def _clear_subsurface_pending_refresh(self) -> None:
+        if pending := self._subsurface_pending_refresh:
+            self._subsurface_refresh_floor = max(self._subsurface_refresh_floor, pending[0])
+        self._subsurface_pending_refresh = None
+
+    def _after_ordinary_draw(self, backing, backing_key: tuple[int, int],
+                             _success, _message="") -> None:
+        if backing is self._backing and backing_key == self._subsurface_refresh_backing_key(backing):
+            self._clear_subsurface_pending_refresh()
+
+    def _after_draw_refresh_for(self, backing, backing_key: tuple[int, int],
+                                success, message="") -> None:
+        if backing is self._backing and backing_key == self._subsurface_refresh_backing_key(backing):
+            self.after_draw_refresh(success, message)
+
+    def _after_subsurface_draw_refresh(
+            self, backing, backing_key: tuple[int, int],
+            transaction_id: int, stage_index: int, stage_count,
+            rect: tuple[int, int, int, int], final_stage: bool,
+            success, message="",
+    ) -> None:
+        if transaction_id and transaction_id <= self._subsurface_refresh_floor:
+            return
+        pending = self._subsurface_pending_refresh
+        pending_transaction_id = pending[0] if pending else 0
+        if pending and transaction_id and transaction_id < pending_transaction_id:
+            # A delayed callback from an older transaction cannot invalidate
+            # the newer transaction which has already superseded it.
+            return
+        if (backing is not self._backing
+                or backing_key != self._subsurface_refresh_backing_key(backing)):
+            if pending and pending[1] is backing and pending[2] == backing_key:
+                self._clear_subsurface_pending_refresh()
+            return
+        if success is not True:
+            if not transaction_id or not pending or transaction_id >= pending_transaction_id:
+                self._subsurface_refresh_floor = max(self._subsurface_refresh_floor, transaction_id)
+                self._clear_subsurface_pending_refresh()
+            return
+        if not transaction_id or stage_index < 0 or type(stage_count) is not int:
+            self._subsurface_refresh_floor = max(self._subsurface_refresh_floor, transaction_id)
+            self._clear_subsurface_pending_refresh()
+            return
+        if stage_index == 0:
+            if pending:
+                if transaction_id <= pending_transaction_id:
+                    self._subsurface_refresh_floor = max(self._subsurface_refresh_floor, transaction_id)
+                    self._clear_subsurface_pending_refresh()
+                    return
+                self._clear_subsurface_pending_refresh()
+            pending = transaction_id, backing, backing_key, 1, stage_count, [rect]
+            self._subsurface_pending_refresh = pending
+        elif (
+            not pending
+            or pending[0] != transaction_id
+            or pending[1] is not backing
+            or pending[2] != backing_key
+            or pending[3] != stage_index
+            or pending[4] != stage_count
+        ):
+            if not pending or transaction_id >= pending_transaction_id:
+                self._subsurface_refresh_floor = max(self._subsurface_refresh_floor, transaction_id)
+                self._clear_subsurface_pending_refresh()
+            return
+        else:
+            pending[5].append(rect)
+            pending = pending[0], pending[1], pending[2], stage_index + 1, pending[4], pending[5]
+            self._subsurface_pending_refresh = pending
+        if not final_stage:
+            return
+        rects = pending[5]
+        self._subsurface_refresh_floor = transaction_id
+        self._subsurface_pending_refresh = None
+        self._refresh_draw_regions(backing, rects)
 
     def after_draw_refresh(self, success, message="") -> None:
         backing = self._backing
@@ -882,13 +1047,18 @@ class ClientWindowBase(ClientWidgetBase):
         paintlog(f"after_draw_refresh({success}, {message!r}) pending_refresh={pr}, {backing=}")
         if not backing:
             return
+        self._refresh_draw_regions(backing, pr)
+
+    def _refresh_draw_regions(self, backing, regions: Sequence[tuple[int, int, int, int]]) -> None:
+        if backing is not self._backing:
+            return
         if backing.repaint_all or self._xscale != 1 or self._yscale != 1 or is_Wayland():
             # easy: just repaint the whole window:
             rw, rh = self.get_size()
             self.idle_add(self.repaint, 0, 0, rw, rh)
             return
         display = self._client.get_subsystem("display")
-        for x, y, w, h in pr:
+        for x, y, w, h in regions:
             rx, ry, rw, rh = display.srect(x, y, w, h) if display else (x, y, w, h)
             if self.window_offset:
                 rx += self.window_offset[0]

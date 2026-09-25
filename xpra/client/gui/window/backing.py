@@ -8,9 +8,20 @@ import os
 from time import monotonic
 from threading import Lock
 from collections import deque
-from typing import Any, TypeAlias, MutableSequence, TYPE_CHECKING
+from typing import Any, NamedTuple, TypeAlias, MutableSequence, TYPE_CHECKING
 from collections.abc import Callable, Iterable, Sequence
 
+from xpra.common import (
+    SUBSURFACE_BACKING_EPOCH,
+    SUBSURFACE_CLIENT_BACKING_STATE,
+    SUBSURFACE_COMPOSITE_FORMATS,
+    SUBSURFACE_COMPOSITE_MODE,
+    SUBSURFACE_STAGE_COUNT,
+    SUBSURFACE_STAGE_INDEX,
+    SUBSURFACE_TOPOLOGY_EPOCH,
+    SUBSURFACE_TRANSACTION_ID,
+    SUBSURFACE_TRANSACTION_OPTIONS,
+)
 from xpra.net import compression
 from xpra.os_util import gi_import
 from xpra.util.objects import typedict
@@ -52,6 +63,25 @@ PILLOW_PACK_FORMATS = ("BGRA", "BGRX", "RGBA", "RGBX", "RGB", "BGR")
 
 PaintCallback: TypeAlias = Callable[[int | bool, str], None]
 PaintCallbacks: TypeAlias = MutableSequence[PaintCallback]
+
+
+class SubsurfaceCompositeStage(NamedTuple):
+    transaction_id: int
+    stage_index: int
+    stage_count: int
+    topology_epoch: int
+    backing_epoch: int
+    reset_region: tuple[int, int, int, int]
+
+
+class SubsurfaceCompositeTransaction(NamedTuple):
+    transaction_id: int
+    next_stage_index: int
+    stage_count: int
+    topology_epoch: int
+    backing_epoch: int
+    local_backing_epoch: int
+    present_region: tuple[int, int, int, int]
 
 
 _PIL_font = None
@@ -217,6 +247,7 @@ class WindowBackingBase:
     see CairoBackingBase and GTKWindowBacking subclasses for actual implementations
     """
     RGB_MODES: Sequence[str] = ()
+    SUBSURFACE_COMPOSITE_MODES: Sequence[str] = ()
     alert_icon: tuple = ()
 
     def __init__(self, wid: int, window_alpha: bool):
@@ -263,6 +294,12 @@ class WindowBackingBase:
         self.fps_refresh_timer: int = 0
         self.alert_state = False
         self.paint_stats: dict[str, int] = {}
+        self._subsurface_transaction: SubsurfaceCompositeTransaction | None = None
+        self._subsurface_transaction_floor = 0
+        self._subsurface_topology_epoch = -1
+        self._subsurface_wire_backing_epoch = -1
+        self._subsurface_local_backing_epoch = 0
+        self._subsurface_client_backing_generation = 0
 
     @staticmethod
     def get_alert_icon() -> tuple[int, int, bytes]:
@@ -484,6 +521,288 @@ class WindowBackingBase:
         # xpra publishes no server-side frame extents, so (x, y) needs no adjustment.
         return x, y
 
+    def get_subsurface_composite_region(self, encoding: str, rgb_format: str,
+                                        options: typedict) -> tuple[int, int, int, int] | None:
+        """
+        Validate the packed premultiplied representation used by the negotiated
+        subsurface composition mode and return its optional reset region.
+
+        The mode is deliberately limited to raw RGB packets. Picture decoders,
+        mmap, planar conversion and 24-bit RGB formats do not establish the
+        staged wire representation required by SOURCE_OVER. X-format pixels
+        are accepted as a distinct, strictly opaque layer.
+        """
+        if "subsurface-composite" not in options:
+            return None
+        composite_mode = options.get("subsurface-composite")
+        if type(composite_mode) is not str or composite_mode != SUBSURFACE_COMPOSITE_MODE:
+            raise ValueError(f"unsupported subsurface composition mode {composite_mode!r}")
+        if encoding != "rgb":
+            raise ValueError(f"invalid {SUBSURFACE_COMPOSITE_MODE} encoding {encoding!r}")
+        if rgb_format not in SUBSURFACE_COMPOSITE_FORMATS:
+            raise ValueError(f"invalid {SUBSURFACE_COMPOSITE_MODE} pixel format {rgb_format!r}")
+        compressors = tuple(name for name in compression.ALL_COMPRESSORS if options.get(name))
+        if compressors:
+            raise ValueError(
+                f"{SUBSURFACE_COMPOSITE_MODE} requires uncompressed pixels, got {csv(compressors)}"
+            )
+        client_backing_state = options.get(SUBSURFACE_CLIENT_BACKING_STATE)
+        if client_backing_state is not None:
+            valid_client_state = (
+                isinstance(client_backing_state, tuple)
+                and len(client_backing_state) == 3
+                and client_backing_state[0] is self
+                and type(client_backing_state[1]) is int
+                and client_backing_state[1] == self._subsurface_client_backing_generation
+                and type(client_backing_state[2]) is int
+                and client_backing_state[2] == self._subsurface_local_backing_epoch
+            )
+            if not valid_client_state:
+                raise ValueError("stale client backing state for subsurface composition")
+
+        raw_region = options.get("subsurface-reset")
+        if raw_region is None:
+            return 0, 0, 0, 0
+        if not isinstance(raw_region, (tuple, list)) or len(raw_region) != 4:
+            raise ValueError(f"invalid subsurface reset region {raw_region!r}")
+        if any(isinstance(v, bool) or not isinstance(v, int) for v in raw_region):
+            raise ValueError(f"invalid subsurface reset region {raw_region!r}")
+        x, y, width, height = raw_region
+        if width <= 0 or height <= 0:
+            raise ValueError(f"invalid subsurface reset region {raw_region!r}")
+        x, y = self.gravity_adjust(x, y, options)
+        bw, bh = self.size
+        if x < 0 or y < 0 or x + width > bw or y + height > bh:
+            raise ValueError(
+                f"subsurface reset region {(x, y, width, height)!r} "
+                f"is outside the {bw}x{bh} backing"
+            )
+        return x, y, width, height
+
+    @staticmethod
+    def _subsurface_exact_int(options: typedict, name: str, *, positive: bool) -> int:
+        value = options.get(name)
+        if type(value) is not int or (value <= 0 if positive else value < 0):
+            qualifier = "positive " if positive else "non-negative "
+            raise ValueError(f"invalid {qualifier}subsurface option {name}={value!r}")
+        return value
+
+    def get_subsurface_composite_stage(self, encoding: str, rgb_format: str,
+                                       options: typedict) -> SubsurfaceCompositeStage | None:
+        reset_region = self.get_subsurface_composite_region(encoding, rgb_format, options)
+        if reset_region is None:
+            return None
+        missing = tuple(name for name in SUBSURFACE_TRANSACTION_OPTIONS if name not in options)
+        if missing:
+            raise ValueError(f"missing subsurface transaction options: {csv(missing)}")
+        transaction_id = self._subsurface_exact_int(options, SUBSURFACE_TRANSACTION_ID, positive=True)
+        stage_index = self._subsurface_exact_int(options, SUBSURFACE_STAGE_INDEX, positive=False)
+        stage_count = self._subsurface_exact_int(options, SUBSURFACE_STAGE_COUNT, positive=True)
+        topology_epoch = self._subsurface_exact_int(options, SUBSURFACE_TOPOLOGY_EPOCH, positive=False)
+        backing_epoch = self._subsurface_exact_int(options, SUBSURFACE_BACKING_EPOCH, positive=False)
+        if stage_index >= stage_count:
+            raise ValueError(f"invalid subsurface stage {stage_index} of {stage_count}")
+        raw_reset = options.get("subsurface-reset")
+        if stage_index == 0:
+            if raw_reset is None:
+                raise ValueError("the first subsurface transaction stage is missing its reset region")
+        elif raw_reset is not None:
+            raise ValueError("only the first subsurface transaction stage may reset the backing")
+        flush = options.get("flush", 0)
+        if type(flush) is not int or flush != stage_count - stage_index - 1:
+            raise ValueError(
+                f"invalid subsurface transaction flush {flush!r} for stage {stage_index} of {stage_count}"
+            )
+        return SubsurfaceCompositeStage(
+            transaction_id,
+            stage_index,
+            stage_count,
+            topology_epoch,
+            backing_epoch,
+            reset_region,
+        )
+
+    def _begin_subsurface_staging(self, _context) -> None:
+        raise NotImplementedError(f"{type(self).__name__} cannot stage subsurface transactions")
+
+    def _discard_subsurface_staging(self, _context) -> None:
+        pass
+
+    def _commit_subsurface_staging(self, _context) -> None:
+        raise NotImplementedError(f"{type(self).__name__} cannot commit subsurface transactions")
+
+    def invalidate_subsurface_transaction(self, context=None) -> None:
+        transaction = self._subsurface_transaction
+        self._subsurface_transaction = None
+        if transaction:
+            self._subsurface_transaction_floor = max(
+                self._subsurface_transaction_floor,
+                transaction.transaction_id,
+            )
+        self._discard_subsurface_staging(context)
+
+    def subsurface_backing_reconfigured(self, context=None) -> None:
+        self.invalidate_subsurface_transaction(context)
+        self._subsurface_local_backing_epoch += 1
+
+    def prepare_subsurface_composite_stage(self, stage: SubsurfaceCompositeStage, context=None) -> None:
+        transaction = self._subsurface_transaction
+        if transaction and stage.transaction_id < transaction.transaction_id:
+            raise ValueError(f"stale subsurface transaction {stage.transaction_id}")
+        if transaction and stage.transaction_id == transaction.transaction_id:
+            if (
+                stage.stage_count != transaction.stage_count
+                or stage.topology_epoch != transaction.topology_epoch
+                or stage.backing_epoch != transaction.backing_epoch
+                or transaction.local_backing_epoch != self._subsurface_local_backing_epoch
+                or stage.stage_index != transaction.next_stage_index
+            ):
+                self.invalidate_subsurface_transaction(context)
+                raise ValueError(
+                    f"invalid subsurface transaction {stage.transaction_id} stage {stage.stage_index}"
+                )
+            return
+
+        if transaction:
+            self.invalidate_subsurface_transaction(context)
+        if stage.transaction_id <= self._subsurface_transaction_floor:
+            raise ValueError(f"stale subsurface transaction {stage.transaction_id}")
+        if stage.stage_index != 0:
+            self._subsurface_transaction_floor = stage.transaction_id
+            raise ValueError(
+                f"subsurface transaction {stage.transaction_id} starts at stage {stage.stage_index}"
+            )
+        if (
+            stage.topology_epoch < self._subsurface_topology_epoch
+            or stage.backing_epoch < self._subsurface_wire_backing_epoch
+        ):
+            self._subsurface_transaction_floor = stage.transaction_id
+            raise ValueError(f"stale subsurface transaction epochs for {stage.transaction_id}")
+        self._subsurface_topology_epoch = stage.topology_epoch
+        self._subsurface_wire_backing_epoch = stage.backing_epoch
+        try:
+            self._begin_subsurface_staging(context)
+        except Exception:
+            self._subsurface_transaction_floor = stage.transaction_id
+            self._discard_subsurface_staging(context)
+            raise
+        self._subsurface_transaction = SubsurfaceCompositeTransaction(
+            stage.transaction_id,
+            0,
+            stage.stage_count,
+            stage.topology_epoch,
+            stage.backing_epoch,
+            self._subsurface_local_backing_epoch,
+            stage.reset_region,
+        )
+
+    def _subsurface_present_region(
+            self, transaction: SubsurfaceCompositeTransaction,
+            painted_region: tuple[int, int, int, int] | None,
+    ) -> tuple[int, int, int, int]:
+        if not painted_region:
+            return transaction.present_region
+        if (
+            not isinstance(painted_region, (tuple, list))
+            or len(painted_region) != 4
+            or any(type(value) is not int for value in painted_region)
+        ):
+            raise ValueError(f"invalid subsurface presentation region {painted_region!r}")
+        x, y, width, height = painted_region
+        bw, bh = self.size
+        if width <= 0 or height <= 0 or x < 0 or y < 0 or x + width > bw or y + height > bh:
+            raise ValueError(
+                f"subsurface presentation region {painted_region!r} "
+                f"is outside the {bw}x{bh} backing"
+            )
+        rx, ry, rw, rh = transaction.present_region
+        left = min(rx, x)
+        top = min(ry, y)
+        right = max(rx + rw, x + width)
+        bottom = max(ry + rh, y + height)
+        return left, top, right - left, bottom - top
+
+    def complete_subsurface_composite_stage(
+            self, stage: SubsurfaceCompositeStage, context=None,
+            painted_region: tuple[int, int, int, int] | None = None,
+    ) -> tuple[int, int, int, int] | None:
+        transaction = self._subsurface_transaction
+        if (
+            transaction is None
+            or transaction.transaction_id != stage.transaction_id
+            or transaction.next_stage_index != stage.stage_index
+        ):
+            self.invalidate_subsurface_transaction(context)
+            raise ValueError(f"subsurface transaction {stage.transaction_id} stage completion is stale")
+        present_region = self._subsurface_present_region(transaction, painted_region)
+        next_stage = stage.stage_index + 1
+        if next_stage < stage.stage_count:
+            self._subsurface_transaction = transaction._replace(
+                next_stage_index=next_stage,
+                present_region=present_region,
+            )
+            return None
+        try:
+            self._commit_subsurface_staging(context)
+        except Exception:
+            self.invalidate_subsurface_transaction(context)
+            raise
+        self._subsurface_transaction = None
+        self._subsurface_transaction_floor = stage.transaction_id
+        return present_region
+
+    def fail_subsurface_composite_stage(self, stage: SubsurfaceCompositeStage | int | None, context=None) -> None:
+        if isinstance(stage, SubsurfaceCompositeStage):
+            transaction_id = stage.transaction_id
+        elif type(stage) is int and stage > 0:
+            transaction_id = stage
+        else:
+            transaction_id = 0
+        transaction = self._subsurface_transaction
+        if transaction_id and transaction and transaction_id < transaction.transaction_id:
+            return
+        self.invalidate_subsurface_transaction(context)
+        if transaction_id:
+            self._subsurface_transaction_floor = max(
+                self._subsurface_transaction_floor,
+                transaction_id,
+            )
+
+    def reject_subsurface_composite(self, transaction_id, callbacks: PaintCallbacks, message: str) -> None:
+        """Reject a decode-thread packet at the backing's UI/GL ownership boundary."""
+        self.with_gfx_context(
+            self._reject_subsurface_composite, transaction_id, callbacks, message,
+        )
+
+    def _reject_subsurface_composite(self, context, transaction_id,
+                                     callbacks: PaintCallbacks, message: str) -> None:
+        self.fail_subsurface_composite_stage(transaction_id, context)
+        fire_paint_callbacks(callbacks, False, message)
+
+    def paint_void(self, callbacks: PaintCallbacks) -> None:
+        """Order an empty ordinary packet against any private UI/GL staging."""
+        self.with_gfx_context(self._paint_void, callbacks)
+
+    def _paint_void(self, context, callbacks: PaintCallbacks) -> None:
+        self.invalidate_subsurface_transaction(context)
+        fire_paint_callbacks(callbacks)
+
+    def discard_subsurface_mmap(self, img_data, options: typedict,
+                                callbacks: PaintCallbacks, message: str) -> None:
+        """Consume a rejected mmap descriptor before reporting the paint failure."""
+        try:
+            if not self.mmap:
+                raise RuntimeError("mmap paint packet without a valid mmap read area")
+            from xpra.net.mmap.io import mmap_read
+            chunks = options.tupleget("chunks") or img_data
+            _data, free_cb = mmap_read(self.mmap.mmap, *chunks)
+            callbacks.append(free_cb)
+        except Exception as e:
+            message = f"{message}: {e}"
+        self.reject_subsurface_composite(
+            options.get(SUBSURFACE_TRANSACTION_ID), callbacks, message,
+        )
+
     def assign_cuda_context(self, opengl=False) -> "cuda_device_context":
         if self.cuda_context is None:
             from xpra.codecs.nvidia.cuda.context import (
@@ -504,6 +823,7 @@ class WindowBackingBase:
             cc.free()
 
     def close(self) -> None:
+        self.subsurface_backing_reconfigured()
         self.cancel_fps_refresh()
         self._backing = None
         log("%s.close() video_decoder=%s", self, self._video_decoder)
@@ -676,8 +996,21 @@ class WindowBackingBase:
             rgb_data = compression.decompress_by_name(raw_data, algo=compressor)
         else:
             rgb_data = raw_data
+        enc_width, enc_height = width, height
+        if options.get("subsurface-composite") == SUBSURFACE_COMPOSITE_MODE:
+            # A native-size Wayland capture may be sent into a differently
+            # sized logical parent region. For this negotiated raw path,
+            # `scaled_size` describes the packed source rather than the draw
+            # packet's destination dimensions.
+            raw_scaled_size = options.get("scaled_size")
+            if raw_scaled_size is not None:
+                if (not isinstance(raw_scaled_size, (tuple, list))
+                        or len(raw_scaled_size) != 2
+                        or any(type(value) is not int or value <= 0 for value in raw_scaled_size)):
+                    raise ValueError(f"invalid subsurface scaled size {raw_scaled_size!r}")
+                enc_width, enc_height = raw_scaled_size
         self.ui_paint_rgb("rgb", rgb_format, rgb_data,
-                          x, y, width, height, width, height, rowstride, options, callbacks)
+                          x, y, enc_width, enc_height, width, height, rowstride, options, callbacks)
 
     def ui_paint_rgb(self, *args) -> None:
         """ calls do_paint_rgb from the ui thread """
@@ -1085,6 +1418,49 @@ class WindowBackingBase:
             assert self._backing is not None
             log("draw_region(%s, %s, %s, %s, %s, %s bytes, %s, %s, %s)",
                 x, y, width, height, coding, len(img_data), rowstride, options, callbacks)
+            composite_present = "subsurface-composite" in options
+            composite_mode = options.get("subsurface-composite")
+            if (composite_present
+                    and (type(composite_mode) is not str
+                         or composite_mode != SUBSURFACE_COMPOSITE_MODE)):
+                message = f"unsupported subsurface composition mode {composite_mode!r}"
+                if coding == "mmap":
+                    self.discard_subsurface_mmap(img_data, options, callbacks, message)
+                else:
+                    self.reject_subsurface_composite(
+                        options.get(SUBSURFACE_TRANSACTION_ID), callbacks, message,
+                    )
+                return
+            if (composite_mode == SUBSURFACE_COMPOSITE_MODE
+                    and composite_mode not in self.SUBSURFACE_COMPOSITE_MODES):
+                message = f"{type(self).__name__} does not implement {SUBSURFACE_COMPOSITE_MODE}"
+                if coding == "mmap":
+                    self.discard_subsurface_mmap(img_data, options, callbacks, message)
+                else:
+                    self.reject_subsurface_composite(
+                        options.get(SUBSURFACE_TRANSACTION_ID), callbacks, message,
+                    )
+                return
+            if composite_mode == SUBSURFACE_COMPOSITE_MODE and coding == "mmap":
+                self.discard_subsurface_mmap(
+                    img_data, options, callbacks,
+                    f"{SUBSURFACE_COMPOSITE_MODE} does not accept 'mmap' packets",
+                )
+                return
+            if composite_mode == SUBSURFACE_COMPOSITE_MODE and coding != "rgb32":
+                self.reject_subsurface_composite(
+                    options.get(SUBSURFACE_TRANSACTION_ID), callbacks,
+                    f"{SUBSURFACE_COMPOSITE_MODE} does not accept {coding!r} packets",
+                )
+                return
+            if composite_mode == SUBSURFACE_COMPOSITE_MODE:
+                compressors = tuple(name for name in compression.ALL_COMPRESSORS if options.get(name))
+                if compressors:
+                    self.reject_subsurface_composite(
+                        options.get(SUBSURFACE_TRANSACTION_ID), callbacks,
+                        f"{SUBSURFACE_COMPOSITE_MODE} requires uncompressed pixels, got {csv(compressors)}",
+                    )
+                    return
             options["encoding"] = coding  # used for choosing the color of the paint box
             if coding == "mmap":
                 self.paint_mmap(img_data, x, y, width, height, rowstride, options, callbacks)

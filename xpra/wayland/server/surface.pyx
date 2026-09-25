@@ -9,11 +9,12 @@ from typing import Dict
 
 from xpra.log import Logger
 from xpra.constants import MoveResize
+from xpra.wayland.server.models.window import image_for_xdg_geometry, xdg_root_damage
 
 from libc.stdint cimport uintptr_t, uint32_t, int32_t
 
 from xpra.wayland.server.wayland_surface cimport WaylandSurface, next_wid, get_damage_areas
-from xpra.wayland.server.subsurface cimport Subsurface
+from xpra.wayland.server.subsurface cimport Subsurface, undiscovered_subsurfaces
 # `surfaces` is the shared registry (Python dict) defined in wayland_surface.pyx
 from xpra.wayland.server.wayland_surface import surfaces
 
@@ -22,8 +23,10 @@ from xpra.wayland.server.wayland_surface import surfaces
 from xpra.wayland.server.wlroots cimport (
     wl_listener,
     wlr_subsurface, wlr_surface_for_each_surface,
-    wlr_surface,
-    wlr_box, wlr_fbox, wlr_surface_get_buffer_source_box,
+    wlr_surface, wlr_box,
+    wlr_surface_get_effective_damage, wlr_surface_has_buffer,
+    WLR_SURFACE_STATE_TRANSFORM, WLR_SURFACE_STATE_SCALE,
+    WLR_SURFACE_STATE_VIEWPORT,
     wlr_xdg_toplevel, wlr_xdg_surface,
     wlr_xdg_toplevel_decoration_v1,
     wlr_xdg_toplevel_move_event, wlr_xdg_toplevel_resize_event, wlr_xdg_toplevel_show_window_menu_event,
@@ -33,7 +36,10 @@ from xpra.wayland.server.wlroots cimport (
     WLR_XDG_SURFACE_ROLE_TOPLEVEL,
     WLR_EDGE_TOP, WLR_EDGE_BOTTOM, WLR_EDGE_LEFT, WLR_EDGE_RIGHT,
 )
-from xpra.wayland.server.pixman cimport pixman_region32_t, pixman_box32_t, pixman_region32_rectangles
+from xpra.wayland.server.pixman cimport (
+    pixman_region32_t, pixman_box32_t, pixman_region32_rectangles,
+    pixman_region32_init, pixman_region32_fini,
+)
 
 
 EDGES: Dict[int, str] = {
@@ -80,6 +86,14 @@ cdef enum SurfaceListener:
 
 log = Logger("wayland")
 cdef bint debug = log.is_debug_enabled()
+
+
+# Last ingest frame per live Surface: XDG geometry followed by wl_surface
+# logical size.  Surface is a pxd-defined extension type, so keeping this small
+# state table here avoids widening its public ABI.  Terminal destroy removes
+# the entry before the WID can become stale.
+surface_geometries: Dict[int, tuple[int, int, int, int, int, int]] = {}
+surface_capture_pending: set[int] = set()
 
 
 # `surfaces` registry and `next_wid` are imported from wayland_surface — the
@@ -243,25 +257,30 @@ cdef class Surface(WaylandSurface):
             # idempotent: destroy already ran (e.g. registry pop triggered it).
             return
         log("XDG surface DESTROYED, toplevel=%s", bool(self.wlr_xdg_surface.toplevel != NULL))
+        surface_geometries.pop(self.wid, None)
+        surface_capture_pending.discard(self.wid)
         # Detach all listeners while wlroots' event lists are still valid.
         # We MUST do this here rather than rely on __dealloc__: the dispatch
         # shim holds a strong reference for the duration of the call, so the
         # registry-drop below cannot bring the refcount to zero until after
         # this event handler returns — by then wlroots' event lists are gone.
         self._detach_all()
-        self._emit("destroy", self.wid)
-        if debug:
-            log("xdg surface dropped")
-        self.unregister()
-        self.update_source_format(NULL)
-        # wlroots will free the wlr_xdg_surface (and the wl_surface inside it)
-        # as soon as we return from this destroy event. Null both pointers so
-        # any later Python-side method calls (frame_done, resize, focus, ...)
-        # become safe no-ops instead of UAFs. Other strong refs to this Surface
-        # (xpra Window _gproperties["surface"], pending packets) outlive the
-        # wlroots free.
-        self.wlr_xdg_surface = NULL
-        self.wlr_surface = NULL
+        try:
+            self._emit("destroy", self.wid)
+        except BaseException:
+            log.error("Error dispatching destroy for %s", self, exc_info=True)
+        finally:
+            try:
+                if debug:
+                    log("xdg surface dropped")
+                self.unregister()
+            finally:
+                # wlroots will free the wlr_xdg_surface (and wl_surface) as
+                # soon as this callback returns. Null every borrowed pointer
+                # even when registry or observer cleanup fails.
+                self.update_source_format(NULL)
+                self.wlr_xdg_surface = NULL
+                self.wlr_surface = NULL
 
     cdef void request_move(self, uint32_t serial) noexcept:
         log("Surface REQUEST MOVE")
@@ -360,52 +379,183 @@ cdef class Surface(WaylandSurface):
             else:
                 self.apply_decoration_mode()
 
-        size = (xdg_surface.geometry.width, xdg_surface.geometry.height)
+        geometry = (
+            xdg_surface.geometry.x, xdg_surface.geometry.y,
+            xdg_surface.geometry.width, xdg_surface.geometry.height,
+        )
+        size = geometry[2:4]
         wlr_surf = xdg_surface.surface
-        rects = []
+        surface_size = (wlr_surf.current.width, wlr_surf.current.height)
+        previous_frame = surface_geometries.get(self.wid)
+        previous_geometry = previous_frame[:4] if previous_frame is not None else None
+        previous_surface_size = previous_frame[4:] if previous_frame is not None else None
+        surface_damage = ()
+        cdef pixman_region32_t effective_damage
+        pixman_region32_init(&effective_damage)
+        try:
+            wlr_surface_get_effective_damage(wlr_surf, &effective_damage)
+            surface_damage = tuple(get_damage_areas(&effective_damage))
+        finally:
+            pixman_region32_fini(&effective_damage)
         if wlr_surf.mapped:
-            rects = get_damage_areas(&wlr_surf.buffer_damage)
-            self.capture_surface_pixels()
+            previous_format = self.source_format
+            self.update_source_format(wlr_surf.buffer.source if wlr_surf.buffer != NULL else NULL)
+            # A sampling or logical-extent change alters the whole normalized
+            # raster.  A buffer attach alone does not: clients attach on most
+            # frames and its declared effective damage remains authoritative.
+            sampling_changed = (
+                self.wid in surface_capture_pending or
+                previous_surface_size != surface_size or
+                previous_format != self.source_format or
+                bool(wlr_surf.current.committed & (
+                    WLR_SURFACE_STATE_TRANSFORM |
+                    WLR_SURFACE_STATE_SCALE |
+                    WLR_SURFACE_STATE_VIEWPORT
+                ))
+            )
+            rects = xdg_root_damage(
+                surface_damage, geometry, previous_geometry,
+                force_full=sampling_changed,
+            )
+            if rects:
+                # Invalidate the model generation before readback.  If the
+                # replacement capture fails, old pixels must not be labelled
+                # as this commit; the client may keep its already-presented
+                # frame until a later successful generation arrives.
+                surface_capture_pending.add(self.wid)
+                try:
+                    self._emit("surface-snapshot", self.wid, None)
+                except BaseException:
+                    log.error("Error invalidating root snapshot for %s", self, exc_info=True)
+                self.capture_surface_pixels()
         else:
             self.update_source_format(NULL)
+            rects = ()
+            # A later map must publish a complete root raster even when the
+            # client retained and reattached the same buffer without damage.
+            surface_geometries.pop(self.wid, None)
+            surface_capture_pending.discard(self.wid)
+            if not wlr_surface_has_buffer(wlr_surf):
+                # A NULL-buffer commit permanently clears the root generation.
+                try:
+                    self._emit("surface-snapshot", self.wid, None)
+                except BaseException:
+                    log.error("Error invalidating root snapshot for %s", self, exc_info=True)
 
-        subsurfaces = collect_surfaces(wlr_surf)
-        self._emit("commit", self.wid, bool(wlr_surf.mapped), size, rects, subsurfaces)
+        surface_tree = self.get_surface_tree()
+        self._emit("commit", self.wid, bool(wlr_surf.mapped), size, rects, surface_tree)
+
+    def get_surface_tree(self) -> tuple:
+        """Return the current mapped paint tree in wlroots rendering order.
+
+        The root marker is retained at the exact point where wlroots visits it,
+        so callers can distinguish subsurfaces below the toplevel content from
+        those above it.  All offsets are relative to the XDG window geometry,
+        which is also the origin of the client backing and captured root image.
+        """
+        cdef wlr_xdg_surface *xdg_surface = self.wlr_xdg_surface
+        if xdg_surface == NULL or xdg_surface.surface == NULL:
+            return ()
+        return tuple(collect_surfaces(
+            xdg_surface.surface, self.wid,
+            xdg_surface.geometry.x, xdg_surface.geometry.y,
+            xdg_surface.geometry.width, xdg_surface.geometry.height,
+        ))
 
     cdef void capture_surface_pixels(self) noexcept:
-        # xdg-surfaces have a `geometry` rect that's the visible area in
-        # surface-local coordinates (excludes shadows/CSD margins). Map it
-        # through wlroots' buffer source box before reading native pixels.
+        # Normalize the whole root wl_surface first, then place it at
+        # (-geometry.x, -geometry.y) in the exact XDG canvas.  This preserves
+        # transparent padding when the requested geometry extends outside the
+        # surface and makes full and tiled reads sample-identical.
         if self.wlr_xdg_surface == NULL:
             return
-        source_geometry = self.get_buffer_source_geometry_for_surface_rect(self.wlr_xdg_surface.geometry.x,
-                                                                           self.wlr_xdg_surface.geometry.y,
-                                                                           self.wlr_xdg_surface.geometry.width,
-                                                                           self.wlr_xdg_surface.geometry.height)
-        image = self.capture_pixels(source_geometry[0], source_geometry[1],
-                                    source_geometry[2], source_geometry[3])
-        if image is None:
-            return
-        self._emit("surface-image", self.wid, image)
+        logical_image = None
+        image = None
+        try:
+            geometry = (
+                self.wlr_xdg_surface.geometry.x, self.wlr_xdg_surface.geometry.y,
+                self.wlr_xdg_surface.geometry.width, self.wlr_xdg_surface.geometry.height,
+            )
+            surface_size = (
+                self.wlr_surface.current.width,
+                self.wlr_surface.current.height,
+            )
+            logical_image = self.capture_logical_pixels()
+            if logical_image is None:
+                return
+            image = image_for_xdg_geometry(logical_image, geometry)
+            if image is not None:
+                self._emit("surface-snapshot", self.wid, image)
+                surface_geometries[self.wid] = geometry + surface_size
+                surface_capture_pending.discard(self.wid)
+        except BaseException:
+            log.error("Error capturing logical root pixels for %s", self, exc_info=True)
+        finally:
+            if logical_image is not None and logical_image is not image:
+                try:
+                    logical_image.free()
+                except BaseException:
+                    log.error("Error releasing surface-local root pixels for %s", self, exc_info=True)
+            if image is not None:
+                try:
+                    image.free()
+                except BaseException:
+                    log.error("Error releasing logical root pixels for %s", self, exc_info=True)
+
+    cdef void discover_subsurfaces(self) noexcept:
+        for pointer in undiscovered_subsurfaces(self.wlr_surface):
+            self.new_subsurface(<wlr_subsurface*> <uintptr_t> pointer)
 
     cdef void new_subsurface(self, wlr_subsurface *subsurface) noexcept:
         if subsurface == NULL or subsurface.surface == NULL:
             return
-        log("New SUBSURFACE created, parent wid=%i", self.wid)
-        log(" subsurface wlr_surface=%#x, parent wlr_surface=%#x",
-            <uintptr_t> subsurface.surface, <uintptr_t> subsurface.parent)
-        cdef Subsurface sub = Subsurface()
-        sub.attach(self, subsurface)
-        cdef int width = subsurface.surface.current.width
-        cdef int height = subsurface.surface.current.height
-        cdef tuple source_size = sub.get_buffer_source_size()
-        self._emit("new-subsurface", self.wid, sub, width, height, source_size[0], source_size[1])
+        cdef Subsurface sub
+        cdef int width
+        cdef int height
+        cdef bint created = False
+        initial_image = None
+        try:
+            log("New SUBSURFACE created, parent wid=%i", self.wid)
+            log(" subsurface wlr_surface=%#x, parent wlr_surface=%#x",
+                <uintptr_t> subsurface.surface, <uintptr_t> subsurface.parent)
+            existing = surfaces.get(<uintptr_t> subsurface.surface)
+            if existing is None:
+                sub = Subsurface()
+                created = True
+            elif isinstance(existing, Subsurface):
+                sub = <Subsurface> existing
+                if sub.wlr_subsurface == subsurface:
+                    return
+            else:
+                log.error("Error: wl_surface %#x already has incompatible wrapper %s",
+                          <uintptr_t> subsurface.surface, existing)
+                return
+            sub.attach(self, subsurface)
+            width = subsurface.surface.current.width
+            height = subsurface.surface.current.height
+            initial_image = sub.capture_attached_pixels() if created else None
+            # `capture_attached_pixels` has already sampled any physical
+            # buffer scale/transform/viewport into this logical raster.  Keep
+            # the transport size logical too so no later encoder scales it a
+            # second time.
+            self._emit("new-subsurface", self.wid, sub, width, height,
+                       width, height, self.wid, self.get_surface_tree(), initial_image,
+                       sub.get_colourspace())
+            sub.discover_subsurfaces()
+        except BaseException:
+            log.error("Error dispatching subsurface for %s", self, exc_info=True)
+        finally:
+            if initial_image is not None:
+                try:
+                    initial_image.free()
+                except BaseException:
+                    log.error("Error releasing initial pixels for %s", self, exc_info=True)
 
     cdef void unregister_toplevel_handlers(self) noexcept nogil:
         # Toplevel slots are contiguous: L_REQUEST_MOVE..L_REQUEST_SHOW_WINDOW_MENU.
-        # L_NEW_SUBSURFACE is technically a main-listener slot but the prior
-        # implementation also detached it on unmap; preserved for behaviour.
-        self._detach_slot(L_NEW_SUBSURFACE)
+        # L_NEW_SUBSURFACE is a wl_surface lifetime listener, not a toplevel
+        # map-state listener: it must survive unmap/remap so newly created
+        # descendants remain observable.
         cdef int i
         for i in range(L_TOPLEVEL_DESTROY, L_REQUEST_SHOW_WINDOW_MENU + 1):
             self._detach_slot(i)
@@ -478,58 +628,65 @@ cdef tuple get_clipped_opaque_region(pixman_region32_t *region,
 
 cdef struct collect_ctx:
     wlr_surface *root
+    unsigned long root_wid
+    int origin_x
+    int origin_y
+    int root_logical_width
+    int root_logical_height
+    bint invalid
     void *result_list
 
 
-cdef void get_surface_source_size(wlr_surface *surface, int *width, int *height) noexcept:
-    """Return the native buffer source size for a surface.
-
-    This can differ from `surface.current.width/height` when `wp_viewport`
-    scales a native-size buffer to a smaller surface-local destination.
-    """
-    width[0] = 0
-    height[0] = 0
-    if surface == NULL:
-        return
-    cdef wlr_fbox source_box
-    wlr_surface_get_buffer_source_box(surface, &source_box)
-    cdef int x = int(source_box.x)
-    cdef int y = int(source_box.y)
-    width[0] = max(0, int(source_box.x + source_box.width + 0.999999) - x)
-    height[0] = max(0, int(source_box.y + source_box.height + 0.999999) - y)
-
-
 cdef void collect_surface_callback(wlr_surface *surface, int sx, int sy, void *user_data) noexcept:
-    """Callback for each surface in the tree. Resolves the wl_surface
-    pointer to the registered WaylandSurface wid and skips the root
-    (which is the parent toplevel itself, not a child)."""
+    """Append one mapped surface without changing wlroots' paint order."""
     cdef collect_ctx *ctx = <collect_ctx*> user_data
-    if surface == ctx.root:
-        return
     result = <object> ctx.result_list
+    if surface == ctx.root:
+        # The root is a structural marker as well as a paint layer.  Its
+        # backing-local origin is always (0, 0), even when XDG geometry crops
+        # shadows or client-side decorations from the wl_surface.
+        result.append((ctx.root_wid, 0, 0,
+                       ctx.root_logical_width, ctx.root_logical_height,
+                       ctx.root_logical_width, ctx.root_logical_height))
+        return
     sub = surfaces.get(<uintptr_t> surface)
     if sub is None:
-        # subsurface not yet registered (shouldn't happen in steady state)
+        # A mapped native layer without a registered stable identity cannot be
+        # omitted: doing so would present a valid-looking but incomplete
+        # authoritative composition.  Mark the whole generation invalid and
+        # let the Python topology boundary refuse it.
+        ctx.invalid = True
         return
-    cdef int source_width = 0
-    cdef int source_height = 0
-    get_surface_source_size(surface, &source_width, &source_height)
-    result.append((sub.wid, sx, sy,
+    result.append((sub.wid, sx - ctx.origin_x, sy - ctx.origin_y,
                    surface.current.width, surface.current.height,
-                   source_width, source_height))
+                   surface.current.width, surface.current.height))
 
 
-cdef list collect_surfaces(wlr_surface *surface):
+cdef list collect_surfaces(wlr_surface *surface, unsigned long root_wid,
+                           int origin_x, int origin_y,
+                           int root_logical_width, int root_logical_height):
     """
-    Collect all subsurfaces of the given root surface (excluding the root).
+    Collect the full mapped tree exactly in wlroots bottom-to-top order.
 
     Returns a list of `(wid, sx, sy, logical_w, logical_h, native_w, native_h)`
-    tuples — `wid` is the registered `WaylandSurface` wid for the subsurface,
-    `(sx, sy)` is its offset relative to `surface`.
+    tuples.  In this post-ingest contract `native_w/h` are deliberately the
+    normalized raster dimensions, not `buffer_width/height`: transform, scale
+    and viewport sampling have already happened exactly once, so downstream
+    packet encoding must not apply a second scale.  The root is retained as
+    `root_wid`; child offsets are translated from wl_surface coordinates to
+    the XDG client-backing origin.
     """
     result = []
     cdef collect_ctx ctx
     ctx.root = surface
+    ctx.root_wid = root_wid
+    ctx.origin_x = origin_x
+    ctx.origin_y = origin_y
+    ctx.root_logical_width = root_logical_width
+    ctx.root_logical_height = root_logical_height
+    ctx.invalid = False
     ctx.result_list = <void*> result
     wlr_surface_for_each_surface(surface, collect_surface_callback, <void*> &ctx)
+    if ctx.invalid:
+        result.clear()
     return result

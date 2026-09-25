@@ -169,6 +169,21 @@ class EncodingsConnection(StubClientConnection):
         window_sources = getattr(self, "window_sources", {})
         return tuple(window_sources.values())
 
+    def all_pixel_sources(self) -> tuple:
+        # Keep `all_window_sources()` as the toplevel reporting/bandwidth set;
+        # this wider view is only for encoder configuration and lifecycle.
+        return self.all_window_sources() + tuple(getattr(self, "subsurface_sources", {}).values())
+
+    def get_window_pixel_sources(self, wid: int) -> tuple:
+        window_sources = getattr(self, "window_sources", {})
+        subsurface_sources = getattr(self, "subsurface_sources", {})
+        sources = []
+        if ws := window_sources.get(wid):
+            sources.append(ws)
+        sources += [ws for sub_wid, ws in subsurface_sources.items()
+                    if sub_wid == wid or ws.parent_wid == wid]
+        return tuple(sources)
+
     def get_caps(self) -> dict[str, str | int]:
         return {
             "auto_refresh_delay": self.auto_refresh_delay,
@@ -567,9 +582,9 @@ class EncodingsConnection(StubClientConnection):
     #
     def set_auto_refresh_delay(self, delay: int, window_ids) -> None:
         if window_ids is not None:
-            wss = (self.window_sources.get(wid) for wid in window_ids)
+            wss = tuple(ws for wid in window_ids for ws in self.get_window_pixel_sources(wid))
         else:
-            wss = self.all_window_sources()
+            wss = self.all_pixel_sources()
         for ws in wss:
             if ws is not None:
                 ws.set_auto_refresh_delay(delay)
@@ -593,9 +608,9 @@ class EncodingsConnection(StubClientConnection):
         if not encoding:
             encoding = "auto"
         if window_ids is not None:
-            wss = [self.window_sources.get(wid) for wid in window_ids]
+            wss = tuple(ws for wid in window_ids for ws in self.get_window_pixel_sources(wid))
         else:
-            wss = self.all_window_sources()
+            wss = self.all_pixel_sources()
         # if we're updating all the windows, reset global stats too:
         if set(wss).issuperset(self.all_window_sources()):
             log("resetting global stats")
@@ -632,27 +647,27 @@ class EncodingsConnection(StubClientConnection):
         return info
 
     def set_min_quality(self, min_quality: int) -> None:
-        for ws in tuple(self.all_window_sources()):
+        for ws in self.all_pixel_sources():
             ws.set_min_quality(min_quality)
 
     def set_max_quality(self, max_quality: int) -> None:
-        for ws in tuple(self.all_window_sources()):
+        for ws in self.all_pixel_sources():
             ws.set_max_quality(max_quality)
 
     def set_quality(self, quality: int) -> None:
-        for ws in tuple(self.all_window_sources()):
+        for ws in self.all_pixel_sources():
             ws.set_quality(quality)
 
     def set_min_speed(self, min_speed: int) -> None:
-        for ws in tuple(self.all_window_sources()):
+        for ws in self.all_pixel_sources():
             ws.set_min_speed(min_speed)
 
     def set_max_speed(self, max_speed: int) -> None:
-        for ws in tuple(self.all_window_sources()):
+        for ws in self.all_pixel_sources():
             ws.set_max_speed(max_speed)
 
     def set_speed(self, speed: int) -> None:
-        for ws in tuple(self.all_window_sources()):
+        for ws in self.all_pixel_sources():
             ws.set_speed(speed)
 
     def make_batch_config(self, wid: int, window):

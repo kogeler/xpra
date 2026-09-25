@@ -276,6 +276,23 @@ void main()
 }}
 """
 
+PREMULTIPLIED_OVERLAY_SHADER = f"""
+#version {GLSL_VERSION}
+layout(origin_upper_left) in vec4 gl_FragCoord;
+uniform vec2 viewport_pos;
+uniform vec2 scaling;
+uniform sampler2DRect rgba;
+layout(location = 0) out vec4 frag_color;
+
+void main()
+{{
+    vec2 pos = (gl_FragCoord.xy - viewport_pos.xy) / scaling;
+    vec2 last_center = vec2(textureSize(rgba)) - vec2(0.5);
+    pos = clamp(pos, vec2(0.5), last_center);
+    frag_color = texture(rgba, pos);
+}}
+"""
+
 BLEND_SHADER = f"""
 #version {GLSL_VERSION}
 layout(origin_upper_left) in vec4 gl_FragCoord;
@@ -405,6 +422,7 @@ SOURCE: dict[str, str] = {
     "blend": BLEND_SHADER,
     "vertex": VERTEX_SHADER,
     "overlay": OVERLAY_SHADER,
+    "premultiplied-overlay": PREMULTIPLIED_OVERLAY_SHADER,
     "fixed-color": FIXED_COLOR_SHADER,
     "upscale": UPSCALE_SHADER,
 }

@@ -58,15 +58,17 @@ from xpra.util.str_fn import repr_ellipsized, hexstr, csv
 from xpra.util.env import envint, envbool, first_time
 from xpra.util.objects import typedict
 from xpra.util.system import is_X11
-from xpra.common import roundup
+from xpra.common import SUBSURFACE_COMPOSITE_MODE, SUBSURFACE_TRANSACTION_ID, roundup
 from xpra.codecs.constants import (
     get_subsampling_divs, get_plane_name,
     CodecSpec, TransientCodecException,
 )
 from xpra.client.gui.window_border import WindowBorder
 from xpra.client.gui.paint_colors import get_paint_box_color
-from xpra.client.gui.window.backing import fire_paint_callbacks, WindowBackingBase, WEBP_PILLOW, ALERT_MODE, \
-    PaintCallbacks
+from xpra.client.gui.window.backing import (
+    fire_paint_callbacks, WindowBackingBase, WEBP_PILLOW, ALERT_MODE,
+    PaintCallbacks,
+)
 from xpra.opengl.check import GL_ALPHA_SUPPORTED, get_max_texture_size
 from xpra.opengl.debug import context_init_debug, gl_marker, gl_frame_terminator
 from xpra.opengl.util import (
@@ -286,6 +288,7 @@ class GLWindowBackingBase(WindowBackingBase):
         "RGB", "BGR",
     )
     HAS_ALPHA: bool = GL_ALPHA_SUPPORTED
+    SUBSURFACE_COMPOSITE_MODES = (SUBSURFACE_COMPOSITE_MODE,)
 
     def __init__(self, wid: int, window_alpha: bool, pixel_depth: int = 0):
         self.wid: int = wid
@@ -310,8 +313,15 @@ class GLWindowBackingBase(WindowBackingBase):
         self.last_present_fbo_error = ""
         self.alert_uploaded = 0
         self.bit_depth = pixel_depth
+        # GTK OpenGL widgets may not have a context until they are realized.
+        # Keep ownership of their deferred work here so closing any OpenGL
+        # backing can complete it, independently of the toolkit implementation.
+        self._pending_gl_context_callbacks: list[tuple[Any, Callable, tuple[Any, ...]]] = []
+        self._gl_context_callbacks_closed = False
         super().__init__(wid, window_alpha and self.HAS_ALPHA)
         self.opengl_init()
+        self.offscreen_fbo_format = self.internal_format
+        self.tmp_fbo_format = self.internal_format
         self.paint_context_manager: AbstractContextManager = nullcontext()
         if is_X11():
             # pylint: disable=ungrouped-imports
@@ -347,7 +357,51 @@ class GLWindowBackingBase(WindowBackingBase):
     def with_gfx_context(self, function: Callable, *args) -> None:
         # first make the call from the main thread via `idle_add`
         # then run the function from a GL context:
-        GLib.idle_add(self.with_gl_context, function, *args)
+        backing = self._backing
+
+        def call_with_gfx_context() -> None:
+            # The idle thunk belongs to the backing/widget which scheduled it.
+            # A replacement or close cannot transfer that work to a new GL
+            # drawable, but the paint callback still has to be completed.
+            if self._gl_context_callbacks_closed or self._backing is not backing:
+                function(None, *args)
+            else:
+                self.with_gl_context(function, *args)
+
+        GLib.idle_add(call_with_gfx_context)
+
+    def defer_gl_context_callback(self, callback: Callable, *args) -> None:
+        """Queue work until realize, or complete it without a context after close."""
+        backing = self._backing
+        if self._gl_context_callbacks_closed or backing is None:
+            callback(None, *args)
+            return
+        self._pending_gl_context_callbacks.append((backing, callback, args))
+
+    def run_gl_context_callbacks(self, context: Any) -> None:
+        """Run each callback currently owned by this backing exactly once."""
+        callbacks = self._pending_gl_context_callbacks
+        self._pending_gl_context_callbacks = []
+        self._run_gl_context_callbacks(callbacks, context)
+
+    def _run_gl_context_callbacks(
+            self, callbacks: list[tuple[Any, Callable, tuple[Any, ...]]], context: Any,
+    ) -> None:
+        for backing, callback, args in callbacks:
+            with log.trap_error("Error calling GL context callback %s", callback):
+                callback(
+                    context if not self._gl_context_callbacks_closed and self._backing is backing else None,
+                    *args,
+                )
+
+    def _begin_gl_context_close(self) -> list[tuple[Any, Callable, tuple[Any, ...]]] | None:
+        """Close callback ownership and detach the work which close must finish."""
+        if self._gl_context_callbacks_closed:
+            return None
+        self._gl_context_callbacks_closed = True
+        callbacks = self._pending_gl_context_callbacks
+        self._pending_gl_context_callbacks = []
+        return callbacks
 
     def with_gl_context(self, cb: Callable, *args) -> None:
         raise NotImplementedError()
@@ -416,6 +470,8 @@ class GLWindowBackingBase(WindowBackingBase):
     def init(self, ww: int, wh: int, bw: int, bh: int) -> None:
         # re-init gl projection with new dimensions
         # (see gl_init)
+        if self.render_size != (ww, wh) or self.size != (bw, bh):
+            self.subsurface_backing_reconfigured()
         self.render_size = ww, wh
         if self.size != (bw, bh):
             self.cancel_fps_refresh()
@@ -464,7 +520,7 @@ class GLWindowBackingBase(WindowBackingBase):
         # now we don't need the old tmp fbo contents anymore,
         # and we can re-initialize it with the correct size:
         mag_filter = self.get_init_magfilter()
-        self.init_fbo(TEX_TMP_FBO, self.tmp_fbo, bw, bh, mag_filter)
+        self.init_fbo(TEX_TMP_FBO, self.tmp_fbo, bw, bh, mag_filter, self.offscreen_fbo_format)
         if RESIZE_GLFINISH:
             glFinish()
         self._backing.queue_draw_area(0, 0, bw, bh)
@@ -497,15 +553,17 @@ class GLWindowBackingBase(WindowBackingBase):
         vertex_shader = self.init_shader("vertex", GL_VERTEX_SHADER)
         from xpra.opengl.shaders import SOURCE
         for name, source in SOURCE.items():
-            if name in ("overlay", "blend", "vertex", "fixed-color", "upscale"):
+            if name in ("overlay", "premultiplied-overlay", "blend", "vertex", "fixed-color", "upscale"):
                 continue
             fragment_shader = self.init_shader(name, GL_FRAGMENT_SHADER)
             self.init_program(name, vertex_shader, fragment_shader)
         blend_shader = self.init_shader("blend", GL_FRAGMENT_SHADER)
         overlay_shader = self.init_shader("overlay", GL_FRAGMENT_SHADER)
+        premultiplied_overlay_shader = self.init_shader("premultiplied-overlay", GL_FRAGMENT_SHADER)
         fixed_color = self.init_shader("fixed-color", GL_FRAGMENT_SHADER)
         self.init_program("blend", vertex_shader, blend_shader)
         self.init_program("overlay", vertex_shader, overlay_shader)
+        self.init_program("premultiplied-overlay", vertex_shader, premultiplied_overlay_shader)
         self.init_program("fixed-color", vertex_shader, fixed_color)
         # Catmull-Rom upscale shader — fall back to glBlitFramebuffer if it fails
         try:
@@ -520,11 +578,17 @@ class GLWindowBackingBase(WindowBackingBase):
         c_vertices = (c_float * len(vertices))(*vertices)
         glBindVertexArray(self.vao)
         buf = glGenBuffers(1)
-        glBindBuffer(GL_ARRAY_BUFFER, buf)
-        glBufferData(GL_ARRAY_BUFFER, len(vertices) * 4, c_vertices, GL_STATIC_DRAW)
-        glVertexAttribPointer(index, 2, GL_FLOAT, GL_FALSE, 0, c_void_p(0))
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-        glEnableVertexAttribArray(index)
+        try:
+            glBindBuffer(GL_ARRAY_BUFFER, buf)
+            glBufferData(GL_ARRAY_BUFFER, len(vertices) * 4, c_vertices, GL_STATIC_DRAW)
+            glVertexAttribPointer(index, 2, GL_FLOAT, GL_FALSE, 0, c_void_p(0))
+            glEnableVertexAttribArray(index)
+        except Exception:
+            if buf:
+                glDeleteBuffers(1, [buf])
+            raise
+        finally:
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
         return buf
 
     def init_program(self, name: str, *shaders: int) -> None:
@@ -631,7 +695,10 @@ class GLWindowBackingBase(WindowBackingBase):
 
         mag_filter = self.get_init_magfilter()
         # Define empty tmp FBO
-        self.init_fbo(TEX_TMP_FBO, self.tmp_fbo, w, h, mag_filter)
+        # Resize preserves the current canvas' precision, including a byte
+        # composite canvas on a higher-depth native output visual.
+        canvas_format = self.offscreen_fbo_format if skip_fbo else self.internal_format
+        self.init_fbo(TEX_TMP_FBO, self.tmp_fbo, w, h, mag_filter, canvas_format)
         if not skip_fbo:
             # Define empty FBO texture and set rendering to FBO
             self.init_fbo(TEX_FBO, self.offscreen_fbo, w, h, mag_filter)
@@ -650,13 +717,18 @@ class GLWindowBackingBase(WindowBackingBase):
             return GL_LINEAR
         return GL_NEAREST
 
-    def init_fbo(self, texture_index: int, fbo, w: int, h: int, mag_filter) -> None:
+    def init_fbo(self, texture_index: int, fbo, w: int, h: int, mag_filter, internal_format=0) -> None:
         target = GL_TEXTURE_RECTANGLE
         glBindTexture(target, self.textures[texture_index])
         # nvidia needs this even though we don't use mipmaps (repeated through this file):
         glTexParameteri(target, GL_TEXTURE_MAG_FILTER, mag_filter)
         glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
-        glTexImage2D(target, 0, self.internal_format, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, None)
+        storage_format = internal_format or self.internal_format
+        glTexImage2D(target, 0, storage_format, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, None)
+        if texture_index == TEX_FBO:
+            self.offscreen_fbo_format = storage_format
+        else:
+            self.tmp_fbo_format = storage_format
         glBindFramebuffer(GL_FRAMEBUFFER, fbo)
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, target, self.textures[texture_index], 0)
         glDrawBuffer(GL_COLOR_ATTACHMENT0)
@@ -670,62 +742,78 @@ class GLWindowBackingBase(WindowBackingBase):
         """
 
     def close(self) -> None:
+        callbacks = self._begin_gl_context_close()
+        if callbacks is None:
+            return
         # `close_gl` frees the cuda context, and the video decoder may be holding
         # resources which belong to it (ie: nvdec), so it has to be closed first:
-        self.close_decoder(False)
-        self.with_gl_context(self.close_gl)
-        super().close()
+        try:
+            try:
+                self.close_decoder(False)
+            finally:
+                self.with_gl_context(self.close_gl)
+        finally:
+            try:
+                super().close()
+            finally:
+                # The callback targets must observe a dead backing.  In
+                # particular, video paints must not start decoder work merely
+                # because they were queued before the widget was realized.
+                self._run_gl_context_callbacks(callbacks, None)
 
     def close_gl(self, context) -> None:
         log("close_gl(%s)", context)
+        self.invalidate_subsurface_transaction(context)
         self.free_cuda_context()
-        try:
-            from OpenGL.GL import glDeleteProgram, glDeleteShader
-            glBindVertexArray(0)
-            glUseProgram(0)
-            programs = self.programs
-            self.programs = {}
-            for name, program in programs.items():
-                try:
-                    log(f"glDeleteProgram({program}) {name!r}")
-                    glDeleteProgram(program)
-                except GLError as gle:
-                    log.error(f"Error deleting {name!r} program")
-                    log.error(f" {gle}")
-            shaders = self.shaders
-            self.shaders = {}
-            for name, shader in shaders.items():
-                try:
-                    log(f"glDeleteShader({shader}) {name!r}")
-                    glDeleteShader(shader)
-                except GLError as gle:
-                    log.error(f"Error deleting {name!r} shader")
-                    log.error(f" {gle}")
-            vaos = []
-            if vao := self.vao:
-                self.vao = None
-                vaos.append(vao)
-            if vao := self.spinner_vao:
-                self.spinner_vao = None
-                vaos.append(vao)
-            if vaos:
-                glDeleteVertexArrays(1, vaos)
-            ofbo = self.offscreen_fbo
-            if ofbo is not None:
-                self.offscreen_fbo = None
-                glDeleteFramebuffers(1, [ofbo])
-            tfbo = self.tmp_fbo
-            if tfbo is not None:
-                self.tmp_fbo = None
-                glDeleteFramebuffers(1, [tfbo])
-            textures = self.textures
-            if len(textures) > 0:
-                self.textures = []
-                glDeleteTextures(textures)
-        except Exception as e:
-            log(f"{self}.close()", exc_info=True)
-            log.error("Error closing OpenGL backing, some resources have not been freed")
-            log.estr(e)
+        programs = self.programs
+        self.programs = {}
+        shaders = self.shaders
+        self.shaders = {}
+        vaos = []
+        if vao := self.vao:
+            self.vao = None
+            vaos.append(vao)
+        if vao := self.spinner_vao:
+            self.spinner_vao = None
+            vaos.append(vao)
+        fbos = tuple(dict.fromkeys(
+            fbo for fbo in (self.offscreen_fbo, self.tmp_fbo) if fbo is not None
+        ))
+        self.offscreen_fbo = None
+        self.tmp_fbo = None
+        textures = self.textures
+        self.offscreen_fbo_format = 0
+        self.tmp_fbo_format = 0
+        self.textures = []
+        if context is not None:
+            try:
+                from OpenGL.GL import glDeleteProgram, glDeleteShader
+                glBindVertexArray(0)
+                glUseProgram(0)
+                for name, program in programs.items():
+                    try:
+                        log(f"glDeleteProgram({program}) {name!r}")
+                        glDeleteProgram(program)
+                    except GLError as gle:
+                        log.error(f"Error deleting {name!r} program")
+                        log.error(f" {gle}")
+                for name, shader in shaders.items():
+                    try:
+                        log(f"glDeleteShader({shader}) {name!r}")
+                        glDeleteShader(shader)
+                    except GLError as gle:
+                        log.error(f"Error deleting {name!r} shader")
+                        log.error(f" {gle}")
+                if vaos:
+                    glDeleteVertexArrays(len(vaos), vaos)
+                if fbos:
+                    glDeleteFramebuffers(len(fbos), fbos)
+                if len(textures) > 0:
+                    glDeleteTextures(textures)
+            except Exception as e:
+                log(f"{self}.close()", exc_info=True)
+                log.error("Error closing OpenGL backing, some resources have not been freed")
+                log.estr(e)
         if b := self._backing:
             self._backing = None
             b.destroy()
@@ -740,10 +828,15 @@ class GLWindowBackingBase(WindowBackingBase):
 
     def do_scroll_paints(self, context, scrolls, flush: int, callbacks: PaintCallbacks) -> None:
         log("do_scroll_paints%s", (context, scrolls, flush))
+        if self._gl_context_callbacks_closed:
+            fire_paint_callbacks(callbacks, -1, "backing is closed")
+            return
         if not context:
             log("%s.do_scroll_paints(..) no context!", self)
             fire_paint_callbacks(callbacks, False, "no opengl context")
             return
+        self.invalidate_subsurface_transaction(context)
+        self.restore_ordinary_fbo_format()
 
         def fail(msg: str) -> None:
             log.error("Error: %s", msg)
@@ -847,6 +940,44 @@ class GLWindowBackingBase(WindowBackingBase):
                           dx, dy, dx + w, dy + h,
                           GL_COLOR_BUFFER_BIT, GL_NEAREST)
 
+    def _begin_subsurface_staging(self, context) -> None:
+        if not context or self.offscreen_fbo is None or self.tmp_fbo is None:
+            raise RuntimeError("cannot stage a subsurface transaction without an OpenGL context")
+        from OpenGL.GL import glEnable, glIsEnabled, glGetFloatv, GL_COLOR_CLEAR_VALUE
+        bw, bh = self.size
+        clear_color = tuple(float(v) for v in glGetFloatv(GL_COLOR_CLEAR_VALUE))
+        scissor_enabled = bool(glIsEnabled(GL_SCISSOR_TEST))
+        try:
+            # Both glClear and glBlitFramebuffer obey the scissor test. The
+            # transaction snapshot must copy the complete visible backing.
+            glDisable(GL_SCISSOR_TEST)
+            # The wire mode specifies byte source-over. The requested display
+            # depth may use RGB10_A2/RGBA4, whose intermediate alpha cannot own
+            # that arithmetic. Keep the active canvas in byte storage until a
+            # real ordinary paint resumes the configured format.
+            self.ensure_tmp_fbo_format(GL_RGBA8 if self._alpha_enabled else GL_RGB8)
+            self.copy_fbo(bw, bh)
+            self.draw_to_tmp()
+        finally:
+            glClearColor(*clear_color)
+            if scissor_enabled:
+                glEnable(GL_SCISSOR_TEST)
+
+    def _discard_subsurface_staging(self, context) -> None:
+        if not context or self.offscreen_fbo is None or len(self.textures) == 0:
+            return
+        try:
+            self.draw_to_offscreen()
+        except Exception:
+            log("failed to restore the visible framebuffer after discarding subsurface staging", exc_info=True)
+
+    def _commit_subsurface_staging(self, context) -> None:
+        if not context or self.offscreen_fbo is None or self.tmp_fbo is None:
+            raise RuntimeError("cannot commit a subsurface transaction without an OpenGL context")
+        # The staging FBO is already bound for drawing. Swapping the object and
+        # texture identities publishes it without another fallible GL call.
+        self.swap_fbos()
+
     def swap_fbos(self) -> None:
         log("swap_fbos()")
         # swap references to tmp and offscreen so tmp becomes the new offscreen:
@@ -856,6 +987,36 @@ class GLWindowBackingBase(WindowBackingBase):
         tmp = self.textures[TEX_FBO]
         self.textures[TEX_FBO] = self.textures[TEX_TMP_FBO]
         self.textures[TEX_TMP_FBO] = tmp
+        self.offscreen_fbo_format, self.tmp_fbo_format = self.tmp_fbo_format, self.offscreen_fbo_format
+
+    def ensure_tmp_fbo_format(self, internal_format) -> None:
+        if self.tmp_fbo_format != internal_format:
+            self.init_fbo(TEX_TMP_FBO, self.tmp_fbo, *self.size, self.get_init_magfilter(), internal_format)
+
+    def restore_ordinary_fbo_format(self) -> None:
+        """Leave byte-composite storage before an ordinary depth-owned paint.
+
+        Format conversion stages into the existing scratch FBO and publishes
+        only after the whole visible canvas was copied. It never changes the
+        configured bit depth, native visual, or ordinary upload format.
+        """
+        if self.offscreen_fbo_format == self.tmp_fbo_format == self.internal_format:
+            return
+        from OpenGL.GL import glEnable, glIsEnabled, glGetFloatv, GL_COLOR_CLEAR_VALUE
+        clear_color = tuple(float(v) for v in glGetFloatv(GL_COLOR_CLEAR_VALUE))
+        scissor_enabled = bool(glIsEnabled(GL_SCISSOR_TEST))
+        try:
+            glDisable(GL_SCISSOR_TEST)
+            self.ensure_tmp_fbo_format(self.internal_format)
+            if self.offscreen_fbo_format != self.internal_format:
+                self.copy_fbo(*self.size)
+                self.swap_fbos()
+                self.ensure_tmp_fbo_format(self.internal_format)
+            self.draw_to_offscreen()
+        finally:
+            glClearColor(*clear_color)
+            if scissor_enabled:
+                glEnable(GL_SCISSOR_TEST)
 
     def painted(self, context, x: int, y: int, w: int, h: int, flush=0) -> None:
         if self.draw_needs_refresh:
@@ -948,7 +1109,7 @@ class GLWindowBackingBase(WindowBackingBase):
             glReadBuffer(GL_COLOR_ATTACHMENT0)
 
             for x, y, w, h in rectangles:
-                glBlitFramebuffer(x, y, w, h,
+                glBlitFramebuffer(x, y, x + w, y + h,
                                   round(x*xscale), round(y*yscale), round((x+w)*xscale), round((y+h)*yscale),
                                   GL_COLOR_BUFFER_BIT, sampling)
 
@@ -1171,48 +1332,125 @@ class GLWindowBackingBase(WindowBackingBase):
             if not blend_enabled:
                 glDisable(GL_BLEND)
 
-    def combine_texture(self, program_name: str, x: int, y: int, w: int, h: int, texture_map: dict, uniforms: dict) -> None:
+    def composite_premultiplied_texture(
+            self, texture: int, x: int, y: int, width: int, height: int,
+            render_width: int, render_height: int,
+    ) -> None:
+        """Layer a Wayland premultiplied-alpha child into the current FBO."""
+        from OpenGL.GL import (
+            glEnable, glIsEnabled, glBlendEquationSeparate, glBlendFuncSeparate,
+            GL_BLEND, GL_SCISSOR_TEST, GL_FUNC_ADD, GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
+            GL_BLEND_EQUATION_RGB, GL_BLEND_EQUATION_ALPHA,
+            GL_BLEND_SRC_RGB, GL_BLEND_DST_RGB, GL_BLEND_SRC_ALPHA, GL_BLEND_DST_ALPHA,
+        )
+        blend_enabled = bool(glIsEnabled(GL_BLEND))
+        scissor_enabled = bool(glIsEnabled(GL_SCISSOR_TEST))
+        blend_equation = (
+            int(glGetIntegerv(GL_BLEND_EQUATION_RGB)),
+            int(glGetIntegerv(GL_BLEND_EQUATION_ALPHA)),
+        )
+        blend_function = (
+            int(glGetIntegerv(GL_BLEND_SRC_RGB)),
+            int(glGetIntegerv(GL_BLEND_DST_RGB)),
+            int(glGetIntegerv(GL_BLEND_SRC_ALPHA)),
+            int(glGetIntegerv(GL_BLEND_DST_ALPHA)),
+        )
+        try:
+            glEnable(GL_BLEND)
+            glDisable(GL_SCISSOR_TEST)
+            glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD)
+            glBlendFuncSeparate(
+                GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
+                GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
+            )
+            self.combine_texture(
+                "premultiplied-overlay", x, y, render_width, render_height,
+                {"rgba": texture},
+                {"scaling": (render_width / width, render_height / height)},
+                viewport_height=self.size[1],
+            )
+        finally:
+            glBlendEquationSeparate(*blend_equation)
+            glBlendFuncSeparate(*blend_function)
+            if scissor_enabled:
+                glEnable(GL_SCISSOR_TEST)
+            if not blend_enabled:
+                glDisable(GL_BLEND)
+
+    def clear_subsurface_region(self, region: tuple[int, int, int, int]) -> None:
+        """Clear one top-left-origin backing region without leaking GL state."""
+        if not region or not region[2] or not region[3]:
+            return
+        from OpenGL.GL import (
+            glEnable, glIsEnabled, glScissor, glGetFloatv,
+            GL_SCISSOR_TEST, GL_SCISSOR_BOX, GL_COLOR_CLEAR_VALUE,
+        )
+        x, y, width, height = region
+        scissor_enabled = bool(glIsEnabled(GL_SCISSOR_TEST))
+        scissor_box = tuple(int(v) for v in glGetIntegerv(GL_SCISSOR_BOX))
+        clear_color = tuple(float(v) for v in glGetFloatv(GL_COLOR_CLEAR_VALUE))
+        try:
+            glEnable(GL_SCISSOR_TEST)
+            glScissor(x, self.size[1] - y - height, width, height)
+            glClearColor(0, 0, 0, 0)
+            glClear(GL_COLOR_BUFFER_BIT)
+        finally:
+            glClearColor(*clear_color)
+            glScissor(*scissor_box)
+            if not scissor_enabled:
+                glDisable(GL_SCISSOR_TEST)
+
+    def combine_texture(self, program_name: str, x: int, y: int, w: int, h: int,
+                        texture_map: dict, uniforms: dict, viewport_height=0) -> None:
         log("combine_texture%s", (program_name, x, y, w, h, texture_map))
         # paint this texture
 
-        wh = self.render_size[1]
+        # Screen overlays use render coordinates. Subsurface layers update the
+        # persistent offscreen FBO and therefore supply the backing height.
+        wh = viewport_height or self.render_size[1]
         target = GL_TEXTURE_RECTANGLE
         # the region we're updating (reversed):
         with TemporaryViewport(x, wh - y - h, w, h):
             program = self.programs[program_name]
-            glUseProgram(program)
-            index = 0
-            for prg_var, texture in texture_map.items():
-                glActiveTexture(GL_TEXTURE0 + index)
-                glBindTexture(target, texture)
-                tex_loc = glGetUniformLocation(program, prg_var)
-                # log("glGetUniformLocation(%s, %r)=%i", program_name, prg_var, tex_loc)
-                glUniform1i(tex_loc, index)  # 0 -> TEXTURE_0
-                index += 1
+            texture_count = 0
+            pos_buffer = 0
+            try:
+                glUseProgram(program)
+                for index, (prg_var, texture) in enumerate(texture_map.items()):
+                    glActiveTexture(GL_TEXTURE0 + index)
+                    glBindTexture(target, texture)
+                    texture_count += 1
+                    tex_loc = glGetUniformLocation(program, prg_var)
+                    # log("glGetUniformLocation(%s, %r)=%i", program_name, prg_var, tex_loc)
+                    glUniform1i(tex_loc, index)  # 0 -> TEXTURE_0
 
-            for prg_var, value in uniforms.items():
-                loc = glGetUniformLocation(program, prg_var)
-                # log("glGetUniformLocation(%s, %r)=%i", program_name, prg_var, loc)
-                if isinstance(value, int):
-                    glUniform1i(loc, value)
-                elif isinstance(value, float):
-                    glUniform1f(loc, value)
-                else:
-                    raise TypeError(f"Unsupported type {type(value)}")
+                for prg_var, value in uniforms.items():
+                    loc = glGetUniformLocation(program, prg_var)
+                    # log("glGetUniformLocation(%s, %r)=%i", program_name, prg_var, loc)
+                    if isinstance(value, int):
+                        glUniform1i(loc, value)
+                    elif isinstance(value, float):
+                        glUniform1f(loc, value)
+                    elif isinstance(value, tuple) and len(value) == 2:
+                        glUniform2f(loc, *value)
+                    else:
+                        raise TypeError(f"Unsupported type {type(value)}")
 
-            viewport_pos = glGetUniformLocation(program, "viewport_pos")
-            glUniform2f(viewport_pos, x, y)
+                viewport_pos = glGetUniformLocation(program, "viewport_pos")
+                glUniform2f(viewport_pos, x, y)
 
-            position = 0
-            pos_buffer = self.set_vao(position)
-
-            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
-
-            glBindVertexArray(0)
-            glUseProgram(0)
-            glDeleteBuffers(1, [pos_buffer])
-
-            glBindTexture(target, 0)
+                position = 0
+                pos_buffer = self.set_vao(position)
+                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
+            finally:
+                glBindVertexArray(0)
+                glUseProgram(0)
+                if pos_buffer:
+                    glDeleteBuffers(1, [pos_buffer])
+                for index in range(texture_count):
+                    glActiveTexture(GL_TEXTURE0 + index)
+                    glBindTexture(target, 0)
+                glActiveTexture(GL_TEXTURE0)
 
     def draw_border(self, border) -> None:
         rgba = charclamp(256 * border.red), charclamp(256 * border.green), charclamp(256 * border.blue), charclamp(256 * border.alpha)
@@ -1244,11 +1482,44 @@ class GLWindowBackingBase(WindowBackingBase):
         # show region being painted if debug paint box is enabled only:
         if self.paint_box_line_width <= 0:
             return
-        self.draw_to_offscreen()
+        if self._subsurface_transaction:
+            self.draw_to_tmp()
+        else:
+            self.draw_to_offscreen()
 
         bw, bh = self.size
         color = get_paint_box_color(encoding)
         r, g, b, a = tuple(round(v * 256) for v in color)
+        if self._subsurface_transaction:
+            # draw_rectangle uses the temporary FBO as its one-pixel source,
+            # so it cannot also target that FBO while a transaction is staged.
+            # Scissored clears produce the same opaque debug border in place.
+            from OpenGL.GL import (
+                glEnable, glIsEnabled, glScissor, glGetFloatv,
+                GL_SCISSOR_TEST, GL_SCISSOR_BOX, GL_COLOR_CLEAR_VALUE,
+            )
+            scissor_enabled = bool(glIsEnabled(GL_SCISSOR_TEST))
+            scissor_box = tuple(int(v) for v in glGetIntegerv(GL_SCISSOR_BOX))
+            clear_color = tuple(float(v) for v in glGetFloatv(GL_COLOR_CLEAR_VALUE))
+            size = self.paint_box_line_width
+            try:
+                glEnable(GL_SCISSOR_TEST)
+                glClearColor(*(charclamp(value) / 255 for value in (r, g, b, a)))
+                for rx, ry, rw, rh in (
+                    (x, y, size, h),
+                    (x + w - size, y, size, h),
+                    (x + size, y, w - 2 * size, size),
+                    (x + size, y + h - size, w - 2 * size, size),
+                ):
+                    if rw > 0 and rh > 0:
+                        glScissor(rx, bh - ry - rh, rw, rh)
+                        glClear(GL_COLOR_BUFFER_BIT)
+            finally:
+                glClearColor(*clear_color)
+                glScissor(*scissor_box)
+                if not scissor_enabled:
+                    glDisable(GL_SCISSOR_TEST)
+            return
         with TemporaryViewport(0, 0, bw, bh):
             self.draw_rectangle(x, y, w, h, self.paint_box_line_width, r, g, b, a, bh)
 
@@ -1611,6 +1882,8 @@ class GLWindowBackingBase(WindowBackingBase):
 
     def paint_nvjpeg(self, gl_context, encoding: str, img_data, x: int, y: int, width: int, height: int,
                      options: typedict, callbacks: PaintCallbacks) -> None:
+        self.invalidate_subsurface_transaction(gl_context)
+        self.restore_ordinary_fbo_format()
         with self.assign_cuda_context(True):
             # we can import pycuda safely here,
             # because `self.assign_cuda_context` will have imported it with the lock:
@@ -1698,15 +1971,22 @@ class GLWindowBackingBase(WindowBackingBase):
                      options: typedict, callbacks: PaintCallbacks) -> None:
         log("%s.do_paint_rgb(%s, %s, %s bytes, x=%d, y=%d, width=%d, height=%d, rowstride=%d, options=%s)",
             self, encoding, rgb_format, len(img_data), x, y, width, height, rowstride, options)
-        x, y = self.gravity_adjust(x, y, options)
-        if not context:
-            log("%s.do_paint_rgb(..) no context!", self)
-            fire_paint_callbacks(callbacks, False, "no opengl context")
+        if self._gl_context_callbacks_closed:
+            fire_paint_callbacks(callbacks, -1, "backing is closed")
             return
-        if not options.boolget("paint", True):
-            fire_paint_callbacks(callbacks)
-            return
+        stage = None
         try:
+            stage = self.get_subsurface_composite_stage(encoding, rgb_format, options)
+            if not context:
+                raise RuntimeError("no opengl context")
+            if not options.boolget("paint", True):
+                if stage:
+                    raise ValueError("cannot skip a subsurface transaction stage")
+                self.invalidate_subsurface_transaction(context)
+                fire_paint_callbacks(callbacks)
+                return
+            x, y = self.gravity_adjust(x, y, options)
+            source_over = stage is not None
             upload, img_data = pixels_for_upload(img_data)
 
             self.gl_init(context)
@@ -1727,6 +2007,11 @@ class GLWindowBackingBase(WindowBackingBase):
             bpp = PIXEL_FORMAT_BPP.get(rgb_format, 0)
             if not bpp:
                 raise ValueError(f"unknown bytes per pixel for {rgb_format!r}")
+            if source_over and min(width, height, render_width, render_height) <= 0:
+                raise ValueError(
+                    "subsurface transaction dimensions must all be positive: "
+                    f"{width}x{height} to {render_width}x{render_height}"
+                )
             if width > 0 and height > 0:
                 if rowstride < width * bpp:
                     raise ValueError(f"invalid rowstride {rowstride} for {width}x{height} {rgb_format}")
@@ -1740,7 +2025,13 @@ class GLWindowBackingBase(WindowBackingBase):
             # uploads in an RGB texture discards the X component; framebuffer
             # reads supply the missing alpha component as 1.0 when we blit to
             # an alpha-capable backing.
-            upload_internal_format = GL_RGB8 if rgb_format in ("BGRX", "RGBX") else self.internal_format
+            if source_over and "A" in rgb_format:
+                # The destination FBO may deliberately be RGB8 for an opaque
+                # top-level window. The temporary layer still needs its source
+                # alpha, independently of the destination's alpha capability.
+                upload_internal_format = GL_RGBA8
+            else:
+                upload_internal_format = GL_RGB8 if rgb_format in ("BGRX", "RGBX") else self.internal_format
 
             gl_marker("%s update at (%d,%d) size %dx%d (%s bytes) to %dx%d, using GL %s format=%s / %s to internal=%s",
                       rgb_format, x, y, width, height, len(img_data), render_width, render_height,
@@ -1750,14 +2041,47 @@ class GLWindowBackingBase(WindowBackingBase):
             # Upload data as temporary RGB texture
             target = GL_TEXTURE_RECTANGLE
             glBindTexture(target, self.textures[TEX_RGB])
-            set_alignment(width, rowstride, rgb_format)
-            mag_filter = GL_LINEAR if scaling else GL_NEAREST
-            glTexParameteri(target, GL_TEXTURE_MAG_FILTER, mag_filter)
-            glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
-            glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER)
-            glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER)
-            glTexImage2D(target, 0, upload_internal_format, width, height, 0, pformat, ptype, img_data)
+            try:
+                set_alignment(width, rowstride, rgb_format)
+                mag_filter = GL_LINEAR if scaling else GL_NEAREST
+                glTexParameteri(target, GL_TEXTURE_MAG_FILTER, mag_filter)
+                glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+                glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER)
+                glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER)
+                glTexImage2D(target, 0, upload_internal_format, width, height, 0, pformat, ptype, img_data)
+            finally:
+                # This texture is rebound explicitly by either compositor or
+                # blit path. Keep upload, validation and stale-stage failures
+                # from leaking a binding into later GL work.
+                glBindTexture(target, 0)
 
+            if source_over:
+                self.prepare_subsurface_composite_stage(stage, context)
+                self.draw_to_tmp()
+                self.clear_subsurface_region(stage.reset_region)
+                self.composite_premultiplied_texture(
+                    int(self.textures[TEX_RGB]), x, y, width, height,
+                    render_width, render_height,
+                )
+                self.paint_box(encoding, x, y, render_width, render_height)
+                committed_region = self.complete_subsurface_composite_stage(
+                    stage, context, (x, y, render_width, render_height),
+                )
+                if committed_region:
+                    # Swapping the FBO identities is the irreversible publish
+                    # point. Presentation bookkeeping may be retried by the
+                    # normal expose path, but it must not report this committed
+                    # transaction as failed and provoke a conflicting replay.
+                    try:
+                        self.painted(context, *committed_region, 0)
+                    except Exception:
+                        log.error("Error presenting a committed subsurface frame", exc_info=True)
+                fire_paint_callbacks(callbacks)
+                return
+
+            self.invalidate_subsurface_transaction(context)
+
+            self.restore_ordinary_fbo_format()
             glBindFramebuffer(GL_READ_FRAMEBUFFER, self.tmp_fbo)
             glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, target, self.textures[TEX_RGB], 0)
             glReadBuffer(GL_COLOR_ATTACHMENT0)
@@ -1784,6 +2108,7 @@ class GLWindowBackingBase(WindowBackingBase):
         except Exception as e:
             message = f"OpenGL {rgb_format} paint error: {e}"
             log("Error in %s paint of %i bytes, options=%s", rgb_format, len(img_data), options, exc_info=True)
+        self.fail_subsurface_composite_stage(stage or options.get(SUBSURFACE_TRANSACTION_ID), context)
         fire_paint_callbacks(callbacks, False, message)
 
     def do_video_paint(self, coding: str, img,
@@ -1819,7 +2144,21 @@ class GLWindowBackingBase(WindowBackingBase):
     def paint_planar(self, context, shader: str, encoding: str, img,
                      x: int, y: int, enc_width: int, enc_height: int, width: int, height: int,
                      options: typedict, callbacks: PaintCallbacks) -> None:
+        if self._gl_context_callbacks_closed:
+            img.free()
+            fire_paint_callbacks(callbacks, -1, "backing is closed")
+            return
         pixel_format = img.get_pixel_format()
+        if "subsurface-composite" in options:
+            mode = options.get("subsurface-composite")
+            if type(mode) is str and mode == SUBSURFACE_COMPOSITE_MODE:
+                message = f"{SUBSURFACE_COMPOSITE_MODE} does not accept planar pixel format {pixel_format!r}"
+            else:
+                message = f"unsupported subsurface composition mode {mode!r}"
+            self.fail_subsurface_composite_stage(options.get(SUBSURFACE_TRANSACTION_ID), context)
+            img.free()
+            fire_paint_callbacks(callbacks, False, message)
+            return
         if pixel_format not in PLANAR_FORMATS:
             img.free()
             raise ValueError(f"the GL backing does not handle pixel format {pixel_format!r} yet!")
@@ -1828,10 +2167,12 @@ class GLWindowBackingBase(WindowBackingBase):
             log("%s.paint_planar(..) no OpenGL context!", self)
             fire_paint_callbacks(callbacks, False, "failed to get a gl context")
             return
+        self.invalidate_subsurface_transaction(context)
         flush = options.intget("flush", 0)
         x, y = self.gravity_adjust(x, y, options)
         try:
             self.gl_init(context)
+            self.restore_ordinary_fbo_format()
             pbo = options.boolget("pbo")
             scaling = enc_width != width or enc_height != height
             try:

@@ -10,14 +10,14 @@ from time import monotonic
 from typing import Any
 from collections.abc import Callable, Sequence
 from cairo import (
-    Context, ImageSurface, Format, Operator, OPERATOR_OVER, LINE_CAP_ROUND,
+    Context, ImageSurface, Format, Operator, Extend, OPERATOR_OVER, LINE_CAP_ROUND,
     FILTER_NEAREST, FILTER_GOOD, FILTER_BEST,
 )
 
 from xpra.client.gui.paint_colors import get_paint_box_color
 from xpra.client.gui.window.backing import WindowBackingBase, fire_paint_callbacks, ALERT_MODE, PaintCallbacks
 from xpra.client.gui.window_border import WindowBorder
-from xpra.common import roundup, noop
+from xpra.common import SUBSURFACE_COMPOSITE_MODE, SUBSURFACE_TRANSACTION_ID, roundup, noop
 from xpra.util.str_fn import memoryview_to_bytes
 from xpra.util.objects import typedict
 from xpra.util.env import envbool
@@ -122,6 +122,7 @@ def cairo_draw_backing(context, backing, scaling_filter=None) -> None:
 
 class CairoBackingBase(WindowBackingBase):
     HAS_ALPHA = envbool("XPRA_ALPHA", True)
+    SUBSURFACE_COMPOSITE_MODES = (SUBSURFACE_COMPOSITE_MODE,)
     alert_image = ()
 
     def __init__(self, wid: int, window_alpha: bool, _pixel_depth=0):
@@ -130,9 +131,12 @@ class CairoBackingBase(WindowBackingBase):
         self.render_size = 0, 0
         self.fps_image = None
         self.content_types: tuple[str, ...] = ()
+        self._subsurface_staging_surface: ImageSurface | None = None
 
     def init(self, ww: int, wh: int, bw: int, bh: int) -> None:
         mod = self.size != (bw, bh) or self.render_size != (ww, wh)
+        if mod:
+            self.subsurface_backing_reconfigured()
         self.size = bw, bh
         self.render_size = ww, wh
         if mod:
@@ -185,10 +189,57 @@ class CairoBackingBase(WindowBackingBase):
         return cr
 
     def close(self) -> None:
-        if backing := self._backing:
-            backing.finish()
+        backing = self._backing
+        try:
+            if backing:
+                backing.finish()
+        finally:
             self._backing = None
-        super().close()
+            # The private transaction surface must be released even when the
+            # visible Cairo surface reports an error while being finished.
+            super().close()
+
+    def _begin_subsurface_staging(self, _context) -> None:
+        backing = self._backing
+        if not backing:
+            raise RuntimeError("cannot stage a subsurface transaction without a Cairo backing")
+        self._discard_subsurface_staging(None)
+        staging = ImageSurface(backing.get_format(), backing.get_width(), backing.get_height())
+        self._subsurface_staging_surface = staging
+        gc = Context(staging)
+        gc.set_operator(Operator.SOURCE)
+        gc.set_source_surface(backing, 0, 0)
+        gc.paint()
+        staging.flush()
+
+    def _discard_subsurface_staging(self, _context) -> None:
+        staging = self._subsurface_staging_surface
+        self._subsurface_staging_surface = None
+        if staging:
+            try:
+                staging.finish()
+            except Exception:
+                # State has already been detached. Keep failure callbacks and
+                # the original paint exception observable if Cairo cleanup is
+                # itself faulty.
+                log.error("Error finishing discarded Cairo subsurface staging", exc_info=True)
+
+    def _commit_subsurface_staging(self, _context) -> None:
+        staging = self._subsurface_staging_surface
+        if not staging:
+            raise RuntimeError("cannot commit a missing Cairo subsurface staging surface")
+        staging.flush()
+        old_backing = self._backing
+        self._subsurface_staging_surface = None
+        self._backing = staging
+        if old_backing and old_backing is not staging:
+            try:
+                old_backing.finish()
+            except Exception:
+                # Publication is already complete and cannot be rolled back.
+                # A cleanup failure must not turn an atomic successful commit
+                # into a failed callback with the new surface already visible.
+                log.error("Error finishing the previous Cairo backing after subsurface commit", exc_info=True)
 
     def cairo_paint_pixbuf(self, pixbuf, x: int, y: int, options) -> None:
         """ must be called from UI thread """
@@ -196,7 +247,8 @@ class CairoBackingBase(WindowBackingBase):
         w, h = pixbuf.get_width(), pixbuf.get_height()
         self.cairo_paint_from_source(Gdk.cairo_set_source_pixbuf, pixbuf, x, y, w, h, w, h, options)
 
-    def cairo_paint_surface(self, img_surface, x: int, y: int, width: int, height: int, options) -> None:
+    def cairo_paint_surface(self, img_surface, x: int, y: int, width: int, height: int, options,
+                            source_over=False, reset_region=()) -> None:
         iw, ih = img_surface.get_width(), img_surface.get_height()
         log("source image surface: %s",
             (img_surface.get_format(), iw, ih, img_surface.get_stride(), img_surface.get_content(),))
@@ -204,34 +256,52 @@ class CairoBackingBase(WindowBackingBase):
         def set_source_surface(gc, surface, sx: int, sy: int) -> None:
             gc.set_source_surface(surface, sx, sy)
 
-        self.cairo_paint_from_source(set_source_surface, img_surface, x, y, iw, ih, width, height, options)
+        self.cairo_paint_from_source(set_source_surface, img_surface, x, y, iw, ih, width, height, options,
+                                     source_over, reset_region)
 
     def cairo_paint_from_source(self, set_source_fn: Callable[[Any, Any, int, int], None], source,
-                                x: int, y: int, iw: int, ih: int, width: int, height: int, options) -> None:
+                                x: int, y: int, iw: int, ih: int, width: int, height: int, options,
+                                source_over=False, reset_region=()) -> None:
         """ must be called from UI thread """
-        backing = self._backing
+        backing = self._subsurface_staging_surface if source_over else self._backing
         log("cairo_paint_surface%s backing=%s, paint box line width=%i",
             (set_source_fn, source, x, y, iw, ih, width, height, options),
             backing, self.paint_box_line_width)
         if not backing:
             return
         gc = Context(backing)
+        if source_over and reset_region:
+            rx, ry, rw, rh = reset_region
+            if rw and rh:
+                gc.save()
+                gc.set_operator(Operator.CLEAR)
+                gc.rectangle(rx, ry, rw, rh)
+                gc.fill()
+                gc.restore()
         if self.paint_box_line_width:
             gc.save()
 
         gc.rectangle(x, y, width, height)
         gc.clip()
 
-        gc.set_operator(Operator.CLEAR)
-        gc.rectangle(x, y, width, height)
-        gc.fill()
-
-        gc.set_operator(Operator.SOURCE)
+        if source_over:
+            # The exact negotiated mode guarantees either direct ARGB32
+            # premultiplied pixels or an RGB24 source which is strictly opaque.
+            gc.set_operator(Operator.OVER)
+        else:
+            gc.set_operator(Operator.CLEAR)
+            gc.rectangle(x, y, width, height)
+            gc.fill()
+            gc.set_operator(Operator.SOURCE)
         gc.translate(x, y)
         if iw != width or ih != height:
             gc.scale(width / iw, height / ih)
         gc.rectangle(0, 0, width, height)
         set_source_fn(gc, source, 0, 0)
+        if source_over:
+            # Scaling must not interpolate the premultiplied edge texels with
+            # transparent pixels beyond the source surface.
+            gc.get_source().set_extend(Extend.PAD)
         gc.paint()
 
         if self.paint_box_line_width:
@@ -240,7 +310,7 @@ class CairoBackingBase(WindowBackingBase):
             self.cairo_paint_box(gc, encoding, x, y, width, height)
 
         flush = options.get("flush", 0)
-        if flush == 0:
+        if not source_over and flush == 0:
             self.record_fps_event()
 
     def cairo_paint_box(self, gc, encoding: str, x: int, y: int, w: int, h: int) -> None:
@@ -257,13 +327,7 @@ class CairoBackingBase(WindowBackingBase):
             this method is only here to ensure that we always fire the callbacks,
             the actual paint code is in _do_paint_rgb[16|24|30|32]
         """
-        if not options.boolget("paint", True):
-            fire_paint_callbacks(callbacks)
-            return
-        if self._backing is None:
-            fire_paint_callbacks(callbacks, -1, "no backing")
-            return
-        x, y = self.gravity_adjust(x, y, options)
+        stage = None
         if rgb_format == "r210":
             bpp = 30
         elif rgb_format == "BGR565":
@@ -273,11 +337,44 @@ class CairoBackingBase(WindowBackingBase):
         if rowstride == 0:
             rowstride = width * roundup(bpp, 8) // 8
         try:
+            stage = self.get_subsurface_composite_stage(encoding, rgb_format, options)
+            if not options.boolget("paint", True):
+                if stage:
+                    raise ValueError("cannot skip a subsurface transaction stage")
+                self.invalidate_subsurface_transaction()
+                fire_paint_callbacks(callbacks)
+                return
+            if self._backing is None:
+                self.fail_subsurface_composite_stage(stage)
+                fire_paint_callbacks(callbacks, -1, "no backing")
+                return
+            if stage:
+                if min(width, height, render_width, render_height) <= 0:
+                    raise ValueError(
+                        "subsurface transaction dimensions must all be positive: "
+                        f"{width}x{height} to {render_width}x{render_height}"
+                    )
+                minimum_stride = width * 4
+                if rowstride < minimum_stride:
+                    raise ValueError(
+                        f"invalid subsurface rowstride {rowstride}, expected at least {minimum_stride}"
+                    )
+                needed = rowstride * (height - 1) + minimum_stride
+                if len(img_data) < needed:
+                    raise ValueError(
+                        f"not enough subsurface pixel data: {len(img_data)} bytes, expected {needed}"
+                    )
+            x, y = self.gravity_adjust(x, y, options)
+            if stage:
+                self.prepare_subsurface_composite_stage(stage)
+            else:
+                self.invalidate_subsurface_transaction()
+            source_over = stage is not None
             # `BGRX` and `RGBX` carry padding rather than alpha,
             # and the value of the `X` byte is undefined:
             # painting them into an `ARGB32` surface would turn it into transparency,
             # `RGB24` ignores it instead (and can still be painted without a copy)
-            paint_alpha = self._alpha_enabled and rgb_format.find("A") >= 0
+            paint_alpha = rgb_format.find("A") >= 0 and (source_over or self._alpha_enabled)
             fmt = {
                 16: Format.RGB16_565,
                 24: Format.RGB24,
@@ -289,11 +386,23 @@ class CairoBackingBase(WindowBackingBase):
             options["rgb_format"] = rgb_format
             # the `GdkPixbuf` fallback needs to know how many bytes per pixel the data has,
             # not whether we want to paint with alpha:
-            alpha = bpp == 32 and self._alpha_enabled
+            alpha = bpp == 32 and (self._alpha_enabled or source_over)
             self._do_paint_rgb(fmt, alpha, img_data,
-                               x, y, width, height, render_width, render_height, rowstride, options)
+                               x, y, width, height, render_width, render_height, rowstride, options,
+                               source_over, stage.reset_region if stage else ())
+            if stage and self.complete_subsurface_composite_stage(
+                    stage, painted_region=(x, y, render_width, render_height),
+            ):
+                # The private surface has already become the visible backing.
+                # Post-publication accounting cannot be allowed to turn that
+                # irreversible commit into a failed draw acknowledgement.
+                try:
+                    self.record_fps_event()
+                except Exception:
+                    log.error("Error recording a committed subsurface frame", exc_info=True)
             fire_paint_callbacks(callbacks, True)
         except Exception as e:
+            self.fail_subsurface_composite_stage(stage or options.get(SUBSURFACE_TRANSACTION_ID))
             if not self._backing:
                 fire_paint_callbacks(callbacks, -1, "paint error on closed backing ignored")
             else:
@@ -340,6 +449,7 @@ class CairoBackingBase(WindowBackingBase):
         return snapshot, x1, y1
 
     def do_paint_scroll(self, scrolls, callbacks: PaintCallbacks) -> None:
+        self.invalidate_subsurface_transaction()
         backing = self._backing
         if not backing:
             fire_paint_callbacks(callbacks, False, message="no backing")

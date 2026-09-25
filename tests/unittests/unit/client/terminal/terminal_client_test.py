@@ -135,6 +135,7 @@ class TerminalClientTest(unittest.TestCase):
         self.assertEqual(client.client_toolkit(), "terminal")
         self.assertEqual(client.client_type, "terminal")
         self.assertEqual(repr(client), "XpraTerminalClient")
+        self.assertNotIn("subsurface-composite", client.get_subsystem("window").get_window_caps())
 
     def test_scheduler_is_the_glib_one(self):
         client = self.make_client()

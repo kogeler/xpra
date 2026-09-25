@@ -61,6 +61,35 @@ def gravity_str(v) -> str:
 
 DEFAULT_DPI: int = 96
 
+# Exact draw-packet contract used when a server flattens a native subsurface
+# tree into one client backing.  Keeping the mode in the neutral common layer
+# makes capability negotiation, server publication and client rendering agree
+# without importing either endpoint's implementation modules.
+SUBSURFACE_COMPOSITE_MODE = "premultiplied-source-over-v1"
+# The versioned mode fixes the packed wire representations independently of
+# whether the top-level client window itself has an alpha channel.  X formats
+# are strictly opaque; A formats carry Wayland-premultiplied alpha.
+SUBSURFACE_COMPOSITE_FORMATS = ("BGRA", "RGBA", "BGRX", "RGBX")
+SUBSURFACE_TRANSACTION_ID = "subsurface-transaction-id"
+SUBSURFACE_STAGE_INDEX = "subsurface-stage-index"
+SUBSURFACE_STAGE_COUNT = "subsurface-stage-count"
+SUBSURFACE_TOPOLOGY_EPOCH = "subsurface-topology-epoch"
+SUBSURFACE_BACKING_EPOCH = "subsurface-backing-epoch"
+# Private client-side delivery token. `WindowDraw` overwrites this value at
+# ingress; it is never a server-owned wire option. The backing revalidates it
+# on the UI / GL thread before it can mutate private or visible pixels.
+SUBSURFACE_CLIENT_BACKING_STATE = "_client-subsurface-backing-state"
+# Every packet in this mode carries all five fields. Transaction identifiers
+# increase for each attempt; indices are contiguous from zero, and both epochs
+# and the stage count stay fixed until the final stage is committed.
+SUBSURFACE_TRANSACTION_OPTIONS = (
+    SUBSURFACE_TRANSACTION_ID,
+    SUBSURFACE_STAGE_INDEX,
+    SUBSURFACE_STAGE_COUNT,
+    SUBSURFACE_TOPOLOGY_EPOCH,
+    SUBSURFACE_BACKING_EPOCH,
+)
+
 
 def noop(*_args, **_kwargs) -> None:
     """ do nothing """

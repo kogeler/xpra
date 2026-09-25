@@ -34,6 +34,14 @@ GREY = (128, 128, 128)
 
 class X11ClientPaintTest(X11ClientTestUtil):
 
+    def _report_paint_failure(self, *processes):
+        # Preserve the first pixel failure and its real peers' diagnostics before
+        # teardown or a later native X11 failure can hide unittest's summary.
+        log.error("X11 client paint check failed", exc_info=True)
+        for proc in processes:
+            if proc is not None:
+                self.show_proc_pipes(proc)
+
     def _quadrant_centers(self, cw, ch):
         # sample near a corner of each quadrant, away from the "R"/"G"/"B"
         # text labels colors-plain draws at the center of the red/green/blue
@@ -68,6 +76,9 @@ class X11ClientPaintTest(X11ClientTestUtil):
                 x, y = point
                 self.wait_for_client_pixel(xvfb.display, xid, x, y, expected, tolerance=tolerance)
                 log("colors-plain %s quadrant OK at (%i, %i)", name, x, y)
+        except Exception:
+            self._report_paint_failure(client, server, xvfb)
+            raise
         finally:
             if client:
                 self.terminate_and_wait(client)
@@ -122,6 +133,9 @@ class X11ClientPaintTest(X11ClientTestUtil):
                     x, y = point
                     self.wait_for_client_pixel(client_display, xid, x, y, expected, tolerance=4)
                     log("colors-plain %s quadrant OK at (%i, %i)", name, x, y)
+            except Exception:
+                self._report_paint_failure(client, server, xvfb)
+                raise
             finally:
                 if client:
                     self.terminate_and_wait(client)

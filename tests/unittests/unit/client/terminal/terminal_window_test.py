@@ -204,6 +204,37 @@ class TerminalWindowTest(unittest.TestCase):
         self.assertEqual(tuple(props["encodings.rgb_formats"]), tuple(TerminalBacking.RGB_MODES))
         self.assertEqual(props["encoding.render-size"], (64, 32))
 
+    def test_unadvertised_subsurface_transaction_is_rejected_without_damage(self):
+        client, window = self.make_window()
+        window.show_all()
+        client.drain()
+        backing = window._backing
+        backing.get_damage()
+        before = bytes(backing.pixels)
+        results = []
+        options = typedict({
+            "rgb_format": "RGBA",
+            "subsurface-composite": "premultiplied-source-over-v1",
+            "subsurface-transaction-id": 1,
+            "subsurface-stage-index": 0,
+            "subsurface-stage-count": 1,
+            "subsurface-topology-epoch": 1,
+            "subsurface-backing-epoch": 1,
+            "subsurface-reset": (0, 0, 4, 4),
+            "flush": 0,
+        })
+        window.draw_region(
+            0, 0, 4, 4, "rgb32", bytes((1, 2, 3, 255)) * 16, 16, options,
+            [lambda success, message="": results.append((success, message))],
+        )
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0][0])
+        self.assertEqual(bytes(backing.pixels), before)
+        self.assertEqual(backing.get_damage(), [])
+        self.assertEqual(client.drain(), b"")
+        self.assertEqual(window.pending_refresh, [])
+        self.assertIsNone(window._subsurface_pending_refresh)
+
     def test_nothing_written_before_mapping(self):
         client, window = self.make_window()
         self.assertEqual(client.drain(), b"")

@@ -225,7 +225,7 @@ class WindowManagerClient(StubClientSubsystem):
     def get_window_caps(self) -> dict[str, Any]:
         if not self.windows_enabled:
             return {}
-        return {
+        caps = {
             "enabled": True,
             # implemented in the gtk client:
             "min-size": self.min_window_size,
@@ -243,6 +243,13 @@ class WindowManagerClient(StubClientSubsystem):
             # when another client focuses them:
             "sync-focus": self.sync_focus,
         }
+        # Backing semantics belong to the concrete UI client rather than this
+        # toolkit-neutral window manager. Unknown and non-GUI owners provide
+        # no hook and therefore advertise no rendering mode.
+        get_backing_caps = getattr(self.client, "get_window_backing_caps", None)
+        if callable(get_backing_caps):
+            caps.update(get_backing_caps())
+        return caps
 
     def parse_server_capabilities(self, c: typedict) -> bool:
         self.server_window_frame_extents = c.boolget("window.frame-extents")

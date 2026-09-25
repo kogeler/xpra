@@ -17,7 +17,7 @@ from xpra.wayland.server.wlroots cimport (
     wlr_seat_pointer_notify_motion, wlr_seat_pointer_notify_button, wlr_seat_pointer_notify_axis,
     wlr_seat_pointer_notify_enter, wlr_seat_pointer_notify_frame,
     wlr_seat_pointer_notify_clear_focus,
-    wlr_button_state,
+    wlr_surface_surface_at,
     WLR_BUTTON_PRESSED, WLR_BUTTON_RELEASED,
     WL_POINTER_AXIS_VERTICAL_SCROLL, WL_POINTER_AXIS_HORIZONTAL_SCROLL,
     WL_POINTER_AXIS_SOURCE_WHEEL, WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL,
@@ -64,7 +64,7 @@ cdef inline uint64_t get_time_usec() noexcept:
     return round((monotonic() - base_time) * 1000000)
 
 
-cdef inline int clamp_int(int value, int low, int high) noexcept:
+cdef inline double clamp_double(double value, double low, double high) noexcept:
     if value < low:
         return low
     if value > high:
@@ -91,8 +91,11 @@ cdef class WaylandPointer(ListenerObject):
     cdef wlr_surface *focused_surface
     cdef wlr_xdg_surface *focused_xdg_surface
     cdef wlr_pointer_constraint_v1 *active_constraint
-    cdef uint32_t offset_x
-    cdef uint32_t offset_y
+    # Translate the parent/XDG-window coordinates carried on the wire into
+    # the exact leaf wl_surface coordinates resolved by wlroots.  Child
+    # offsets may be negative and surface-at coordinates may be fractional.
+    cdef double offset_x
+    cdef double offset_y
     cdef int last_x
     cdef int last_y
     cdef bint have_last
@@ -110,8 +113,8 @@ cdef class WaylandPointer(ListenerObject):
         self.focused_surface = NULL
         self.focused_xdg_surface = NULL
         self.active_constraint = NULL
-        self.offset_x = 0
-        self.offset_y = 0
+        self.offset_x = 0.0
+        self.offset_y = 0.0
         self.last_x = 0
         self.last_y = 0
         self.have_last = False
@@ -154,8 +157,10 @@ cdef class WaylandPointer(ListenerObject):
         cdef uint32_t time = get_time_msec()
         cdef double dx = 0
         cdef double dy = 0
-        cdef int sx = x
-        cdef int sy = y
+        cdef double sx = x
+        cdef double sy = y
+        cdef double relx = 0
+        cdef double rely = 0
         if self.have_last:
             dx = x - self.last_x
             dy = y - self.last_y
@@ -170,52 +175,84 @@ cdef class WaylandPointer(ListenerObject):
             log("locked pointer constraint active: suppressing absolute motion")
             return
         if self.active_constraint != NULL and self.active_constraint.type == WLR_POINTER_CONSTRAINT_V1_CONFINED:
-            self.confine_position(&sx, &sy)
+            # Pointer constraints are expressed in focused leaf coordinates,
+            # whereas the stable wire stream remains parent-window local.
+            relx = sx + self.offset_x
+            rely = sy + self.offset_y
+            self.confine_position(&relx, &rely)
+            sx = relx - self.offset_x
+            sy = rely - self.offset_y
         self.cursor.x = sx
         self.cursor.y = sy
         # wlr_cursor_warp(self.cursor, NULL, sx, sy)
-        cdef uint32_t relx = sx + self.offset_x
-        cdef uint32_t rely = sy + self.offset_y
+        relx = sx + self.offset_x
+        rely = sy + self.offset_y
         wlr_seat_pointer_notify_motion(self.seat, time, relx, rely)
         wlr_seat_pointer_notify_frame(self.seat)
         # requires a device?
         # wlr_cursor_move(self.cursor, NULL, delta_x, delta_y)
 
-    def enter_surface(self, uintptr_t xdg_surface_ptr, x: int, y: int) -> bool:
+    def enter_surface(self, uintptr_t xdg_surface_ptr, x: int, y: int):
+        """Hit-test one XDG tree and focus its exact mapped input leaf.
+
+        ``x`` and ``y`` remain relative to the XDG window geometry used by
+        the client backing.  The returned pointer identifies the native leaf;
+        the coordinates are diagnostic and already leaf-local.
+        """
         cdef wlr_xdg_surface *xdg_surface = <wlr_xdg_surface*> xdg_surface_ptr
-        cdef wlr_surface *surface = xdg_surface.surface
-        if not surface:
-            log("surface is NULL")
-            return False
-        if not surface.mapped:
-            log("surface is not mapped")
-            return False
-        log("enter_surface(%#x, %i, %i) seat=%#x, surface=%#x",
-            xdg_surface_ptr, x, y, <uintptr_t> self.seat, <uintptr_t> surface)
-        if self.focused_surface != surface:
+        cdef wlr_surface *root_surface = NULL
+        cdef wlr_surface *surface = NULL
+        cdef double root_x = 0
+        cdef double root_y = 0
+        cdef double sub_x = 0
+        cdef double sub_y = 0
+        cdef bint changed = False
+        if xdg_surface == NULL:
+            log("XDG surface is NULL")
+            return ()
+        root_surface = xdg_surface.surface
+        if root_surface == NULL or not root_surface.mapped:
+            log("root surface is NULL or not mapped")
+            return ()
+        # Client backing coordinates use the XDG window geometry as origin;
+        # wlroots surface_at expects coordinates in the root wl_surface.
+        root_x = x + xdg_surface.geometry.x
+        root_y = y + xdg_surface.geometry.y
+        surface = wlr_surface_surface_at(root_surface, root_x, root_y, &sub_x, &sub_y)
+        if surface == NULL:
+            log("no mapped input surface at %i,%i", x, y)
+            return ()
+        log("enter_surface(%#x, %i, %i) seat=%#x, surface=%#x, local=%s",
+            xdg_surface_ptr, x, y, <uintptr_t> self.seat, <uintptr_t> surface, (sub_x, sub_y))
+        changed = self.focused_surface != surface
+        if changed:
             self.deactivate_constraint()
         self.focused_xdg_surface = xdg_surface
         self.focused_surface = surface
-        self.offset_x = xdg_surface.geometry.x
-        self.offset_y = xdg_surface.geometry.y
-        self.last_x = x
-        self.last_y = y
-        self.have_last = True
-        cdef uint32_t relx = x + self.offset_x
-        cdef uint32_t rely = y + self.offset_y
-        wlr_seat_pointer_notify_enter(self.seat, surface, relx, rely)
-        wlr_seat_pointer_notify_frame(self.seat)
-        self.activate_constraint()
-        return True
+        # Recompute this on every packet: a synchronized or desynchronized
+        # subsurface can move while the root wire WID remains unchanged.
+        self.offset_x = sub_x - x
+        self.offset_y = sub_y - y
+        if changed:
+            # The first motion after an enter must not synthesize a relative
+            # jump between two unrelated surface-local coordinate systems.
+            self.last_x = x
+            self.last_y = y
+            self.have_last = True
+            wlr_seat_pointer_notify_enter(self.seat, surface, sub_x, sub_y)
+            wlr_seat_pointer_notify_frame(self.seat)
+            self.activate_constraint()
+        return <uintptr_t> surface, sub_x, sub_y
 
     def leave_surface(self):
         log("leave_surface()")
         self.deactivate_constraint()
         wlr_seat_pointer_notify_clear_focus(self.seat)
+        wlr_seat_pointer_notify_frame(self.seat)
         self.focused_surface = NULL
         self.focused_xdg_surface = NULL
-        self.offset_x = 0
-        self.offset_y = 0
+        self.offset_x = 0.0
+        self.offset_y = 0.0
         self.have_last = False
 
     def click(self, button: int, pressed: bool, props: dict) -> None:
@@ -301,21 +338,21 @@ cdef class WaylandPointer(ListenerObject):
         wlr_pointer_constraint_v1_send_deactivated(constraint)
 
     cdef void constraint_region_changed(self, wlr_pointer_constraint_v1 *constraint) noexcept:
-        cdef int x = 0
-        cdef int y = 0
+        cdef double x = 0
+        cdef double y = 0
         log("pointer constraint %#x region changed", <uintptr_t> constraint)
         if constraint == self.active_constraint and constraint.type == WLR_POINTER_CONSTRAINT_V1_CONFINED:
-            x = <int> self.cursor.x
-            y = <int> self.cursor.y
+            x = self.cursor.x + self.offset_x
+            y = self.cursor.y + self.offset_y
             self.confine_position(&x, &y)
-            self.cursor.x = x
-            self.cursor.y = y
+            self.cursor.x = x - self.offset_x
+            self.cursor.y = y - self.offset_y
 
-    cdef void confine_position(self, int *x, int *y) noexcept:
-        cdef int min_x = 0
-        cdef int min_y = 0
-        cdef int max_x = 0
-        cdef int max_y = 0
+    cdef void confine_position(self, double *x, double *y) noexcept:
+        cdef double min_x = 0
+        cdef double min_y = 0
+        cdef double max_x = 0
+        cdef double max_y = 0
         cdef wlr_pointer_constraint_v1 *constraint = self.active_constraint
         if self.focused_surface == NULL:
             return
@@ -331,8 +368,8 @@ cdef class WaylandPointer(ListenerObject):
             max_x = min_x
         if max_y < min_y:
             max_y = min_y
-        x[0] = clamp_int(x[0], min_x, max_x)
-        y[0] = clamp_int(y[0], min_y, max_y)
+        x[0] = clamp_double(x[0], min_x, max_x)
+        y[0] = clamp_double(y[0], min_y, max_y)
 
 
 cdef class PointerConstraint(ListenerObject):
