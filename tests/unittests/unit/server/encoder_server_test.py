@@ -10,10 +10,12 @@ import tempfile
 import unittest
 from time import monotonic, sleep
 from threading import Event, current_thread
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from xpra.os_util import POSIX
 from xpra.util.io import pollwait
+from xpra.util.objects import typedict
 from unit.process_test_util import ProcessTestUtil, log
 
 # the socket path must fit in `sockaddr_un.sun_path`:
@@ -103,9 +105,12 @@ def stop_encode_thread(ss, gate: Event) -> None:
     gate.set()
     thread = ss.encode_thread
     if thread:
-        # an end of queue marker may already have been posted, one more is harmless:
-        ss.queue_encode(None)
+        # Only the connection owns terminal queue admission; this is idempotent
+        # after normal close and also releases the worker after a failed check.
+        ss.stop_encode_thread()
         thread.join(10)
+        if thread.is_alive():
+            raise AssertionError("encoder cleanup test leaked its encode worker")
 
 
 class EncoderServerCleanupTest(unittest.TestCase):
@@ -116,6 +121,7 @@ class EncoderServerCleanupTest(unittest.TestCase):
 
     def test_cleanup_source_order(self):
         from xpra.server.encoder.server import EncoderServer
+        from xpra.server.source import factory
         from xpra.server.source.client_connection import ClientConnection
         from xpra.server.source.encoding import EncodingsConnection
 
@@ -129,12 +135,23 @@ class EncoderServerCleanupTest(unittest.TestCase):
             def clean(self) -> None:
                 events.append(("encoder cleaned", current_thread().name))
 
-        ss = ClientConnection(Mock(), Mock(), Mock())
-        ss.init_state()
+        # Exercise the actual initialized connection/encoding muxer, not encoding
+        # methods transplanted onto a bare ClientConnection with partial state.
+        bases = (ClientConnection, EncodingsConnection)
+        with patch.object(factory, "get_needed_based_classes", return_value=bases):
+            connection_class = factory.get_client_connection_class(typedict())
+        protocol = SimpleNamespace(
+            is_closed=lambda: False, _conn=SimpleNamespace(output_bytecount=0),
+            source_has_more=Mock(), set_packet_source=Mock(),
+        )
+        source_server = SimpleNamespace(subsystems={"encoding": SimpleNamespace(
+            core_encodings=("rgb24", "rgb32"), encodings=("rgb",),
+            default_encoding="", scaling_control=None,
+            default_quality=0, default_min_quality=0, default_speed=0, default_min_speed=0,
+        )})
+        ss = connection_class(protocol, Mock(), source_server, Mock())
         ss.uuid = "test-uuid"
-        ss.cancel_recalculate_timer = Mock()
         ss.cuda_device_context = FakeCudaContext()
-        ss.free_cuda_device_context = EncodingsConnection.free_cuda_device_context.__get__(ss)
 
         server = EncoderServer.__new__(EncoderServer)
         server.encoders = {ss.uuid: {1: FakeEncoder()}}
@@ -151,10 +168,7 @@ class EncoderServerCleanupTest(unittest.TestCase):
         self.assertEqual(server.encoders, {})
         self.assertEqual(events, [], "the encoders must not be cleaned from the calling thread")
 
-        # `ClientConnectionMuxer.close()`, in mixin cleanup order:
-        ss.close_event.set()
-        EncodingsConnection.cleanup(ss)
-        ss.cleanup()
+        ss.close()
 
         gate.set()
         ss.encode_thread.join(10)

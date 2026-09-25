@@ -8,6 +8,7 @@ import time
 import operator
 from math import sqrt, ceil
 from functools import reduce
+from threading import RLock
 from time import monotonic
 from typing import Any
 from collections.abc import Callable, Iterable, Sequence
@@ -30,7 +31,7 @@ from xpra.server.window.compress import (
 from xpra.net.common import Packet, BACKWARDS_COMPATIBLE
 from xpra.net.packet_type import WINDOW_EOS
 from xpra.util.rectangle import rectangle, merge_all
-from xpra.server.window.video_subregion import VideoSubregion, VIDEO_SUBREGION
+from xpra.server.window.video_subregion import VideoSubregion, VIDEO_SUBREGION, attach_source
 from xpra.server.window.video_scoring import get_pipeline_score
 from xpra.codecs.constants import PREFERRED_ENCODING_ORDER, EDGE_ENCODING_ORDER, preforder, CSCSpec
 from xpra.codecs.protocols import VideoEncoder
@@ -185,16 +186,62 @@ class WindowVideoSource(WindowSource):
 
     def __init__(self, *args):
         self.supports_scrolling: bool = False
+        self._init_video_lifecycle()
         # this will call init_vars():
         super().__init__(*args)
         self.scroll_min_percent: int = self.encoding_options.intget("scrolling.min-percent", SCROLL_MIN_PERCENT)
         self.scroll_preference: int = self.encoding_options.intget("scrolling.preference", 100)
         self.supports_video_b_frames: Sequence[str] = self.encoding_options.strtupleget("video_b_frames", ())
         self.video_max_size = self.encoding_options.inttupleget("video_max_size", (8192, 8192), 2, 2)
-        self.video_stream_file = None
+        self.video_subregion = VideoSubregion(self.refresh_subregion, self.auto_refresh_delay, VIDEO_SUBREGION)
+        self.video_subregion.supported = VIDEO_SUBREGION
 
     def __repr__(self) -> str:
         return f"WindowVideoSource({self.wid:#x} : {self.window_dimensions})"
+
+    def _init_video_lifecycle(self) -> None:
+        """Initialize resource ownership once, before reusable policy state."""
+        self._video_state_lock = RLock()
+        self._video_refresh_lock = RLock()
+        self._video_source_closed = False
+        self._video_cleanup_queued = False
+        self.video_fallback_refresh_idle = 0
+        self._video_fallback_refresh_generation = 0
+        self.video_subregion: VideoSubregion | None = None
+        self.video_encoder_timer: GLib.Source | int = 0
+        self._video_encoder_timer_generation = 0
+        self.b_frame_flush_timer: GLib.Source | int = 0
+        self._b_frame_flush_generation = 0
+        self.b_frame_flush_data: tuple = ()
+        self.encode_from_queue_timer: GLib.Source | int = 0
+        self.encode_from_queue_due = 0.0
+        self._encode_from_queue_generation = 0
+        self.scroll_data = None
+        self._csc_encoder: ColorspaceConverter | None = None
+        self._video_encoder: VideoEncoder | None = None
+        self.video_stream_file = None
+        self._video_stream_encoder = None
+
+    @staticmethod
+    def _raise_video_cleanup_errors(scope: str, errors: list[tuple[BaseException, Any]]) -> None:
+        if not errors:
+            return
+        for later_error, later_traceback in errors[1:]:
+            log.error("Additional error during %s: %s", scope, later_error,
+                      exc_info=(type(later_error), later_error, later_traceback))
+        error, traceback = errors[0]
+        raise error.with_traceback(traceback)
+
+    @classmethod
+    def _remove_video_sources(cls, *sources: GLib.Source | int) -> None:
+        remove_errors: list[tuple[BaseException, Any]] = []
+        for source in sources:
+            if source:
+                try:
+                    source.destroy()
+                except BaseException as e:
+                    remove_errors.append((e, e.__traceback__))
+        cls._raise_video_cleanup_errors("video timer removal", remove_errors)
 
     def init_vars(self) -> None:
         super().init_vars()
@@ -212,30 +259,17 @@ class WindowVideoSource(WindowSource):
         self.last_pipeline_scores : tuple = ()
         self.last_pipeline_time: float = 0.0
 
-        self.video_subregion = VideoSubregion(self.refresh_subregion, self.auto_refresh_delay, VIDEO_SUBREGION)
-        self.video_subregion.supported = VIDEO_SUBREGION
         self.video_encodings: Sequence[str] = ()
         self.common_video_encodings: Sequence[str] = ()
         self.non_video_encodings: Sequence[str] = ()
         self.video_fallback_encodings: dict = {}
         self.edge_encoding: str = ""
         self.start_video_frame: int = 0
-        self.video_encoder_timer: int = 0
-        self.b_frame_flush_timer: int = 0
-        self.b_frame_flush_data : tuple = ()
-        self.encode_from_queue_timer: int = 0
-        self.encode_from_queue_due = 0
-        self.scroll_data = None
         self.last_scroll_time = 0.0
-
-        self._csc_encoder: ColorspaceConverter | None = None
-        self._video_encoder: VideoEncoder | None = None
         self._last_pipeline_check = 0
 
     def do_init_encoders(self) -> None:
         super().do_init_encoders()
-        self._csc_encoder = None
-        self._video_encoder = None
         self._last_pipeline_check = 0
 
         def add(enc, encode_fn) -> None:
@@ -275,6 +309,11 @@ class WindowVideoSource(WindowSource):
         log(f" non video encodings={self.non_video_encodings}")
         if "scroll" in self.server_core_encodings:
             add("scroll", self.scroll_encode)
+
+    def init_encoders(self) -> None:
+        if hasattr(self, "_encoders"):
+            self.video_context_clean()
+        super().init_encoders()
 
     def do_set_auto_refresh_delay(self, min_delay, delay) -> None:
         super().do_set_auto_refresh_delay(min_delay, delay)
@@ -357,57 +396,121 @@ class WindowVideoSource(WindowSource):
             "src_format"    : src_format
         }
 
-    def video_context_clean(self, encode_thread: bool = False) -> None:
+    def video_context_clean(self, encode_thread: bool = False, send_eos: bool = False) -> None:
         """Detach the video context and clean it from the encode thread."""
-        self.cancel_video_encoder_flush()
-        self.cancel_video_encoder_timer()
-        csce = self._csc_encoder
-        ve = self._video_encoder
-        if csce or ve:
-            if DEBUG_VIDEO_CLEAN:
+        cleanup_errors: list[tuple[BaseException, Any]] = []
+        for cancel in (self.cancel_video_encoder_flush, self.cancel_video_encoder_timer):
+            try:
+                cancel()
+            except BaseException as e:
+                cleanup_errors.append((e, e.__traceback__))
+        with self._video_state_lock:
+            if self._video_cleanup_queued and not encode_thread:
+                self._raise_video_cleanup_errors("video context cleanup", cleanup_errors)
+                return
+            csce = self._csc_encoder
+            ve = self._video_encoder
+            if (csce or ve) and DEBUG_VIDEO_CLEAN:
                 log.warn("video_context_clean() for wid %i: %s and %s", self.wid, csce, ve, backtrace=True)
             self._csc_encoder = None
             self._video_encoder = None
 
-        def clean() -> None:
-            if DEBUG_VIDEO_CLEAN:
-                log.warn("video_context_clean() done")
-            if csce:
-                self.csc_clean(csce)
-            if ve:
-                self.ve_clean(ve)
-            # this function always runs from the encode thread
-            # but the `video_context_clean` may have been called from another thread,
-            # in which case we want to run it again to close video contexts
-            # that may have been instantiated in the meantime:
-            if not encode_thread:
-                self.video_context_clean(True)
+            def clean() -> None:
+                errors: list[tuple[BaseException, Any]] = []
 
-        if encode_thread:
-            # already in the correct thread
-            clean()
-        else:
-            self.call_in_encode_thread(clean)
+                def attempt(callback: Callable, *args) -> None:
+                    try:
+                        callback(*args)
+                    except BaseException as e:
+                        errors.append((e, e.__traceback__))
+
+                if DEBUG_VIDEO_CLEAN:
+                    attempt(log.warn, "video_context_clean() done")
+                if csce:
+                    attempt(self.csc_clean, csce)
+                if ve:
+                    if send_eos:
+                        attempt(self.ve_clean, ve, True)
+                    else:
+                        attempt(self.ve_clean, ve)
+                if not encode_thread:
+                    # Work ahead of this callback may have published a pair.
+                    # Its late sweep is serialized by the same encode worker.
+                    attempt(self.video_context_clean, True)
+                self._raise_video_cleanup_errors("worker video context cleanup", errors)
+
+            if not encode_thread:
+                try:
+                    # Keep detachment and FIFO publication in one critical
+                    # section: terminal cleanup cannot overtake this owner.
+                    self.call_in_encode_thread(clean)
+                    if self._video_source_closed:
+                        self._video_cleanup_queued = True
+                except BaseException as e:
+                    # Rejection precedes queue admission. Keep the pair owned
+                    # by the source rather than losing it or freeing it on UI.
+                    # The terminal encode-ended sweep can still retire it on
+                    # the worker; ordinary reconfiguration may explicitly retry.
+                    self._csc_encoder = csce
+                    self._video_encoder = ve
+                    cleanup_errors.append((e, e.__traceback__))
+
+        try:
+            if encode_thread:
+                # Native teardown never executes under the video-state lock.
+                clean()
+        except BaseException as e:
+            cleanup_errors.append((e, e.__traceback__))
+        self._raise_video_cleanup_errors("video context cleanup", cleanup_errors)
 
     # noinspection PyMethodMayBeStatic
     def csc_clean(self, csce) -> None:
         if csce:
             csce.clean()
 
-    def ve_clean(self, ve) -> None:
-        self.cancel_video_encoder_timer()
+    def clean_unpublished_pipeline(self, csce, ve) -> None:
+        """Release codec instances which have not been transferred to the source fields."""
+        try:
+            if csce:
+                self.csc_clean(csce)
+        finally:
+            if ve:
+                ve.clean()
+
+    def ve_clean(self, ve, send_eos: bool | None = None) -> None:
+        errors: list[tuple[BaseException, Any]] = []
+        try:
+            self.cancel_video_encoder_timer()
+        except BaseException as e:
+            errors.append((e, e.__traceback__))
         if ve:
-            ve.clean()
+            if send_eos is None:
+                send_eos = self._video_encoder == ve
+            cleaned = False
+            try:
+                ve.clean()
+                cleaned = True
+            except BaseException as e:
+                errors.append((e, e.__traceback__))
+            finally:
+                if SAVE_VIDEO_STREAMS and self._video_stream_encoder is ve:
+                    try:
+                        self.close_video_stream_file()
+                    except BaseException as e:
+                        errors.append((e, e.__traceback__))
             # only send eos if this video encoder is still current,
             # (otherwise, sending the new stream will have taken care of it already,
             # and sending eos then would close the new stream, not the old one!)
-            if self._video_encoder == ve:
-                log("sending eos for wid %i", self.wid)
-                self.queue_packet((WINDOW_EOS, self.wid))
-            if SAVE_VIDEO_STREAMS:
-                self.close_video_stream_file()
+            if cleaned and send_eos:
+                try:
+                    log("sending eos for wid %i", self.wid)
+                    self.queue_packet((WINDOW_EOS, self.wid))
+                except BaseException as e:
+                    errors.append((e, e.__traceback__))
+        self._raise_video_cleanup_errors("video encoder cleanup", errors)
 
     def close_video_stream_file(self) -> None:
+        self._video_stream_encoder = None
         if vsf := self.video_stream_file:
             self.video_stream_file = None
             with log.trap_error(f"Error closing video stream file {vsf}"):
@@ -416,6 +519,44 @@ class WindowVideoSource(WindowSource):
     def ui_cleanup(self) -> None:
         super().ui_cleanup()
         self.video_subregion = None
+
+    def encode_ended(self) -> None:
+        # This is the base-owned terminal worker barrier. A previously rejected
+        # handoff may have left a pair or scroll state source-owned. Retire those
+        # exact remaining owners here, not on UI and not by retrying a destructor
+        # whose detached object already received its one cleanup attempt.
+        errors: list[tuple[BaseException, Any]] = []
+        for callback, args in (
+            (self.video_context_clean, (True,)),
+            (self.do_free_scroll_data, ()),
+            (super().encode_ended, ()),
+        ):
+            try:
+                callback(*args)
+            except BaseException as e:
+                errors.append((e, e.__traceback__))
+        self._raise_video_cleanup_errors("terminal video barrier", errors)
+
+    def cleanup(self) -> None:
+        with self._video_state_lock:
+            self._video_source_closed = True
+        cleanup_errors: list[tuple[BaseException, Any]] = []
+        try:
+            self.cancel_video_fallback_refresh()
+        except BaseException as e:
+            cleanup_errors.append((e, e.__traceback__))
+        try:
+            if vs := self.video_subregion:
+                vs.cleanup()
+        except BaseException as e:
+            cleanup_errors.append((e, e.__traceback__))
+        try:
+            # A subregion failure must not bypass inherited timer, icon,
+            # damage, encoder-barrier, or model cleanup.
+            super().cleanup()
+        except BaseException as e:
+            cleanup_errors.append((e, e.__traceback__))
+        self._raise_video_cleanup_errors("video source cleanup", cleanup_errors)
 
     def set_new_encoding(self, encoding : str, strict=None) -> None:
         if self.encoding != encoding:
@@ -666,16 +807,24 @@ class WindowVideoSource(WindowSource):
         # first of all, mark the sequences as cancelled,
         # so that the encode thread will not try to use
         # the images we are about to free below:
-        super().cancel_damage(limit)
-        self.cancel_encode_from_queue()
-        self.free_encode_queue_images()
+        errors: list[tuple[BaseException, Any]] = []
+        callbacks = [
+            (super().cancel_damage, (limit,)),
+            (self.cancel_encode_from_queue, ()),
+            (self.cancel_video_fallback_refresh, ()),
+            (self.free_encode_queue_images, ()),
+        ]
         if vsr := self.video_subregion:
-            vsr.cancel_refresh_timer()
-        self.free_scroll_data()
+            callbacks.append((vsr.cancel_refresh_timer, ()))
+            callbacks.append((vsr.cancel_nonvideo_refresh_timer, ()))
+        callbacks += [(self.free_scroll_data, ()), (self.video_context_clean, ())]
+        for callback, args in callbacks:
+            try:
+                callback(*args)
+            except BaseException as e:
+                errors.append((e, e.__traceback__))
         self.last_scroll_time = 0
-        # we must clean the video encoder to ensure
-        # we will resend a key frame because we may be missing a frame
-        self.video_context_clean()
+        self._raise_video_cleanup_errors("video damage cancellation", errors)
 
     def full_quality_refresh(self, damage_options: dict) -> None:
         vs = self.video_subregion
@@ -948,8 +1097,6 @@ class WindowVideoSource(WindowSource):
                                 image: ImageWrapper,
                                 coding: str, sequence: int, eoptions: typedict, flush=0):
         """
-            This may be called from any thread - the window object should not be accessed here.
-
             Actual damage region processing:
             we extract the rgb data from the pixmap and:
             * if doing av-sync, we place the data on the encode queue with a timer,
@@ -980,20 +1127,28 @@ class WindowVideoSource(WindowSource):
                 image.freeze()
 
         def call_encode(ew: int, eh: int, eimage: ImageWrapper, encoding: str, flush: int) -> None:
-            if self.is_cancelled(sequence):
-                free_image_wrapper(eimage)
-                log("call_encode: sequence %s is cancelled", sequence)
-                return
             now = monotonic()
             log("process_damage_region: wid=%#x, sequence=%i, adding pixel data to encode queue (%4ix%-4i - %5s), elapsed time: %3.1f ms, request time: %3.1f ms, frame delay=%3ims",   # noqa: E501
                 self.wid, sequence, ew, eh, encoding, 1000*(now-damage_time), 1000*(now-rgb_request_time), av_delay)
             item = (ew, eh, damage_time, now, eimage, encoding, sequence, eoptions, flush)
-            if av_delay <= 0:
-                # the encode thread now owns this image and must free it:
-                self.call_in_encode_thread(self.make_data_packet_cb, *item)
-            else:
-                self.encode_queue.append(item)
-                self.schedule_encode_from_queue(av_delay)
+            with self._video_state_lock:
+                cancelled = self._video_source_closed or self.is_cancelled(sequence)
+                if not cancelled:
+                    if av_delay <= 0:
+                        # A successful return transfers ownership. Do not run
+                        # fallible diagnostics after queue admission.
+                        self.call_in_encode_thread(self.make_data_packet_cb, *item)
+                    else:
+                        self.encode_queue.append(item)
+                        try:
+                            self.schedule_encode_from_queue(av_delay)
+                        except BaseException:
+                            # This item was never handed to the encode worker.
+                            # The caller still owns it on failed admission.
+                            self.encode_queue.remove(item)
+                            raise
+            if cancelled:
+                free_image_wrapper(eimage)
         # now figure out if we need to send edges separately:
         ee = self.edge_encoding
         ow = w
@@ -1001,25 +1156,38 @@ class WindowVideoSource(WindowSource):
         w = w & self.width_mask
         h = h & self.height_mask
         regions = []
-        if video_mode and ee:
-            dw = ow - w
-            dh = oh - h
-            if dw > 0 and h > 0:
-                sub = image.get_sub_image(w, 0, dw, oh)
-                regions.append((dw, h, sub, ee))
-            if dh > 0 and w > 0:
-                sub = image.get_sub_image(0, h, ow, dh)
-                regions.append((dw, h, sub, ee))
-        # the main area:
-        if w > 0 and h > 0:
-            regions.append((w, h, image, coding))
-        # process all regions:
-        if regions:
-            # ensure that the flush value ends at 0 on the last region:
-            flush = max(len(regions)-1, flush or 0)
-            for i, region in enumerate(regions):
-                w, h, image, coding = region
-                call_encode(w, h, image, coding, flush-i)
+        accepted = 0
+        try:
+            if video_mode and ee:
+                dw = ow - w
+                dh = oh - h
+                if dw > 0 and oh > 0:
+                    sub = image.get_sub_image(w, 0, dw, oh)
+                    regions.append((dw, oh, sub, ee))
+                if dh > 0 and w > 0:
+                    sub = image.get_sub_image(0, h, w, dh)
+                    regions.append((w, dh, sub, ee))
+            # The caller's original image remains the last handoff. On error
+            # it is still caller-owned; only unaccepted derived images belong
+            # to this frame fanout and need to be retired here.
+            if w > 0 and h > 0:
+                regions.append((w, h, image, coding))
+            if regions:
+                flush = max(len(regions)-1, flush or 0)
+                for i, (rw, rh, region_image, region_coding) in enumerate(regions):
+                    call_encode(rw, rh, region_image, region_coding, flush-i)
+                    accepted += 1
+        except BaseException as e:
+            errors = [(e, e.__traceback__)]
+            for _, _, sub, _ in regions[accepted:]:
+                if sub is not image:
+                    try:
+                        free_image_wrapper(sub)
+                    except BaseException as cleanup_error:
+                        errors.append((cleanup_error, cleanup_error.__traceback__))
+            self._raise_video_cleanup_errors("video image admission", errors)
+        if not any(region[2] is image for region in regions):
+            free_image_wrapper(image)
         return True
 
     def get_frame_encode_delay(self, options: dict) -> int:
@@ -1043,43 +1211,77 @@ class WindowVideoSource(WindowSource):
         return self.av_sync_delay
 
     def cancel_encode_from_queue(self) -> None:
-        # free all items in the encode queue:
-        self.encode_from_queue_due = 0
-        eqt: int = self.encode_from_queue_timer
-        avsynclog("cancel_encode_from_queue() timer=%s for wid=%#x", eqt, self.wid)
-        if eqt:
+        with self._video_state_lock:
+            self._encode_from_queue_generation += 1
+            eqt = self.encode_from_queue_timer
             self.encode_from_queue_timer = 0
-            GLib.source_remove(eqt)
+            self.encode_from_queue_due = 0
+        if eqt:
+            eqt.destroy()
 
     def free_encode_queue_images(self) -> None:
         # must be called from the UI thread, which is the only thread
         # allowed to modify the encode queue - see `encode_from_queue`
-        eq = self.encode_queue
-        avsynclog("free_encode_queue_images() freeing %i images for wid=%#x", len(eq), self.wid)
-        if not eq:
-            return
-        self.encode_queue = []
+        with self._video_state_lock:
+            eq = self.encode_queue
+            self.encode_queue = []
+        errors: list[tuple[BaseException, Any]] = []
         for item in eq:
-            image = item[4]
-            with log.trap_error(f"Error: cannot free image wrapper {image}"):
-                free_image_wrapper(image)
+            try:
+                free_image_wrapper(item[4])
+            except BaseException as e:
+                errors.append((e, e.__traceback__))
+        self._raise_video_cleanup_errors("AV image cleanup", errors)
 
     def schedule_encode_from_queue(self, av_delay: int) -> None:
         # must be called from the UI thread for synchronization
         # we ensure that the timer will fire no later than av_delay
         # re-scheduling it if it was due later than that
         due = monotonic()+av_delay/1000.0
-        if self.encode_from_queue_due == 0 or due < self.encode_from_queue_due:
+        with self._video_state_lock:
+            if self._video_source_closed:
+                return
+            if self.encode_from_queue_due and due >= self.encode_from_queue_due:
+                return
             self.cancel_encode_from_queue()
-            self.encode_from_queue_due = due
-            self.encode_from_queue_timer = GLib.timeout_add(av_delay, self.timer_encode_from_queue)
+            generation = self._encode_from_queue_generation
+            source = GLib.timeout_source_new(av_delay)
+            try:
+                source.set_callback(lambda *_args: self.timer_encode_from_queue(generation))
+                self.encode_from_queue_due = due
+                self.encode_from_queue_timer = source
+                source.attach(None)
+            except BaseException:
+                if generation == self._encode_from_queue_generation:
+                    self.encode_from_queue_timer = 0
+                    self.encode_from_queue_due = 0
+                    self._encode_from_queue_generation += 1
+                source.destroy()
+                raise
 
-    def timer_encode_from_queue(self) -> None:
-        self.encode_from_queue_timer = 0
-        self.encode_from_queue_due = 0
+    def timer_encode_from_queue(self, generation: int) -> bool:
+        with self._video_state_lock:
+            if self._video_source_closed or generation != self._encode_from_queue_generation:
+                return False
+            self._encode_from_queue_generation += 1
+            self.encode_from_queue_timer = 0
+            self.encode_from_queue_due = 0
+        # Preserve upstream's single UI owner of the AV list. Only an individual
+        # make_data_packet_cb transfers an image to the encode worker.
         self.encode_from_queue()
+        return False
 
     def encode_from_queue(self) -> None:
+        with self._video_refresh_lock:
+            with self._video_state_lock:
+                if self._video_source_closed:
+                    return
+            self.update_av_sync_delay()
+            with self._video_state_lock:
+                if not self._video_source_closed:
+                    self._encode_from_queue()
+
+    def _encode_from_queue(self) -> None:
         # note: we use a queue here to ensure we preserve the order
         # (so we encode frames in the same order they were grabbed)
         # this runs in the UI thread: it is the only thread allowed to modify the queue,
@@ -1090,7 +1292,6 @@ class WindowVideoSource(WindowSource):
         avsynclog("encode_from_queue: %s items for wid=%#x", len(eq), self.wid)
         if not eq:
             return      # nothing to encode, must have been picked off already
-        self.update_av_sync_delay()
         # find the first item which is due
         # in seconds, same as monotonic():
         if len(self.encode_queue) >= self.encode_queue_max_size:
@@ -1101,34 +1302,34 @@ class WindowVideoSource(WindowSource):
             av_delay = self.av_sync_delay/1000.0
         now = monotonic()
         still_due = []
-        remove = []
         done_packet = False     # only one packet per iteration
-        for index, item in enumerate(eq):
+        index = 0
+        while index < len(eq):
+            item = eq[index]
             # item = (w, h, damage_time, now, image, coding, sequence, options, flush)
             sequence = item[6]
             if self.is_cancelled(sequence):
+                eq.pop(index)
                 free_image_wrapper(item[4])
-                remove.append(index)
                 continue
             ts = item[3]
             due = ts + av_delay
             if due <= now and not done_packet:
                 # found an item which is due
-                remove.append(index)
                 avsynclog("encode_from_queue: processing item %s/%s (overdue by %ims)",
                           index+1, len(self.encode_queue), int(1000*(now-due)))
                 # the encode thread now owns this image and must free it:
                 self.call_in_encode_thread(self.make_data_packet_cb, *item)
+                # Remove each accepted image immediately: a later item's free
+                # or next timer's attachment may fail independently.
+                eq.pop(index)
                 done_packet = True
+                continue
             else:
                 # we only process one item per call (see "done_packet")
                 # and just keep track of extra ones:
                 still_due.append(int(1000*(due-now)))
-        # remove the items we've dealt with:
-        # (in reverse order since we pop them from the queue)
-        if remove:
-            for x in reversed(remove):
-                eq.pop(x)
+            index += 1
         # if there are still some items left in the queue, re-schedule:
         if not still_due:
             avsynclog("encode_from_queue: nothing due")
@@ -1743,8 +1944,7 @@ class WindowVideoSource(WindowSource):
         videolog("check_pipeline%s setting up a new pipeline as check failed - encodings=%s",
                  (encodings, width, height, src_format), encodings)
         # cleanup existing one if needed:
-        self.csc_clean(self._csc_encoder)
-        self.ve_clean(self._video_encoder)
+        self.video_context_clean(True, send_eos=True)
         # and make a new one:
         w = width & self.width_mask
         h = height & self.height_mask
@@ -1898,8 +2098,7 @@ class WindowVideoSource(WindowSource):
                     return False
                 videolog.warn("Warning: failed to setup video pipeline %s", option, exc_info=True)
             # we're here because an exception occurred, cleanup before trying again:
-            self.csc_clean(self._csc_encoder)
-            self.ve_clean(self._video_encoder)
+            self.video_context_clean(True, send_eos=True)
         end = monotonic()
         videolog("setup_pipeline(..) failed! took %.2fms", (end-start) * 1000)
         return False
@@ -1947,11 +2146,15 @@ class WindowVideoSource(WindowSource):
             csc_options["full-range"] = encoder_spec.full_range
             csc_start = monotonic()
             csce = csc_spec.make_instance()
-            csce.init_context(csc_width, csc_height, src_format,
-                              enc_width, enc_height, enc_in_format, csc_options)
-            csc_end = monotonic()
-            csclog("setup_pipeline: csc=%s, info=%s, setup took %.2fms",
-                   csce, csce.get_info(), (csc_end - csc_start) * 1000)
+            try:
+                csce.init_context(csc_width, csc_height, src_format,
+                                  enc_width, enc_height, enc_in_format, csc_options)
+                csc_end = monotonic()
+                csclog("setup_pipeline: csc=%s, info=%s, setup took %.2fms",
+                       csce, csce.get_info(), (csc_end - csc_start) * 1000)
+            except BaseException:
+                self.clean_unpublished_pipeline(csce, None)
+                raise
         else:
             csce = None
             # use the encoder's mask directly since that's all we have to worry about!
@@ -1966,41 +2169,55 @@ class WindowVideoSource(WindowSource):
                 videolog("scaling is now enabled, so skipping %s", encoder_spec)
                 return False
         enc_start = monotonic()
-        ve = encoder_spec.make_instance()
-        options.update(self.get_video_encoder_options(encoding, width, height))
-        if self.encoding == "grayscale":
-            options["grayscale"] = True
-        if encoder_scaling != (1, 1):
-            n, d = encoder_scaling
-            options["scaling"] = encoder_scaling
-            options["scaled-width"] = enc_width*n//d
-            options["scaled-height"] = enc_height*n//d
-        options["dst-formats"] = dst_formats
-        options["datagram"] = self.datagram
-        # the encoder consumes images in the range the csc was asked to produce,
-        # so that it can signal it in the bitstream from the very first frame:
-        options["full-range"] = encoder_spec.full_range
+        ve = None
+        published = False
+        released = False
+        try:
+            ve = encoder_spec.make_instance()
+            options.update(self.get_video_encoder_options(encoding, width, height))
+            if self.encoding == "grayscale":
+                options["grayscale"] = True
+            if encoder_scaling != (1, 1):
+                n, d = encoder_scaling
+                options["scaling"] = encoder_scaling
+                options["scaled-width"] = enc_width*n//d
+                options["scaled-height"] = enc_height*n//d
+            options["dst-formats"] = dst_formats
+            options["datagram"] = self.datagram
+            # the encoder consumes images in the range the csc was asked to produce,
+            # so that it can signal it in the bitstream from the very first frame:
+            options["full-range"] = encoder_spec.full_range
 
-        ve.init_context(encoding, enc_width, enc_height, enc_in_format, typedict(options))
-        # record new actual limits:
-        self.actual_scaling = scaling
-        self.width_mask = width_mask
-        self.height_mask = height_mask
-        self.min_w = min_w
-        self.min_h = min_h
-        self.max_w = max_w
-        self.max_h = max_h
-        enc_end = monotonic()
-        self.start_video_frame = 0
-        # publish both together, back-to-back, to narrow the window during which
-        # video_context_clean() (running on another thread) could observe a
-        # half-updated pair and end up clearing only one of the two:
-        self._csc_encoder = csce
-        self._video_encoder = ve
-        videolog("setup_pipeline: csc=%s, video encoder=%s, info: %s, setup took %.2fms",
-                 csce, ve, ve.get_info(), (enc_end - enc_start) * 1000)
-        scalinglog("setup_pipeline: scaling=%s, encoder_scaling=%s", scaling, encoder_scaling)
-        return True
+            ve.init_context(encoding, enc_width, enc_height, enc_in_format, typedict(options))
+            enc_end = monotonic()
+            # Publication and terminal teardown share one ownership boundary.
+            # A completed constructor which loses this race remains local and
+            # is released here rather than becoming visible on a closed source.
+            with self._video_state_lock:
+                if not self._video_source_closed:
+                    self.actual_scaling = scaling
+                    self.width_mask = width_mask
+                    self.height_mask = height_mask
+                    self.min_w = min_w
+                    self.min_h = min_h
+                    self.max_w = max_w
+                    self.max_h = max_h
+                    self.start_video_frame = 0
+                    self._csc_encoder = csce
+                    self._video_encoder = ve
+                    published = True
+            if not published:
+                released = True
+                self.clean_unpublished_pipeline(csce, ve)
+                return False
+            videolog("setup_pipeline: csc=%s, video encoder=%s, info: %s, setup took %.2fms",
+                     csce, ve, ve.get_info(), (enc_end - enc_start) * 1000)
+            scalinglog("setup_pipeline: scaling=%s, encoder_scaling=%s", scaling, encoder_scaling)
+            return True
+        except BaseException:
+            if not published and not released:
+                self.clean_unpublished_pipeline(csce, ve)
+            raise
 
     def get_video_encoder_options(self, encoding, width, height) -> dict[str, Any]:
         # tweaks for "real" video:
@@ -2042,7 +2259,9 @@ class WindowVideoSource(WindowSource):
         return packet
 
     def free_scroll_data(self) -> None:
-        self.call_in_encode_thread(self.do_free_scroll_data)
+        with self._video_state_lock:
+            if not self._video_cleanup_queued:
+                self.call_in_encode_thread(self.do_free_scroll_data)
 
     def do_free_scroll_data(self) -> None:
         sd = self.scroll_data
@@ -2480,6 +2699,7 @@ class WindowVideoSource(WindowSource):
             if SAVE_VIDEO_PATH:
                 stream_filename = os.path.join(SAVE_VIDEO_PATH, stream_filename)
             self.video_stream_file = open(stream_filename, "wb")
+            self._video_stream_encoder = ve
             log.info("saving new %s stream for window %i to %s", ve.get_encoding(), self.wid, stream_filename)
         if self.video_stream_file and data:
             self.video_stream_file.write(data)
@@ -2526,33 +2746,72 @@ class WindowVideoSource(WindowSource):
         return actual_encoding, Compressed(actual_encoding, data), client_options, width, height, 0, 24
 
     def cancel_video_encoder_flush(self) -> None:
-        self.cancel_video_encoder_flush_timer()
-        self.b_frame_flush_data = ()
+        with self._video_state_lock:
+            self._b_frame_flush_generation += 1
+            bft = self.b_frame_flush_timer
+            self.b_frame_flush_timer = 0
+            self.b_frame_flush_data = ()
+        self._remove_video_sources(bft)
 
     def cancel_video_encoder_flush_timer(self) -> None:
-        if bft := self.b_frame_flush_timer:
+        with self._video_state_lock:
+            self._b_frame_flush_generation += 1
+            bft = self.b_frame_flush_timer
             self.b_frame_flush_timer = 0
-            GLib.source_remove(bft)
+        self._remove_video_sources(bft)
 
     def schedule_video_encoder_flush(self, ve, csc, frame, x: int, y: int, scaled_size) -> None:
         flush_delay: int = max(150, min(500, int(self.batch_config.delay*10)))
-        self.b_frame_flush_data = (ve, csc, frame, x, y, scaled_size)
-        self.b_frame_flush_timer = GLib.timeout_add(flush_delay, self.flush_video_encoder)
+        with self._video_state_lock:
+            if self._video_source_closed:
+                return
+            self._b_frame_flush_generation += 1
+            generation = self._b_frame_flush_generation
+            old_timer = self.b_frame_flush_timer
+            self.b_frame_flush_timer = 0
+            self.b_frame_flush_data = (ve, csc, frame, x, y, scaled_size)
+        if old_timer:
+            old_timer.destroy()
+        timer = attach_source(GLib.timeout_source_new(flush_delay), self.flush_video_encoder, generation)
+        with self._video_state_lock:
+            if self._video_source_closed or generation != self._b_frame_flush_generation:
+                remove = True
+            else:
+                self.b_frame_flush_timer = timer
+                remove = False
+        if remove:
+            timer.destroy()
 
     def flush_video_encoder_now(self) -> None:
         # this can be called before the timer is due
         self.cancel_video_encoder_flush_timer()
         self.flush_video_encoder()
 
-    def flush_video_encoder(self) -> None:
+    def flush_video_encoder(self, generation: int = 0) -> bool:
         # this runs in the UI thread as scheduled by schedule_video_encoder_flush,
         # but we want to run from the encode thread to access the encoder:
-        self.b_frame_flush_timer = 0
-        if self.b_frame_flush_data:
-            self.call_in_encode_thread(self.do_flush_video_encoder)
+        with self._video_state_lock:
+            if generation and generation != self._b_frame_flush_generation:
+                return False
+            if self._video_source_closed or not self.b_frame_flush_data:
+                return False
+            self._b_frame_flush_generation += 1
+            worker_generation = self._b_frame_flush_generation
+            self.b_frame_flush_timer = 0
+            flush_data = self.b_frame_flush_data
+            # Preserve the requested frame across the UI-to-worker handoff.
+            # A later encode or cancellation invalidates this exact generation.
+            self.call_in_encode_thread(self.do_flush_video_encoder, worker_generation, flush_data)
+        return False
 
-    def do_flush_video_encoder(self) -> None:
-        flush_data = self.b_frame_flush_data
+    def do_flush_video_encoder(self, generation: int = 0, flush_data: tuple = ()) -> None:
+        with self._video_state_lock:
+            if generation and (self._video_source_closed or generation != self._b_frame_flush_generation):
+                return
+            self._b_frame_flush_generation += 1
+            if not flush_data:
+                flush_data = self.b_frame_flush_data
+            self.b_frame_flush_data = ()
         videolog("do_flush_video_encoder: %s", flush_data)
         if not flush_data:
             return
@@ -2561,10 +2820,10 @@ class WindowVideoSource(WindowSource):
             return
         if frame == 0 and ve.get_type() == "x264":
             # x264 has problems if we try to re-use a context after flushing the first IDR frame
-            self.ve_clean(self._video_encoder)
+            self.video_context_clean(True, send_eos=True)
             if self.non_video_encodings:
                 log("do_flush_video_encoder() scheduling novideo refresh")
-                GLib.idle_add(self.refresh, {"novideo": True})
+                self.schedule_video_fallback_refresh()
                 videolog("flushed frame 0, novideo refresh requested")
             return
         w = ve.get_width()
@@ -2609,25 +2868,83 @@ class WindowVideoSource(WindowSource):
             if closed:
                 self.video_context_clean(True)
 
+    def cancel_video_fallback_refresh(self) -> None:
+        # A claimed UI refresh may enter generic timer code. Fence it with its
+        # own lock so no refresh body runs under _video_state_lock.
+        with self._video_refresh_lock:
+            with self._video_state_lock:
+                self._video_fallback_refresh_generation += 1
+                source = self.video_fallback_refresh_idle
+                self.video_fallback_refresh_idle = 0
+            self._remove_video_sources(source)
+
+    def schedule_video_fallback_refresh(self) -> None:
+        self.cancel_video_fallback_refresh()
+        with self._video_state_lock:
+            if self._video_source_closed:
+                return
+            generation = self._video_fallback_refresh_generation
+        source = attach_source(GLib.idle_source_new(), self.video_fallback_refresh, generation)
+        with self._video_state_lock:
+            if self._video_source_closed or generation != self._video_fallback_refresh_generation:
+                remove = True
+            else:
+                self.video_fallback_refresh_idle = source
+                remove = False
+        if remove:
+            self._remove_video_sources(source)
+
+    def video_fallback_refresh(self, generation: int) -> bool:
+        with self._video_refresh_lock:
+            with self._video_state_lock:
+                if self._video_source_closed or generation != self._video_fallback_refresh_generation:
+                    return False
+                self._video_fallback_refresh_generation += 1
+                self.video_fallback_refresh_idle = 0
+            self.refresh({"novideo": True})
+        return False
+
     def cancel_video_encoder_timer(self) -> None:
-        if vet := self.video_encoder_timer:
+        with self._video_state_lock:
+            self._video_encoder_timer_generation += 1
+            vet = self.video_encoder_timer
             self.video_encoder_timer = 0
-            GLib.source_remove(vet)
+        self._remove_video_sources(vet)
 
     def schedule_video_encoder_timer(self) -> None:
-        if not self.video_encoder_timer:
+        with self._video_state_lock:
+            if self._video_source_closed or self.video_encoder_timer:
+                return
             vs = self.video_subregion
             if vs and vs.detection:
                 timeout = VIDEO_TIMEOUT
             else:
                 timeout = VIDEO_NODETECT_TIMEOUT
-            if timeout > 0:
-                self.video_encoder_timer = GLib.timeout_add(timeout*1000, self.video_encoder_timeout)
+            if timeout <= 0:
+                return
+            self._video_encoder_timer_generation += 1
+            generation = self._video_encoder_timer_generation
+        timer = attach_source(GLib.timeout_source_new(timeout*1000), self.video_encoder_timeout, generation)
+        with self._video_state_lock:
+            if self._video_source_closed or generation != self._video_encoder_timer_generation:
+                remove = True
+            else:
+                self.video_encoder_timer = timer
+                remove = False
+        if remove:
+            timer.destroy()
 
-    def video_encoder_timeout(self) -> None:
-        videolog("video_encoder_timeout() will close video encoder=%s", self._video_encoder)
-        self.video_encoder_timer = 0
-        self.video_context_clean()
+    def video_encoder_timeout(self, generation: int) -> bool:
+        with self._video_state_lock:
+            if generation != self._video_encoder_timer_generation:
+                return False
+            self._video_encoder_timer_generation += 1
+            self.video_encoder_timer = 0
+            if self._video_source_closed:
+                return False
+            videolog("video_encoder_timeout() will close video encoder=%s", self._video_encoder)
+            self.video_context_clean()
+        return False
 
     def csc_image(self, image: ImageWrapper, width: int, height: int) -> tuple:
         """

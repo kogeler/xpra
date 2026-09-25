@@ -5,10 +5,12 @@
 # later version. See the file COPYING for details.
 
 import os
+from threading import RLock
 from math import sqrt
 from typing import Any
 from time import sleep, monotonic
 from collections.abc import Sequence
+from contextlib import nullcontext
 
 from xpra.os_util import gi_import
 from xpra.net.common import FULL_INFO, BACKWARDS_COMPATIBLE
@@ -58,6 +60,9 @@ class EncodingsConnection(StubClientConnection):
         return bool(caps.dictget("encoding") or caps.strtupleget("encodings")) or wants_windows(caps)
 
     def init_state(self) -> None:
+        self._encoding_state_lock = RLock()
+        self._calculate_execution_lock = RLock()
+        self._encoding_closed = False
         # contains default values, some of which may be supplied by the client:
         self.default_batch_config = batch_config.DamageBatchConfig()
         self.global_batch_config = self.default_batch_config.clone()  # global batch config
@@ -78,7 +83,8 @@ class EncodingsConnection(StubClientConnection):
         # for managing the recalculate_delays work:
         self.calculate_window_pixels: dict[int, int] = {}
         self.calculate_window_ids: set[int] = set()
-        self.calculate_timer = 0
+        self.calculate_timer: GLib.Source | int = 0
+        self._calculate_request: object | None = None
         self.calculate_last_time: float = 0
 
         self.video_helper = getVideoHelper()
@@ -97,31 +103,65 @@ class EncodingsConnection(StubClientConnection):
         self.default_min_speed = enc.default_min_speed
 
     def reinit_encodings(self, server) -> None:
-        self.server_core_encodings = server.core_encodings
-        self.server_encodings = server.encodings
+        with self._encoding_state_lock:
+            if self._encoding_closed or self.is_closed():
+                return
+            self.server_core_encodings = server.core_encodings
+            self.server_encodings = server.encodings
         # If this client connected before nvenc finished loading, CUDA context allocation
         # was skipped in parse_encoding_caps. Allocate it now if still missing.
         if not self.cuda_device_context and self.wants_cuda_device():
             self.allocate_cuda_device_context()
         # Propagate cuda context to any window sources created before it was available.
-        if self.cuda_device_context:
-            for ws in self.all_window_sources():
-                if not ws.cuda_device_context:
-                    ws.cuda_device_context = self.cuda_device_context
+        with self._encoding_state_lock:
+            if self._encoding_closed or self.is_closed():
+                return
+            context = self.cuda_device_context
+            if context:
+                get_sources = getattr(self, "all_pixel_sources", self.all_window_sources)
+                for ws in get_sources():
+                    if not ws.cuda_device_context:
+                        ws.cuda_device_context = context
 
     def cleanup(self) -> None:
-        self.cancel_recalculate_timer()
+        with self._encoding_state_lock:
+            if self._encoding_closed:
+                return
+            self._encoding_closed = True
+        errors: list[tuple[BaseException, Any]] = []
+        try:
+            self.cancel_recalculate_timer()
+        except BaseException as error:
+            errors.append((error, error.__traceback__))
+        # Background calculation is a separate producer, not drained by the
+        # encode FIFO. Wait without holding its short publication lock before
+        # the reverse muxer traversal releases window state.
+        with self._calculate_execution_lock:
+            with self._encoding_state_lock:
+                self.calculate_window_ids.clear()
+                self.calculate_window_pixels.clear()
         # the video encoders are using the cuda context, and they are only cleaned up
         # when the window subsystem is - which happens after this one,
         # so this can only be freed at the very end.
-        # this is queued unconditionally because a context can still be allocated
-        # after this point (ie: `reinit_encodings` when the codecs finish loading),
-        # `free_cuda_device_context` is the one checking if there is anything to free:
-        self.call_in_encode_thread_at_end(self.free_cuda_device_context)
+        # Preserve the unconditional upstream tail registration. A constructor
+        # losing to the publication fence frees its unpublished candidate;
+        # the worker tail frees any context which was already published.
+        try:
+            self.call_in_encode_thread_at_end(self.free_cuda_device_context)
+        except BaseException as error:
+            errors.append((error, error.__traceback__))
+        if errors:
+            for error, traceback in errors[1:]:
+                log.error("Additional error during encoding cleanup: %s", error,
+                          exc_info=(type(error), error, traceback))
+            error, traceback = errors[0]
+            raise error.with_traceback(traceback)
 
     def free_cuda_device_context(self) -> None:
-        if cdd := self.cuda_device_context:
+        with self._encoding_state_lock:
+            cdd = self.cuda_device_context
             self.cuda_device_context = None
+        if cdd:
             cdd.free()
 
     def all_window_sources(self) -> tuple:
@@ -161,12 +201,28 @@ class EncodingsConnection(StubClientConnection):
         if not mmap_write_area or not mmap_write_area.enabled:
             self.print_encoding_info()
 
-    def recalculate_delays(self) -> None:
+    def recalculate_delays(self, request: object | None = None) -> None:
         """ calls update_averages() on `ServerSource.statistics` (`GlobalStatistics`)
             and `WindowSource.statistics` (`WindowPerformanceStatistics`) for each window id in calculate_window_ids,
             this runs in the worker thread.
         """
-        self.calculate_timer = 0
+        with self._calculate_execution_lock:
+            with self._encoding_state_lock:
+                if self._encoding_closed or self.is_closed():
+                    return
+                if request is not None:
+                    if self._calculate_request is not request:
+                        return
+                    self._calculate_request = None
+                # Claim this batch before admitting a successor. Failed
+                # successor publication must not erase the active batch.
+                wids = tuple(self.calculate_window_ids)
+                self.calculate_window_ids.clear()
+                for wid in wids:
+                    self.calculate_window_pixels.pop(wid, None)
+            self._recalculate_delays(wids)
+
+    def _recalculate_delays(self, wids: Sequence[int]) -> None:
         if self.is_closed():
             return
         now = monotonic()
@@ -196,26 +252,25 @@ class EncodingsConnection(StubClientConnection):
                             log("failed to query TCP_INFO for %s", conn, exc_info=True)
             stats.update_averages()
         may_update_bandwidth_limits(self)
-        wids = tuple(self.calculate_window_ids)  # make a copy so we don't clobber new wids
         focus = self.get_focus()
-        sources = self.window_sources.items()
+        get_window_sources = getattr(self, "window_source_items", lambda: tuple(self.window_sources.items()))
+        source_operation = getattr(self, "pixel_source_operation", nullcontext)
+        sources = get_window_sources()
         maximized_wids = tuple(wid for wid, source in sources if source is not None and source.maximized)
         fullscreen_wids = tuple(wid for wid, source in sources if source is not None and source.fullscreen)
         log("recalculate_delays() wids=%s, focus=%s, maximized=%s, fullscreen=%s",
             wids, focus, maximized_wids, fullscreen_wids)
         for wid in wids:
-            # this is safe because we only add to this set from other threads:
-            self.calculate_window_ids.remove(wid)
-            self.calculate_window_pixels.pop(wid, None)
-            ws = self.window_sources.get(wid)
-            if ws is None:
-                continue
-            with log.trap_error("Error calculating delays for window %s", wid):
-                ws.statistics.update_averages()
-                ws.calculate_batch_delay(wid == focus,
-                                         len(fullscreen_wids) > 0 and wid not in fullscreen_wids,
-                                         len(maximized_wids) > 0 and wid not in maximized_wids)
-                ws.reconfigure()
+            get_pixel_source = getattr(self, "get_pixel_source", self.window_sources.get)
+            with source_operation(get_pixel_source(wid)) as ws:
+                if ws is None:
+                    continue
+                with log.trap_error("Error calculating delays for window %s", wid):
+                    ws.statistics.update_averages()
+                    ws.calculate_batch_delay(wid == focus,
+                                             len(fullscreen_wids) > 0 and wid not in fullscreen_wids,
+                                             len(maximized_wids) > 0 and wid not in maximized_wids)
+                    ws.reconfigure()
             if self.is_closed():
                 return
             # allow other threads to run
@@ -223,16 +278,17 @@ class EncodingsConnection(StubClientConnection):
             sleep(0)
         # calculate weighted average as new global default delay:
         wdimsum, wdelay, tsize, tcount = 0, 0, 0, 0
-        for ws in tuple(self.window_sources.values()):
-            if ws.batch_config.last_updated <= 0:
-                continue
-            w, h = ws.window_dimensions
-            tsize += w * h
-            tcount += 1
-            time_w = 2.0 + (now - ws.batch_config.last_updated)  # add 2 seconds to even things out
-            weight = int(w * h * time_w)
-            wdelay += ws.batch_config.delay * weight
-            wdimsum += weight
+        for _wid, source in get_window_sources():
+            with source_operation(source) as ws:
+                if ws is None or ws.batch_config.last_updated <= 0:
+                    continue
+                w, h = ws.window_dimensions
+                tsize += w * h
+                tcount += 1
+                time_w = 2.0 + (now - ws.batch_config.last_updated)  # add 2 seconds to even things out
+                weight = int(w * h * time_w)
+                wdelay += ws.batch_config.delay * weight
+                wdimsum += weight
         if wdimsum > 0 and tcount > 0:
             # weighted delay:
             delay = wdelay // wdimsum
@@ -248,29 +304,74 @@ class EncodingsConnection(StubClientConnection):
                 normalized_delay, delay, wdelay, avg_size, ratio)
 
     def may_recalculate(self, wid: int, pixel_count: int) -> None:
-        if wid in self.calculate_window_ids:
-            return  # already scheduled
-        v = self.calculate_window_pixels.get(wid, 0) + pixel_count
-        self.calculate_window_pixels[wid] = v
-        if v < MIN_PIXEL_RECALCULATE:
-            return  # not enough pixel updates
-        statslog("may_recalculate(%#x, %i) total %i pixels, scheduling recalculate work item", wid, pixel_count, v)
-        self.calculate_window_ids.add(wid)
-        if self.calculate_timer:
-            # already due
-            return
-        delta = monotonic() - self.calculate_last_time
-        RECALCULATE_DELAY = 1.0  # 1s
-        if delta > RECALCULATE_DELAY:
-            add_work_item(self.recalculate_delays)
-        else:
-            delay = int(1000 * (RECALCULATE_DELAY - delta))
-            self.calculate_timer = GLib.timeout_add(delay, add_work_item, self.recalculate_delays)
+        with self._encoding_state_lock:
+            if self._encoding_closed or self.is_closed():
+                return
+            if wid in self.calculate_window_ids:
+                return
+            v = self.calculate_window_pixels.get(wid, 0) + pixel_count
+            self.calculate_window_pixels[wid] = v
+            if v < MIN_PIXEL_RECALCULATE:
+                return
+            statslog("may_recalculate(%#x, %i) total %i pixels, scheduling recalculate work item", wid, pixel_count, v)
+            self.calculate_window_ids.add(wid)
+            if self._calculate_request is not None:
+                return
+            request = object()
+            self._calculate_request = request
+
+            def calculate() -> None:
+                self.recalculate_delays(request)
+
+            def rollback() -> None:
+                if self._calculate_request is request:
+                    self._calculate_request = None
+                    # Keep the pixel totals so the next real update can retry.
+                    # No active calculation owns these pending IDs: it takes a
+                    # separate batch before releasing its admission state.
+                    self.calculate_window_ids.clear()
+
+            delta = monotonic() - self.calculate_last_time
+            recalculate_delay = 1.0
+            timer = None
+            try:
+                if delta > recalculate_delay:
+                    add_work_item(calculate)
+                    return
+                delay = int(1000 * (recalculate_delay - delta))
+                timer = GLib.timeout_source_new(delay)
+
+                def enqueue_recalculate(*_args) -> bool:
+                    with self._encoding_state_lock:
+                        if self.calculate_timer is not timer or self._calculate_request is not request:
+                            return False
+                        self.calculate_timer = 0
+                        try:
+                            add_work_item(calculate)
+                        except BaseException:
+                            rollback()
+                            raise
+                    return False
+
+                timer.set_callback(enqueue_recalculate)
+                self.calculate_timer = timer
+                timer.attach()
+            except BaseException:
+                rollback()
+                if self.calculate_timer is timer:
+                    self.calculate_timer = 0
+                if timer is not None:
+                    timer.destroy()
+                raise
 
     def cancel_recalculate_timer(self) -> None:
-        if ct := self.calculate_timer:
+        with self._encoding_state_lock:
+            timer = self.calculate_timer
             self.calculate_timer = 0
-            GLib.source_remove(ct)
+            self._calculate_request = None
+            self.calculate_window_ids.clear()
+        if timer:
+            timer.destroy()
 
     def parse_client_caps(self, c: typedict) -> None:
         # batch options:
@@ -408,24 +509,39 @@ class EncodingsConnection(StubClientConnection):
 
     def allocate_cuda_device_context(self):
         cudalog = Logger("cuda")
-        cudalog(f"allocate_cuda_device_context() cuda_device_context={self.cuda_device_context}")
-        if not self.cuda_device_context:
-            try:
-                # pylint: disable=import-outside-toplevel
-                from xpra.codecs.nvidia.cuda.context import get_device_context
-            except ImportError as e:
-                cudalog(f"unable to import cuda context: {e}")
+        with self._encoding_state_lock:
+            if self._encoding_closed or self.is_closed():
                 return None
-            try:
-                self.cuda_device_context = get_device_context(self.encoding_options)
-                cudalog("cuda_device_context=%s", self.cuda_device_context)
-            except Exception as e:
-                cudalog("failed to get a cuda device context using encoding options %s",
-                        self.encoding_options, exc_info=True)
-                cudalog.error("Error: failed to allocate a CUDA context:")
-                cudalog.estr(e)
-                cudalog.error(" NVJPEG and NVENC will not be available")
-        return self.cuda_device_context
+            if self.cuda_device_context:
+                return self.cuda_device_context
+        try:
+            # pylint: disable=import-outside-toplevel
+            from xpra.codecs.nvidia.cuda.context import get_device_context
+        except ImportError as e:
+            cudalog(f"unable to import cuda context: {e}")
+            return None
+        try:
+            candidate = get_device_context(self.encoding_options)
+        except Exception as e:
+            cudalog("failed to get a cuda device context using encoding options %s",
+                    self.encoding_options, exc_info=True)
+            cudalog.error("Error: failed to allocate a CUDA context:")
+            cudalog.estr(e)
+            cudalog.error(" NVJPEG and NVENC will not be available")
+            return None
+        if not candidate:
+            return None
+        with self._encoding_state_lock:
+            if self._encoding_closed or self.is_closed():
+                current = None
+            elif current := self.cuda_device_context:
+                pass
+            else:
+                self.cuda_device_context = current = candidate
+        if current is not candidate:
+            candidate.free()
+        cudalog("cuda_device_context=%s", current)
+        return current
 
     def print_encoding_info(self) -> None:
         log("print_encoding_info() core-encodings=%s, server-core-encodings=%s",

@@ -4,6 +4,7 @@
 # later version. See the file COPYING for details.
 
 import math
+from threading import RLock
 from time import monotonic
 from typing import Any
 from collections.abc import Callable, Sequence
@@ -57,8 +58,25 @@ def scoreinout(ww: int, wh: int, region, incount: int, outcount: int) -> int:
     return max(0, int(score))
 
 
+def attach_source(source: GLib.Source, callback: Callable, *args) -> GLib.Source:
+    """Retain the exact GLib source across callback-before-attach-return."""
+    try:
+        source.set_callback(lambda *_user_data: callback(*args))
+        source.attach(None)
+    except BaseException:
+        source.destroy()
+        raise
+    return source
+
+
 class VideoSubregion:
     def __init__(self, refresh_cb: Callable, auto_refresh_delay: int, supported=False):
+        self._lifecycle_lock = RLock()
+        self._closed = False
+        self._refresh_generation = 0
+        self._nonvideo_refresh_generation = 0
+        self.refresh_timer = 0
+        self.nonvideo_refresh_timer = 0
         self.refresh_cb = refresh_cb  # usage: refresh_cb(window, regions)
         self.auto_refresh_delay = auto_refresh_delay
         self.supported = supported
@@ -76,194 +94,338 @@ class VideoSubregion:
         self.set_at = 0  # value of the "damage event count" when the region was set
         self.counter = 0  # value of the "damage event count" recorded at "time"
         self.time: float = 0  # see above
-        self.refresh_timer = 0
         self.refresh_regions: list[rectangle] = []
         self.last_scores: dict[rectangle | None, int] = {}
         self.nonvideo_regions: list[rectangle] = []
-        self.nonvideo_refresh_timer = 0
         # keep track of how much extra we batch non-video regions (milliseconds):
         self.non_max_wait = 150
         self.min_time = monotonic()
 
+    def _cancel_timers_locked(self) -> tuple[GLib.Source | int, GLib.Source | int]:
+        """Invalidate both timer leases and return their retained source objects."""
+        self._refresh_generation += 1
+        refresh_timer = self.refresh_timer
+        self.refresh_timer = 0
+        self._nonvideo_refresh_generation += 1
+        nonvideo_refresh_timer = self.nonvideo_refresh_timer
+        self.nonvideo_refresh_timer = 0
+        return refresh_timer, nonvideo_refresh_timer
+
+    @staticmethod
+    def _remove_timers(*timers: GLib.Source | int) -> None:
+        remove_errors: list[tuple[BaseException, Any]] = []
+        for timer in timers:
+            if timer:
+                try:
+                    timer.destroy()
+                except BaseException as e:
+                    remove_errors.append((e, e.__traceback__))
+        if remove_errors:
+            for later_error, later_traceback in remove_errors[1:]:
+                refreshlog.error("Additional error removing a video subregion timer: %s", later_error,
+                                 exc_info=(type(later_error), later_error, later_traceback))
+            error, traceback = remove_errors[0]
+            raise error.with_traceback(traceback)
+
     def reset(self) -> None:
-        self.cancel_refresh_timer()
-        self.cancel_nonvideo_refresh_timer()
-        self.init_vars()
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            timers = self._cancel_timers_locked()
+            self.init_vars()
+        self._remove_timers(*timers)
 
     def cleanup(self) -> None:
-        self.reset()
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            timers = self._cancel_timers_locked()
+            self.init_vars()
+        self._remove_timers(*timers)
 
     def __repr__(self):
         return f"VideoSubregion({self.rectangle})"
 
     def set_enabled(self, enabled: bool) -> None:
-        self.enabled = enabled
-        if not enabled:
-            self.novideoregion("disabled")
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self.enabled = enabled
+            if not enabled:
+                self.novideoregion("disabled")
 
     def set_detection(self, detection: bool) -> None:
-        self.detection = detection
-        if not self.detection:
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self.detection = detection
+        if not detection:
             self.reset()
 
     def set_region(self, x: int, y: int, w: int, h: int) -> None:
-        sslog("set_region%s", (x, y, w, h))
-        if self.detection:
-            sslog("video region detection is on - the given region may or may not stick")
-        if x == 0 and y == 0 and w == 0 and h == 0:
-            self.novideoregion("empty")
-        else:
-            self.rectangle = rectangle(x, y, w, h)
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            sslog("set_region%s", (x, y, w, h))
+            if self.detection:
+                sslog("video region detection is on - the given region may or may not stick")
+            if x == 0 and y == 0 and w == 0 and h == 0:
+                self.novideoregion("empty")
+            else:
+                self.rectangle = rectangle(x, y, w, h)
 
     def set_exclusion_zones(self, zones) -> None:
         rects = []
         for (x, y, w, h) in zones:
             rects.append(rectangle(int(x), int(y), int(w), int(h)))
-        self.exclusion_zones = rects
-        # force expire:
-        self.counter = 0
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self.exclusion_zones = rects
+            # force expire:
+            self.counter = 0
 
     def set_auto_refresh_delay(self, d: int) -> None:
         refreshlog("subregion auto-refresh delay: %s", d)
         if not isinstance(d, int):
             raise ValueError(f"delay is not an int: {d} ({type(d)})")
-        self.auto_refresh_delay = d
+        with self._lifecycle_lock:
+            if not self._closed:
+                self.auto_refresh_delay = d
 
     def cancel_refresh_timer(self) -> None:
-        if rt := self.refresh_timer:
-            refreshlog("%s.cancel_refresh_timer() timer=%s", self, rt)
+        with self._lifecycle_lock:
+            self._refresh_generation += 1
+            rt = self.refresh_timer
             self.refresh_timer = 0
-            GLib.source_remove(rt)
+        if rt:
+            refreshlog("%s.cancel_refresh_timer() timer=%s", self, rt)
+            rt.destroy()
+
+    def _publish_refresh_timer(self, delay: int, generation: int) -> None:
+        with self._lifecycle_lock:
+            if self._closed or generation != self._refresh_generation:
+                return
+        timer = attach_source(GLib.timeout_source_new(delay), self.refresh, generation)
+        with self._lifecycle_lock:
+            if self._closed or generation != self._refresh_generation:
+                remove = True
+            else:
+                self.refresh_timer = timer
+                remove = False
+        if remove:
+            timer.destroy()
+
+    def schedule_refresh(self, delay: int) -> None:
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._refresh_generation += 1
+            generation = self._refresh_generation
+            old_timer = self.refresh_timer
+            self.refresh_timer = 0
+        if old_timer:
+            old_timer.destroy()
+        self._publish_refresh_timer(delay, generation)
+
+    def _publish_nonvideo_refresh_timer(self, delay: int, generation: int) -> None:
+        with self._lifecycle_lock:
+            if self._closed or generation != self._nonvideo_refresh_generation:
+                return
+        timer = attach_source(GLib.timeout_source_new(delay), self.nonvideo_refresh, generation)
+        with self._lifecycle_lock:
+            if self._closed or generation != self._nonvideo_refresh_generation:
+                remove = True
+            else:
+                self.nonvideo_refresh_timer = timer
+                remove = False
+        if remove:
+            timer.destroy()
+
+    def schedule_nonvideo_refresh(self, delay: int) -> None:
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._nonvideo_refresh_generation += 1
+            generation = self._nonvideo_refresh_generation
+            old_timer = self.nonvideo_refresh_timer
+            self.nonvideo_refresh_timer = 0
+        if old_timer:
+            old_timer.destroy()
+        self._publish_nonvideo_refresh_timer(delay, generation)
 
     def get_info(self) -> dict[str, Any]:
-        r = self.rectangle
-        info: dict[str, Any] = {
-            "supported": self.supported,
-            "enabled": self.enabled,
-            "detection": self.detection,
-            "counter": self.counter,
-            "auto-refresh-delay": self.auto_refresh_delay,
-        }
-        if r is None:
+        with self._lifecycle_lock:
+            r = self.rectangle
+            info: dict[str, Any] = {
+                "supported": self.supported,
+                "enabled": self.enabled,
+                "detection": self.detection,
+                "counter": self.counter,
+                "auto-refresh-delay": self.auto_refresh_delay,
+            }
+            if r is None:
+                return info
+            info.update({
+                "x": r.x,
+                "y": r.y,
+                "width": r.width,
+                "height": r.height,
+                "rectangle": (r.x, r.y, r.width, r.height),
+                "set-at": self.set_at,
+                "time": int(self.time),
+                "min-time": int(self.min_time),
+                "non-max-wait": self.non_max_wait,
+                "timer": self.refresh_timer.get_id() if self.refresh_timer else 0,
+                "nonvideo-timer": self.nonvideo_refresh_timer.get_id() if self.nonvideo_refresh_timer else 0,
+                "in-out": self.inout,
+                "score": self.score,
+                "fps": self.fps,
+                "damaged": self.damaged,
+                "exclusion-zones": [(r.x, r.y, r.width, r.height) for r in self.exclusion_zones]
+            })
+            if ls := self.last_scores:
+                # convert rectangles into tuples:
+                info["scores"] = {r.get_geometry(): score for r, score in ls.items() if r is not None}
+            rr = tuple(self.refresh_regions)
+            if rr:
+                for i, r in enumerate(rr):
+                    info[f"refresh_region[{i}]"] = (r.x, r.y, r.width, r.height)
+            nvrr = tuple(self.nonvideo_regions)
+            if nvrr:
+                for i, r in enumerate(nvrr):
+                    info[f"nonvideo_refresh_region[{i}]"] = (r.x, r.y, r.width, r.height)
             return info
-        info.update({
-            "x": r.x,
-            "y": r.y,
-            "width": r.width,
-            "height": r.height,
-            "rectangle": (r.x, r.y, r.width, r.height),
-            "set-at": self.set_at,
-            "time": int(self.time),
-            "min-time": int(self.min_time),
-            "non-max-wait": self.non_max_wait,
-            "timer": self.refresh_timer,
-            "nonvideo-timer": self.nonvideo_refresh_timer,
-            "in-out": self.inout,
-            "score": self.score,
-            "fps": self.fps,
-            "damaged": self.damaged,
-            "exclusion-zones": [(r.x, r.y, r.width, r.height) for r in self.exclusion_zones]
-        })
-        if ls := self.last_scores:
-            # convert rectangles into tuples:
-            info["scores"] = {r.get_geometry(): score for r, score in ls.items() if r is not None}
-        rr = tuple(self.refresh_regions)
-        if rr:
-            for i, r in enumerate(rr):
-                info[f"refresh_region[{i}]"] = (r.x, r.y, r.width, r.height)
-        nvrr = tuple(self.nonvideo_regions)
-        if nvrr:
-            for i, r in enumerate(nvrr):
-                info[f"nonvideo_refresh_region[{i}]"] = (r.x, r.y, r.width, r.height)
-        return info
 
     def remove_refresh_region(self, region) -> None:
-        remove_rectangle(self.refresh_regions, region)
-        remove_rectangle(self.nonvideo_regions, region)
-        refreshlog("remove_refresh_region(%s) updated refresh regions=%s, nonvideo regions=%s",
-                   region, self.refresh_regions, self.nonvideo_regions)
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            remove_rectangle(self.refresh_regions, region)
+            remove_rectangle(self.nonvideo_regions, region)
+            refreshlog("remove_refresh_region(%s) updated refresh regions=%s, nonvideo regions=%s",
+                       region, self.refresh_regions, self.nonvideo_regions)
 
     def add_video_refresh(self, region) -> None:
         # called by add_refresh_region if the video region got painted on
         # Note: this does not run in the UI thread!
-        rect = self.rectangle
-        if not rect:
-            return
-        # something in the video region is still refreshing,
-        # so we re-schedule the subregion refresh:
-        self.cancel_refresh_timer()
-        # add the new region to what we already have:
-        add_rectangle(self.refresh_regions, region)
-        # do refresh any regions which are now outside the current video region:
-        # (this can happen when the region moves or changes size)
-        nonvideo = []
-        for r in self.refresh_regions:
-            if not rect.contains_rect(r):
-                nonvideo += r.subtract_rect(rect)
-        delay = max(150, self.auto_refresh_delay)
-        self.nonvideo_regions += nonvideo
-        if self.nonvideo_regions:
-            if not self.nonvideo_refresh_timer:
-                # refresh via timeout_add so this will run in the UI thread:
-                self.nonvideo_refresh_timer = GLib.timeout_add(delay, self.nonvideo_refresh)
-            # only keep the regions still in the video region:
-            inrect = (rect.intersection_rect(r) for r in self.refresh_regions)
-            self.refresh_regions = [r for r in inrect if r is not None]
-        refreshlog("add_video_refresh(%s) rectangle=%s, delay=%ims, nonvideo=%s, refresh_regions=%s",
-                   region, rect, delay, self.nonvideo_regions, self.refresh_regions)
-        # re-schedule the video region refresh (if we still have regions to fresh):
-        if self.refresh_regions:
-            self.refresh_timer = GLib.timeout_add(delay, self.refresh)
+        with self._lifecycle_lock:
+            rect = self.rectangle
+            if self._closed or not rect:
+                return
+            # Something in the video region is still refreshing, so invalidate
+            # and replace its timer as one locked state transition.
+            self._refresh_generation += 1
+            refresh_generation = self._refresh_generation
+            old_refresh_timer = self.refresh_timer
+            self.refresh_timer = 0
+            # add the new region to what we already have:
+            add_rectangle(self.refresh_regions, region)
+            # do refresh any regions which are now outside the current video region:
+            # (this can happen when the region moves or changes size)
+            nonvideo = []
+            for r in self.refresh_regions:
+                if not rect.contains_rect(r):
+                    nonvideo += r.subtract_rect(rect)
+            delay = max(150, self.auto_refresh_delay)
+            self.nonvideo_regions += nonvideo
+            schedule_nonvideo = bool(self.nonvideo_regions) and not self.nonvideo_refresh_timer
+            if schedule_nonvideo:
+                self._nonvideo_refresh_generation += 1
+                nonvideo_generation = self._nonvideo_refresh_generation
+            else:
+                nonvideo_generation = 0
+            if self.nonvideo_regions:
+                # only keep the regions still in the video region:
+                inrect = (rect.intersection_rect(r) for r in self.refresh_regions)
+                self.refresh_regions = [r for r in inrect if r is not None]
+            schedule_refresh = bool(self.refresh_regions)
+            refreshlog("add_video_refresh(%s) rectangle=%s, delay=%ims, nonvideo=%s, refresh_regions=%s",
+                       region, rect, delay, self.nonvideo_regions, self.refresh_regions)
+        if schedule_nonvideo:
+            self._publish_nonvideo_refresh_timer(delay, nonvideo_generation)
+        if old_refresh_timer:
+            old_refresh_timer.destroy()
+        if schedule_refresh:
+            self._publish_refresh_timer(delay, refresh_generation)
 
     def cancel_nonvideo_refresh_timer(self) -> None:
-        if nvrt := self.nonvideo_refresh_timer:
-            refreshlog("cancel_nonvideo_refresh_timer() timer=%s", nvrt)
+        with self._lifecycle_lock:
+            self._nonvideo_refresh_generation += 1
+            nvrt = self.nonvideo_refresh_timer
             self.nonvideo_refresh_timer = 0
-            GLib.source_remove(nvrt)
             self.nonvideo_regions = []
+        if nvrt:
+            refreshlog("cancel_nonvideo_refresh_timer() timer=%s", nvrt)
+            nvrt.destroy()
 
-    def nonvideo_refresh(self) -> None:
-        self.nonvideo_refresh_timer = 0
-        nonvideo = tuple(self.nonvideo_regions)
-        refreshlog("nonvideo_refresh() nonvideo regions=%s", nonvideo)
-        if not nonvideo:
-            return
-        if self.refresh_cb(nonvideo):
-            self.nonvideo_regions = []
-        # if the refresh didn't fire (refresh_cb() returned False),
-        # then we should end up re-scheduling the nonvideo refresh
-        # from add_video_refresh()
+    def nonvideo_refresh(self, generation: int) -> bool:
+        with self._lifecycle_lock:
+            if self._closed or generation != self._nonvideo_refresh_generation:
+                return False
+            self._nonvideo_refresh_generation += 1
+            claimed_generation = self._nonvideo_refresh_generation
+            self.nonvideo_refresh_timer = 0
+            nonvideo = tuple(self.nonvideo_regions)
+            refreshlog("nonvideo_refresh() nonvideo regions=%s", nonvideo)
+            if not nonvideo:
+                return False
+            # Cleanup must not return while a callback which already claimed
+            # this owner can still reach its refresh callback.
+            if (self.refresh_cb(nonvideo)
+                    and claimed_generation == self._nonvideo_refresh_generation):
+                self.nonvideo_regions = []
+        # If the refresh did not fire, add_video_refresh() will schedule a
+        # replacement when the region is damaged again.
+        return False
 
-    def refresh(self) -> None:
-        regions = self.refresh_regions
-        rect = self.rectangle
-        refreshlog("refresh() refresh_timer=%s, refresh_regions=%s, rectangle=%s",
-                   self.refresh_timer, regions, rect)
-        # runs via timeout_add, safe to call UI!
-        self.refresh_timer = 0
-        if rect and len(regions) >= 2:
-            # figure out if it makes sense to refresh the whole area,
-            # or if we just send the list of smaller rectangles:
-            pixels = sum(r.width * r.height for r in regions)
-            if pixels >= rect.width * rect.height // 2:
-                regions = [rect]
-        refreshlog("refresh() calling %s with regions=%s", self.refresh_cb, regions)
-        if self.refresh_cb(regions):
-            self.refresh_regions = []
-        else:
-            # retry later
-            self.refresh_timer = GLib.timeout_add(1000, self.refresh)
+    def refresh(self, generation: int) -> bool:
+        with self._lifecycle_lock:
+            if self._closed or generation != self._refresh_generation:
+                return False
+            self._refresh_generation += 1
+            claimed_generation = self._refresh_generation
+            regions = tuple(self.refresh_regions)
+            rect = self.rectangle
+            refreshlog("refresh() refresh_timer=%s, refresh_regions=%s, rectangle=%s",
+                       self.refresh_timer, regions, rect)
+            # runs via timeout_add, safe to call UI!
+            self.refresh_timer = 0
+            if rect and len(regions) >= 2:
+                # figure out if it makes sense to refresh the whole area,
+                # or if we just send the list of smaller rectangles:
+                pixels = sum(r.width * r.height for r in regions)
+                if pixels >= rect.width * rect.height // 2:
+                    regions = (rect,)
+            refreshlog("refresh() calling %s with regions=%s", self.refresh_cb, regions)
+            # Keep the callback claim until it has finished.  cleanup() uses
+            # the same lock, so its return is the terminal callback boundary.
+            refreshed = self.refresh_cb(regions)
+            retry_generation = 0
+            if claimed_generation == self._refresh_generation:
+                if refreshed:
+                    self.refresh_regions = []
+                else:
+                    self._refresh_generation += 1
+                    retry_generation = self._refresh_generation
+        if retry_generation:
+            self._publish_refresh_timer(1000, retry_generation)
+        return False
 
     def novideoregion(self, msg, *args) -> None:
-        sslog("novideoregion: " + msg, *args)
-        self.rectangle = None
-        self.time = 0
-        self.set_at = 0
-        self.counter = 0
-        self.inout = 0, 0
-        self.score = 0
-        self.fps = 0
-        self.damaged = 0
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            sslog("novideoregion: " + msg, *args)
+            self.rectangle = None
+            self.time = 0
+            self.set_at = 0
+            self.counter = 0
+            self.inout = 0, 0
+            self.score = 0
+            self.fps = 0
+            self.damaged = 0
 
     def excluded_rectangles(self, rect, ww: int, wh: int) -> list:
         rects = [rect]
@@ -284,6 +446,14 @@ class VideoSubregion:
 
     def identify_video_subregion(self, ww: int, wh: int, damage_events_count, last_damage_events,
                                  starting_at=0.0, children=()):
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._identify_video_subregion(ww, wh, damage_events_count, last_damage_events,
+                                           starting_at, children)
+
+    def _identify_video_subregion(self, ww: int, wh: int, damage_events_count, last_damage_events,
+                                  starting_at=0.0, children=()):
         if not self.enabled or not self.supported:
             self.novideoregion("disabled")
             return
