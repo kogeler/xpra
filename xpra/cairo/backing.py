@@ -40,13 +40,27 @@ class CairoBacking(CairoBackingBase):
 
     def _do_paint_rgb(self, cairo_format, has_alpha: bool, img_data,
                       x: int, y: int, width: int, height: int, render_width: int, render_height: int,
-                      rowstride: int, options: typedict) -> None:
+                      rowstride: int, options: typedict, source_over=False, reset_region=()) -> None:
         """ must be called from UI thread """
         log("cairo._do_paint_rgb%s make_image_surface=%s, use pixbuf=%s",
             (FORMATS.get(cairo_format, cairo_format), has_alpha, len(img_data),
              type(img_data), x, y, width, height, render_width, render_height,
              rowstride, options), make_image_surface, CAIRO_USE_PIXBUF)
         rgb_format = options.strget("rgb_format", "RGB")
+        if source_over:
+            # GdkPixbuf treats RGBA as straight-alpha and cannot make an X byte
+            # strictly opaque. Use only Cairo's direct ARGB32 / RGB24 paths:
+            # they preserve premultiplied A formats and discard X as required.
+            expected_format = Format.ARGB32 if "A" in rgb_format else Format.RGB24
+            if cairo_format != expected_format or rgb_format not in ("BGRA", "RGBA", "BGRX", "RGBX"):
+                raise ValueError(f"invalid premultiplied Cairo source {cairo_format!r} / {rgb_format!r}")
+            img_surface = make_image_surface(cairo_format, rgb_format, img_data, width, height, rowstride)
+            try:
+                self.cairo_paint_surface(img_surface, x, y, render_width, render_height, options,
+                                         True, reset_region)
+            finally:
+                img_surface.finish()
+            return
         if not CAIRO_USE_PIXBUF:
             rgb_formats = CAIRO_FORMATS.get(cairo_format, ())
             if rgb_format in rgb_formats:

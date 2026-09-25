@@ -205,15 +205,33 @@ class ClientConnection(StubClientConnection):
             Add a new 'draw' packet to the 'packet_queue'.
             Note: this code runs in the non-ui thread
         """
-        now = monotonic()
-        self.statistics.packet_qsizes.append((now, len(self.packet_queue)))
-        if wid > 0:
-            self.statistics.damage_packet_qpixels.append(
-                (now, wid, sum(x[2] for x in tuple(self.packet_queue) if x[1] == wid))
-            )
+        # Queue accounting is diagnostic.  The deque append below is the
+        # packet ownership boundary and must remain reachable if statistics
+        # have already been torn down or a diagnostic collector fails.
+        try:
+            now = monotonic()
+            self.statistics.packet_qsizes.append((now, len(self.packet_queue)))
+            if wid > 0:
+                self.statistics.damage_packet_qpixels.append(
+                    (now, wid, sum(x[2] for x in tuple(self.packet_queue) if x[1] == wid))
+                )
+        except BaseException:
+            log.error("Error recording queued packet statistics", exc_info=True)
         self.packet_queue.append((packet, wid, pixels, wait_for_more))
+        self._notify_packet_queued()
+
+    def _notify_packet_queued(self) -> None:
+        """Wake the protocol after a packet has crossed the queue boundary.
+
+        Once either outbound deque owns a packet, a wakeup failure cannot
+        turn that committed enqueue back into an exception: callers would
+        otherwise discard ACK ownership while the packet remains sendable.
+        """
         if p := self.protocol:
-            p.source_has_more()
+            try:
+                p.source_has_more()
+            except BaseException:
+                log.error("Error notifying protocol of queued packet", exc_info=True)
 
     def encode_loop(self) -> None:
         """
@@ -247,12 +265,24 @@ class ClientConnection(StubClientConnection):
             return Packet("closed"), False, False
         synchronous = True
         more = False
-        if self.ordinary_packets:
-            packet, synchronous, more = self.ordinary_packets.pop(0)
-        elif self.packet_queue:
-            packet, _, _, more = self.packet_queue.popleft()
-        else:
-            packet = Packet("none")
+        while True:
+            if self.ordinary_packets:
+                packet, synchronous, more = self.ordinary_packets.pop(0)
+                break
+            if not self.packet_queue:
+                packet = Packet("none")
+                break
+            queued_packet = self.packet_queue.popleft()
+            packet_filter = getattr(self, "filter_queued_damage_packet", None)
+            if packet_filter:
+                queued_packet = packet_filter(queued_packet)
+                if queued_packet is None:
+                    # Re-check the ordinary queue before inspecting another
+                    # pixel packet.  A window destroy or replacement queued by
+                    # the filter's lifecycle owner must keep priority.
+                    continue
+            packet, _, _, more = queued_packet
+            break
         if not more:
             more = bool(packet) and bool(self.ordinary_packets or self.packet_queue)
         return packet, synchronous, more
@@ -261,10 +291,10 @@ class ClientConnection(StubClientConnection):
         """ This method queues non-damage packets (higher priority) """
         synchronous = bool(kwargs.get("synchronous", True))
         will_have_more = bool(kwargs.get("will_have_more", not synchronous))
-        if p := self.protocol:
+        if self.protocol:
             packet = Packet(packet_type, *parts)
             self.ordinary_packets.append((packet, synchronous, will_have_more))
-            p.source_has_more()
+            self._notify_packet_queued()
 
     def send_more(self, packet_type: str, *parts: PacketElement, **kwargs) -> None:
         kwargs["will_have_more"] = True

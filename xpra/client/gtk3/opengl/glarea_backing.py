@@ -3,8 +3,7 @@
 # Xpra is released under the terms of the GNU GPL v2, or, at your option, any
 # later version. See the file COPYING for details.
 
-from typing import Any
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 
 from xpra.common import noop
 from xpra.os_util import gi_import
@@ -32,7 +31,6 @@ def GLArea(alpha: bool) -> Gtk.GLArea:
 class GLAreaBacking(GLWindowBackingBase):
 
     def __init__(self, wid: int, window_alpha: bool, pixel_depth: int = 0):
-        self.on_realize_cb: list[tuple[Callable, Sequence[Any]]] = []
         super().__init__(wid, window_alpha, pixel_depth)
 
     def __repr__(self):
@@ -67,13 +65,9 @@ class GLAreaBacking(GLWindowBackingBase):
         gl_context.make_current()
         self.gl_init(gl_context)
         # fire the delayed realized callbacks:
-        onrcb = self.on_realize_cb
-        log(f"GLAreaBacking.on_realize({args}) callbacks=%s", tuple(Ellipsizer(x) for x in onrcb))
+        log("GLAreaBacking.on_realize(%s) callbacks=%i", args, len(self._pending_gl_context_callbacks))
         gl_context.update_geometry = noop
-        self.on_realize_cb = []
-        for callback, xargs in onrcb:
-            with log.trap_error("Error calling realize callback %s", Ellipsizer(callback)):
-                callback(gl_context, *xargs)
+        self.run_gl_context_callbacks(gl_context)
 
     def _inject_scale_factor(self, glcontext):
         if not hasattr(glcontext, "get_scale_factor"):
@@ -91,9 +85,11 @@ class GLAreaBacking(GLWindowBackingBase):
             gl_context = self._inject_scale_factor(self.gl_context())
             gl_context.make_current()
             cb(gl_context, *args)
+        elif not da:
+            cb(None, *args)
         else:
             log("GLAreaBacking.with_gl_context delayed: %s%s", cb, Ellipsizer(args))
-            self.on_realize_cb.append((cb, args))
+            self.defer_gl_context_callback(cb, *args)
 
     def get_bit_depth(self, pixel_depth=0) -> int:
         return pixel_depth or 24

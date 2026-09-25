@@ -45,5 +45,6 @@ cdef class Surface(WaylandSurface):
     cdef void set_parent(self) noexcept
     cdef void commit(self) noexcept
     cdef void capture_surface_pixels(self) noexcept
+    cdef void discover_subsurfaces(self) noexcept
     cdef void new_subsurface(self, wlr_subsurface *subsurface) noexcept
     cdef void unregister_toplevel_handlers(self) noexcept nogil
