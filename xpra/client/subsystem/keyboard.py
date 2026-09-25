@@ -9,7 +9,7 @@ from collections.abc import Sequence
 
 from xpra.client.base import features
 from xpra.client.base.stub import StubClientSubsystem
-from xpra.client.gui.keyboard_helper import KeyboardHelper, KEYCODE_DEF
+from xpra.client.gui.keyboard_helper import KeyboardHelper, KEYCODE_DEF, RMLVO_VERSION
 from xpra.keyboard.common import KeyEvent, DELAY_KEYBOARD_DATA
 from xpra.keyboard.mask import DEFAULT_MODIFIER_MEANINGS
 from xpra.util.objects import typedict
@@ -72,8 +72,16 @@ class KeyboardClient(StubClientSubsystem):
                                             opts.shortcut_modifiers,
                                             opts.key_shortcut,
                                             opts.keyboard_raw, **kwargs)
-            if DELAY_KEYBOARD_DATA and not self.client.readonly:
-                self.client.after_handshake(self.helper.send_config)
+            if not self.client.readonly:
+                # A keymap-change timer may expire before the server hello.
+                # Keep send_config() coalesced through handshake completion,
+                # then emit the newest state exactly once.  DELAY_KEYBOARD_DATA
+                # requires that initial post-handshake send even when no signal
+                # fired; the non-delay mode uses this callback only to finish
+                # negotiation unless an early change marked config_pending.
+                self.helper.server_rmlvo_pending = True
+                self.helper.config_pending = DELAY_KEYBOARD_DATA
+                self.client.after_handshake(self._send_pending_keyboard_config)
         except ImportError as e:
             log("error instantiating %s", self.helper_class, exc_info=True)
             log.warn(f"Warning: no keyboard support, {e}")
@@ -110,6 +118,14 @@ class KeyboardClient(StubClientSubsystem):
         if not self.server_enabled and self.helper:
             # swallow packets:
             self.helper.send = noop
+        helper = self.helper
+        if helper:
+            raw_rmlvo_version = c.get("keyboard.rmlvo-version", 0)
+            helper.server_rmlvo_version = (
+                raw_rmlvo_version
+                if type(raw_rmlvo_version) is int and raw_rmlvo_version == RMLVO_VERSION
+                else 0
+            )
         try:
             from xpra import keyboard
             if not keyboard:
@@ -119,12 +135,21 @@ class KeyboardClient(StubClientSubsystem):
             log.warn("Warning: keyboard module is missing")
             self.enabled = False
             return True
-        if self.helper:
+        if helper:
             modifier_keycodes = c.dictget("modifier_keycodes")
             if modifier_keycodes:
-                self.helper.set_modifier_mappings(modifier_keycodes)
+                helper.set_modifier_mappings(modifier_keycodes)
         self.key_repeat_delay, self.key_repeat_interval = c.intpair("key_repeat", (-1, -1))
         return True
+
+    def _send_pending_keyboard_config(self) -> None:
+        helper = self.helper
+        if not helper:
+            return
+        pending = helper.config_pending
+        helper.server_rmlvo_pending = False
+        if pending:
+            helper.send_config()
 
     def get_keyboard_caps(self) -> dict[str, Any]:
         caps = {}

@@ -12,6 +12,7 @@ from pathlib import Path
 
 
 WAYLAND_MODULES = (
+    "xpra.wayland.server.keyboard",
     "xpra.wayland.server.events",
     "xpra.wayland.server.display",
     "xpra.wayland.server.wayland_surface",

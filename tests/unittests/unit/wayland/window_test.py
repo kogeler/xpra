@@ -688,6 +688,97 @@ class WaylandWindowServerConfigureTest(unittest.TestCase):
                 server.server.compositor.flush.assert_not_called()
 
 
+class WaylandWindowServerFocusTest(unittest.TestCase):
+
+    @staticmethod
+    def focus_packet():
+        from xpra.net.common import Packet
+        return Packet("window-focus", 9, ("shift",))
+
+    @staticmethod
+    def make_server(recording: bool):
+        owner = Mock()
+        owner.readonly = False
+        manager = Mock()
+        manager.is_recording_source.return_value = recording
+        owner.subsystems = {"keyboard": manager}
+        source = Mock()
+        source.effective_readonly.return_value = False
+        owner.get_server_source.return_value = source
+        return WaylandWindowServer(owner), source
+
+    def test_recording_only_focus_packet_has_no_outer_side_effects(self):
+        server, source = self.make_server(True)
+        proto = object()
+        packet = self.focus_packet()
+        window = Mock()
+        server._id_to_window[9] = window
+        peer = Mock()
+        peer.window_sync_focus = True
+
+        parent = WaylandWindowServer.__mro__[1]
+        with (
+            patch.object(WaylandWindowServer, "_focus", autospec=True) as apply_focus,
+            patch.object(parent, "window_sources", autospec=True, return_value=(peer,)) as window_sources,
+        ):
+            server._process_focus(proto, packet)
+
+        apply_focus.assert_not_called()
+        source.user_event.assert_not_called()
+        window_sources.assert_not_called()
+        peer.raise_window.assert_not_called()
+
+    def test_writable_non_owner_focus_packet_keeps_generic_handling(self):
+        server, source = self.make_server(False)
+        proto = object()
+        packet = self.focus_packet()
+        server._id_to_window[9] = Mock()
+
+        parent = WaylandWindowServer.__mro__[1]
+        with (
+            patch.object(WaylandWindowServer, "_focus", autospec=True) as apply_focus,
+            patch.object(parent, "window_sources", autospec=True, return_value=()) as window_sources,
+        ):
+            server._process_focus(proto, packet)
+
+        self.assertEqual(apply_focus.call_count, 1)
+        self.assertEqual(apply_focus.call_args.kwargs, {})
+        self.assertEqual(apply_focus.call_args.args[-3:], (source, 9, ("shift",)))
+        source.user_event.assert_called_once_with("focus")
+        window_sources.assert_called_once()
+        self.assertEqual(window_sources.call_args.kwargs, {"exclude": source})
+
+    def test_modifier_update_keeps_the_originating_source(self):
+        manager = Mock()
+        manager.is_recording_source.return_value = False
+        server = Mock()
+        server.server = Mock()
+        server.server.subsystems = {"keyboard": manager}
+        server.focused = 7
+        source = Mock()
+
+        WaylandWindowServer._focus(server, source, 7, ("mod5",))
+
+        manager.update_keyboard_modifiers.assert_called_once_with(("mod5",), source=source)
+
+    def test_recording_only_source_cannot_redirect_shared_keyboard_focus(self):
+        manager = Mock()
+        manager.is_recording_source.return_value = True
+        server = Mock()
+        server.server = Mock()
+        server.server.subsystems = {"keyboard": manager}
+        server.focused = 7
+        source = Mock()
+
+        WaylandWindowServer._focus(server, source, 9, ("shift",))
+
+        self.assertEqual(server.focused, 7)
+        manager.update_keyboard_modifiers.assert_not_called()
+        manager.device.focus.assert_not_called()
+        server.get_window.assert_not_called()
+        server.server.compositor.flush.assert_not_called()
+
+
 def main():
     unittest.main()
 

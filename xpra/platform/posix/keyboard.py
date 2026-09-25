@@ -206,6 +206,9 @@ class Keyboard(KeyboardBase):
             self.keymap_modifiers = self.do_get_keymap_modifiers()
         return self.keymap_modifiers
 
+    def invalidate_keymap_modifiers(self) -> None:
+        self.keymap_modifiers = ()
+
     def do_get_keymap_modifiers(self) -> tuple[dict, list[str], list[str]]:
         if not self.keyboard_bindings:
             if is_Wayland():
@@ -308,5 +311,5 @@ class Keyboard(KeyboardBase):
         except ImportError:
             self.modifier_map = MODIFIER_MAP
         # force re-query on next call:
-        self.keymap_modifiers = ()
+        self.invalidate_keymap_modifiers()
         log(f"update_modifier_map({mod_meanings}) modifier_map={self.modifier_map}")

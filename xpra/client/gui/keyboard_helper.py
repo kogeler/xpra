@@ -23,6 +23,7 @@ from xpra.log import Logger
 log = Logger("keyboard")
 
 LAYOUT_GROUPS = envbool("XPRA_LAYOUT_GROUPS", True)
+RMLVO_VERSION = 1
 DEBUG_KEY_EVENTS = tuple(x.strip().lower() for x in os.environ.get("XPRA_DEBUG_KEY_EVENTS", "").split(",") if x.strip())
 
 KEYCODE_DEF: TypeAlias = tuple[int, str, int, int, int]
@@ -73,6 +74,7 @@ class KeyboardHelper:
         self.variant_option = variant
         self.layouts_option = layouts
         self.variants_option = variants
+        self.options_option = options
         self.options = options
         self.keyboard = self.make_keyboard()
         log("KeyboardHelper(%s) keyboard=%s",
@@ -109,11 +111,15 @@ class KeyboardHelper:
         self.variant = ""
         self.variants: list[str] = []
         self.options = ""
+        self.options_option = ""
         self.backend = ""
         self.backend_name = ""
         self.query = ""
         self.query_struct: dict[str, Any] = {}
         self.layout_groups = LAYOUT_GROUPS
+        self.server_rmlvo_version = 0
+        self.server_rmlvo_pending = False
+        self.config_pending = False
         self.raw = False
 
         self.hash = ""
@@ -273,7 +279,9 @@ class KeyboardHelper:
         def inl(v, l) -> list:
             try:
                 if v in l or v is None:
-                    return l
+                    return list(l)
+                if isinstance(v, str) and "," in v and tuple(v.split(",")) == tuple(l):
+                    return list(l)
                 return [v] + list(l)
             except Exception:
                 if v is not None:
@@ -290,7 +298,9 @@ class KeyboardHelper:
             layouts,
             variant,
             variants,
-            self.options or options,
+            (
+                "" if self.options_option.lower() == "none" else self.options_option
+            ) if self.options_option else options,
         )
         log("get_layout_spec()=%s", val)
         return val
@@ -309,11 +319,11 @@ class KeyboardHelper:
                 query_struct["variant"] = self.variant_option
             if self.variants_option:
                 query_struct["variants"] = csv(self.variants_option)
-            if self.options:
-                if self.options.lower() == "none":
+            if self.options_option:
+                if self.options_option.lower() == "none":
                     query_struct["options"] = ""
                 else:
-                    query_struct["options"] = self.options
+                    query_struct["options"] = self.options_option
         return query_struct
 
     def query_xkbmap(self) -> None:
@@ -354,6 +364,25 @@ class KeyboardHelper:
     def send_config(self) -> None:
         # this is the initial configuration, it must always be applied:
         # (the server has been waiting for it, see `DELAY_KEYBOARD_DATA`)
+        if self.server_rmlvo_pending:
+            # The GTK keymap signal can fire before the server hello has been
+            # parsed.  Do not materialize legacy packets while exact-RMLVO
+            # negotiation is still unknown: the post-handshake callback (or
+            # KeyboardClient's no-delay handoff) sends the newest state once.
+            self.config_pending = True
+            return
+        self.config_pending = False
+        if self.server_rmlvo_version == RMLVO_VERSION:
+            props = self.get_keymap_properties()
+            if props.get("rmlvo-version") == RMLVO_VERSION:
+                # A server which advertises this exact representation also
+                # understands the current flat packet.  Send one complete
+                # transaction rather than the legacy layout-changed /
+                # keymap-changed pair, whose first packet cannot carry rules
+                # or model and can expose a transient hybrid keymap.
+                props["force"] = True
+                self.send(KEYBOARD_CONFIG, props)
+                return
         if BACKWARDS_COMPATIBLE:
             if self.layout:
                 self.send_layout()
@@ -404,8 +433,107 @@ class KeyboardHelper:
     def get_full_keymap(self) -> Sequence[KEYCODE_DEF]:
         return ()
 
+    def get_rmlvo_properties(self) -> dict[str, Any]:
+        """Return the versioned, positional XKB names used by the client."""
+        query = self.query_struct or {}
+        # XkbRF_GetNamesProp omits the optional variant / options values when
+        # their entries in _XKB_RULES_NAMES are empty.  Once rules or model is
+        # present this is nevertheless an authoritative XKB names query, not a
+        # layout-only platform guess (such as localectl under Wayland).  Keep
+        # those empty values explicit so non-empty server defaults cannot alter
+        # the client's actual map.
+        exact_xkb_query = "layout" in query and ("rules" in query or "model" in query)
+
+        def groups(value) -> tuple[str, ...]:
+            if isinstance(value, str):
+                return tuple(value.split(",")) if value else ()
+            if isinstance(value, (tuple, list)):
+                return tuple(value)
+            return (value,) if value is not None else ()
+
+        layout_value = None
+        if "layout" in query:
+            layout_value = query["layout"]
+        elif self.layout_option:
+            layout_value = self.layout_option
+        elif self.layout:
+            # `self.layouts` is a legacy selection list on Win32 and macOS,
+            # not a simultaneous XKB group list.  Only the singular detected
+            # layout is safe when no authoritative XKB query is available.
+            layout_value = self.layout
+        layouts = groups(layout_value)
+        if not layouts:
+            # Base helpers used by Qt, Pyglet and Tk are not populated until
+            # they have an authoritative layout.  Omitting the exact block
+            # lets the server retain its configured/bootstrap defaults.
+            return {}
+
+        props: dict[str, Any] = {
+            "rmlvo-version": RMLVO_VERSION,
+            "layouts": layouts,
+            "layout_groups": bool(self.layout_groups),
+        }
+        rules = query.get("rules")
+        if isinstance(rules, str):
+            props["rules"] = rules
+        elif exact_xkb_query:
+            # XkbRF_GetNamesProp omits an empty rules name.  In an otherwise
+            # authoritative names property that omission is an exact empty
+            # value, not permission for the server to substitute its default.
+            props["rules"] = ""
+        if self.model_option:
+            model = self.model_option
+        elif "model" in query:
+            model = query["model"]
+        elif exact_xkb_query:
+            # As with rules above, a missing model in an authoritative XKB
+            # names property means that the corresponding field is empty.
+            model = ""
+        else:
+            model = self.model
+        if isinstance(model, str) and (model or "model" in query or exact_xkb_query):
+            props["model"] = model
+
+        variant_present = False
+        variant_value = None
+        if "variant" in query:
+            variant_present = True
+            variant_value = query["variant"]
+        elif self.variant_option:
+            variant_present = True
+            variant_value = self.variant_option
+        elif self.variant:
+            variant_present = True
+            variant_value = self.variant
+        elif exact_xkb_query:
+            variant_present = True
+            variant_value = ""
+        if variant_present:
+            variants = groups(variant_value)
+            if len(variants) < len(layouts):
+                variants += ("",) * (len(layouts) - len(variants))
+            props["variants"] = variants
+
+        if "options" in query:
+            options = query["options"]
+            if isinstance(options, str):
+                props["options"] = "" if options.lower() == "none" else options
+        elif self.options_option:
+            props["options"] = (
+                "" if self.options_option.lower() == "none" else self.options_option
+            )
+        elif self.options:
+            props["options"] = "" if self.options.lower() == "none" else self.options
+        elif exact_xkb_query:
+            props["options"] = ""
+        return props
+
     def get_keymap_properties(self, skip=()) -> dict[str, Any]:
-        props = {}
+        props = {
+            name: value for name, value in self.get_rmlvo_properties().items()
+            if name not in skip
+        }
+        exact_rmlvo = "rmlvo-version" in props
         for x in (
                 "backend", "backend_name",
                 "layout", "layouts", "variant", "variants", "options",
@@ -415,6 +543,13 @@ class KeyboardHelper:
                 "mod_managed", "mod_pointermissing", "keycodes", "x11_keycodes",
         ):
             if x in skip:
+                continue
+            if exact_rmlvo and x in ("layouts", "variants"):
+                # These legacy plural properties are platform selection lists
+                # on Win32 and macOS.  They must never fill an absent field in
+                # the presence-aware exact representation.
+                continue
+            if x in props:
                 continue
             v = None
             if x in ("layout", "variant"):

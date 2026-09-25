@@ -1,37 +1,41 @@
 #!/usr/bin/env python3
 # This file is part of Xpra.
 # Copyright (C) 2026 Antoine Martin <antoine@xpra.org>
+# Copyright (C) 2026 kogeler
 # Xpra is released under the terms of the GNU GPL v2, or, at your option, any
 # later version. See the file COPYING for details.
 
 import unittest
-from unittest.mock import Mock
 
 from xpra.util.objects import typedict
-from xpra.keyboard.nokeyboard import NoKeyboardDevice
-from xpra.server.source.keyboard import KeyboardConnection
 from xpra.wayland.server.keyboard_config import KeyboardConfig
 from xpra.wayland.server.subsystem.keyboard import WaylandKeyboardManager
+from unit.wayland.keyboard_test import FakeDevice as BoundaryDevice, FakeServer, FakeSource as BoundarySource
 
 
-class FakeDevice(NoKeyboardDevice):
-    """ records the keymaps installed on it - the real one is a `wlr_keyboard` """
-    __slots__ = ("installed", "refused")
+class FakeDevice(BoundaryDevice):
+    """Record the exact candidate installed, not the last non-owner compile."""
 
     def __init__(self, refused=()):
+        super().__init__()
         self.installed: list[tuple[str, str, str, str]] = []
-        # layout strings that xkb would fail to compile:
         self.refused = tuple(refused)
 
-    def set_layout(self, layout="us", model="pc105", variant="", options="") -> bool:
+    def compile_keymap(self, rules, model, layout, variant, options):
         if layout in self.refused:
-            return False
-        self.installed.append((layout, model, variant, options))
-        return True
+            raise ValueError("simulated unavailable XKB layout")
+        candidate = super().compile_keymap(rules, model, layout, variant, options)
+        candidate.install_tuple = layout, model, variant, options
+        return candidate
+
+    def install_keymap(self, candidate, settle_keycodes=(), modifiers=(), group=0):
+        groups = super().install_keymap(candidate, settle_keycodes, modifiers, group)
+        self.installed.append(candidate.install_tuple)
+        return groups
 
 
 class Opts:
-    """ only the `keyboard_*` options are ever read from here """
+    """Only the keyboard_* options are ever read from here."""
 
     def __init__(self, **kwargs):
         self.keyboard_sync = True
@@ -44,21 +48,17 @@ class Opts:
             setattr(self, f"keyboard_{k}", v)
 
 
-class FakeSource(KeyboardConnection):
-    """ stands in for the per-client connection object """
+class FakeSource(BoundarySource):
+    """Retain the real KeyboardConnection state and public source API."""
 
-    def __init__(self, uuid: str):
-        self.uuid = uuid
-        self.init_state()
-
-    def effective_readonly(self) -> bool:
-        return False
+    def __init__(self, uuid: str, *, readonly=False):
+        super().__init__(uuid, 0, None, readonly=readonly)
 
 
 class KeyboardConfigTest(unittest.TestCase):
 
     def test_parse_hello(self):
-        # the hello packet nests everything in a `keymap` dictionary:
+        # The hello packet nests everything in a keymap dictionary.
         kc = KeyboardConfig()
         mods = kc.parse(typedict({
             "keymap": {
@@ -68,185 +68,216 @@ class KeyboardConfigTest(unittest.TestCase):
                 "query_struct": {"model": "pc104"},
             },
         }))
-        self.assertEqual((kc.layout, kc.model, kc.variant, kc.options),
+        self.assertEqual((kc.rmlvo.layout, kc.rmlvo.model, kc.rmlvo.variant, kc.rmlvo.options),
                          ("de", "pc104", "nodeadkeys", "compose:ralt"))
-        self.assertEqual(mods, 4)
+        # RMLVO is one atomic change, not four independently mutated strings.
+        self.assertGreater(mods, 0)
 
     def test_parse_config_packet(self):
-        # the `keyboard-config` packet sends the same attributes at the top level:
+        # keyboard-config sends the same attributes at the top level.
         kc = KeyboardConfig()
         kc.parse(typedict({"layout": "fr", "query_struct": {"model": "pc105"}}))
-        self.assertEqual((kc.layout, kc.model, kc.variant, kc.options), ("fr", "pc105", "", ""))
-        # re-sending the same values changes nothing:
+        self.assertEqual((kc.rmlvo.layout, kc.rmlvo.model, kc.rmlvo.variant, kc.rmlvo.options),
+                         ("fr", "pc105", "", ""))
         self.assertEqual(kc.parse(typedict({"layout": "fr", "query_struct": {"model": "pc105"}})), 0)
 
     def test_set_layout(self):
-        # the legacy `layout-changed` packet, which does not carry the model:
+        # The legacy layout-changed packet does not carry the model.
         kc = KeyboardConfig()
-        kc.parse(typedict({"layout": "fr", "query_struct": {"model": "pc105"}}))
+        kc.parse(typedict({"layout": "fr", "query_struct": {"model": "pc104"}}))
         self.assertTrue(kc.set_layout("gb", "", ""))
-        self.assertEqual((kc.layout, kc.model, kc.variant), ("gb", "pc105", ""))
+        self.assertEqual((kc.rmlvo.layout, kc.rmlvo.model, kc.rmlvo.variant), ("gb", "pc104", ""))
         self.assertFalse(kc.set_layout("gb", "", ""))
 
-    def test_layout_groups(self):
+    def test_layout_groups_keep_exact_order(self):
         kc = KeyboardConfig()
-        kc.parse(typedict({"layout": "fr", "variant": "oss", "layouts": ["us", "fr", "de"],
-                           "variants": ["", "oss", "nodeadkeys"]}))
-        # the active layout comes first and is not repeated by its entry in the list:
-        self.assertEqual(kc.get_layout_groups(), (("fr", "oss"), ("us", ""), ("de", "nodeadkeys")))
+        kc.parse(typedict({
+            "rmlvo-version": 1, "layout": "fr", "variant": "oss",
+            "layouts": ["us", "fr", "de"], "variants": ["", "oss", "nodeadkeys"],
+            "layout_groups": True,
+        }))
+        self.assertEqual(tuple(zip(kc.rmlvo.layouts, kc.rmlvo.variants)),
+                         (("us", ""), ("fr", "oss"), ("de", "nodeadkeys")))
 
     def test_layout_groups_without_variants(self):
         kc = KeyboardConfig()
-        kc.parse(typedict({"layout": "us", "layouts": ["us", "fr"]}))
-        # a layout with no variant of its own gets an empty one:
-        self.assertEqual(kc.get_layout_groups(), (("us", ""), ("fr", "")))
+        kc.parse(typedict({"rmlvo-version": 1, "layouts": ["us", "fr"]}))
+        self.assertEqual(tuple(zip(kc.rmlvo.layouts, kc.rmlvo.variants)), (("us", ""), ("fr", "")))
 
-    def test_no_layout_has_no_groups(self):
-        self.assertEqual(KeyboardConfig().get_layout_groups(), ())
+    def test_legacy_selection_list_does_not_reorder_current_layout(self):
+        kc = KeyboardConfig()
+        kc.parse(typedict({
+            "layout": "fr", "variant": "oss",
+            "layouts": ["us", "fr", "de"], "variants": ["", "oss", "nodeadkeys"],
+        }))
+        self.assertEqual(tuple(zip(kc.rmlvo.layouts, kc.rmlvo.variants)), (("fr", "oss"),))
+
+    def test_no_layout_has_known_unapplied_bootstrap(self):
+        kc = KeyboardConfig()
+        self.assertEqual(tuple(zip(kc.rmlvo.layouts, kc.rmlvo.variants)), (("us", ""),))
+        self.assertFalse(kc.applied_hash)
+        self.assertFalse(kc.validated_hash)
+        self.assertEqual(kc.compiled_groups, 0)
 
     def test_hash(self):
         kc = KeyboardConfig()
-        # an empty configuration must not look like one that was applied:
-        self.assertEqual(kc.get_hash(), "")
+        # A normalized identity exists before it has been installed.
+        bootstrap_hash = kc.get_hash()
+        self.assertTrue(bootstrap_hash)
+        self.assertFalse(kc.applied_hash)
         kc.parse(typedict({"layout": "fr"}))
-        self.assertNotEqual(kc.get_hash(), "")
-        self.assertNotEqual(KeyboardConfig().get_hash(), kc.get_hash())
+        self.assertNotEqual(bootstrap_hash, kc.get_hash())
+        self.assertFalse(kc.applied_hash)
 
 
 class WaylandKeymapInstallTest(unittest.TestCase):
 
-    def setUp(self):
-        self.sources: list[FakeSource] = []
-
     def make_manager(self, refused=(), **opts) -> tuple[WaylandKeyboardManager, FakeDevice]:
         device = FakeDevice(refused)
-        # the connected keyboard clients, which `get_layout_groups` iterates over:
-        sources = self.sources = []
-        server = Mock()
-        server.compositor.get_keyboard_device.return_value = device
-        # no `control` subsystem, so no control commands are registered:
-        server.get_subsystem.return_value = None
-        server.get_sources_by_type.side_effect = lambda atype, exclude=None: tuple(
-            ss for ss in sources if ss is not exclude
-        )
+        server = FakeServer()
+        server.compositor.keyboard_device = device
+        self.sources = server.sources
         manager = WaylandKeyboardManager(server=server)
         manager.init_state()
         manager.init(Opts(**opts))
         manager.setup()
         return manager, device
 
-    def connect(self, manager, uuid: str, keymap: dict) -> FakeSource:
-        # what `parse_hello_ui_keyboard` does for every new keyboard client:
-        ss = FakeSource(uuid)
-        ss.keyboard_config = manager.get_keyboard_config(typedict({"keyboard": True, "keymap": keymap}))
+    def connect(self, manager, uuid: str, keymap: dict, *, readonly=False, keyboard=True) -> FakeSource:
+        ss = FakeSource(uuid, readonly=readonly)
+        caps = typedict({"keyboard": keyboard, "keymap": keymap})
+        before = tuple(manager.server.compositor.keyboard_device.installed)
+        manager.parse_hello_ui_keyboard(ss, caps)
+        self.assertEqual(tuple(manager.server.compositor.keyboard_device.installed), before,
+                         "hello parsing must not mutate the shared seat before acceptance")
         self.sources.append(ss)
-        manager.set_keymap(ss)
+        manager.add_new_client(ss, caps)
         return ss
 
     def test_server_layout_option(self):
-        # `--keyboard-layout=fr` must reach the device before any client connects:
         manager, device = self.make_manager(layout="fr")
         self.assertEqual(device.installed, [("fr", "pc105", "", "")])
-        # the config recorded as current is the one installed on the seat:
         self.assertEqual(manager.config_hash, manager.config.get_hash())
+        self.assertEqual(manager.config.applied_hash, manager.config_hash)
 
-    def test_no_layout_installs_nothing(self):
-        # the device compiles its own default keymap when it is created,
-        # so a client which tells us nothing must not cause a re-install:
+    def test_no_layout_installs_bootstrap_once(self):
+        # The manager binds explicit known-good metadata to the native map.
+        # An identical default client must not trigger another installation.
         manager, device = self.make_manager(layout="")
-        self.assertEqual(device.installed, [])
-        self.connect(manager, "client-1", {})
-        self.assertEqual(device.installed, [])
+        self.assertEqual(device.installed, [("us", "pc105", "", "")])
+        ss = self.connect(manager, "client-1", {})
+        self.assertEqual(device.installed, [("us", "pc105", "", "")])
+        self.assertIs(manager._keyboard_owner_source, ss)
+        self.assertEqual(ss.keyboard_config.applied_hash, manager.config_hash)
 
     def test_client_layout(self):
         manager, device = self.make_manager(layout="")
         ss = self.connect(manager, "client-1", {
             "layout": "de", "variant": "nodeadkeys", "query_struct": {"model": "pc105"},
         })
-        self.assertEqual(device.installed, [("de", "pc105", "nodeadkeys", "")])
-        # the delayed `keyboard-config` packet repeats the same values:
+        self.assertEqual(device.installed, [("us", "pc105", "", ""), ("de", "pc105", "nodeadkeys", "")])
+        before = tuple(device.installed)
         ss.keyboard_config.parse(typedict({"layout": "de", "variant": "nodeadkeys",
                                            "query_struct": {"model": "pc105"}}))
         manager.set_keymap(ss, True)
-        self.assertEqual(device.installed, [("de", "pc105", "nodeadkeys", "")],
-                         "an unchanged keymap must not be re-installed")
-        # now the client actually switches layout:
+        self.assertEqual(tuple(device.installed), before, "an unchanged keymap must not be re-installed")
         ss.keyboard_config.parse(typedict({"layout": "fr", "query_struct": {"model": "pc105"}}))
         manager.set_keymap(ss, True)
         self.assertEqual(device.installed[-1], ("fr", "pc105", "", ""))
 
     def test_client_layout_groups(self):
-        # a client which can switch layouts gets all of them, its active one first:
         manager, device = self.make_manager(layout="")
         self.connect(manager, "client-1", {
-            "layout": "fr", "layouts": ["us", "fr"], "variants": ["", "oss"],
+            "rmlvo-version": 1, "layout": "fr", "layouts": ["us", "fr"], "variants": ["", "oss"],
+            "layout_groups": True,
         })
-        self.assertEqual(device.installed, [("fr,us", "pc105", ",", "")])
+        self.assertEqual(device.installed[-1], ("us,fr", "pc105", ",oss", ""))
 
-    def test_union_of_client_layouts(self):
-        # the seat has a single keymap, so it must carry every client's layout,
-        # with the client being configured in the first group:
+    def test_other_clients_do_not_replace_the_owner_map(self):
+        # Replace upstream's union assertion: it renumbers the owner's groups.
         manager, device = self.make_manager(layout="")
-        self.connect(manager, "client-1", {"layout": "de"})
-        self.assertEqual(device.installed[-1], ("de", "pc105", "", ""))
-        self.connect(manager, "client-2", {"layout": "es"})
-        self.assertEqual(device.installed[-1], ("es,de", "pc105", ",", ""))
+        owner = self.connect(manager, "client-1", {"layout": "de"})
+        before = tuple(device.installed)
+        other = self.connect(manager, "client-2", {"layout": "es"})
+        self.assertEqual(tuple(device.installed), before)
+        self.assertEqual(device.layouts, ("de",))
+        self.assertIs(manager._keyboard_owner_source, owner)
+        self.assertTrue(other.keyboard_config.validated_hash)
+        self.assertFalse(other.keyboard_config.applied_hash)
 
-    def test_union_keeps_variants_positional(self):
-        # xkb pairs layouts and variants by position and refuses a mismatched list:
+    def test_owner_variants_stay_positional_after_foreign_validation(self):
         manager, device = self.make_manager(layout="")
-        self.connect(manager, "client-1", {"layout": "de", "variant": "nodeadkeys"})
-        self.connect(manager, "client-2", {"layout": "us"})
+        self.connect(manager, "client-1", {
+            "rmlvo-version": 1, "layouts": ["us", "de"], "variants": ["", "nodeadkeys"],
+        })
+        before = tuple(device.installed)
+        self.connect(manager, "client-2", {"layout": "fr"})
+        self.assertEqual(tuple(device.installed), before)
         layouts, _, variants, _ = device.installed[-1]
         self.assertEqual((layouts, variants), ("us,de", ",nodeadkeys"))
         self.assertEqual(len(layouts.split(",")), len(variants.split(",")))
 
-    def test_union_is_capped(self):
-        # xkb silently truncates a keymap to its first 4 layouts,
-        # so we have to do the truncating ourselves, keeping the active client's layout:
+    def test_too_many_groups_are_rejected_without_truncation(self):
         manager, device = self.make_manager(layout="")
-        for i, layout in enumerate(("de", "es", "it", "pt", "se")):
-            self.connect(manager, f"client-{i}", {"layout": layout})
-        layouts = device.installed[-1][0].split(",")
-        self.assertEqual(len(layouts), 4)
-        self.assertEqual(layouts[0], "se", "the client being configured must keep the first group")
+        owner = self.connect(manager, "owner", {"layout": "de"})
+        before = tuple(device.installed)
+        rejected = self.connect(manager, "too-many", {
+            "rmlvo-version": 1, "layouts": ["de", "es", "it", "pt", "se"],
+        })
+        self.assertFalse(rejected.keyboard_config.valid)
+        self.assertTrue(rejected.keyboard_config.rejected)
+        self.assertEqual(tuple(device.installed), before)
+        self.assertIs(manager._keyboard_owner_source, owner)
 
-    def test_duplicate_layouts_are_not_repeated(self):
+    def test_duplicate_groups_keep_their_positions(self):
+        manager, device = self.make_manager(layout="")
+        self.connect(manager, "client-1", {
+            "rmlvo-version": 1, "layouts": ["de", "de", "us"],
+            "variants": ["nodeadkeys", "", ""], "layout_groups": True,
+        })
+        self.assertEqual(device.installed[-1], ("de,de,us", "pc105", "nodeadkeys,,", ""))
+
+    def test_identical_other_client_does_not_reinstall(self):
         manager, device = self.make_manager(layout="")
         self.connect(manager, "client-1", {"layout": "de"})
+        before = tuple(device.installed)
         self.connect(manager, "client-2", {"layout": "de"})
-        self.assertEqual([x[0] for x in device.installed], ["de"],
-                         "a client with the same layout must not change the keymap")
+        self.assertEqual(tuple(device.installed), before)
 
     def test_readonly_client_cannot_change_the_keymap(self):
         manager, device = self.make_manager(layout="fr")
-        ss = FakeSource("readonly-client")
-        ss.effective_readonly = lambda: True
-        ss.keyboard_config = manager.get_keyboard_config(typedict({"keymap": {"layout": "de"}}))
+        ss = self.connect(manager, "readonly-client", {"layout": "de"}, readonly=True)
         manager.set_keymap(ss)
         self.assertEqual([x[0] for x in device.installed], ["fr"])
 
     def test_disabled_keyboard(self):
         manager, device = self.make_manager(layout="")
-        ss = FakeSource("client-1")
-        ss.keyboard_config = manager.get_keyboard_config(typedict({"keyboard": False, "keymap": {"layout": "de"}}))
+        ss = self.connect(manager, "client-1", {"layout": "de"}, keyboard=False)
         self.assertFalse(ss.keyboard_config.enabled)
         manager.set_keymap(ss)
-        self.assertEqual(device.installed, [])
+        self.assertEqual(device.installed, [("us", "pc105", "", "")])
 
-    def test_unusable_layout_falls_back(self):
-        # one layout xkb cannot compile stops the whole keymap from compiling,
-        # so the client being configured must still get its own layout:
-        manager, device = self.make_manager(refused=("fr,de", ))
-        self.connect(manager, "client-1", {"layout": "de"})
-        self.connect(manager, "client-2", {"layout": "fr"})
-        self.assertEqual([x[0] for x in device.installed], ["de", "fr"])
+    def test_unusable_foreign_layout_preserves_the_installed_owner(self):
+        manager, device = self.make_manager(refused=("fr",))
+        owner = self.connect(manager, "client-1", {"layout": "de"})
+        before = tuple(device.installed)
+        rejected = self.connect(manager, "client-2", {"layout": "fr"})
+        self.assertEqual(tuple(device.installed), before)
+        self.assertIs(manager._keyboard_owner_source, owner)
+        self.assertEqual(manager.config_hash, owner.keyboard_config.applied_hash)
+        self.assertFalse(rejected.keyboard_config.validated_hash)
+        self.assertTrue(rejected.keyboard_config.rejected)
 
     def test_no_device(self):
-        # `install_keymap` must cope with a server that has no keyboard device:
-        manager, _ = self.make_manager(layout="")
+        manager, device = self.make_manager(layout="")
+        before = tuple(device.installed)
+        installed_hash = manager.config_hash
         manager.device = None
-        self.connect(manager, "client-1", {"layout": "de"})
+        rejected = self.connect(manager, "client-1", {"layout": "de"})
+        self.assertEqual(tuple(device.installed), before)
+        self.assertEqual(manager.config_hash, installed_hash)
+        self.assertFalse(rejected.keyboard_config.applied_hash)
+        self.assertTrue(rejected.keyboard_config.rejected)
 
 
 def main():

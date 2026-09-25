@@ -19,7 +19,7 @@ cdef extern from "xkbcommon/xkbcommon.h":
     cdef struct xkb_keymap:
         pass
 
-    ctypedef struct xkb_state:
+    cdef struct xkb_state:
         pass
 
     ctypedef uint32_t xkb_led_index_t
@@ -28,6 +28,7 @@ cdef extern from "xkbcommon/xkbcommon.h":
     ctypedef uint32_t xkb_keysym_t
     ctypedef uint32_t xkb_layout_index_t
     ctypedef uint32_t xkb_level_index_t
+    ctypedef uint32_t xkb_mod_mask_t
 
     cdef enum xkb_keysym_flags:
         XKB_KEYSYM_NO_FLAGS
@@ -81,10 +82,23 @@ cdef extern from "xkbcommon/xkbcommon.h":
     xkb_keymap* xkb_keymap_new_from_names(xkb_context *context, const xkb_rule_names *names, xkb_keymap_compile_flags flags)
     void xkb_keymap_unref(xkb_keymap *keymap)
 
+    xkb_state* xkb_state_new(xkb_keymap *keymap)
+    void xkb_state_unref(xkb_state *state)
+    xkb_state_component xkb_state_update_mask(xkb_state *state,
+                                               xkb_mod_mask_t depressed_mods,
+                                               xkb_mod_mask_t latched_mods,
+                                               xkb_mod_mask_t locked_mods,
+                                               xkb_layout_index_t depressed_layout,
+                                               xkb_layout_index_t latched_layout,
+                                               xkb_layout_index_t locked_layout)
+    int xkb_state_key_get_syms(xkb_state *state, xkb_keycode_t key,
+                               const xkb_keysym_t **syms_out)
+
     char *xkb_keymap_get_as_string(xkb_keymap *keymap, xkb_keymap_format format)
 
     xkb_keycode_t xkb_keymap_min_keycode(xkb_keymap *keymap)
     xkb_keycode_t xkb_keymap_max_keycode(xkb_keymap *keymap)
+    xkb_mod_index_t xkb_keymap_mod_get_index(xkb_keymap *keymap, const char *name)
     xkb_layout_index_t xkb_keymap_num_layouts(xkb_keymap *keymap)
     xkb_layout_index_t xkb_keymap_num_layouts_for_key(xkb_keymap *keymap, xkb_keycode_t key)
     xkb_level_index_t xkb_keymap_num_levels_for_key(xkb_keymap *keymap, xkb_keycode_t key, xkb_layout_index_t layout)
@@ -92,6 +106,7 @@ cdef extern from "xkbcommon/xkbcommon.h":
                                          xkb_layout_index_t layout, xkb_level_index_t level,
                                          const xkb_keysym_t **syms_out)
     xkb_keysym_t xkb_keysym_from_name(const char *name, xkb_keysym_flags flags)
+    xkb_keysym_t xkb_utf32_to_keysym(uint32_t ucs)
 
 
 cdef extern from "linux/input-event-codes.h":
@@ -793,6 +808,7 @@ cdef extern from "wlr/types/wlr_seat.h":
     void wlr_seat_keyboard_notify_modifiers(wlr_seat *seat, wlr_keyboard_modifiers *modifiers)
     void wlr_seat_keyboard_notify_enter(wlr_seat *seat, wlr_surface *surface,
                                         uint32_t *keycodes, size_t num_keycodes, wlr_keyboard_modifiers *modifiers)
+    void wlr_seat_keyboard_notify_clear_focus(wlr_seat *seat)
     void wlr_seat_set_keyboard(wlr_seat *seat, wlr_keyboard *dev)
     void wlr_seat_keyboard_clear_focus(wlr_seat *seat)
 
@@ -942,7 +958,7 @@ cdef extern from "wlr/types/wlr_keyboard.h":
         bint update_state       # if backend doesn't update modifiers on its own
         wl_keyboard_key_state state
 
-    void wlr_keyboard_set_keymap(wlr_keyboard *kb, xkb_keymap *keymap)
+    bint wlr_keyboard_set_keymap(wlr_keyboard *kb, xkb_keymap *keymap)
     void wlr_keyboard_set_repeat_info(wlr_keyboard *kb, int32_t rate, int32_t delay)
 
 

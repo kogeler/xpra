@@ -89,6 +89,9 @@ class KeyboardBase:
         """
         return {}, [], ["lock"]
 
+    def invalidate_keymap_modifiers(self) -> None:
+        """Discard any platform cache before querying a changed keymap."""
+
     def get_keymap_spec(self) -> dict[str, Any]:
         return {}
 
