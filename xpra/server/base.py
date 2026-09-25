@@ -294,9 +294,12 @@ class ServerBase(ServerCore):
 
     def do_cleanup(self) -> None:
         # ServerCore.cleanup has already dispatched `cleanup` to all subsystems
-        # before invoking do_cleanup; we just emit the server event here.
+        # and queued every client's disconnect packet before invoking do_cleanup:
+        # emit the server event, then keep ServerCore's flush interval, or the
+        # server can exit before the write threads have sent that last packet
         self.server_event("exit")
         log("do_cleanup()")
+        super().do_cleanup()
 
     def late_cleanup(self, stop=True) -> None:
         # ServerCore.late_cleanup dispatches `late_cleanup` to all subsystems

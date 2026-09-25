@@ -1937,7 +1937,9 @@ class ServerCore(GLibServer):
             packet_type = packet.get_type()
             netlog.error(f"Error: unknown or invalid packet type {packet_type!r}")
             netlog.error(f" received from {proto}")
-        if not ss:
+        # when the server is closing, the shutdown sends every protocol its
+        # disconnect packet and closes it: closing it here could drop that packet
+        if not ss and not self._closing:
             proto.close()
 
     def handle_rfb_connection(self, conn, data: bytes = b"") -> None:

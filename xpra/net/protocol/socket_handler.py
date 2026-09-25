@@ -836,13 +836,18 @@ class SocketProtocol:
         self._io_thread_loop("write", self._write)
 
     def _write(self) -> bool:
-        items = self._write_queue.get()
+        write_queue = self._write_queue
+        items = write_queue.get()
         # Used to signal that we should exit:
         if not items:
             log("write thread: empty marker, exiting")
             self.close()
             return False
-        return self.write_items(*items)
+        try:
+            return self.write_items(*items)
+        finally:
+            # flush_then_close waits for this, not just for an empty queue:
+            write_queue.task_done()
 
     def write_items(self, buf_data, packet_type: str = "", synchronous: bool = True, more: bool = False) -> bool:
         conn = self._conn
@@ -1258,11 +1263,15 @@ class SocketProtocol:
                 close_and_release()
                 return
 
+            # the write thread takes the packet off the queue before writing it,
+            # so an empty queue does not mean that the last packet has been sent:
+            write_queue = self._write_queue
+
             def wait_for_packet_sent() -> bool:
                 closed = self._closed
-                eventlog("flush_then_close: wait_for_packet_sent() queue.empty()=%s, closed=%s",
-                         self._write_queue.empty(), closed)
-                if self._write_queue.empty() or closed:
+                sent = closed or not write_queue.unfinished_tasks
+                eventlog("flush_then_close: wait_for_packet_sent() sent=%s, closed=%s", sent, closed)
+                if sent:
                     # it got sent, we're done!
                     close_and_release()
                     return False
