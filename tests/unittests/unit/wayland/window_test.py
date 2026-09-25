@@ -7,7 +7,7 @@
 import sys
 import unittest
 from types import ModuleType
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, call, patch
 
 from xpra.util.objects import typedict
 # `load_window_server_class` restores `sys.modules` wholesale, which drops every
@@ -206,6 +206,83 @@ class WaylandSubsurfaceFrameTest(unittest.TestCase):
         self.assertFalse(self.facade.is_managed())
 
 
+class WaylandWindowServerFrameStateTest(unittest.TestCase):
+
+    def test_map_applies_properties_before_first_refresh(self):
+        from xpra.net.common import Packet
+        from xpra.server.subsystem.window import WindowServer
+        from xpra.server.window.compress import WindowSource
+        from xpra.server.window.video_compress import WindowVideoSource
+
+        proto = Mock()
+        window = Mock()
+        surface = Mock()
+        server = Mock()
+        server.get_window.return_value = window
+        server.get_surface.return_value = surface
+        source = object.__new__(WindowVideoSource)
+        source.wid = 7
+        source.window = Mock()
+        source.window.get.return_value = ""
+        source.window.get_internal_property_names.return_value = ()
+        source.window.has_alpha.return_value = True
+        source.window_signal_handlers = []
+        source._client_csc_modes_resolved = False
+        source._current_frame_has_alpha = None
+        source._alpha_capable = True
+        source.has_alpha = True
+        source.supports_transparency = True
+        source.discard_alpha = False
+        source._want_alpha = True
+        source.window_dimensions = (800, 600)
+        source.window_type = set()
+        source.content_types = ()
+        source.encoding = "h264"
+        source.is_OR = False
+        source.is_tray = False
+        source.is_shadow = False
+        source.common_video_encodings = ("h264",)
+        source.non_video_encodings = ()
+        source.full_csc_modes = typedict()
+        connection = Mock(uuid="client")
+        server.get_server_source.return_value = connection
+        events = []
+
+        def set_client_properties(_wid, _window, properties):
+            events.append("properties")
+            source.set_client_properties(properties)
+
+        connection.set_client_properties.side_effect = set_client_properties
+        server._set_client_properties.side_effect = (
+            lambda *args: WindowServer._set_client_properties(server, *args)
+        )
+        surface.resize.side_effect = lambda *_args: events.append("resize")
+        server.server.compositor.flush.side_effect = lambda: events.append("flush")
+
+        def refresh_window(_window):
+            events.append("refresh")
+            source.damage(0, 0, 800, 600)
+
+        server.refresh_window.side_effect = refresh_window
+        properties = {"encoding.full_csc_modes": {"h264": ("YUV420P",)}}
+
+        with patch.object(WindowSource, "set_client_properties"), \
+                patch.object(WindowSource, "damage") as damage:
+            source.damage(0, 0, 800, 600)
+            damage.assert_not_called()
+
+            WaylandWindowServer._process_map(
+                server, proto, Packet("window-map", 7, 0, 0, 800, 600, properties),
+            )
+
+        self.assertEqual(events, ["properties", "resize", "flush", "refresh"])
+        self.assertTrue(source._client_csc_modes_resolved)
+        damage.assert_called_once_with(0, 0, 800, 600, None)
+        server._set_client_properties.assert_called_once_with(
+            proto, 7, window, properties | {"event": "map"},
+        )
+
+
 class WaylandWindowServerCommitTest(unittest.TestCase):
 
     @staticmethod
@@ -243,6 +320,99 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
 
         window.schedule_empty_acknowledgement.assert_called_once_with()
         server.refresh_window_area.assert_not_called()
+
+    def test_surface_image_publishes_current_pixel_format(self):
+        window = Mock()
+        server = self.make_server(window)
+        image = Mock()
+        image.get_pixel_format.return_value = "BGRX"
+
+        WaylandWindowServer.surface_image(server, 7, image)
+
+        self.assertEqual(window._updateprop.call_args_list, [
+            call("pixel-format", "BGRX"),
+            call("frame-has-alpha", False),
+            call("image", image),
+        ])
+
+    def test_popup_frame_format_is_published_before_its_damage(self):
+        window = Mock()
+        server = self.make_server(window)
+        properties = {
+            "geometry": (10, 20, 100, 80),
+            "pixel-format": "",
+            "role": "popup",
+        }
+        window.get_property.side_effect = properties.__getitem__
+        events = []
+
+        def update_property(name, value):
+            properties[name] = value
+            events.append((name, value))
+
+        window._updateprop.side_effect = update_property
+        server.refresh_window_area.side_effect = (
+            lambda *_args, **_kwargs: events.append(
+                ("damage", properties["pixel-format"]),
+            )
+        )
+
+        for pixel_format in ("BGRX", "BGRA"):
+            image = Mock()
+            image.get_pixel_format.return_value = pixel_format
+
+            WaylandWindowServer.popup_commit(
+                server, 7, True, (10, 20), (100, 80), True,
+            )
+            server.refresh_window_area.assert_not_called()
+            WaylandWindowServer.surface_image(server, 7, image)
+            server.refresh_window_area.reset_mock()
+
+        self.assertEqual(events, [
+            ("pixel-format", "BGRX"),
+            ("frame-has-alpha", False),
+            ("image", ANY),
+            ("damage", "BGRX"),
+            ("pixel-format", "BGRA"),
+            ("frame-has-alpha", True),
+            ("image", ANY),
+            ("damage", "BGRA"),
+        ])
+
+    def test_subsurface_frame_is_published_before_its_damage(self):
+        window = Mock()
+        server = self.make_server(window)
+        server.subsurface_info[2] = (7, 3, 4, 100, 80, 100, 80)
+        facade = Mock()
+        server.subsurface_facades[2] = facade
+        source = Mock()
+        subsource = Mock()
+        source.make_subsurface_source.return_value = subsource
+        server.window_sources.return_value = (source,)
+        image = Mock()
+        image.get_pixel_format.return_value = "BGRX"
+        image.get_width.return_value = 100
+        image.get_height.return_value = 80
+        published = {}
+
+        def publish_frame(new_image):
+            published["image"] = new_image
+            published["pixel-format"] = new_image.get_pixel_format()
+
+        facade.set_image.side_effect = publish_frame
+
+        def check_published_frame(*_args):
+            self.assertEqual(published.get("pixel-format"), "BGRX")
+            self.assertIs(published.get("image"), image)
+
+        subsource.damage.side_effect = check_published_frame
+
+        WaylandWindowServer.subsurface_image(server, 2, image, 100, 80, 100, 80)
+
+        source.make_subsurface_source.assert_called_once_with(
+            2, 7, 3, 4, facade, 100, 80, 100, 80,
+        )
+        subsource.damage.assert_called_once_with(0, 0, 100, 80, {})
 
     def test_mapped_damage_refreshes_without_immediate_acknowledgement(self):
         window = Mock()
@@ -351,6 +521,7 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
             # not follow the buffers, and the frame value has to be published before the
             # image, so the encoding selection is current when the `commit` becomes damage:
             self.assertEqual(window._updateprop.call_args_list, [
+                (("pixel-format", pixel_format), ),
                 (("frame-has-alpha", has_alpha), ),
                 (("image", image), ),
             ], f"unexpected properties published for a {pixel_format!r} buffer")

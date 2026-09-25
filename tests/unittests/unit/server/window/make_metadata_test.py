@@ -10,6 +10,7 @@ Tests for xpra/server/window/metadata.py
 
 import os
 import unittest
+from unittest.mock import patch
 
 from xpra.server.window.metadata import (
     make_window_metadata, _make_window_metadata,
@@ -85,6 +86,36 @@ class TestMakeWindowMetadata(unittest.TestCase):
         w = _Window(**{"content-types": ("browser", "video")})
         result = make_window_metadata(w, "content-types")
         self.assertEqual(result, {"content-types": ("browser", "video")})
+
+    def test_pixel_format(self):
+        for pixel_format in ("BGRX", "BGRA", "RGBX", "RGBA", "future-format"):
+            for skip_defaults in (False, True):
+                with self.subTest(pixel_format=pixel_format, skip_defaults=skip_defaults):
+                    w = _Window(**{"pixel-format": pixel_format})
+                    result = make_window_metadata(w, "pixel-format", skip_defaults=skip_defaults)
+                    self.assertEqual(result, {"pixel-format": pixel_format})
+
+    def test_pixel_format_defaults(self):
+        for pixel_format in ("", None):
+            with self.subTest(pixel_format=pixel_format):
+                w = _Window(**{"pixel-format": pixel_format})
+                self.assertEqual(make_window_metadata(w, "pixel-format"), {"pixel-format": pixel_format})
+                self.assertEqual(make_window_metadata(w, "pixel-format", skip_defaults=True), {})
+
+    def test_skip_pixel_format(self):
+        w = _Window(**{"pixel-format": "BGRA"})
+        with patch("xpra.server.window.metadata.SKIP_METADATA", ["pixel-format"]):
+            self.assertEqual(make_window_metadata(w, "pixel-format"), {})
+
+    def test_internal_frame_alpha(self):
+        for value in (True, False, None):
+            with self.subTest(value=value):
+                w = _Window(**{"frame-has-alpha": value})
+                self.assertEqual(make_window_metadata(w, "frame-has-alpha"), {"frame-has-alpha": value})
+                expected = {"frame-has-alpha": False} if value is False else {}
+                self.assertEqual(make_window_metadata(w, "frame-has-alpha", skip_defaults=True), expected)
+                with patch("xpra.server.window.metadata.SKIP_METADATA", ["frame-has-alpha"]):
+                    self.assertEqual(make_window_metadata(w, "frame-has-alpha"), {})
 
     def test_legacy_content_type_is_compatibility_only(self):
         self.assertEqual("content-type" in DEFAULT_VALUES, BACKWARDS_COMPATIBLE)

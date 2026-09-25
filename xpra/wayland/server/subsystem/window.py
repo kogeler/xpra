@@ -276,6 +276,7 @@ class WaylandWindowServer(WindowServer):
         log("new surface image for window %i: %s", wid, image)
         # Do not free the image while window compression threads may still reference it.
         image.free = noop
+        window._updateprop("pixel-format", image.get_pixel_format())
         # The buffer the client has committed tells us whether these pixels really have
         # an alpha channel: an `XRGB` / `XBGR` one has none, which lets the window source
         # use a video encoding for them. This is internal state and not `has-alpha`:
@@ -284,6 +285,10 @@ class WaylandWindowServer(WindowServer):
         # already up to date when the `commit` which follows this signal becomes damage:
         window._updateprop("frame-has-alpha", "A" in image.get_pixel_format())
         window._updateprop("image", image)
+        if window.get_property("role") == "popup":
+            _x, _y, w, h = window.get_property("geometry")
+            if w > 0 and h > 0:
+                self.refresh_window_area(window, 0, 0, w, h, options={"damage": True})
 
     def map(self, wid: int, title: str, app_id: str, size: tuple[int, int]) -> None:
         window = self.get_window(wid)
@@ -717,10 +722,6 @@ class WaylandWindowServer(WindowServer):
         self.update_colourspace(window, surface)
         self.update_content_types(window, surface)
         self.update_geometry(window, position, size)
-        if mapped and has_image:
-            w, h = size
-            if w > 0 and h > 0:
-                self.refresh_window_area(window, 0, 0, w, h, options={"damage": True})
 
     def popup_reposition(self, wid: int, position: tuple[int, int]) -> None:
         window = self.get_window(wid)

@@ -36,6 +36,7 @@ class SubsurfaceWindow(FrameCallbackModel):
                     GObject.ParamFlags.READABLE),
         "depth": (GObject.TYPE_INT, "bit depth", "", -1, 64, -1, GObject.ParamFlags.READABLE),
         "has-alpha": (GObject.TYPE_BOOLEAN, "alpha channel", "", False, GObject.ParamFlags.READABLE),
+        "pixel-format": (GObject.TYPE_PYOBJECT, "current pixel format", "", GObject.ParamFlags.READABLE),
         "frame-has-alpha": (GObject.TYPE_BOOLEAN, "alpha channel of the current buffer", "",
                             True, GObject.ParamFlags.READABLE),
     }
@@ -45,7 +46,7 @@ class SubsurfaceWindow(FrameCallbackModel):
     # a subsurface has its own buffer, so its transparency is its own:
     # the canonical use for one is an opaque video plane inside a parent
     # which is only translucent for its shadow and rounded corners
-    _internal_property_names: list[str] = ["frame-has-alpha"]
+    _internal_property_names: list[str] = ["frame-has-alpha", "pixel-format"]
     _MODELTYPE = "WaylandSubsurface"
 
     def __init__(self, width: int, height: int, has_alpha: bool = True, depth: int = 32,
@@ -59,6 +60,7 @@ class SubsurfaceWindow(FrameCallbackModel):
         self._snapshot_generation = 0
         self._internal_set_property("depth", depth)
         self._internal_set_property("has-alpha", has_alpha)
+        self._internal_set_property("pixel-format", "")
         self._setup_done = True
         self._managed = True
 
@@ -72,6 +74,7 @@ class SubsurfaceWindow(FrameCallbackModel):
 
     def set_image(self, image: ImageWrapper) -> None:
         self._image = image
+        self._updateprop("pixel-format", image.get_pixel_format())
         # publish the alpha the buffer really has, so that an opaque subsurface
         # can be encoded as video even if its parent window is translucent:
         self._updateprop("frame-has-alpha", "A" in image.get_pixel_format())

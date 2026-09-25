@@ -225,6 +225,11 @@ class Window(FrameCallbackModel):
             True,
             GObject.ParamFlags.READABLE,
         ),
+        "pixel-format": (
+            GObject.TYPE_PYOBJECT,
+            "pixel format of the current surface buffer", "",
+            GObject.ParamFlags.READABLE,
+        ),
         "opaque-region": (
             GObject.TYPE_PYOBJECT,
             "Compositor can assume that there is no transparency for this region", "",
@@ -344,11 +349,12 @@ class Window(FrameCallbackModel):
     # `has-alpha` is the capability the client creates its visual and backing from,
     # so it must not follow the buffers: a surface can commit an opaque one and still
     # gain a translucent subsurface later, which the client paints into that backing
-    _internal_property_names = ["frame-has-alpha"]
+    _internal_property_names = ["frame-has-alpha", "pixel-format"]
     _MODELTYPE = "Wayland"
 
     def __init__(self, props: dict[str, Any]):
         super().__init__()
+        self._internal_set_property("pixel-format", "")
         for key, prop in props.items():
             self._internal_set_property(key, prop)
         # Monotonic identity for the retained WSSO root raster.  A composite

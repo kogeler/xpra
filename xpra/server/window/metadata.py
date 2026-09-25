@@ -41,6 +41,9 @@ DEFAULT_VALUES: dict[str, int | str | bool | tuple | dict] = {
     "workspace": WORKSPACE_UNSET,
     "bypass-compositor": 0,
     "depth": 24,
+    # Internal current-frame state exposed by xpra info, not client metadata:
+    "pixel-format": "",
+    "frame-has-alpha": True,
     # the colourspace this window's pixels are in:
     # only window models that can tell them apart declare this property
     # (ie: individually tagged wayland surfaces),

@@ -24,7 +24,7 @@ from xpra.codecs.image import ImageWrapper
 from xpra.codecs.protocols import ColorspaceConverter
 from xpra.server.window.compress import (
     WindowSource, DelayedRegions, get_encoder_type, free_image_wrapper,
-    STRICT_MODE, LOSSLESS_WINDOW_TYPES,
+    STRICT_MODE, LOSSLESS_WINDOW_TYPES, TRANSPARENCY_ENCODINGS,
     DOWNSCALE_THRESHOLD, DOWNSCALE, TEXT_QUALITY,
     LOG_ENCODERS,
 )
@@ -319,6 +319,111 @@ class WindowVideoSource(WindowSource):
         super().do_set_auto_refresh_delay(min_delay, delay)
         if r := self.video_subregion:
             r.set_auto_refresh_delay(self.base_auto_refresh_delay)
+
+    # Map completion and an explicit (even empty) CSC dictionary are terminal.
+    _client_csc_modes_resolved = False
+    # Diagnostic state only; alpha classification belongs to WindowSource.
+    _last_frame_alpha_log: tuple[str, bool] | None = None
+
+    def set_client_properties(self, properties: typedict) -> None:
+        if properties.strget("event") == "map" or isinstance(properties.get("encoding.full_csc_modes"), dict):
+            self._client_csc_modes_resolved = True
+        super().set_client_properties(properties)
+
+    def update_frame_alpha_state(self) -> None:
+        # UI only. Reuse the constructor-owned upstream frame signal/cache,
+        # and sample before damage (including before the first notification).
+        previous = self._current_frame_has_alpha
+        self.update_has_alpha()
+        want_alpha = bool(
+            (self.is_tray or (self.has_alpha and self.supports_transparency))
+            and not self.discard_alpha
+        )
+        if previous != self._current_frame_has_alpha or want_alpha != self._want_alpha:
+            self.apply_frame_alpha_state()
+        state = (self.window.get("pixel-format", ""), self._want_alpha)
+        if state != self._last_frame_alpha_log:
+            self._last_frame_alpha_log = state
+            log("window %#x frame pixel format=%s, want-alpha=%s", self.wid, *state)
+
+    def apply_frame_alpha_state(self) -> None:
+        # Cached values only: encoder reconfiguration can run off the UI thread.
+        self._want_alpha = bool(
+            (self.is_tray or (self.has_alpha and self.supports_transparency))
+            and not self.discard_alpha
+        )
+        self.assign_encoding_getter()
+
+    def get_frame_transparent_encoding(self, w: int, h: int, options: dict,
+                                       current_encoding: str) -> str:
+        if not set(self.common_encodings).intersection(TRANSPARENCY_ENCODINGS):
+            raise ValueError(f"no transparency encoding is available for window {self.wid:#x}")
+
+        def usable(encoding: str) -> bool:
+            if encoding not in self.common_encodings or encoding not in TRANSPARENCY_ENCODINGS:
+                return False
+            if encoding == "webp":
+                return 2 <= w <= 16383 and 2 <= h <= 16383
+            if encoding == "jpega":
+                return w >= 2 and h >= 2
+            return True
+
+        encoding = self.get_transparent_encoding(w, h, options, current_encoding)
+        if not usable(encoding) and current_encoding:
+            encoding = self.get_transparent_encoding(w, h, options, "")
+        if not usable(encoding):
+            raise ValueError(
+                f"no usable transparency encoding is available for window {self.wid:#x}: "
+                f"selected {encoding!r}",
+            )
+        return encoding
+
+    def get_best_encoding_impl(self) -> Callable[..., str]:
+        if self._current_frame_has_alpha is not None and self._want_alpha:
+            if self._mmap and self.encoding != "grayscale":
+                return self.encoding_is_mmap
+            # The current buffer is authoritative when an explicit opaque
+            # encoding hint or override conflicts with its alpha channel.
+            return self.get_frame_transparent_encoding
+        return super().get_best_encoding_impl()
+
+    def get_csc_mode_candidates(self) -> Sequence[str]:
+        encoding = self.encoding
+        selector = getattr(self, "get_best_encoding", None)
+        if selector in (
+            self.hardcoded_encoding,
+            self.encoding_is_hint,
+            self.get_strict_encoding,
+        ):
+            # These selectors return one fixed coding without consulting
+            # geometry or adaptive policy.  Reuse their resolved intent so a
+            # ready CSC mode for a different codec cannot release the wait.
+            encoding = selector()
+        if encoding in ("auto", "stream", "grayscale"):
+            return self.common_video_encodings
+        if encoding in self.common_video_encodings:
+            return (encoding,)
+        return ()
+
+    def waiting_for_client_csc_modes(self) -> bool:
+        video_encodings = self.get_csc_mode_candidates()
+        frame_needs_video = self._current_frame_has_alpha is False
+        unresolved_video_only = self._current_frame_has_alpha is None and not self.non_video_encodings
+        return all((
+            not self._client_csc_modes_resolved,
+            not getattr(self, "parent_wid", 0),
+            not (self.is_OR or self.is_tray or self.is_shadow),
+            bool(video_encodings),
+            frame_needs_video or unresolved_video_only,
+            not any(self.full_csc_modes.strtupleget(encoding) for encoding in video_encodings),
+        ))
+
+    def damage(self, x: int, y: int, w: int, h: int, options=None) -> None:
+        self.update_frame_alpha_state()
+        if self.waiting_for_client_csc_modes():
+            videolog("dropping damage for window %#x until client CSC modes are known", self.wid)
+            return
+        super().damage(x, y, w, h, options)
 
     def update_av_sync_frame_delay(self) -> None:
         self.av_sync_frame_delay = 0
@@ -802,6 +907,9 @@ class WindowVideoSource(WindowSource):
 
     def update_window_dimensions(self, ww: int, wh: int) -> None:
         super().update_window_dimensions(ww, wh)
+        # Generic damage discovers resizes after our outer damage wrapper.
+        # Refresh browser/size policy and rebind before the same batch.
+        self.update_frame_alpha_state()
 
     def cancel_damage(self, limit: int = 0) -> None:
         # first of all, mark the sequences as cancelled,
@@ -1111,6 +1219,23 @@ class WindowVideoSource(WindowSource):
         w = image.get_width()
         h = image.get_height()
 
+        if (self._current_frame_has_alpha is not None
+                and image.get_pixel_format() in ("RGBA", "BGRA")
+                and (self.is_tray or (self._alpha_capable and self.supports_transparency))):
+            # The wrapper is the final alpha authority, not a newer model or
+            # discard state. Generic processing already stripped authorized
+            # opaque regions before reaching this boundary.
+            if self._mmap and self.encoding != "grayscale":
+                coding = "mmap"
+            else:
+                try:
+                    # Cython requires an actual dict for the planner; retain
+                    # the original typed codec options at the worker handoff.
+                    coding = self.get_frame_transparent_encoding(w, h, dict(eoptions), coding)
+                except ValueError:
+                    free_image_wrapper(image)
+                    raise
+
         # freeze if:
         # * we want av-sync
         # * the video encoder needs a thread safe image
@@ -1153,8 +1278,9 @@ class WindowVideoSource(WindowSource):
         ee = self.edge_encoding
         ow = w
         oh = h
-        w = w & self.width_mask
-        h = h & self.height_mask
+        if video_mode:
+            w = w & self.width_mask
+            h = h & self.height_mask
         regions = []
         accepted = 0
         try:
