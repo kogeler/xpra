@@ -30,16 +30,9 @@ The active patches are:
 4. `wayland-initial-window-state`;
 5. `wayland-client-keymap-sync`;
 6. `x11-client-clipboard-events`;
-7. `wayland-clipboard-token-coalescing`;
-8. `wayland-empty-damage-throttle`;
-9. `jph-parallel-build-objects`;
-10. `debian-libva-codecs-package`;
-11. `packet-handler-error-boundary`;
-12. `gtk-client-scroll-deduplication`;
-13. `wayland-display-name-signal`;
-14. `client-codec-startup-order`;
-15. `x11-selection-refusal`;
-16. `client-popup-modal-lifecycle`.
+7. `packet-handler-error-boundary`;
+8. `gtk-client-scroll-deduplication`;
+9. `server-shutdown-disconnect-flush`.
 
 No quarantine duty case is currently active. The permanent
 [`upstream-test-quarantine` scaffold](cases/upstream-test-quarantine/README.md)
@@ -261,12 +254,18 @@ make -C fork-maintenance live-wait RUN=wayland-subsurface-live-01
 
 Every live test runs the complete `stacks/develop` on BOTH endpoints.
 Case-only, partial-stack and clean-endpoint live tests are forbidden.
-For every patch validation, use:
+For every patch validation, finish with one complete pass:
 
 ```bash
 make -C fork-maintenance live-all STACK=develop RUN=<fresh-prefix>
 make -C fork-maintenance live-suite-check STACK=develop RUN=<fresh-prefix>
 ```
+
+Reach it through the [live loop](docs/runbooks/live-tests.md#the-live-loop-fix-and-continue-then-one-complete-pass):
+when a gate fails, fix it and continue from that gate with
+`live-all ... RUN=<next-prefix> FROM=<gate>` to the last gate instead of
+rerunning the whole set; then a complete pass, repeated the same way until one
+succeeds without a fix.
 
 The nine required profiles are Zed RGB, adaptive-alpha Zed H.264, RGB detach,
 RGB transport loss, native-Wayland keymap, Vulkan hardware, OpenGL hardware,

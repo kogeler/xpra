@@ -215,7 +215,7 @@ make -C fork-maintenance develop-rebase
 ```
 
 If rebase stops, resolve and stage each conflict and run
-`git rebase --continue` until it completes. Abort and stop if the resolution is
+`git -c commit.gpgsign=false rebase --continue` until it completes. Abort and stop if the resolution is
 uncertain. Upstream transfer by merge is forbidden. Then prove the new base and
 resolve the queue:
 

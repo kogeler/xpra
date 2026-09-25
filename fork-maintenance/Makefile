@@ -38,6 +38,7 @@ LIFECYCLE ?= application-exit
 NETWORK_PROFILE ?= $(shell $(LIVE_CONFIG) default-profile)
 RENDER_NODE ?=
 ZED_DIRECTORY ?=
+FROM ?=
 ALLOW_PATH_CHANGE ?= 0
 
 SELECTOR = $(if $(strip $(CASE)),cases/$(strip $(CASE)),$(if $(strip $(STACK)),stacks/$(strip $(STACK))))
@@ -55,9 +56,13 @@ export XPRA_FORK_LIFECYCLE := $(LIFECYCLE)
 export XPRA_FORK_NETWORK_PROFILE := $(NETWORK_PROFILE)
 export XPRA_FORK_RENDER_NODE := $(RENDER_NODE)
 export XPRA_FORK_ZED_DIRECTORY := $(ZED_DIRECTORY)
+export XPRA_FORK_LIVE_FROM := $(FROM)
 export XPRA_FORK_SELECTOR := $(SELECTOR)
 export XPRA_ARTIFACT_CONFIRM := $(CONFIRM)
 export XPRA_KNOWLEDGE_SESSION := $(SESSION)
+# A partial clone must never lazily fetch from its (credentialed) promisor
+# remote: missing objects fail closed; `objects-backfill` completes them.
+export GIT_NO_LAZY_FETCH := 1
 
 AUTOMATION_PYTHON := $(shell find tools infra cases -type f -name '*.py' -print 2>/dev/null | sort)
 AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_wayland_clipboard_fixture.sh \
@@ -67,7 +72,7 @@ AUTOMATION_SHELL := infra/live/start_hardware_fixture.sh infra/live/start_waylan
 	infra/upstream-tests/entrypoint.sh
 
 .PHONY: help check lint typecheck contributor-tests clean artifact-boundary doctor \
-	live-venv live-venv-check list repo-status repo-sync master-update develop-rebase \
+	live-venv live-venv-check list repo-status repo-sync master-update develop-rebase objects-backfill \
 	patch-start-check isolated-start-check develop-check ci-layout-check ci-prepare ci-master-sync ci-upstream-tests ci-deb-release \
 	case-new case-recover case-name-check stack-name-check selector-check workspace-selector-check optional-selector-check \
 	patch-check patch-apply patch-unapply patch-update stack-check stack-apply stack-unapply \
@@ -100,7 +105,9 @@ help:
 		'make -C fork-maintenance master-update' \
 		'    Separate operator Git request: fast-forward local master to fetched origin/master' \
 		'make -C fork-maintenance develop-rebase' \
-		'    Explicit upstream refresh: rebase clean develop onto local master' \
+		'    Explicit upstream refresh: backfill objects, rebase clean develop unsigned onto local master' \
+		'make -C fork-maintenance objects-backfill' \
+		'    Complete partial-clone objects of local master and HEAD from public upstream HTTPS' \
 		'make -C fork-maintenance patch-start-check' \
 		'    Verify the local rebase boundary before explicit host patch integration' \
 		'make -C fork-maintenance isolated-start-check' \
@@ -163,6 +170,8 @@ help:
 		'    List tracked client network profiles; profiles.yml supplies the default' \
 		'make -C fork-maintenance live-xpra-opengl-hardware STACK=develop RUN=unique-name' \
 		'make -C fork-maintenance live-all STACK=develop RUN=unique-prefix' \
+		'make -C fork-maintenance live-all STACK=develop RUN=unique-prefix FROM=live-h264' \
+		'    After a fix, continue with the failed gate and the ones after it (never acceptance)' \
 		'make -C fork-maintenance live-suite-check STACK=develop RUN=unique-prefix' \
 		'    Every patch validation requires all nine profiles with all patches on both endpoints' \
 		'make -C fork-maintenance typecheck WORKSPACE=complete-stack-workspace' \
@@ -194,7 +203,8 @@ check: artifact-boundary ci-layout-check
 	@PYTHONPATH="$(AUTOMATION_ROOT)/tools" $(PYTHON) tools/test_container_payload.py
 	@PYTHONPATH="$(AUTOMATION_ROOT)/tools" $(PYTHON) tools/test_podman_policy.py
 	@$(MAKE) --no-print-directory -C "$(DEB_PACKAGES)" check
-	@$(PYTHON) -m unittest discover -s infra/live -p 'test_*.py'
+	@$(LIVE_JOB_BOOTSTRAP) environment-check >/dev/null
+	@"$(LIVE_PYTHON)" -m unittest discover -s infra/live -p 'test_*.py'
 	@$(PYTHON) -m unittest discover -s infra/upstream-tests -p 'test_*.py'
 	@command -v "$(RUFF)" >/dev/null 2>&1 || { printf 'ruff is required for check\n' >&2; exit 2; }
 	@$(RUFF) check tools infra cases
@@ -275,6 +285,9 @@ master-update:
 
 develop-rebase:
 	@$(CONTRIB) develop-rebase
+
+objects-backfill:
+	@$(CONTRIB) objects-backfill
 
 patch-start-check:
 	@$(CONTRIB) patch-start-check
@@ -488,6 +501,7 @@ live-all: live-stack-policy-check isolated-start-check selector-check run-name-c
 		--network-profile "$${XPRA_FORK_NETWORK_PROFILE}"; \
 	if [[ -n "$${XPRA_FORK_RENDER_NODE}" ]]; then set -- "$$@" --render-node "$${XPRA_FORK_RENDER_NODE}"; fi; \
 	if [[ -n "$${XPRA_FORK_ZED_DIRECTORY}" ]]; then set -- "$$@" --zed-directory "$${XPRA_FORK_ZED_DIRECTORY}"; fi; \
+	if [[ -n "$${XPRA_FORK_LIVE_FROM}" ]]; then set -- "$$@" --from "$${XPRA_FORK_LIVE_FROM}"; fi; \
 	"$$@"
 
 live-suite-check: live-stack-policy-check run-name-check live-venv-check

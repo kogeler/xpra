@@ -267,16 +267,9 @@ Only these active cases are retained:
 4. `wayland-initial-window-state`;
 5. `wayland-client-keymap-sync`;
 6. `x11-client-clipboard-events`;
-7. `wayland-clipboard-token-coalescing`;
-8. `wayland-empty-damage-throttle`;
-9. `jph-parallel-build-objects`;
-10. `debian-libva-codecs-package`;
-11. `packet-handler-error-boundary`;
-12. `gtk-client-scroll-deduplication`;
-13. `wayland-display-name-signal`;
-14. `client-codec-startup-order`;
-15. `x11-selection-refusal`;
-16. `client-popup-modal-lifecycle`.
+7. `packet-handler-error-boundary`;
+8. `gtk-client-scroll-deduplication`;
+9. `server-shutdown-disconnect-flush`.
 
 ## Stack contract
 
@@ -305,7 +298,10 @@ streamed context inventory and host runner digest. All case patch modes install
 the same neutral inputs; `clean` means no case patch or production change.
 The native pointer protocol regression has both clean-source and resulting-
 stack `wayland` gates plus complete-stack focused selection after its upstream
-replacement. A neutral test cannot introduce a production delta, waive live
+replacement. The client codec-startup regression, retained after
+`client-codec-startup-order` retired, has its clean-source proof in the clean
+full leg and its resulting-stack proof in complete-stack focused selection
+and the full legs. A neutral test cannot introduce a production delta, waive live
 coverage, overwrite an upstream test, or satisfy acceptance without execution.
 
 ## Isolated patch lifecycle
@@ -535,7 +531,7 @@ Initial source inspection, static checks and offline fork-control/safety tests
 remain allowed. No new Xpra, quarantine, native/compiled, live or real package
 run, nor upstream-test image preparation, starts before that gate.
 
-After the gate, use the development loop and early complete live suite from
+After the gate, use the development loop and early live loop from
 [`validation.md`](docs/runbooks/validation.md); schedule full matrix/package
 and remaining live acceptance only after a reviewed candidate freeze. Reuse
 exact valid new-base controls instead of repeating them at each numbered phase.
@@ -544,7 +540,8 @@ exact valid new-base controls instead of repeating them at each numbered phase.
    creating a commit, stashing or discarding it;
 2. record existing local `master` and `develop`, then run `develop-rebase`
    without network access, branch switching or another ref update;
-3. resolve and stage every conflict, then use `git rebase --continue` until the
+3. resolve and stage every conflict, then use
+   `git -c commit.gpgsign=false rebase --continue` until the
    rebase completes; abort and stop if correct resolution is not possible;
 4. run the local read-only `patch-start-check` and inventory every individual `patch-check`
    outcome; perform the incremental deep review/decision/implementation/export/
@@ -591,6 +588,15 @@ No content commit is authorized by refresh. If a clean-host-only operation is
 unavailable, use the supported isolated workflow or request an explicit Git
 disposition. No fetch, synchronization or remote-URL check is a refresh step.
 Ordinary patch work does not implicitly start a rebase.
+
+Two narrow rules keep automation non-interactive. Every commit the agent
+creates or replays, including the rebase and its continuation, is unsigned
+(`commit.gpgsign=false`). A partial clone never lazily fetches: Make exports
+`GIT_NO_LAZY_FETCH=1`, and `develop-rebase` (or `objects-backfill`) fetches
+exactly the missing object IDs reachable from local `master` and `HEAD` from
+the public canonical repository over anonymous HTTPS, without a remote name,
+credential, ref, `FETCH_HEAD` or configuration change, then requires none to
+remain missing. This content-addressed backfill is not a ref fetch or sync.
 
 No form of `git merge master`, `git merge upstream/master`, or an equivalent
 merge is accepted as upstream transfer. `develop-check` rejects merge commits
@@ -1137,12 +1143,17 @@ final gates, not automatic execution of the entire ladder after every edit.
 The live runner keeps direct Xpra boundaries distinct from SSH orchestration.
 The mandatory positive suite is Zed RGB, adaptive-alpha Zed H.264, RGB detach,
 RGB transport loss, native-Wayland keymap input, Vulkan H.264, OpenGL H.264,
-X11 clipboard and Wayland subsurface composition. Every patch validation runs
-all nine through `live-all STACK=develop RUN=<fresh-prefix>`. A single profile,
-case gate declaration or previous partial suite cannot accept an alteration.
-Each profile uses its own named supervised job; the suite runs them serially,
-collects and removes each completed runtime before the next, and stops at the
-first failure. Retained reports and exact removal transactions remain available
+X11 clipboard and Wayland subsurface composition. Every patch validation ends
+with one complete pass of all nine through
+`live-all STACK=develop RUN=<fresh-prefix>` without a fix in between. A single
+profile, a `FROM=<gate>` continuation, a case gate declaration or a previous
+partial suite cannot accept an alteration. Each profile uses its own named
+supervised job; the suite runs them serially, collects and removes each
+completed runtime before the next, and stops at the first failure. A fix is
+never tested by rerunning the whole set: the failed gate is fixed and the walk
+continues from it (`FROM=<gate>`, next fresh prefix) to the last gate, then a
+new complete pass starts, following the live loop of
+[`live-tests.md`](docs/runbooks/live-tests.md#the-live-loop-fix-and-continue-then-one-complete-pass). Retained reports and exact removal transactions remain available
 to `live-suite-check`, which revalidates all nine profiles against the current
 source, complete queue and harness, common context/hardware/network inputs, and
 unchanged Zed payload for the two Zed profiles. Missing, failed, stale, mixed

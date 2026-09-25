@@ -20,6 +20,9 @@ import contrib
 
 
 def command(*arguments: str, cwd: Path | None = None) -> str:
+    if arguments[:1] == ("git",):
+        # Fixture commits must never reach for the operator's signing key.
+        arguments = ("git", "-c", "commit.gpgsign=false", *arguments[1:])
     result = subprocess.run(
         arguments,
         cwd=cwd,
@@ -505,6 +508,24 @@ class DevelopRebaseTest(unittest.TestCase):
         with verify, sync:
             self.assertEqual(contrib.patch_start_check(self.repo), self.base)
 
+    def test_develop_rebase_never_signs_replayed_commits(self) -> None:
+        # A configured but unusable signer fails any signing attempt.
+        command("git", "config", "commit.gpgsign", "true", cwd=self.repo)
+        command("git", "config", "gpg.program", "false", cwd=self.repo)
+        verify, sync = self.sync_mocks()
+        with verify, sync:
+            self.assertEqual(contrib.develop_rebase(self.repo), self.base)
+        self.assertEqual(
+            subprocess.run(
+                ("git", "log", "-1", "--format=%G?", "develop"),
+                cwd=self.repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip(),
+            "N",
+        )
+
     def test_patch_start_rejects_merge_transfer(self) -> None:
         command("git", "merge", "-q", "--no-edit", "master", cwd=self.repo)
         verify, sync = self.sync_mocks()
@@ -523,6 +544,48 @@ class DevelopRebaseTest(unittest.TestCase):
         self.assertEqual(command("git", "rev-parse", "HEAD", cwd=self.repo), self.old_develop)
         self.assertEqual(command("git", "rev-parse", "master", cwd=self.repo), self.base)
         self.assertEqual(command("git", "status", "--porcelain=v1", cwd=self.repo), before)
+
+
+class ObjectBackfillTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        root = Path(self.temporary.name)
+        self.source = root / "source"
+        command("git", "init", "-q", "-b", "master", str(self.source))
+        for key, value in (("uploadpack.allowFilter", "true"), ("uploadpack.allowAnySHA1InWant", "true")):
+            command("git", "config", key, value, cwd=self.source)
+        (self.source / "payload.txt").write_text("content-addressed payload\n", encoding="utf-8")
+        command("git", "add", "payload.txt", cwd=self.source)
+        command("git", "-c", "user.name=Fixture", "-c", "user.email=f@example.invalid", "commit", "-qm", "base",
+                cwd=self.source)
+        self.repo = root / "partial"
+        command("git", "clone", "-q", "--filter=blob:none", "--no-checkout", self.source.as_uri(), str(self.repo))
+        # The promisor itself must never be contacted by automation.
+        command("git", "remote", "set-url", "origin", "ssh://promisor.invalid/unreachable.git", cwd=self.repo)
+        self.blob = command("git", "rev-parse", "master:payload.txt", cwd=self.source)
+
+    def refs(self) -> str:
+        return command("git", "for-each-ref", "--format=%(refname) %(objectname)", cwd=self.repo)
+
+    def test_missing_objects_do_not_trigger_a_lazy_fetch(self) -> None:
+        self.assertEqual(contrib.missing_objects(self.repo, "refs/heads/master"), [self.blob])
+
+    def test_backfill_fetches_exact_objects_without_touching_refs(self) -> None:
+        refs = self.refs()
+        count = contrib.backfill_missing_objects(self.repo, "refs/heads/master", source=self.source.as_uri())
+        self.assertEqual(count, 1)
+        self.assertEqual(contrib.missing_objects(self.repo, "refs/heads/master"), [])
+        self.assertEqual(self.refs(), refs)
+        self.assertFalse((self.repo / ".git" / "FETCH_HEAD").exists())
+        self.assertEqual(contrib.backfill_missing_objects(self.repo, "refs/heads/master"), 0)
+
+    def test_backfill_fails_closed_when_the_source_lacks_objects(self) -> None:
+        empty = Path(self.temporary.name) / "empty"
+        command("git", "init", "-q", "--bare", str(empty))
+        with self.assertRaises(contrib.ContribError):
+            contrib.backfill_missing_objects(self.repo, "refs/heads/master", source=empty.as_uri())
+        self.assertEqual(contrib.missing_objects(self.repo, "refs/heads/master"), [self.blob])
 
 
 class IsolatedStartTest(unittest.TestCase):
@@ -6427,22 +6490,15 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(
             set(cases),
             {
-                "debian-libva-codecs-package",
-                "jph-parallel-build-objects",
                 "packet-handler-error-boundary",
                 "gtk-client-scroll-deduplication",
                 "wayland-subsurface-stream-ownership",
                 "wayland-client-keymap-sync",
-                "wayland-empty-damage-throttle",
                 "wayland-initial-window-state",
                 "video-pipeline-cleanup-race",
                 "window-source-timer-lifecycle",
                 "x11-client-clipboard-events",
-                "wayland-clipboard-token-coalescing",
-                "wayland-display-name-signal",
-                "client-codec-startup-order",
-                "x11-selection-refusal",
-                "client-popup-modal-lifecycle",
+                "server-shutdown-disconnect-flush",
             },
         )
         self.assertTrue(all(case.kind == "production" for case in cases.values()))
@@ -6514,16 +6570,9 @@ class ManifestTest(unittest.TestCase):
                 "wayland-initial-window-state",
                 "wayland-client-keymap-sync",
                 "x11-client-clipboard-events",
-                "wayland-clipboard-token-coalescing",
-                "wayland-empty-damage-throttle",
-                "jph-parallel-build-objects",
-                "debian-libva-codecs-package",
                 "packet-handler-error-boundary",
                 "gtk-client-scroll-deduplication",
-                "wayland-display-name-signal",
-                "client-codec-startup-order",
-                "x11-selection-refusal",
-                "client-popup-modal-lifecycle",
+                "server-shutdown-disconnect-flush",
             ),
         )
 
@@ -6531,13 +6580,8 @@ class ManifestTest(unittest.TestCase):
         cases = contrib.load_cases()
         stack = contrib.load_stacks(cases)["develop"]
         self.assertEqual(cases["video-pipeline-cleanup-race"].required_gates, ())
-        self.assertEqual(cases["jph-parallel-build-objects"].required_gates, ())
         self.assertEqual(
             cases["x11-client-clipboard-events"].required_gates,
-            ("live-x11-clipboard",),
-        )
-        self.assertEqual(
-            cases["wayland-clipboard-token-coalescing"].required_gates,
             ("live-x11-clipboard",),
         )
         self.assertEqual(

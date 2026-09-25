@@ -275,7 +275,7 @@ index 0000000000000000000000000000000000000000..86b1b8bc3d6b52c51f866119d2feae3b
 +if __name__ == "__main__":
 +    unittest.main()
 diff --git a/xpra/net/dispatch.py b/xpra/net/dispatch.py
-index 530536b47903c18af09982b5cbc46fe35b7efe12..35d366611ba72bc6fd55dc1bd1d4021d657edf5d 100644
+index 2cd86690253ff9763bbbbe2496a2340664292275..26d5ef03389269b30e58850eed0daf72e5d9a389 100644
 --- a/xpra/net/dispatch.py
 +++ b/xpra/net/dispatch.py
 @@ -5,6 +5,8 @@
@@ -327,29 +327,7 @@ index 530536b47903c18af09982b5cbc46fe35b7efe12..35d366611ba72bc6fd55dc1bd1d4021d
  
      def get_packet_types(self) -> list[str]:
          """ every packet type we can handle once authenticated, flat registry and subsystems """
-@@ -238,10 +257,17 @@ class PacketDispatcher:
- 
-         def call_handler(main: bool) -> None:
-             may_log_packet(False, packet_type, packet)
--            try:
--                self.call_packet_handler(main, handler, proto, packet)
--            except (AssertionError, TypeError, ValueError, RuntimeError):
--                log.error(f"Error processing {packet_type!r}", exc_info=True)
-+
-+            def guarded_handler(*args) -> None:
-+                # Guard the actual invocation, not just its scheduling. The
-+                # client adapter supplies (packet), the server (proto, packet).
-+                # Never propagate a truthy return into a repeating UI source.
-+                try:
-+                    handler(*args)
-+                except Exception:
-+                    self._log_packet_error(packet_type)
-+
-+            self.call_packet_handler(main, guarded_handler, proto, packet)
- 
-         try:
-             if authenticated and not proto.is_closed():
-@@ -268,10 +294,25 @@ class PacketDispatcher:
+@@ -265,10 +284,25 @@ class PacketDispatcher:
                  return
  
              self.handle_invalid_packet(proto, packet)
@@ -377,5 +355,18 @@ index 530536b47903c18af09982b5cbc46fe35b7efe12..35d366611ba72bc6fd55dc1bd1d4021d
 +        log.error("Error processing %r packet (%i error reports suppressed)",
 +                  packet_type, suppressed, exc_info=True, backtrace=False)
  
-     @staticmethod
-     def call_packet_handler(main: bool, handler: PacketHandlerType, proto, packet: Packet) -> None:
+     def call_packet_handler(self, main: bool, handler: PacketHandlerType, proto, packet: Packet) -> None:
+         args = self.packet_handler_args(proto, packet)
+@@ -279,8 +313,10 @@ class PacketDispatcher:
+             # it runs, the dispatcher has long returned and is no longer on the stack
+             try:
+                 handler(*args)
+-            except (AssertionError, TypeError, ValueError, RuntimeError):
+-                log.error(f"Error processing {packet.get_type()!r} packet", exc_info=True)
++            except Exception:
++                # whatever a malformed packet makes its handler raise stops here,
++                # and a burst of them shares one reporting budget:
++                self._log_packet_error(packet.get_type())
+ 
+         if main:
+             self.call_in_main_thread(call)

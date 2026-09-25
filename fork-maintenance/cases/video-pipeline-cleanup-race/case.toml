@@ -2,7 +2,7 @@ schema = 1
 slug = "video-pipeline-cleanup-race"
 title = "Own video pipeline resources through terminal cleanup"
 commit_subject = "Own video pipeline resources through terminal cleanup"
-patch_sha256 = "f9a697da8b09b544a7df5363060c5684a0a62210225c68d08a226af43c71a1e6"
+patch_sha256 = "8476263e5703a56977b39e54a4501bee71630618fd73434479b5ee6fc6eb54bb"
 dependencies = []
 paths = [
   "tests/unittests/unit/server/encoder_server_test.py",

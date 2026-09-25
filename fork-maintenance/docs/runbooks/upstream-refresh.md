@@ -55,7 +55,7 @@ Persist findings while the relevant code is in context, then export the
 complete atomic candidate and record its checkpoint before moving on.
 
 After that gate, use nearest regressions, affected upstream/case modules,
-relevant native/compiled checks, and the early complete live suite. Only after
+relevant native/compiled checks, and the early live loop. Only after
 the candidate is stable fill the final evidence gaps; do not repeat the whole
 matrix after each subsequent correction. Tests can refute or strengthen a
 review conclusion, but never replace the agent's reasoning about correctness,
@@ -74,6 +74,20 @@ switch branches, configure remotes, stash, create a content commit, or publish
 as an implicit part of refresh. Read-only local inspection and private
 workspace/test indexes remain part of authorized patch work and leave host
 Git state unchanged.
+
+Two exceptions keep the refresh non-interactive. First, the checkout may be a
+partial clone whose local `master` lacks blobs; `develop-rebase` then backfills
+exactly the missing object IDs reachable from local `master` and `HEAD` from
+the public canonical repository over anonymous HTTPS (`objects-backfill` runs
+the same step alone). It names no remote, updates no ref, `FETCH_HEAD` or
+configuration, and uses no credentials; objects are content-addressed, so the
+bytes are identical to the promisor's. Every Make target exports
+`GIT_NO_LAZY_FETCH=1`, so a missing object fails closed instead of lazily
+fetching from the SSH promisor, which would open the operator's security-key
+PIN prompt. Second, every commit the agent creates or replays is unsigned:
+the rebase runs with `commit.gpgsign=false`, and conflict continuation uses
+`git -c commit.gpgsign=false rebase --continue`. The operator's signing key is
+interactive and never required.
 
 Moving the embedded source invalidates every previous functional result. The
 agent therefore reads and semantically reassesses each active patch in its
@@ -151,6 +165,26 @@ also valid after its ownership and executable-file boundary are reviewed, but
 it is session state that `artifacts-close` discards. The optional tooling venv
 is not created by this runbook and is not acceptance evidence.
 
+When none exists, the agent provisions the version pinned in
+`.pre-commit-config.yaml` in a disposable container and uses a wrapper outside
+the repository, for example `/tmp/<user>/ruff`, that mounts the repository
+read-only at its own path:
+
+```bash
+printf 'FROM docker.io/library/python:3.13-slim\nRUN pip install --no-cache-dir ruff==<pinned>\n' |
+  podman build -q -t localhost/ruff-tool:<pinned> -
+cat > /tmp/<user>/ruff <<'SH'
+#!/bin/sh
+root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+exec podman run --rm --network=none -e RUFF_NO_CACHE=true \
+  -v "$root":"$root":ro -w "$PWD" localhost/ruff-tool:<pinned> ruff "$@"
+SH
+chmod 755 /tmp/<user>/ruff
+```
+
+Record the pinned version and image ID in the ledger. The image is tooling,
+not a maintenance cache, and is not acceptance evidence.
+
 If the retained artifact inventory contains an owner from the retired
 `xpra-lab-*` namespace, use only the exact retired-namespace classification in
 [the pre-refresh record](#pre-refresh-record). The old migration document is
@@ -220,6 +254,10 @@ Record in the handoff notes, without creating a tracked evidence file:
 Use commands which do not change refs or tracked source, and require exactly
 one old embedded source commit. Fork-control checks may update only ignored
 tool caches:
+
+`check` runs the live-runner unit tests with the hash-locked live
+interpreter, so create or validate it first with `make -C fork-maintenance
+live-venv` (see the quiescence note below).
 
 ```bash
 (
@@ -631,7 +669,9 @@ case/workspace transaction, or unreviewed runtime owner.
 
 Stay on clean local `develop` and use the recorded existing local `master`.
 Neither remote URLs nor cached/live remote equality are admission gates.
-The public target performs no fetch, master update or branch switch:
+The public target performs no master update or branch switch. In a partial
+clone it first backfills missing objects credential-free as described in
+[Purpose](#purpose), then rebases without signing:
 
 ```bash
 make -C fork-maintenance develop-rebase
@@ -642,7 +682,7 @@ merge either master ref into `develop`.
 
 If rebase stops, inspect the current commit, both sides of every conflict, and
 the new upstream source. Resolve and stage only conclusions that are certain,
-then run `git rebase --continue` until complete. In particular, preserve
+then run `git -c commit.gpgsign=false rebase --continue` until complete. In particular, preserve
 canonical upstream workflow changes as byte-identical disabled renames and
 keep fork-only executable workflows separate. Never skip a fork commit merely
 to make the rebase finish. If the correct resolution is uncertain, run
@@ -1285,7 +1325,7 @@ patched command. Keep its infrastructure, empty patch and commented TOML
 references; the resulting stack-focused and full legs below remain mandatory.
 
 The review gate and CI-layout repair precede source builds; clean quarantine
-proof precedes runtime use of the duty patch. Start the complete live suite
+proof precedes runtime use of the duty patch. Start the live loop
 early in this post-review development phase once its focused/native and
 complete-stack prerequisites are satisfied, without waiting for the full
 upstream matrix. Keep every repair uncommitted. Any newly required source or
@@ -1345,8 +1385,9 @@ focused/native checks through the durable ownership and selection migrated
 during review. A missing replacement gate reopens review; deletion never waives
 a behavioral boundary.
 
-Some production cases, currently `debian-libva-codecs-package`, name an
-existing upstream focused module but own no test file. `tests-only` correctly
+A production case may name an existing upstream focused module but own no
+test file. No active case currently does; the retired
+`debian-libva-codecs-package` packaging case was the last one. `tests-only` correctly
 refuses such a selection, and the focused runner also rejects
 `PATCH_MODE=clean`; do not turn either guard failure into a control. Inspect the
 clean new upstream packaging, dependency resolution, install ownership and
@@ -1590,21 +1631,32 @@ both endpoints, including clipboard, subsurface, keyboard and hardware tests.
 A new or retired case must update its regression ownership without creating a
 single-patch live path or dropping the profile from global coverage.
 
-Use the full suite for any patch validation:
+Use the live loop of
+[`live-tests.md`](live-tests.md#the-live-loop-fix-and-continue-then-one-complete-pass)
+for any patch validation:
 
 ```bash
 make -C fork-maintenance live-all STACK=develop RUN=<cycle>-live-01
-make -C fork-maintenance live-suite-check STACK=develop RUN=<cycle>-live-01
+# gate G failed: diagnose, fix, prove offline, then continue from G
+make -C fork-maintenance live-remove RUN=<cycle>-live-01-G
+make -C fork-maintenance live-all STACK=develop RUN=<cycle>-live-02 FROM=G
+# ... until the last gate passes; then one complete pass
+make -C fork-maintenance live-all STACK=develop RUN=<cycle>-live-03
+make -C fork-maintenance live-suite-check STACK=develop RUN=<cycle>-live-03
 ```
 
-The suite orders clipboard/subsurface first, runs every profile through its
-named start/wait/remove lifecycle and validates all nine retained reports.
-A failure stops escalation. Diagnose, correct and use new run names; do not
-combine results from different source/queue/harness candidates.
+The suite orders clipboard/subsurface first and runs every profile through its
+named start/wait/remove lifecycle. A failed gate stops the controller: fix it
+and continue from that gate under the next prefix instead of restarting the
+whole set, until the last gate passes. Then run one complete pass; if one of
+its gates fails, fix and continue the same way and finish with another complete
+pass. Only a complete pass without a fix is validated by `live-suite-check`;
+never combine results from different source/queue/harness candidates. Record
+every prefix, failure, classification and fix in the cycle ledger.
 
 ### All nine positive live profiles
 
-The `live-all` command above is the mandatory nine-profile matrix. Do not
+The complete `live-all` pass above is the mandatory nine-profile matrix. Do not
 repeat it as a separate case-selected ladder or count a subset as full coverage.
 Every member must have positive application, transport, hardware, lifecycle and
 owned-cleanup evidence. Missing hardware, application input or environment

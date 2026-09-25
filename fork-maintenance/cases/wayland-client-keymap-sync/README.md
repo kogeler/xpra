@@ -19,7 +19,7 @@ promotion, and release/repeat identity therefore form one atomic behavior.
 
 ## Current upstream boundary and retained necessity
 
-At source `d95058b0916913fe6ae5296fb702f66d833898b0`, upstream
+At source `0a80430b6506e403f6469416d8aaa8463e331296`, upstream
 `ac732233d68` installs client keymaps and `6b79cb2db5a` combines the layouts
 of connected clients, limits that union to four groups, and returns
 `(keycode, group)` from native lookup. That is a partial replacement, not this
@@ -34,6 +34,19 @@ new upstream `set_current_config()` path. The upstream public native bool
 refusal and tuple lookup interfaces, generic `key_events` accounting, and
 canonical `setting-changed` / `client-exited` signals remain intact. No
 separate `readonly-changed` signal is needed.
+
+Two later upstream commits meet this case. `d6b8c59eed` routes the server
+`keys-changed` watcher through a new `KeyboardConfigBase.keys_changed()` hook
+instead of calling `compute_modifier_map()` / `compute_modifier_keynames()` on
+every config. The Wayland `KeyboardConfig` therefore no longer carries no-op
+overrides of those two X11 methods; it inherits the no-op hook because its
+translation tables derive from the client-supplied owner map, not from a
+server X11 keymap. `d4aa77773e` records that client cleanup runs on the
+protocol reader thread and defers the generic key release to the main loop.
+This case's overrides of `client_exited()` and `cleanup_protocol()` bypass
+that generic release, so they now queue their own retirement through the
+subsystem's `idle_add()` instead of releasing keys and reinstalling the native
+`wlr_keyboard` from the reader thread.
 
 The current upstream parser/install test module is retained and adapted,
 rather than overwritten by the older downstream new-file hunk. Its useful
@@ -580,8 +593,11 @@ modifier update. The keyboard manager performs the final eligibility check,
 including recording policy.
 
 The client-session registry removes a source and emits `client-exited` before
-closing it and before subsystem `cleanup_protocol()` callbacks run. The
-Wayland signal handler retires that exact registered source immediately.
+closing it and before subsystem `cleanup_protocol()` callbacks run, both on the
+protocol reader thread for a lost connection. The Wayland signal handler
+queues retirement of that exact registered source to the main loop, ahead of
+the queued registry reconciliation, so the seat and native keyboard are only
+touched from the main thread and the relative order is unchanged.
 Unlike the generic clear-all callback, a non-owner's exit must not release
 keys still held by another client. Registry reconciliation remains an
 idempotent cleanup fallback: after signal-driven retirement it must not
@@ -623,13 +639,12 @@ remains usable.
 This case has no semantic dependency on another production case and declares
 the native `wayland` gate itself. It must apply and test standalone. The
 maintained stack nevertheless places it after
-`wayland-subsurface-stream-ownership` and `wayland-initial-window-state`, and
-before `wayland-empty-damage-throttle`. These cases touch
+`wayland-subsurface-stream-ownership` and `wayland-initial-window-state`. These cases touch
 `xpra/wayland/server/subsystem/window.py` and the shared Wayland test boundary;
 WSSO additionally overlaps `wlroots.pxd` and the pointer subsystem.
 
 `WaylandWindowServerFocusTest` must remain a top-level class alongside the
-initial-state and empty-damage test classes after the whole stack is applied.
+initial-state and upstream frame-callback test classes after the whole stack is applied.
 Its `Packet` import is intentionally local to `focus_packet()`: moving it into
 the module import block creates avoidable clean-base patch overlap with the
 earlier case. Textual apply/reverse success cannot prove class ownership or
@@ -643,7 +658,7 @@ The shared paths have this strict semantic split:
 | --- | --- |
 | `wayland-client-keymap-sync` | Keyboard RMLVO/device ABI, shared-seat map ownership, focus-source attribution, readonly/recording arbitration, group-aware key delivery, and source-tagged modifiers. |
 | `wayland-initial-window-state` | Current buffer format, frame-alpha publication, popup initial damage ordering, and video-selector inputs; it does not select or mutate the keyboard device. |
-| `wayland-empty-damage-throttle` | Ordinary non-composite toplevel frame-callback pacing and empty-damage acknowledgement; it does not own focus or input translation. |
+| Upstream `FrameCallbackModel` | Ordinary toplevel frame-callback pacing and empty-damage acknowledgement (formerly `wayland-empty-damage-throttle`); it does not own focus or input translation. |
 | `wayland-subsurface-stream-ownership` | Surface-tree ABI declarations, native pointer leaf targeting, topology, child frame completion, and parent-backing composition; it preserves the keyboard focus and modifier hooks already installed in the subsystem. |
 
 Conflict resolution must keep both keyboard and surface-tree Cython
@@ -759,6 +774,9 @@ belong to each compiled candidate, not the last unrelated non-owner compile.
 Canonical-signal tests use actual `SignalEmitter` subscriptions and
 `KeyboardConnection` sources, including shared-holder departure,
 readonly reversal, failed repeat admission, and signal-before-close ordering.
+A queued-scheduler control proves that a reader-thread `client-exited` and
+`cleanup_protocol()` change neither the native device nor the holder maps
+until the main loop drains them, and then retire only the departed holder.
 Settings/core controls also inject a failed outbound send after the signal.
 
 Real compiled-XKB tests cover arbitrary installed layouts, variants and
@@ -877,6 +895,8 @@ accepted until the migrated complete-stack boundary passes.
   rejects the source; generic parent side effects occur outside `_focus()`.
 - Do not bypass the canonical `setting-changed` readonly notification or the
   exact-source `client-exited` boundary; do not add a duplicate signal.
+- Do not release keys or install a native keymap from `client_exited()` or
+  `cleanup_protocol()` directly: they run on the protocol reader thread.
 - Do not let repeat-timer admission failure orphan an already injected press.
 - Do not destroy the native keyboard after its seat, and do not trust an
   optional linkage-test skip in place of the native `wayland` gate.

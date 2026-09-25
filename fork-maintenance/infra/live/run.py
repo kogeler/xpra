@@ -4872,12 +4872,29 @@ def compare_rgb_image_values(
     }
 
 
+# The direct window capture and the composited screen capture are taken one
+# after the other. For a continuously animating application they show two
+# frames of the same stream, so each is bound to its own server frame, in
+# capture order and within this interval.
+MOVING_CONTENT_CAPTURE_INTERVAL_MS = 2000
+
+
+def _screenshot_time_ms(relative: str) -> int | None:
+    """The millisecond bucket a server screenshot was saved in."""
+    parts = Path(relative).parts
+    if len(parts) >= 2 and parts[-2].isdigit():
+        return int(parts[-2])
+    return None
+
+
 def pixel_pipeline_evidence(
     directory: Path,
     screenshots: list[str],
     direct_path: Path,
     focused_path: Path,
     maximum_error: float,
+    *,
+    moving_content: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     comparisons: list[dict[str, Any]] = []
     for relative in screenshots:
@@ -4911,6 +4928,42 @@ def pixel_pipeline_evidence(
         ),
         default=None,
     )
+    ordered_frames = None
+    if moving_content and not matching:
+        timed = [
+            (_screenshot_time_ms(comparison["source"]), comparison)
+            for comparison in comparable
+        ]
+        direct_frames = [
+            (time_ms, comparison) for time_ms, comparison in timed
+            if time_ms is not None
+            and comparison["direct"]["mean_absolute_error"] <= maximum_error
+        ]
+        focused_frames = [
+            (time_ms, comparison) for time_ms, comparison in timed
+            if time_ms is not None
+            and comparison["focused_screen"]["mean_absolute_error"] <= maximum_error
+        ]
+        pairs = [
+            (focused_time - direct_time, direct, focused)
+            for direct_time, direct in direct_frames
+            for focused_time, focused in focused_frames
+            if 0 <= focused_time - direct_time <= MOVING_CONTENT_CAPTURE_INTERVAL_MS
+        ]
+        if pairs:
+            gap, direct, focused = min(
+                pairs,
+                key=lambda pair: (
+                    pair[0],
+                    pair[1]["direct"]["mean_absolute_error"]
+                    + pair[2]["focused_screen"]["mean_absolute_error"],
+                ),
+            )
+            ordered_frames = {
+                "direct": direct["source"],
+                "focused_screen": focused["source"],
+                "interval_ms": gap,
+            }
     direct_focused = compare_rgb_images(direct_path, focused_path)
     red_blue_order_verified = bool(
         selected
@@ -4921,7 +4974,8 @@ def pixel_pipeline_evidence(
         "comparisons": comparisons,
         "direct_focused": direct_focused,
         "maximum_mean_absolute_error": maximum_error,
-        "matching_server_frame": bool(matching),
+        "matching_server_frame": bool(matching or ordered_frames),
+        "capture_ordered_server_frames": ordered_frames,
         "red_blue_order_verified": red_blue_order_verified,
     }
     source_image = (
@@ -8038,6 +8092,73 @@ def _eligible_va_contexts(
     ]
 
 
+def preceding_h264_streams(
+    history: dict[str, Any] | None,
+    production: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return the window's H.264 streams which ended before the bound production packets.
+
+    A later client configuration may clean the video context after the server has
+    already sent a short stream (`cancel_damage` resets the encoder so that the
+    refresh starts from a key frame). Those frames went through an earlier VA
+    context of the same surface size, which the production interval excludes.
+    """
+    if not isinstance(history, dict) or history is production:
+        return []
+    production_sequences = [
+        sequence
+        for packet in production.get("updates", ())
+        if isinstance(packet, dict)
+        and (sequence := _exact_int(packet.get("sequence"), positive=True)) is not None
+    ]
+    if not production_sequences:
+        return []
+    first = min(production_sequences)
+    earlier = [
+        packet
+        for packet in history.get("updates", ())
+        if isinstance(packet, dict)
+        and packet.get("encoding") == "h264"
+        and (sequence := _exact_int(packet.get("sequence"), positive=True)) is not None
+        and sequence < first
+    ]
+    if not earlier:
+        return []
+    return h264_packet_streams({"updates": earlier, "window_id": history.get("window_id")})
+
+
+def _account_preceding_contexts(
+    contexts: list[dict[str, Any]],
+    preceding: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Assign every earlier stream its own context with exactly its frame count.
+
+    This is all or nothing: an earlier stream which is not structurally complete,
+    or has no distinct exact context, leaves every context in the production
+    accounting, so the frame totals still fail closed.
+    """
+    remaining = list(contexts)
+    accounted: list[dict[str, Any]] = []
+    for stream in preceding:
+        if not (
+            stream["contiguous_frames"]
+            and stream["contiguous_sequences"]
+            and stream["positive_payloads"]
+            and stream["starts_with_idr"]
+        ):
+            return list(contexts), []
+        frames = int(stream["packet_count"])
+        match = next(
+            (context for context in remaining if int(context["completed_frames"]) == frames),
+            None,
+        )
+        if match is None:
+            return list(contexts), []
+        remaining.remove(match)
+        accounted.append(match)
+    return remaining, accounted
+
+
 def match_h264_production_stream(
     updates: dict[str, Any],
     server_trace: dict[str, Any],
@@ -8048,6 +8169,7 @@ def match_h264_production_stream(
     allow_terminal_client_frame: bool = False,
     allow_terminal_server_frame: bool = False,
     allow_window_resize_gaps: bool = False,
+    preceding_streams: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     streams = h264_packet_streams(
         updates,
@@ -8085,6 +8207,18 @@ def match_h264_production_stream(
             surface_size,
             {"VAEntrypointVLD"},
         )
+        preceding = [
+            stream
+            for stream in preceding_streams or ()
+            if tuple(int(value) for value in stream["surface_size"]) == surface_size
+        ]
+        server_matches, server_preceding = _account_preceding_contexts(server_matches, preceding)
+        client_matches, client_preceding = _account_preceding_contexts(client_matches, preceding)
+        if preceding and not (server_preceding and client_preceding):
+            # account for both sides or neither: the totals below then fail closed
+            server_matches = [*server_matches, *server_preceding]
+            client_matches = [*client_matches, *client_preceding]
+            server_preceding = client_preceding = []
         expected_frames = sum(
             int(candidate["packet_count"]) for candidate in grouped_candidates
         )
@@ -8120,6 +8254,8 @@ def match_h264_production_stream(
             candidate["expected_packet_frames"] = expected_frames
             candidate["server_contexts"] = server_matches
             candidate["server_completed_frames"] = server_frames
+            candidate["preceding_server_contexts"] = server_preceding
+            candidate["preceding_client_contexts"] = client_preceding
             candidate["terminal_server_frame_untransmitted"] = bool(
                 allow_terminal_server_frame
                 and server_frames == expected_frames + 1
@@ -8144,6 +8280,8 @@ def match_h264_production_stream(
             for context in (
                 *candidate["server_contexts"],
                 *candidate["client_contexts"],
+                *candidate.get("preceding_server_contexts", ()),
+                *candidate.get("preceding_client_contexts", ()),
             )
         )
     all_contexts = [*server_trace["contexts"], *client_trace["contexts"]]
@@ -8365,32 +8503,21 @@ def _h264_presentation_before_overwrite(
     return False, []
 
 
-def h264_client_packet_chain(
-    directory: Path,
-    updates: dict[str, Any],
-    matched_stream: dict[str, Any] | None,
+# how many exact frames of the matched stream may be painted over before one of
+# them reaches a GL presentation: the first decode includes the hardware decoder
+# setup, so the frames queued behind it are painted in the same UI iteration
+H264_PRESENTATION_SUPERSEDE_LIMIT = 8
+
+
+def _h264_packet_chain_fields(
+    client_log: str,
+    saved: dict[str, Any],
+    window_id: int,
+    *,
+    first_in_stream: bool,
 ) -> dict[str, Any]:
-    if not matched_stream:
-        return {"complete": False, "reason": "no matched production stream"}
-    sequence = int(matched_stream["first_sequence"])
-    window_id = int(updates["window_id"])
-    saved = next(
-        (
-            update
-            for update in updates["updates"]
-            if int(update.get("sequence", -1)) == sequence
-            and update.get("encoding") == "h264"
-        ),
-        None,
-    )
-    if saved is None:
-        return {"complete": False, "reason": "production packet was not saved"}
-    log_path = directory / "client.stdout"
-    client_log = (
-        log_path.read_text(encoding="utf-8", errors="replace")
-        if log_path.is_file()
-        else ""
-    )
+    """Bind one saved H.264 packet to its client draw, decode, paint and ACK."""
+    sequence = int(saved["sequence"])
     process_matches = [
         match
         for match in H264_PROCESS_DRAW_RE.finditer(client_log)
@@ -8400,11 +8527,9 @@ def h264_client_packet_chain(
     ]
     if len(process_matches) != 1:
         return {
-            "complete": False,
             "process_draw_matches": len(process_matches),
             "reason": "production packet does not have one client process_draw event",
             "sequence": sequence,
-            "window_id": window_id,
         }
     process_match = process_matches[0]
     next_process = next(
@@ -8497,76 +8622,224 @@ def h264_client_packet_chain(
         rf"{encoded_width}x{encoded_height} NV12\b",
         client_log[search_start:paint_position] if paint_position >= 0 else "",
     )
-    decode_success_match = (
-        re.search(
-            rf"(?m)^.*?record_decode_time\((?:True|1),[^\n]*\) "
-            rf"wid=0x{window_id:x}, h264: {width}x{height},",
-            client_log[paint_end:],
-        )
-        if paint_match
-        else None
-    )
-    decode_success_end = (
-        paint_end + decode_success_match.end() if decode_success_match else paint_end
-    )
-    render_matches = list(re.finditer(
-        rf"(?m)^.*?GLDrawingArea\({window_id}, \((?P<w>\d+), (?P<h>\d+)\)\)"
-        rf"\.render_planar_update\({int(saved['x'])}, {int(saved['y'])}, "
-        rf"{encoded_width}, {encoded_height}, {width}, {height}, 'NV12_to_RGB'\) pixel_format=NV12$",
-        client_log[paint_end:decode_success_end],
-    ))
-    backing_size = (
-        (int(render_matches[0].group("w")), int(render_matches[0].group("h")))
-        if len(render_matches) == 1 else None
-    )
+    # The UI thread runs one paint callback at a time, and each one logs its GL
+    # render, its decode success and its ACK in that order; other threads only
+    # interleave lines. Several frames can be decoded before the first of them
+    # is painted, so the first decode success after this packet's decode may
+    # belong to an earlier frame. Bind backwards from this packet's own ACK,
+    # whose decode time the decode success line repeats.
     ack_matches = [
         match
-        for match in H264_ACK_RE.finditer(client_log, decode_success_end)
+        for match in H264_ACK_RE.finditer(client_log, paint_end)
         if int(match.group("window_id")) == window_id
         and int(match.group("sequence")) == sequence
         and int(match.group("width")) == width
         and int(match.group("height")) == height
-    ]
+    ] if paint_match else []
     ack_match = ack_matches[0] if len(ack_matches) == 1 else None
     ack_position = ack_match.start() if ack_match else -1
+    decode_success_match = None
+    decode_success_start = decode_success_end = paint_end
+    if ack_match:
+        ack_decode_time = re.match(r"\s*(\d+),", client_log[ack_match.end():])
+        records = list(re.finditer(
+            r"(?m)^.*?record_decode_time\([^\n]*$",
+            client_log[paint_end:ack_position],
+        ))
+        if ack_decode_time and records:
+            # draw.py logs the decode time truncated to 0.1 ms:
+            decode_ms = int(int(ack_decode_time.group(1)) / 100) / 10.0
+            decode_success_match = re.search(
+                rf"record_decode_time\((?:True|1),[^\n]*\) "
+                rf"wid=0x{window_id:x}, h264: {width}x{height}, {re.escape(str(decode_ms))}ms$",
+                records[-1].group(0),
+            )
+            if decode_success_match:
+                decode_success_start = paint_end + records[-1].start()
+                decode_success_end = paint_end + records[-1].end()
+    # the render of the same callback: the last one before the decode success,
+    # with no other callback's decode success in between
+    renders = list(re.finditer(
+        rf"(?m)^.*?GLDrawingArea\({window_id}, \(\d+, \d+\)\)\.render_planar_update\([^\n]*$",
+        client_log[paint_end:decode_success_start],
+    )) if decode_success_match else []
+    render_match = (
+        re.search(
+            rf"GLDrawingArea\({window_id}, \((?P<w>\d+), (?P<h>\d+)\)\)"
+            rf"\.render_planar_update\({int(saved['x'])}, {int(saved['y'])}, "
+            rf"{encoded_width}, {encoded_height}, {width}, {height}, 'NV12_to_RGB'\) pixel_format=NV12$",
+            renders[-1].group(0),
+        )
+        if renders
+        and "record_decode_time(" not in client_log[paint_end + renders[-1].end():decode_success_start]
+        else None
+    )
+    backing_size = (
+        (int(render_match.group("w")), int(render_match.group("h")))
+        if render_match else None
+    )
     intervening_decode = (
         "record_decode_time(" in client_log[decode_success_end:ack_position]
         if ack_position >= 0
         else True
     )
-    presentation_complete, intervening_edges = (
-        _h264_presentation_before_overwrite(client_log, ack_match, saved, updates, backing_size)
-        if ack_match else (False, [])
+    # only the first packet of a stream selects and creates the decoder:
+    decoder_selected = bool(
+        (decoder_choice_match and decoder_instance_match) if first_in_stream else True
     )
+    return {
+        "ack_match": ack_match,
+        "backing_size": backing_size,
+        "callback": callback,
+        "chain_ok": bool(
+            packet_fields_match
+            and draw_fields_match
+            and decoder_selected
+            and paint_match
+            and decode_success_match
+            and ack_match
+            and not intervening_decode
+        ),
+        "decoder_selected": bool(decoder_choice_match and decoder_instance_match),
+        "draw_fields_match": draw_fields_match,
+        "encoded_size": [encoded_width, encoded_height],
+        "intervening_decode": intervening_decode,
+        "libva_decode_match": bool(libva_decode_match),
+        "packet_fields_match": packet_fields_match,
+        "paint_match": bool(paint_match),
+        "payload_bytes": payload_bytes,
+        "sequence": sequence,
+        "size": [width, height],
+    }
+
+
+def _h264_superseded_before_presentation(
+    client_log: str,
+    earlier_ack: re.Match[str],
+    later_ack: re.Match[str],
+    window_id: int,
+) -> bool:
+    """The earlier frame was painted over by the later one before any presentation."""
+    if later_ack.start() <= earlier_ack.end():
+        return False
+    between = client_log[earlier_ack.end():later_ack.start()]
+    return not re.search(
+        rf"GLDrawingArea\({window_id}, \(\d+, \d+\)\)\.do_present_fbo\(\) done",
+        between,
+    )
+
+
+def h264_client_packet_chain(
+    directory: Path,
+    updates: dict[str, Any],
+    matched_stream: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not matched_stream:
+        return {"complete": False, "reason": "no matched production stream"}
+    sequence = int(matched_stream["first_sequence"])
+    window_id = int(updates["window_id"])
+
+    def saved_packet(packet_sequence: int) -> dict[str, Any] | None:
+        return next(
+            (
+                update
+                for update in updates["updates"]
+                if int(update.get("sequence", -1)) == packet_sequence
+                and update.get("encoding") == "h264"
+            ),
+            None,
+        )
+
+    saved = saved_packet(sequence)
+    if saved is None:
+        return {"complete": False, "reason": "production packet was not saved"}
+    log_path = directory / "client.stdout"
+    client_log = (
+        log_path.read_text(encoding="utf-8", errors="replace")
+        if log_path.is_file()
+        else ""
+    )
+    first = _h264_packet_chain_fields(client_log, saved, window_id, first_in_stream=True)
+    if "reason" in first:
+        return {
+            "complete": False,
+            "process_draw_matches": first["process_draw_matches"],
+            "reason": first["reason"],
+            "sequence": sequence,
+            "window_id": window_id,
+        }
+
+    def presentation(fields: dict[str, Any], packet: dict[str, Any]) -> tuple[bool, list[int]]:
+        if not fields["ack_match"]:
+            return False, []
+        return _h264_presentation_before_overwrite(
+            client_log, fields["ack_match"], packet, updates, fields["backing_size"],
+        )
+
+    presentation_complete, intervening_edges = presentation(first, saved)
+    # A frame may be painted over by its exact successor in the same stream before
+    # GTK's frame clock presents anything: follow the stream to the first frame
+    # which is presented, requiring the same exact chain for every frame on the way.
+    stream_sequences = [int(value) for value in matched_stream.get("packet_sequences", ())]
+    superseded: list[int] = []
+    followed_chains_ok = True
+    current, current_saved = first, saved
+    while (
+        not presentation_complete
+        and current["chain_ok"]
+        and current["libva_decode_match"]
+        and len(superseded) < H264_PRESENTATION_SUPERSEDE_LIMIT
+        and current["sequence"] in stream_sequences
+    ):
+        index = stream_sequences.index(current["sequence"]) + 1
+        if index >= len(stream_sequences):
+            break
+        next_saved = saved_packet(stream_sequences[index])
+        if next_saved is None:
+            break
+        following = _h264_packet_chain_fields(
+            client_log, next_saved, window_id, first_in_stream=False,
+        )
+        if (
+            "reason" in following
+            or not following["chain_ok"]
+            or not following["libva_decode_match"]
+            or following["backing_size"] != first["backing_size"]
+            or not _h264_superseded_before_presentation(
+                client_log, current["ack_match"], following["ack_match"], window_id,
+            )
+        ):
+            followed_chains_ok = False
+            break
+        superseded.append(current["sequence"])
+        current, current_saved = following, next_saved
+        presentation_complete, intervening_edges = presentation(current, current_saved)
     base_chain_complete = bool(
-        packet_fields_match
-        and draw_fields_match
-        and decoder_choice_match
-        and decoder_instance_match
-        and paint_match
-        and decode_success_match
-        and ack_match
-        and not intervening_decode
+        first["chain_ok"]
+        and first["decoder_selected"]
+        and followed_chains_ok
         and presentation_complete
     )
     return {
-        "acknowledged": bool(ack_match and not intervening_decode),
+        "acknowledged": bool(first["ack_match"] and not first["intervening_decode"]),
         "base_chain_complete": base_chain_complete,
-        "callback": callback,
-        "complete": bool(base_chain_complete and libva_decode_match),
-        "decoder_selected": bool(decoder_choice_match and decoder_instance_match),
-        "draw_region_matches_saved_packet": draw_fields_match,
-        "encoded_size": [encoded_width, encoded_height],
-        "libva_decode_log_matches_saved_packet": bool(libva_decode_match),
-        "nv12_painted": bool(paint_match and backing_size),
-        "paint_backing_size": list(backing_size) if backing_size else None,
-        "payload_bytes": payload_bytes,
+        "callback": first["callback"],
+        "complete": bool(base_chain_complete and first["libva_decode_match"]),
+        "decoder_selected": first["decoder_selected"],
+        "draw_region_matches_saved_packet": first["draw_fields_match"],
+        "encoded_size": first["encoded_size"],
+        "libva_decode_log_matches_saved_packet": first["libva_decode_match"],
+        "nv12_painted": bool(first["paint_match"] and first["backing_size"]),
+        "paint_backing_size": list(first["backing_size"]) if first["backing_size"] else None,
+        "payload_bytes": first["payload_bytes"],
         "payload_sha256": saved.get("payload_sha256", ""),
         "presented_before_overwrite": presentation_complete,
+        "presented_sequence": current["sequence"] if presentation_complete else None,
+        "superseded_sequences": superseded,
         "intervening_edge_sequences": intervening_edges,
-        "process_draw_matches_saved_packet": packet_fields_match,
+        "process_draw_matches_saved_packet": first["packet_fields_match"],
         "sequence": sequence,
-        "size": [width, height],
+        "size": first["size"],
         "window_id": window_id,
     }
 
@@ -8579,6 +8852,7 @@ def h264_hardware_evidence(
     allow_lossless_rgb_edges: bool = False,
     allow_terminal_server_frame: bool = False,
     allow_window_resize_gaps: bool = False,
+    history: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     server_trace = parse_va_contexts(directory, "server-va")
     client_trace = parse_va_contexts(directory, "client-va")
@@ -8594,6 +8868,7 @@ def h264_hardware_evidence(
         ),
         allow_terminal_server_frame=allow_terminal_server_frame,
         allow_window_resize_gaps=allow_window_resize_gaps,
+        preceding_streams=preceding_h264_streams(history, updates),
     )
     matched = production["matched_stream"]
     packet_chain = h264_client_packet_chain(directory, updates, matched)
@@ -20811,6 +21086,7 @@ def run_scenario(
             direct_rgb_path,
             focused_rgb_path,
             pixel_error_limit(args.application, args.encoding),
+            moving_content=args.application in MULTIWINDOW_HARDWARE_APPLICATIONS,
         )
         if source_viewport is not None:
             pixel_evidence["source_viewport_placement_logged"] = source_viewport[
@@ -20850,6 +21126,7 @@ def run_scenario(
             h264_hardware = h264_hardware_evidence(
                 directory,
                 h264_production_updates,
+                history=updates,
                 allow_alpha_gaps=allow_alpha_gaps,
                 allow_lossless_rgb_edges=allow_lossless_rgb_edges,
                 allow_terminal_server_frame=(

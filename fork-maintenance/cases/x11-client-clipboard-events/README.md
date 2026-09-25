@@ -59,7 +59,7 @@ closes over a private monotonic key, whose live record owns the exact Python
 source object, remote generation, target, and FD. Destruction removes that
 record and closes the FD, so a late reply cannot reach a replacement source
 through a repeated target or reused descriptor. Native-source reads use an
-independent key, pointer and local generation; replacement empty-completes old
+independent key, pointer and upstream's `source_generation`; replacement empty-completes old
 reads once and stops their eager multi-target collectors, including when the
 allocator reuses a source pointer.
 
@@ -87,7 +87,7 @@ owns the cross-backend oracle, but acceptance requires all nine profiles through
 ## Upstream provenance
 
 The case is based on the source commit embedded in the current `develop`
-history, `d95058b0916913fe6ae5296fb702f66d833898b0`.  It does not compare or
+history, `0a80430b6506e403f6469416d8aaa8463e331296`.  It does not compare or
 follow moving master refs.  The relevant implementation is the result of a
 maintainer-authored 2025 refactor followed by the 2026 token-state work:
 
@@ -130,11 +130,19 @@ Manual reassessment on this source keeps the case but narrows its ownership:
 | `af0d210f310`, `445e0412281` remove the lookup injection seam and separate native routing from GTK lookup. | Remove our common/GTK initializer hunks and migrate their controls. Do not resurrect the deleted delegate API. |
 | `5bbba04e93f` flushes all six native selection adapter operations. | Preserve both current flush methods and all six calls; retain only residual source/FD lifetime changes. |
 | `ff3f98f45d8` drains requests while records remain resolvable. | Extend existing `cancel_outstanding_requests` with exact callbacks and re-entry protection; no second reset/drain API. |
+| `873c3cfdab`, `c6a8c73470`, `e279a836c4`, `6450f5810f`, `f6bb8bcbed`, `2cfde8e7ed` give every proxy the shared earliest-deadline token scheduler and back-off; `do_emit_token()` now reports whether a token was sent. | Keep the X11 plain-first-token guard: a second `schedule_emit_token()` after an immediate emission still arms a back-off token and bypasses `_block_owner_change`. Wayland `do_emit_token()` returns `False` when closing, disabled or send-denied. |
+| `b77dabfe32`, `0823039ea7` cancel a departed peer's scheduled token and route startup tokens through the scheduler. | Compose unchanged; the helper's exact-request drain and cleanup ordering remain case-owned. |
+| `2cc7b915ad` unifies the ordinary and primary Wayland proxies behind `SELECTION_SIGNAL`, `SELECTION_API` and `SOURCE_CLASS`, and adds a per-change `source_generation` for recycled source addresses. | Port the case once onto the unified base; `source_generation` replaces the case's local generation. It changes on every selection signal, so it also covers the case's former source-pointer comparison in origin reads. |
+| `e6cf67171f` keeps one `IncrTransfer` per conversion property and adds the request time to `local_requests` records. | Retire the old single-transfer `INCR` reordering; cleanup retires every transfer through `cancel_incr_transfer`. Upstream cleanup still detaches both request tables before calling `got_contents`/`got_local_contents`, whose own lookups then find nothing: no requestor is answered and no conversion timer is removed. Keep the case's direct empty responses and source removal. |
+| `54e156591c` keeps the standard seat selection listeners without Xpra forwarding. | Identical to the former case hunk; `compositor.pyx` keeps only the custom connect/disconnect registry and the snapshot emission. |
+| `ed6fd9ecc6`, `6813a9fa3f`, `9a02d981ed`, `0f50ff4ac7` route `SelectionNotify`, complete refused conversions, fix the selection-request blocklist lookup and defer debug window lookups. | Independent upstream ownership; they replaced the retired `x11-selection-refusal` case. This case's proxy cleanup still removes the timer of every local conversion that is still pending. |
 
 The residual defects remain visible in code: unused root subscription and
-invalid selection mask, duplicate scheduling, incomplete constructor/teardown
-ownership, unbound native request completions and partial writes, peer/policy
-admission, and standard compositor selection service with forwarding off.
+invalid selection mask, duplicate scheduling, receive-denied or nonclaiming
+tokens advancing `_selection_generation`, incomplete constructor/teardown
+ownership, unbound native request completions and partial writes, and
+peer/policy admission. Standard compositor selection service with forwarding
+off is now upstream (`54e156591c`).
 Tests challenge this keep/adapt conclusion; they do not replace the call-path
 and ownership analysis.
 
@@ -335,17 +343,18 @@ conversion:
    current before emitting a token.
 
 Ordinary X11 owners also send a synthetic `SelectionNotify` to the requestor.
-The current generic parser drops most events whose `send_event` flag is set,
-including that `SelectionNotify`.  Protocol probes proved this fact, but also
-proved that the associated property write and routed `PropertyNotify` complete
-both `TARGETS` and `UTF8_STRING` conversions.  The parser policy is therefore
-not the first failing boundary in this case and is deliberately unchanged.
+Older sources dropped that synthetic event in the generic parser. Protocol
+probes showed that the property write and the routed `PropertyNotify` still
+completed both `TARGETS` and `UTF8_STRING` conversions. The parser policy was
+therefore never the first failing boundary in this case, and the case leaves
+it unchanged.
 
-The complete queue additionally carries `x11-selection-refusal`, which owns
-negative core SelectionNotify completion and private conversion requestors.
-That independent protocol fix does not replace this case's filter lease,
-XFixes ownership, client packaging or Wayland publication controls. This
-section describes this atomic case on its own embedded-source boundary.
+Upstream `ed6fd9ecc6` now admits and routes `SelectionNotify` to the requestor.
+`6813a9fa3f` then completes refused conversions by their server timestamp.
+Together they replaced the former `x11-selection-refusal` case. That protocol
+path does not replace this case's filter lease, XFixes ownership, client
+packaging or Wayland publication controls. This section describes this atomic
+case on its own embedded-source boundary.
 
 Do not infer a conversion failure from the 100 ms timeout alone.  The clean
 failure timed out because neither XFixes nor property events entered Xpra's
@@ -420,11 +429,11 @@ merged or drained with one generic callback loop:
 | Wayland proxy `pending_writes` and `pending_write_sources` | One native consumer FD waiting for one exact remote request or draining cached/replied bytes. Its unique key records source identity, remote generation, target, and FD; active output also owns a GLib write watch and deadline. | Ownership lasts through complete nonblocking delivery. Each readiness callback resolves its key and rechecks source/generation. Completion, source destruction, reset, cleanup, I/O failure, or deadline retires the key, FD, watch, and timer once; later callbacks cannot reach a reused FD. |
 | Wayland proxy `pending_reads` and `pending_read_timers` | One asynchronous native-source pipe read, keyed independently of its FD and bound to the source pointer and ownership generation, with a request deadline. | EOF returns data only for the current pointer/generation. Replacement, deadline, size failure, or I/O failure retires the watch, timer, and FD and empty-completes once; cleanup retires without starting replacement work. |
 | X11 proxy `remote_requests` | One or more local X11 `SelectionRequest` consumers waiting for a target which Xpra must fetch from its remote peer.  Requests for the same target share one wire request. | `got_contents` writes each requestor property and sends `SelectionNotify`; proxy cleanup gives every still-attached requestor one empty response, then clears the table.  There is no independent timer in this table. |
-| X11 proxy `local_requests` | Xpra's own `XConvertSelection` operations against the current local X11 owner, keyed by target and local request generation. | Routed `PropertyNotify` or `CONVERT_TIMEOUT` completes the callback.  Cleanup atomically detaches the table and removes its GLib sources without calling those callbacks. |
-| X11 proxy `incr_data_*` and `incr_data_timer` | The currently accumulated incremental property transfer for a local X11 conversion. | Every chunk refreshes the one-second watchdog.  Completion or an error cancels the source before resetting the fields; cleanup does the same. |
+| X11 proxy `local_requests` | Xpra's own `XConvertSelection` operations against the current local X11 owner, keyed by target and local request ID; each record also keeps its request time. | Routed `PropertyNotify` or `CONVERT_TIMEOUT` completes the callback.  Cleanup atomically detaches the table and removes its GLib sources without calling those callbacks. |
+| X11 proxy `incr_transfers` | One upstream `IncrTransfer` per conversion property, accumulating a local X11 incremental transfer. | Every chunk refreshes that transfer's one-second watchdog.  Completion, a type change or cleanup removes the record through `cancel_incr_transfer`, which clears the numeric source ID before removing it. |
 
-Proxy teardown cancels the `INCR` source before clearing its numeric source ID,
-then resets the accumulated size, type, and chunks.  It resolves every pending
+Proxy teardown retires every `INCR` transfer independently, so one removal
+failure cannot keep later transfers alive.  It resolves every pending
 local-X11 request for remote data with an empty selection response while the
 detached records are still available for that exact cleanup pass; an
 individual requestor failure cannot skip later requestors.  Local conversion
@@ -531,7 +540,7 @@ For X11-client to Wayland-server transfer, the complete route is:
 For Wayland-server to X11-client transfer, the ownership direction reverses
 but the on-demand packet pair does not:
 
-1. the compositor's seat selection signal advances a local generation and
+1. the compositor's seat selection signal advances `source_generation` and
    supplies the new native Wayland source pointer; the Wayland proxy cancels
    reads from the previous generation, reads the new MIME types, excludes the
    private origin MIME, and calls its owner-change path only after a
@@ -618,8 +627,10 @@ and eventual cross-peer conversion remain the behavioral authorities.
 
 ### Standard data-device ownership when forwarding is off
 
-There are two independent feature decisions which the embedded source had
-accidentally coupled:
+There are two independent feature decisions which older sources coupled.
+Upstream `54e156591c` now separates them exactly as described below, so the
+case no longer changes these listeners; it keeps the live `off` control which
+proves them:
 
 1. the compositor advertises the standard `wl_data_device_manager` for local
    Wayland data-device behavior, including clipboard selection and drag and
@@ -802,7 +813,7 @@ decoding already produces bytes and does not introduce a NumPy runtime
 dependency.
 
 Each native-source read similarly receives a unique `read_key` and records the
-local generation, source pointer, read FD, GLib watch, and callback.  Every
+`source_generation`, source pointer, read FD, GLib watch, and callback.  Every
 seat selection signal increments the generation before retiring old reads.
 Replacement removes each watch, closes its FD, and empty-completes the callback
 once; EOF can return accumulated bytes only while both generation and pointer
@@ -946,9 +957,10 @@ Keep these maintenance constraints:
   re-entry guard, and unregister each clipboard callback through the
   compositor's custom connect/disconnect contract rather than assuming a
   GObject signal ID;
-- keep standard data-device seat listeners alive with the unconditional
-  standard manager even when `features.clipboard` is false; do not move the
-  optional data-control or primary-selection facilities outside their gate;
+- preserve upstream's (`54e156591c`) standard data-device seat listeners
+  alongside the unconditional standard manager even when `features.clipboard`
+  is false; do not move the optional data-control or primary-selection
+  facilities outside their gate;
 - keep extension debug-name ordering and generic `send_event` policy out of
   this patch unless new protocol evidence changes the first failing boundary;
 - never retain arbitrary clipboard bytes in tracked or ignored acceptance
@@ -994,9 +1006,6 @@ by the X11-client failure:
   cleanup and exact compositor callback disconnection;
 - refusal/nonclaim ownership preservation, source-constructor rollback and
   pre-publication metadata restoration without reviving a destroyed source;
-- unconditional standard seat request/set-selection listeners paired with the
-  compositor's unconditional standard data-device manager, while optional
-  forwarding/data-control/primary facilities remain feature-gated;
 - a real X11/XFixes regression in the existing clipboard client test module;
 - deterministic compiled Wayland pipe/source lifecycle regressions for both
   ordinary and primary selections, plus the real compositor listener API.
@@ -1045,9 +1054,9 @@ pretending one injected exception represents every setup failure.
 A state table requires one owner change to schedule exactly one token in
 plain, have-token, want-targets, and greedy modes and none while blocked.  The
 proxy-lifecycle test manually seeds `local_requests`, `remote_requests`, and
-partial `INCR` state and installs real long-lived GLib sources for the local
-conversion and incremental watchdog.  Two cleanup calls must cancel both
-sources, clear all incremental state, answer the mocked X11 requestor exactly
+one partial per-property `IncrTransfer` and installs real long-lived GLib
+sources for the local conversion and incremental watchdog.  Two cleanup calls
+must cancel both sources, remove the transfer record, answer the mocked X11 requestor exactly
 once, and never invoke the local conversion callback.  This is an exact
 teardown/idempotency test; it does not claim to perform an end-to-end INCR
 transfer or network round trip. Separate failure injection makes the first
@@ -1119,6 +1128,16 @@ destruction when the selection adapter cannot clear, and cleanup of both
 custom compositor event registrations.  A real uninitialized
 `WaylandCompositor` instance binds the exact connect/emit/disconnect API rather
 than substituting GObject signal IDs.
+
+The same module also carries upstream's `WaylandClipboardTokenTest` (token
+pacing, coalescing and stale-origin rejection), sharing its `FakeCompositor`.
+Its fake selection keeps a duplicate of each origin-read pipe, and the case
+retires a replaced read and closes its end immediately. So the fake's
+`complete()` tolerates `EPIPE`, as a real source whose consumer has gone would.
+The case's policy-loss test waits for the eager read after policy is restored,
+because the shared scheduler spaces that token from the previous one. While
+policy is revoked it also requires that no token timer is armed, so the
+negative check cannot pass merely because the read was delayed.
 
 These pipe controls use a selection-adapter stand-in which explicitly destroys
 old sources synchronously on set/clear. A NULL native adapter may no longer
@@ -1364,8 +1383,8 @@ cycle ledger, not this architecture description.
   identities and the published client PID, not copied from an in-memory result.
 - A failed or repeated cleanup must not remove a peer's filter, underflow the
   count, or clear unrelated dispatch receivers.
-- Proxy cleanup must cancel core, local-conversion, and `INCR` timers, reset
-  partial incremental data, answer remote X11 requestors at most once, and
+- Proxy cleanup must cancel core and local-conversion timers, retire every
+  per-property `INCR` transfer, answer remote X11 requestors at most once, and
   never let a local completion callback re-enter conversion during teardown.
 - Every helper wire request retains its own ID, timer, selection, target, and
   optional completion.  Reset/cleanup empty-completes each record once under a
@@ -1398,7 +1417,7 @@ cycle ledger, not this architecture description.
   superseded by a native source is destroyed without clearing the newer owner.
 - Pending Wayland writes are keyed per request and owned by exact source object
   plus generation, never fanned out by target.  Pending reads use an
-  independent key plus local generation and source pointer; neither raw pointer
+  independent key plus `source_generation` and source pointer; neither raw pointer
   nor numeric FD reuse may cross an ownership transition.
 - Origin reads and sequential eager collection stop at generation change.
   Source destruction, reset, and cleanup close owned FDs once, and late wire or

@@ -8032,7 +8032,7 @@ class LiveSourceTest(unittest.TestCase):
 
     def test_frozen_selection_admission_uses_the_exact_snapshot_root(self) -> None:
         selected = live_run.resolve_patch_selection(
-            "cases/wayland-empty-damage-throttle",
+            "cases/window-source-timer-lifecycle",
             None,
         )
         resolution = {"resolution_sha256": "2" * 64}
@@ -8053,7 +8053,7 @@ class LiveSourceTest(unittest.TestCase):
             snapshot_root = (
                 root
                 / "validated-manifests"
-                / "0001-cases-wayland-empty-damage-throttle"
+                / "0001-cases-window-source-timer-lifecycle"
             )
             observed_roots: list[Path] = []
             output_at = live_run.selection_output_at
@@ -10700,6 +10700,18 @@ class LiveTransportProfileTest(unittest.TestCase):
         self.assertIn("start_wayland_keyboard_fixture.sh", containerfile)
         self.assertIn("wayland_keyboard_fixture.py", containerfile)
 
+    def test_zed_starts_after_the_client_attaches(self) -> None:
+        # Zed redraws only during its startup: the client must be attached to see it
+        script = (LIVE_DIRECTORY / "start_zed.sh").read_text(encoding="utf-8")
+        info = " ".join(("xpra info", *live_run.command_cli_options("server", "info")))
+        wait = script.index(f"until {info} ")
+        self.assertIn("grep -q '^client\\.0\\.connection\\.active=True$'", script[wait:])
+        self.assertLess(script.index('printf \'%s\\n\' "$$" > /artifacts/zed.pid'), wait)
+        self.assertLess(wait, script.index("exec env"))
+        self.assertIn("exit 1", script[wait:script.index("exec env")])
+        # the server records `--start-child-after-connect` twice: never use it
+        self.assertNotIn("--start-child-after-connect=", (LIVE_DIRECTORY / "run.py").read_text(encoding="utf-8"))
+
     def test_subsurface_fixture_and_container_inventory_are_bound(self) -> None:
         command, titles, pid_file = live_run.application_contract("subsurface")
         self.assertEqual(
@@ -11781,6 +11793,45 @@ class LiveTransportProfileTest(unittest.TestCase):
             evidence["comparisons"][0]["direct"]["mean_absolute_error"],
             1.0,
         )
+
+    def test_moving_content_binds_each_capture_to_an_ordered_server_frame(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            frames = {100: (200, 0, 0), 116: (0, 200, 0), 5000: (0, 0, 200)}
+            for time_ms, colour in frames.items():
+                path = directory / "screen-updates" / "1" / str(time_ms)
+                path.mkdir(parents=True)
+                live_run.Image.new("RGB", (32, 32), colour).save(path / "screenshot.png")
+
+            def evaluate(direct_colour, focused_colour, *, moving=True):
+                live_run.Image.new("RGB", (32, 32), direct_colour).save(directory / "direct.png")
+                live_run.Image.new("RGB", (32, 32), focused_colour).save(directory / "focused.png")
+                evidence, _source = live_run.pixel_pipeline_evidence(
+                    directory,
+                    [f"screen-updates/1/{time_ms}/screenshot.png" for time_ms in frames],
+                    directory / "direct.png",
+                    directory / "focused.png",
+                    15.0,
+                    moving_content=moving,
+                )
+                return evidence
+
+            # the composited capture follows the direct one by one frame:
+            accepted = evaluate(frames[100], frames[116])
+            self.assertTrue(accepted["matching_server_frame"])
+            self.assertEqual(accepted["capture_ordered_server_frames"]["interval_ms"], 16)
+            # one server frame for both is still the ordinary case:
+            same = evaluate(frames[116], frames[116])
+            self.assertTrue(same["matching_server_frame"])
+            self.assertIsNone(same["capture_ordered_server_frames"])
+            # the focused capture cannot show an older frame than the direct one:
+            self.assertFalse(evaluate(frames[116], frames[100])["matching_server_frame"])
+            # nor one outside the capture interval:
+            self.assertFalse(evaluate(frames[116], frames[5000])["matching_server_frame"])
+            # and static profiles keep the single-frame requirement:
+            self.assertFalse(evaluate(frames[100], frames[116], moving=False)["matching_server_frame"])
+            # a capture which matches no frame still fails:
+            self.assertFalse(evaluate((90, 90, 90), frames[116])["matching_server_frame"])
 
     def test_hardware_application_uses_observable_vulkan_boundaries(self) -> None:
         checks = live_run.application_boundary_checks(
@@ -13405,6 +13456,70 @@ class H264EvidenceTest(unittest.TestCase):
         self.assertTrue(result["production_proven"])
         self.assertEqual(result["matched_stream"]["first_sequence"], 3)
 
+    def test_complete_stream_before_bound_production_accounts_its_own_contexts(self) -> None:
+        # the client's map refresh cleaned the video context after a first
+        # two-frame stream, and production restarted from a new key frame
+        history = {
+            "updates": [
+                self.packet(3, 0), self.packet(4, 1),
+                self.packet(6, 0), self.packet(7, 1), self.packet(8, 2),
+            ],
+            "window_id": 1,
+        }
+        production = {"updates": history["updates"][2:], "window_id": 1}
+
+        def contexts(entrypoint: str, earlier_frames: int) -> dict[str, object]:
+            earlier = {**self.context(entrypoint), "completed_frames": earlier_frames}
+            current = {**self.context(entrypoint), "context": "0x2", "completed_frames": 3}
+            return {"contexts": [earlier, current]}
+
+        preceding = live_run.preceding_h264_streams(history, production)
+        self.assertEqual([stream["packet_sequences"] for stream in preceding], [[3, 4]])
+        self.assertEqual(live_run.preceding_h264_streams(production, production), [])
+
+        unaccounted = live_run.match_h264_production_stream(
+            production,
+            contexts("VAEntrypointEncSlice", 2),
+            contexts("VAEntrypointVLD", 2),
+        )
+        self.assertFalse(unaccounted["production_proven"])
+
+        result = live_run.match_h264_production_stream(
+            production,
+            contexts("VAEntrypointEncSlice", 2),
+            contexts("VAEntrypointVLD", 2),
+            preceding_streams=preceding,
+        )
+        self.assertTrue(result["production_proven"])
+        self.assertTrue(result["all_streams_proven"])
+        matched = result["matched_stream"]
+        self.assertEqual(matched["first_sequence"], 6)
+        self.assertEqual([c["context"] for c in matched["server_contexts"]], ["0x2"])
+        self.assertEqual([c["context"] for c in matched["preceding_server_contexts"]], ["0x1"])
+        self.assertEqual([c["context"] for c in matched["preceding_client_contexts"]], ["0x1"])
+        self.assertEqual(result["unmatched_contexts"], [])
+
+        # an earlier context which does not hold exactly that stream is not accounted:
+        for server_frames, client_frames in ((1, 2), (2, 1), (3, 2)):
+            with self.subTest(server=server_frames, client=client_frames):
+                rejected = live_run.match_h264_production_stream(
+                    production,
+                    contexts("VAEntrypointEncSlice", server_frames),
+                    contexts("VAEntrypointVLD", client_frames),
+                    preceding_streams=preceding,
+                )
+                self.assertFalse(rejected["production_proven"])
+
+        # nor is an earlier stream which does not start from a key frame:
+        headless = {**history, "updates": [self.packet(4, 1), *history["updates"][2:]]}
+        rejected = live_run.match_h264_production_stream(
+            production,
+            contexts("VAEntrypointEncSlice", 1),
+            contexts("VAEntrypointVLD", 1),
+            preceding_streams=live_run.preceding_h264_streams(headless, production),
+        )
+        self.assertFalse(rejected["production_proven"])
+
     def test_unscaled_stream_keeps_coded_dimensions(self) -> None:
         updates = {"updates": [self.packet(1, 0, scaled=False)]}
         stream = live_run.h264_packet_streams(updates)[0]
@@ -13480,6 +13595,155 @@ class H264EvidenceTest(unittest.TestCase):
                     self.assertEqual(result["complete"], accepted)
                     self.assertEqual(result["size"], [1596, 1172])
                     self.assertEqual(result["encoded_size"], [1064, 780])
+
+    def test_packet_chain_follows_exact_successors_to_the_first_presented_frame(self) -> None:
+        # the first decode includes the libva decoder setup, so the frame queued
+        # behind the IDR is painted in the same UI iteration, before any present
+        idr = self.packet(3, 0, scaled=False)
+        following = self.packet(4, 1, scaled=False)
+        for packet in (idr, following):
+            packet["options"]["window-size"] = [1596, 1172]
+        updates = {"updates": [idr, following], "window_id": 1}
+
+        def packet_log(sequence: int, frame: str, callback: str, *, new_decoder: bool) -> list[str]:
+            options = f"{{'frame': {frame}, 'window-size': (1596, 1172)}}"
+            lines = [
+                (
+                    f"process_draw: 100 <class 'memoryview'> for window 1, sequence {sequence}, "
+                    f"1596x1172 at 0,0 using h264 encoding with options=typedict({options})"
+                ),
+                (
+                    f"draw_region(0, 0, 1596, 1172, h264, 100 bytes, 0, typedict({options}), "
+                    f"[<function WindowDraw._do_draw.<locals>.record_decode_time at {callback}>])"
+                ),
+            ]
+            if new_decoder:
+                lines += [
+                    "choose_decoder([libva(YUV420P - h264)])=libva(YUV420P - h264)",
+                    "paint_with_video_decoder: new libva('h264', 1596, 1172, 'YUV420P')",
+                ]
+            return lines + [
+                "libva decoded h264 100 bytes into 1596x1172 NV12",
+                (
+                    "do_video_paint('h264', ImageWrapper(NV12:(0, 0, 1596, 1172, 24):PLANAR_2), "
+                    f"record_decode_time at {callback}>"
+                ),
+                (
+                    "GLDrawingArea(1, (1596, 1173)).render_planar_update(0, 0, 1596, 1172, "
+                    "1596, 1172, 'NV12_to_RGB') pixel_format=NV12"
+                ),
+                "record_decode_time(True, ) wid=0x1, h264: 1596x1172, 8.4ms",
+                f"sending ack: ('window-ack', 1, 1596, 1172, {sequence}, 8468, \"''\")",
+            ]
+
+        idr["options"]["frame"] = 0
+        following["options"]["frame"] = 1
+        present = self.presentation_log(1).splitlines()
+        # `packet()` records the frame as an int, which the logged typedicts must repeat:
+        base = [
+            *packet_log(3, "0, 'type': 'IDR'", "0x1", new_decoder=True),
+            *packet_log(4, "1, 'type': 'P'", "0x2", new_decoder=False),
+        ]
+        stream = {"first_sequence": 3, "packet_sequences": [3, 4]}
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+
+            def chain(lines: list[str], matched: dict[str, object]) -> dict[str, object]:
+                (directory / "client.stdout").write_text("\n".join(lines) + "\n", encoding="utf-8")
+                return live_run.h264_client_packet_chain(directory, updates, matched)
+
+            accepted = chain([*base, *present], stream)
+            self.assertTrue(accepted["complete"])
+            self.assertEqual(accepted["sequence"], 3)
+            self.assertEqual(accepted["superseded_sequences"], [3])
+            self.assertEqual(accepted["presented_sequence"], 4)
+
+            # the successor must belong to the matched stream:
+            self.assertFalse(chain([*base, *present], {"first_sequence": 3, "packet_sequences": [3]})["complete"])
+            # and have its own exact decode callback chain:
+            broken = [
+                line.replace("record_decode_time at 0x2>", "record_decode_time at 0x9>")
+                if line.startswith("do_video_paint") else line
+                for line in base
+            ]
+            self.assertFalse(chain([*broken, *present], stream)["complete"])
+            # a presentation of this window between the two ACKs means the IDR was
+            # presented or overwritten differently - not the supersession this allows:
+            ack3 = base.index("sending ack: ('window-ack', 1, 1596, 1172, 3, 8468, \"''\")") + 1
+            interleaved = [*base[:ack3], "GLDrawingArea(1, (1596, 1173)).do_present_fbo() done", *base[ack3:], *present]
+            self.assertFalse(chain(interleaved, stream)["complete"])
+            # the IDR itself still needs the decoder selection:
+            no_decoder = [line for line in base if not line.startswith(("choose_decoder", "paint_with_video_decoder"))]
+            self.assertFalse(chain([*no_decoder, *present], stream)["complete"])
+
+    def test_packet_chain_binds_frames_decoded_ahead_of_their_paints(self) -> None:
+        # the decode thread can decode the successor before the UI thread paints
+        # the IDR: each paint callback's render, decode success and ACK still come
+        # together, and the ACK's decode time identifies its decode success line
+        idr = self.packet(3, 0, scaled=False)
+        following = self.packet(4, 1, scaled=False)
+        for packet in (idr, following):
+            packet["options"]["window-size"] = [1596, 1172]
+        idr["options"]["frame"] = 0
+        following["options"]["frame"] = 1
+        updates = {"updates": [idr, following], "window_id": 1}
+
+        def decode(sequence: int, frame: str, callback: str) -> list[str]:
+            options = f"{{'frame': {frame}, 'window-size': (1596, 1172)}}"
+            return [
+                (
+                    f"process_draw: 100 <class 'memoryview'> for window 1, sequence {sequence}, "
+                    f"1596x1172 at 0,0 using h264 encoding with options=typedict({options})"
+                ),
+                (
+                    f"draw_region(0, 0, 1596, 1172, h264, 100 bytes, 0, typedict({options}), "
+                    f"[<function WindowDraw._do_draw.<locals>.record_decode_time at {callback}>])"
+                ),
+                *(
+                    (
+                        "choose_decoder([libva(YUV420P - h264)])=libva(YUV420P - h264)",
+                        "paint_with_video_decoder: new libva('h264', 1596, 1172, 'YUV420P')",
+                    )
+                    if sequence == 3 else ()
+                ),
+                "libva decoded h264 100 bytes into 1596x1172 NV12",
+                (
+                    "do_video_paint('h264', ImageWrapper(NV12:(0, 0, 1596, 1172, 24):PLANAR_2), "
+                    f"record_decode_time at {callback}>"
+                ),
+            ]
+
+        def paint(sequence: int, decode_ms: str, decode_us: int) -> list[str]:
+            return [
+                (
+                    "GLDrawingArea(1, (1596, 1173)).render_planar_update(0, 0, 1596, 1172, "
+                    "1596, 1172, 'NV12_to_RGB') pixel_format=NV12"
+                ),
+                f"record_decode_time(True, ) wid=0x1, h264: 1596x1172, {decode_ms}ms",
+                f"sending ack: ('window-ack', 1, 1596, 1172, {sequence}, {decode_us}, \"''\")",
+            ]
+
+        present = self.presentation_log(1).splitlines()
+        stream = {"first_sequence": 3, "packet_sequences": [3, 4]}
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+
+            def chain(lines: list[str]) -> dict[str, object]:
+                (directory / "client.stdout").write_text("\n".join(lines) + "\n", encoding="utf-8")
+                return live_run.h264_client_packet_chain(directory, updates, stream)
+
+            decoded = [*decode(3, "0, 'type': 'IDR'", "0x1"), *decode(4, "1, 'type': 'P'", "0x2")]
+            accepted = chain([*decoded, *paint(3, "42.9", 42947), *paint(4, "20.7", 20730), *present])
+            self.assertTrue(accepted["complete"])
+            self.assertEqual(accepted["superseded_sequences"], [3])
+            self.assertEqual(accepted["presented_sequence"], 4)
+
+            # a decode success which is not the one this ACK reports is not bound:
+            swapped = chain([*decoded, *paint(3, "42.9", 42947), *paint(4, "42.9", 20730), *present])
+            self.assertFalse(swapped["complete"])
+            # nor is a render from another paint callback:
+            unrendered = paint(4, "20.7", 20730)[1:]
+            self.assertFalse(chain([*decoded, *paint(3, "42.9", 42947), *unrendered, *present])["complete"])
 
     @staticmethod
     def presentation_log(window_id: int = 7, *, count: int = 1) -> str:

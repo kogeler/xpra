@@ -1,9 +1,19 @@
-# Native Wayland pointer protocol regression
-
-## Current ownership and upstream replacement
+# Runner-owned neutral regressions
 
 These are current runner-owned tests, not a production patch, quarantine or
-historical verification archive. They retain the real native boundary after
+historical verification archive. Each one keeps a durable boundary after
+upstream absorbed the production fix of a retired case:
+
+| Input | Installed at | Former case |
+| --- | --- | --- |
+| `pointer_scroll_test.py`, `pointer_scroll_client.c` | `tests/unittests/unit/wayland/` | native Wayland wheel conversion |
+| `codec_startup_test.py` | `tests/unittests/unit/client/subsystem/` | `client-codec-startup-order` |
+
+## Native Wayland pointer protocol regression
+
+### Current ownership and upstream replacement
+
+The pointer tests retain the real native boundary after
 upstream `9d0ec89ab8b53477f29c2dcbed38dcbb95dfc45e` incorporated the complete
 wheel conversion at embedded source
 `d95058b0916913fe6ae5296fb702f66d833898b0`.
@@ -21,7 +31,7 @@ Client GTK event admission remains owned by
 One admitted packet's native conversion is independent of choosing one client
 representation: a duplicate packet still means a duplicate native operation.
 
-## Direction, units and lifecycle
+### Direction, units and lifecycle
 
 The common client pointer subsystem maps direction buttons, including user
 inversion, and serializes the signed distance in thousandths of a click.
@@ -54,7 +64,7 @@ not change pointer lifetime, acceleration, inertia, axis-stop policy, relative
 motion or constraints. Native units are not a promise of a fixed number of
 application pixels or text lines.
 
-## Real protocol fixture
+### Real protocol fixture
 
 `pointer_scroll_test.py` builds `pointer_scroll_client.c` with the installed
 Wayland protocol descriptions, `wayland-scanner`, pkg-config and a C compiler
@@ -86,17 +96,47 @@ negative oracle is now expected to pass on clean new upstream. A new failure
 must be investigated, not hidden by restoring the retired production patch or
 weakening the expected units.
 
+## Client codec startup regression
+
+Upstream `c45e990e8285` (with `83e30e43d75b` normalizing `auto`) now starts the
+decode subsystem before `handle_client_encoding_option()` waits for its codecs.
+It validates after `init_ui()` and `load()`, and `Decode.run()` keeps one worker.
+That is the retired case's production change line for line. Upstream's own
+tests use fakes: `decode_test` runs `Decode.run()` twice and `main_test`
+records the start/load order. The decode worker is a non-daemon thread, and
+starting it before `app.run()` creates new lifecycle obligations. The retained
+module covers those obligations through the real `get_client_gui_app()`
+bootstrap, real `Encodings`/`Decode` subsystems and a real GLib scheduler:
+
+- an explicit encoding loads the codecs once, on the worker, after `load()`,
+  followed by every `preload_decode` hook and then the seccomp filter;
+- a later `app.run()` reuses that worker, and `run()` after cleanup does not
+  restart it;
+- `help` and an invalid encoding raise `InitInfo` and leave no live worker,
+  because a leaked non-daemon worker would keep the client from exiting;
+- `auto`/unset, disabled or absent encoding support and a client without
+  `decode` do not start the worker early;
+- with native codecs, codec loading and seccomp installation share that one
+  worker.
+
+A warning from the codec-load timeout fails the module. The complete-stack live
+suite separately rejects `timed out waiting for the decode thread to load the
+codecs` in every peer log. On clean new upstream this module is expected to
+pass. A failure must be investigated, not hidden by restoring the retired
+patch.
+
 ## Frozen installation and inventory
 
-The fixed inventory in `../neutral_tests.py` installs only these two files at
-`tests/unittests/unit/wayland/` inside the runner's private cloned source.
-It verifies the exact frozen HEAD and real checkout root, rejects symlinked
-inputs/parents and any pre-existing target, validates both payloads before
-writing either, and stages exactly the new files. An upstream test at the same
+The fixed inventory in `../neutral_tests.py` (`ASSET_TARGETS`) installs only
+these files, each into its declared upstream test package inside the runner's
+private cloned source. It verifies the exact frozen HEAD and real checkout
+root, rejects symlinked inputs, missing or symlinked target packages and any
+pre-existing target, validates every payload before writing any, and stages
+exactly the new files. An upstream test at the same
 path requires explicit reassessment; even byte-identical files are not silently
 overwritten or accepted as equivalent coverage.
 
-The helper and both fixtures belong to the image-input hash, validated streamed
+The helper and every input belong to the image-input hash, validated streamed
 image context, Containerfile copy inventory and host runner digest. Each run
 logs the installed paths and SHA-256 values. Staging includes them in the
 focused applied-tree identity. Changing fixture/oracle bytes invalidates that
@@ -130,6 +170,22 @@ real protocol consumers. The stack's focused inventory also retains that module,
 the server/client pointer modules and `unit.pointer_loopback_test`; run focused,
 compiled and no-compat composition as required by the enclosing validation flow.
 Native test discovery in full upstream legs sees the retained files too.
+
+`unit.client.subsystem.codec_startup_test` is a Python client module, so no
+native gate selects it, and the focused runner rejects `PATCH_MODE=clean`. Its
+clean-source proof is the full leg on unmodified production code, which
+discovers every installed neutral module:
+
+```bash
+make -C fork-maintenance test-start STACK=develop PATCH_MODE=clean \
+  TARGET=full RUN=<cycle>-clean-full
+```
+
+Record that reason in the cycle ledger before starting the leg. A refresh which
+retires cases normally needs the same clean full leg to prove their upstream
+replacement tests. The resulting stack runs the module through its focused
+inventory (`STACK=develop TARGET=focused` and the compiled/no-compat variants)
+and through all three full legs.
 
 The shared hardware live profiles exercise Sway-to-Xwayland smooth input, while
 GTK detach/transport-loss profiles exercise XTEST discrete input. Each stimulus,

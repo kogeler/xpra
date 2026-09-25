@@ -222,16 +222,9 @@ The currently retained active cases are:
 - `wayland-initial-window-state`;
 - `wayland-client-keymap-sync`;
 - `x11-client-clipboard-events`;
-- `wayland-clipboard-token-coalescing`;
-- `wayland-empty-damage-throttle`;
-- `jph-parallel-build-objects`;
-- `debian-libva-codecs-package`;
 - `packet-handler-error-boundary`;
 - `gtk-client-scroll-deduplication`;
-- `wayland-display-name-signal`;
-- `client-codec-startup-order`;
-- `x11-selection-refusal`;
-- `client-popup-modal-lifecycle`.
+- `server-shutdown-disconnect-flush`.
 
 There is currently no active quarantine duty case, but
 `fork-maintenance/cases/upstream-test-quarantine/` is permanent infrastructure.
@@ -468,9 +461,16 @@ the server and client. Case-only, partial-stack and clean-endpoint live tests
 are forbidden, including newly developed fixtures. A scenario may target one
 behavior, but its running product must contain every active patch. Atomic patch
 storage and isolated unit/negative controls do not authorize isolated live runs.
-For validation of ANY patch, run the entire nine-profile live suite through
-`make -C fork-maintenance live-all STACK=develop RUN=<fresh-prefix>`.
-A single-profile pass cannot accept a patch. `live-suite-check` verifies complete
+For validation of ANY patch, the entire nine-profile live suite must pass in one
+complete `make -C fork-maintenance live-all STACK=develop RUN=<fresh-prefix>`
+pass. Reach it through the live loop in `fork-maintenance/docs/runbooks/live-tests.md`
+and never rerun the whole set to test a fix: when a gate fails, find the
+problem, fix it (code or test, from evidence), and continue from that same gate
+with `live-all ... FROM=<gate>` under the next fresh prefix, until the last gate
+passes. Then run one complete pass from the first gate; if a gate fails, fix
+it, continue from it the same way, and finish with another complete pass,
+until one complete pass succeeds without a fix.
+A single-profile pass or a continuation cannot accept a patch. `live-suite-check` verifies complete
 coverage and matching current source, queue, harness and endpoint provenance.
 It also checks the complete report-bound stdout/stderr of both peers in every
 scenario for undeclared Wayland display-name signals, codec startup waits,
@@ -484,7 +484,7 @@ During development, freeze the embedded base, establish a non-vacuous clean
 control, and run the nearest real regression immediately after each atomic
 edit. Include affected upstream modules, case regressions and relevant
 dependent/composed tests; exercise native, compiled and compatibility modes
-according to the changed boundary. Start the complete live suite early.
+according to the changed boundary. Start the live loop early.
 Full upstream unit suites are not a prerequisite
 for live diagnosis or acceptance.
 Stop escalation at the first unexplained failure and investigate its owner.
@@ -816,6 +816,11 @@ after review; it never deletes patches, cases, or unrelated Podman objects.
   them directly or delegates them to the agent. The sole autonomous exception
   is local `develop` rebase onto existing local `master` through the refresh
   runbook, including conflict continuation or abort.
+- Every commit the agent creates or replays is unsigned
+  (`git -c commit.gpgsign=false ...`); never invoke the operator's signing key.
+  Automation never lazily fetches from the credentialed promisor of a partial
+  clone; missing objects are backfilled credential-free by
+  `make -C fork-maintenance objects-backfill` (run inside `develop-rebase`).
 - Refresh never authorizes a preservation or result commit, fetch, branch
   switch, local-master update, remote/configuration change, or publication.
 - The scheduled `master-sync.yml` service identity may fast-forward only the

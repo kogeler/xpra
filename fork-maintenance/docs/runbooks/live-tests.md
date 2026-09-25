@@ -1,11 +1,11 @@
 # Run Direct Xpra And Physical-GPU Tests
 
 Use [`validation.md`](validation.md) to schedule these fixed positive gates.
-During development, start the full live suite after the nearest focused/native
+During development, start the live loop below after the nearest focused/native
 checks; all three full upstream suites are not a prerequisite. Final acceptance
-requires all nine current full-stack results after candidate
-freeze. Development-stage named results may count when their exact final
-inputs and assertions remain valid; foreground diagnostics cannot.
+requires one complete pass of all nine current full-stack results after
+candidate freeze. Never rerun the whole set just to test a fix: follow
+[the live loop](#the-live-loop-fix-and-continue-then-one-complete-pass).
 
 ## Preconditions
 
@@ -149,7 +149,8 @@ endpoints. Developing or running isolated-case, partial-stack or clean-endpoint
 live tests is forbidden. Atomic source patches and focused unit controls remain
 useful; isolated live product configurations do not represent production.
 
-For validation of any patch, including an unchanged-base repair, run all nine:
+For validation of any patch, including an unchanged-base repair, all nine must
+pass in one complete pass:
 
 ```bash
 make -C fork-maintenance live-all STACK=develop RUN=<fresh-prefix>
@@ -157,13 +158,64 @@ make -C fork-maintenance live-suite-check STACK=develop RUN=<fresh-prefix>
 ```
 
 The controller calls the existing named `live-start`, `live-wait` (including
-collection) and `live-remove` for each member serially. Clipboard and subsurface
-run first. The run name is `<prefix>-<gate>`, where the gate is defined in
+collection) and `live-remove` for each member serially, in this fixed order:
+
+1. `live-x11-clipboard`
+2. `live-wayland-subsurface`
+3. `live-xpra-detach`
+4. `live-xpra-transport-loss`
+5. `live-wayland-h264-hardware` (the Vulkan `live-xpra-hardware` profile)
+6. `live-wayland-keyboard`
+7. `live-wayland-opengl-h264-hardware` (the `live-xpra-opengl-hardware` profile)
+8. `live-h264`
+9. `live-rgb`
+
+The run name is `<prefix>-<gate>`, where the gate is defined in
 `infra/live/profiles.py` (hardware gate names retain their `live-wayland-*`
 spelling). No workloads run in the control shell itself. If interrupted, inspect
 the current member with `live-status`/`live-logs` and complete its lifecycle;
 never launch a duplicate under an existing name. A failed member stops the
-suite; correct it before a fresh candidate/suite attempt.
+controller. `FROM=<gate>` starts it at that gate instead of the first one and
+runs it and every later gate; such a continuation never prints or implies a
+suite result.
+
+### The live loop: fix and continue, then one complete pass
+
+A live profile takes minutes and the complete set about an hour, so a fix is
+never tested by rerunning the whole set. Every failure is fixed where it
+appears, and the walk continues from that gate:
+
+1. **Walk.** Start `live-all` under a fresh prefix. When a gate fails, stop
+   there: read its evidence, decide from evidence whether the product or the
+   test is at fault (a failing gate is never a handoff), fix it, and prove the
+   fix offline first (its focused/unit test, and for an oracle change a replay
+   on the retained evidence of the failed run). Then remove the failed member
+   and continue from the same gate under the next fresh prefix:
+
+   ```bash
+   make -C fork-maintenance live-remove RUN=<prefix>-<gate>
+   make -C fork-maintenance live-all STACK=develop RUN=<next-prefix> FROM=<gate>
+   ```
+
+   If that gate fails again, repeat this step for it; otherwise the
+   continuation goes on to the following gates. Keep walking until the last
+   gate (`live-rgb`) has passed. Record each failure, its classification, fix
+   and continuation prefix in the session ledger.
+2. **Complete pass.** Once the walk has reached the end, every problem found so
+   far is fixed. Start a complete `live-all` from the first gate under a fresh
+   prefix. If it passes all nine without any change in between, it is the
+   acceptance pass: run `live-suite-check` on its prefix.
+3. **Around again.** If a gate of the complete pass fails, fix it and continue
+   from that gate exactly as in step 1 until the last gate has passed, then go
+   back to step 2 with a new complete pass. Repeat until one complete pass
+   succeeds without a fix.
+
+Only that uninterrupted pass is acceptance: every fix changes the candidate or
+the harness, which makes all earlier members stale, and `live-suite-check`
+rejects stale, mixed and missing members. Continuations are the diagnostic
+walk; they keep their own prefixes so no name is ever reused. Do not replace a
+continuation with repeated reruns of a gate that already passes, and do not
+launch a new complete pass while any gate is still failing.
 
 The exact set is `live-rgb`, `live-h264`, `live-xpra-detach`,
 `live-xpra-transport-loss`, `live-xpra-hardware`,
@@ -656,6 +708,20 @@ recover transparency lost through H.264 and cannot affect the server cleanup
 race. The `--encodings` allowlist is a separate control: selecting a CSC module
 does not discover or enable a codec.
 
+`start_zed.sh` publishes its PID, then waits until `xpra info` (the tracked
+`live-cli.yml` info options) reports `client.0.connection.active=True` before it
+executes Zed; it exits with an error after 120 s without a client. Zed redraws
+only while its startup work (fonts, theme, welcome page) lands and then idles.
+Without a client the server answers its frame callbacks only after
+`XPRA_WAYLAND_FRAME_TIMEOUT` (1 s), so that startup could finish before the
+client attached; the client then only received the initial and resize
+refreshes, which the server always sends as pictures (`no recent updates`,
+`resized recently`), and the first-H.264 readiness timed out. Waiting for the
+client streams Zed's whole startup to it. Do not use
+`--start-child-after-connect` instead: this server records that option twice
+and starts two Zed instances, and the second, short-lived one overwrites
+`zed.pid`.
+
 `RGBA`/`BGRA` frames must use an alpha-capable picture encoding and must never
 pass silently through H.264. The runner waits for initial picture activity,
 then records a stable-geometry interval owned by repeated real Zed input. Every
@@ -761,6 +827,15 @@ Never assume it is first, accept duplicate or missing decode callbacks, or
 replace packet identity with a generic successful paint. Retain the ordinary
 dimensions/options, payload, hardware presentation and ordering assertions.
 
+The decode thread may decode several frames before the UI thread paints the
+first of them, so the first decode success after a packet's decode can belong
+to an earlier frame. Bind the UI-thread part backwards from the packet's own
+ACK: its decode success is the last `record_decode_time` line before that ACK
+and must repeat the ACK's decode time (truncated to 0.1 ms, as `draw.py` logs
+it), and its GL render is the last `render_planar_update` of the window before
+that line with no other decode success in between. One paint callback logs
+render, decode success and ACK in that order; other threads only interleave.
+
 Bind presentation to one complete FBO blit/swap/completion transaction for the
 exact window and backing size, with a blit covering the selected H.264 region.
 The prefix in `N.do_gl_show(...)` is the rectangle count, not the window ID.
@@ -772,6 +847,19 @@ cross-window presentation transactions. A queued `process_draw` alone is not a
 completed paint. The report records `presented_before_overwrite` and the exact
 intervening edge sequences; a correct screenshot alone cannot establish this
 packet-specific proof.
+
+The first packet of the matched stream (its IDR) keeps the complete chain,
+including libva decoder selection. Its decode also creates the hardware decoder,
+so the stream's next frames are often queued behind it and painted in the same
+UI iteration, before GTK's frame clock presents anything. In that case the harness
+follows the matched stream. Each exact successor must carry its own
+process_draw, draw region, decode callback, NV12 paint, libva decode, decode
+success and ACK, with no presentation of the window between the two ACKs. The
+presentation proof then binds to the first frame which is actually presented.
+At most `H264_PRESENTATION_SUPERSEDE_LIMIT` (8) frames may be superseded this
+way. The report records `superseded_sequences` and `presented_sequence`. A
+successor outside the matched stream, a broken successor chain or an
+intervening presentation fails closed.
 
 The frozen host runner computes this ordinary-root H.264 ledger from the saved
 packet metadata and payloads. It records readiness and profile-owned baseline/
@@ -932,13 +1020,34 @@ additional completed server encode untransmitted. Both exceptions require an
 otherwise exact complete packet sequence; larger or in-production differences
 fail.
 
+The bound context suffix may be preceded by an earlier complete stream of the
+same window and surface size. This happens when the client's map refresh
+reaches the server after production H.264 has started: upstream
+`cancel_damage` cleans the video context so that the refresh restarts from a
+key frame, and a slower client (the OpenGL profile) makes this ordering
+likely. Each such earlier stream must start with an IDR, have contiguous
+frames and positive payloads, and own exactly one distinct server encoder
+context and one client decoder context whose completed frames equal its packet
+count. Only then are those contexts excluded from the production totals, and
+they are reported as preceding contexts rather than unmatched ones. Anything
+short of that exact one-to-one accounting on both sides leaves every context in
+the production totals, which then fail closed.
+
 The Vulkan profile runs `vkcube` through native Wayland and requires its live
 process to hold the selected render node, map RADV, and produce changing
 nonuniform forwarded frames. The OpenGL profile uses the same launcher and
 evidence path but selects the native-Wayland `glmark2-wayland` synthetic OpenGL
 `jellyfish` benchmark with an explicit no-alpha EGL visual. Its fixed 640x480
 source may occupy a larger tiled client backing; the exact logged OpenGL
-viewport binds the north-west source crop used by the pixel comparison. After
+viewport binds the north-west source crop used by the pixel comparison. The
+direct window capture and the composited screen capture are taken one after the
+other while `glmark2` or `vkcube` keeps animating. For these two applications the
+pixel check therefore binds each capture to its own server frame of the
+window, within the same error limit, in capture order: the composited frame is
+the same as or later than the direct one, and at most
+`MOVING_CONTENT_CAPTURE_INTERVAL_MS` (2000) later. A single frame matching both
+remains the ordinary case. Static RGB profiles keep the single-frame requirement,
+and the report records the chosen `capture_ordered_server_frames`. After
 quiescence its stdout must contain one exact vendor, renderer, and version
 identity from the live GL context; the process must hold the selected render node, map the AMD
 Mesa/Radeon driver, reject `llvmpipe`, `softpipe`, `swrast`, and other software

@@ -78,6 +78,7 @@ RUNNER_INPUTS = (
     RUNNER_ROOT / "neutral_tests.py",
     RUNNER_ROOT / "neutral" / "pointer_scroll_test.py",
     RUNNER_ROOT / "neutral" / "pointer_scroll_client.c",
+    RUNNER_ROOT / "neutral" / "codec_startup_test.py",
 )
 IMAGE_CONTEXT_INPUTS = {
     ".containerignore": RUNNER_ROOT / ".containerignore",
@@ -88,6 +89,7 @@ IMAGE_CONTEXT_INPUTS = {
     "neutral_tests.py": RUNNER_ROOT / "neutral_tests.py",
     "neutral/pointer_scroll_test.py": RUNNER_ROOT / "neutral" / "pointer_scroll_test.py",
     "neutral/pointer_scroll_client.c": RUNNER_ROOT / "neutral" / "pointer_scroll_client.c",
+    "neutral/codec_startup_test.py": RUNNER_ROOT / "neutral" / "codec_startup_test.py",
 }
 CONTAINER_RUNNER = "/opt/xpra-fork-maintenance/upstream-tests"
 CONTAINER_PAYLOAD = f"{CONTAINER_RUNNER}/container_payload.py"
