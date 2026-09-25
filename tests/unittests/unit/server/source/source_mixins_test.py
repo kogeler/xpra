@@ -240,6 +240,8 @@ class SourceMixinsTest(unittest.TestCase):
     def test_cuda_adapter_hint(self):
         from xpra.server.source.encoding import EncodingsConnection
         source = EncodingsConnection()
+        # the encoding state lock guards the CUDA hint (video-pipeline-cleanup-race)
+        source.init_state()
         source.encoding_options = typedict()
         cuda_module = Mock()
         with patch.dict(sys.modules, {"xpra.codecs.nvidia.cuda.context": cuda_module}):

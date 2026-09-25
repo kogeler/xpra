@@ -28,6 +28,8 @@ def make_source(encoders=None, converters=None):
     # Only the source adapter tests need the full window implementation.
     from xpra.server.window.video_compress import WindowVideoSource
     source = WindowVideoSource.__new__(WindowVideoSource)
+    # pipeline publication runs under the source's own lifecycle locks:
+    source._init_video_lifecycle()
     encoders = {"h264": {"RGB": (encoder_spec(),)}} if encoders is None else encoders
     converters = {} if converters is None else converters
     source.video_helper = Mock()

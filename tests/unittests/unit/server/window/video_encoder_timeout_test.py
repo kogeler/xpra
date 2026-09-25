@@ -47,7 +47,9 @@ class VideoEncoderTimeoutTest(unittest.TestCase):
         return self.timer_id()
 
     def timer_id(self) -> int:
-        return self.source.video_encoder_timer
+        # the source retains the `GLib.Source` which owns its timer:
+        timer = self.source.video_encoder_timer
+        return getattr(timer, "tid", timer)
 
     def run_encode_queue(self) -> None:
         while self.encode_queue:
@@ -125,7 +127,6 @@ class VideoEncoderTimeoutTest(unittest.TestCase):
         self.assertIsNone(source._video_encoder)
         self.assertIsNone(source._csc_encoder)
         self.assertEqual(source.video_encoder_timer, 0)
-        self.assertEqual(source._video_encoder_timer_sequence, 0)
         self.assertFalse(self.scheduler.tasks)
 
     def test_timeout_without_csc(self) -> None:
@@ -270,7 +271,6 @@ class VideoEncoderTimeoutTest(unittest.TestCase):
         self.schedule()
         self.assertFalse(self.scheduler.tasks)
         self.assertEqual(self.source.video_encoder_timer, 0)
-        self.assertEqual(self.source._video_encoder_timer_sequence, 0)
 
 
 if __name__ == "__main__":

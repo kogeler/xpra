@@ -55,7 +55,7 @@ class RefreshSourceTest(unittest.TestCase):
 
     def make_source(self, source_type=WindowSource):
         source = object.__new__(source_type)
-        WindowSource.init_vars(source)
+        source.init_vars()
         source.encoding = "auto"
         source.image_depth = 24
         source.window_dimensions = 100, 100
@@ -177,7 +177,7 @@ class RefreshSourceTest(unittest.TestCase):
         source.get_video_encoder_options = Mock(return_value={})
         source.cancel_video_encoder_timer = Mock()
         source.schedule_video_encoder_timer = Mock()
-        source.call_in_encode_thread = Mock(side_effect=lambda callback: callback())
+        source.call_in_encode_thread = Mock(side_effect=lambda callback, *args: callback(*args))
         source.queue_damage_packet = Mock(
             side_effect=lambda packet, _damage_time, _process_time, options: source.schedule_auto_refresh(packet, options),
         )

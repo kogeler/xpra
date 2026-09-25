@@ -108,8 +108,10 @@ class WindowConnectionTest(unittest.TestCase):
             source.set_window_stacking((1, 2))
             self.assertEqual(source.calculate_window_ids, {1, 2})
             self.assertEqual(source.calculate_window_pixels, {1: 0, 2: 0})
-            enqueue.assert_called_with(source.recalculate_delays)
-        source.recalculate_delays()
+            # the queued item owns its admission token (video-pipeline-cleanup-race):
+            enqueue.assert_called_once()
+            work, = enqueue.call_args.args
+        work()
         source.window_sources[1].calculate_batch_delay.assert_called_once_with(False, False, True, True)
         source.window_sources[2].calculate_batch_delay.assert_called_once_with(True, False, False, False)
         self.assertFalse(source.calculate_window_ids)
@@ -140,10 +142,13 @@ class WindowConnectionTest(unittest.TestCase):
                 source.calculate_last_time = 0
                 target.calculate_batch_delay.reset_mock()
                 action()
-                enqueue.assert_called_with(source.recalculate_delays)
+                # the queued item owns its admission token (video-pipeline-cleanup-race),
+                # run it as the encode thread would:
+                enqueue.assert_called_once()
+                work, = enqueue.call_args.args
                 self.assertIn(1, source.calculate_window_ids)
                 self.assertEqual(source.calculate_window_pixels[1], 0)
-                source.recalculate_delays()
+                work()
                 self.assertEqual(target.calculate_batch_delay.call_args.args[-1], covered)
                 self.assertEqual(source.window_stacking, (1, 2))
         covering.cleanup.assert_called_once_with()
@@ -171,12 +176,17 @@ class WindowConnectionTest(unittest.TestCase):
         source = self.encoding_connection()
         source.window_stacking = (1, 2)
         source.calculate_last_time = 100
-        with patch.object(encoding.GLib, "timeout_add", return_value=1) as timeout:
+        # the pending recalculation is an owned GLib source (video-pipeline-cleanup-race):
+        timer = Mock()
+        with patch.object(encoding.GLib, "timeout_source_new", return_value=timer) as timeout, \
+                patch.object(encoding, "add_work_item", side_effect=lambda work: work()):
             source.map_window(2, object(), (1920, 0, 800, 600))
             source.map_window(2, object(), (10, 10, 800, 600))
             timeout.assert_called_once()
+            timer.attach.assert_called_once()
             self.assertEqual(source.calculate_window_ids, {1, 2})
-        source.recalculate_delays()
+            # fire it as the main loop would:
+            timer.set_callback.call_args.args[0]()
         source.window_sources[1].calculate_batch_delay.assert_called_once_with(False, False, True, True)
 
 
