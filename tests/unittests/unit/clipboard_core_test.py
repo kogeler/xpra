@@ -7,7 +7,7 @@
 import unittest
 from collections import deque
 from time import monotonic, sleep
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from xpra.os_util import gi_import
 
@@ -16,6 +16,7 @@ from xpra.clipboard import core
 from xpra.clipboard.common import ALL_CLIPBOARDS, parse_greedy, parse_want_targets
 from xpra.clipboard.core import ClipboardProtocolHelperCore
 from xpra.clipboard.proxy import ClipboardProxyCore
+from xpra.clipboard.timeout import ClipboardTimeoutHelper
 from xpra.util.objects import typedict
 
 GLib = gi_import("GLib")
@@ -54,6 +55,20 @@ class ClipboardProxy(ClipboardProxyCore):
 class ClipboardHelper(ClipboardProtocolHelperCore):
     def make_proxy(self, selection: str):
         return ClipboardProxy(selection)
+
+
+class TimeoutProxy(ClipboardProxyCore):
+    def __init__(self, selection: str):
+        super().__init__(selection)
+        self.results = []
+
+    def got_contents(self, target: str, dtype="", dformat=0, data=None) -> None:
+        self.results.append((target, dtype, dformat, data))
+
+
+class TimeoutHelper(ClipboardTimeoutHelper):
+    def make_proxy(self, selection: str):
+        return TimeoutProxy(selection)
 
 
 class ClipboardCoreTest(unittest.TestCase):
@@ -205,6 +220,227 @@ class ClipboardCoreTest(unittest.TestCase):
         self.assertEqual(proxy._sent_token_events, 2)
         self.assertNotEqual(proxy._last_emit_token, 0)
         self.assertFalse(proxy._have_token)
+
+    def test_timeout_helper_routes_exact_request_callbacks(self):
+        packets = []
+        helper = TimeoutHelper(
+            lambda *packet: packets.append(packet),
+            **{
+                "clipboards.local": ("CLIPBOARD",),
+                "clipboards.remote": ("CLIPBOARD",),
+            },
+        )
+        proxy = helper._get_proxy("CLIPBOARD")
+        results1 = []
+        results2 = []
+        try:
+            helper._send_clipboard_request_handler(
+                proxy, "CLIPBOARD", "UTF8_STRING",
+                lambda dtype, dformat, data: results1.append((dtype, dformat, data)),
+            )
+            helper._send_clipboard_request_handler(
+                proxy, "CLIPBOARD", "UTF8_STRING",
+                lambda dtype, dformat, data: results2.append((dtype, dformat, data)),
+            )
+            request1, request2 = packets
+            helper._clipboard_got_contents(request2[1], "UTF8_STRING", 8, b"two")
+            helper._clipboard_got_contents(request1[1], "UTF8_STRING", 8, b"one")
+            self.assertEqual(results1, [("UTF8_STRING", 8, b"one")])
+            self.assertEqual(results2, [("UTF8_STRING", 8, b"two")])
+            self.assertEqual(proxy.results, [])
+        finally:
+            helper.cleanup()
+
+    def test_nonclaiming_data_does_not_replace_local_origin(self):
+        for claim, receive, token in ((False, True, True), (True, False, True), (True, True, False)):
+            with self.subTest(claim=claim, receive=receive, token=token):
+                helper, proxy, _packets = self.make_helper(False)
+                proxy._can_receive = receive
+                proxy._clipboard_origin = "local-origin"
+                helper._process_data(Packet("clipboard-data", "CLIPBOARD", {
+                    "origin": "remote-origin", "claim": claim, "token": token,
+                }))
+                self.assertEqual(proxy._clipboard_origin, "local-origin")
+
+    def test_failed_claim_keeps_previous_origin(self):
+        helper, proxy, _packets = self.make_helper(False)
+        proxy._clipboard_origin = "local-origin"
+        with patch.object(proxy, "got_token", side_effect=RuntimeError("claim refused")):
+            with self.assertRaisesRegex(RuntimeError, "claim refused"):
+                helper._process_data(Packet("clipboard-data", "CLIPBOARD", {"origin": "new-origin"}))
+        self.assertEqual(proxy._clipboard_origin, "local-origin")
+
+    def test_helper_cleanup_retires_all_proxies_before_reporting_failure(self):
+        helper = TimeoutHelper(lambda *_args: None, **{"clipboards.local": ("CLIPBOARD", "PRIMARY")})
+        first, second = tuple(helper._clipboard_proxies.values())
+        first.cleanup = Mock(side_effect=RuntimeError("first proxy failed"))
+        second.cleanup = Mock()
+        with self.assertRaisesRegex(RuntimeError, "first proxy failed"):
+            helper.cleanup()
+        first.cleanup.assert_called_once_with()
+        second.cleanup.assert_called_once_with()
+        self.assertFalse(helper._clipboard_proxies)
+        late = []
+        with patch.object(gi_import("GLib"), "timeout_add", side_effect=AssertionError("late request timer")):
+            helper._send_clipboard_request_handler(
+                first, "CLIPBOARD", "late", lambda *result: late.append(result),
+            )
+        self.assertEqual(late, [("", 0, None)])
+        helper.cleanup()
+
+    def test_request_admission_failure_completes_the_native_consumer(self):
+        for failure in ("timer", "send"):
+            with self.subTest(failure=failure):
+                helper = TimeoutHelper(lambda *_args: None, **{"clipboards.local": ("CLIPBOARD",)})
+                proxy = helper._get_proxy("CLIPBOARD")
+                results = []
+                target = gi_import("GLib") if failure == "timer" else helper
+                method = "timeout_add" if failure == "timer" else "send"
+                try:
+                    with patch.object(target, method, side_effect=RuntimeError("admission failed")):
+                        with self.assertRaisesRegex(RuntimeError, "admission failed"):
+                            helper._send_clipboard_request_handler(
+                                proxy, "CLIPBOARD", "test", lambda *result: results.append(result),
+                            )
+                    self.assertEqual(results, [("", 0, None)])
+                    self.assertFalse(helper._clipboard_outstanding_requests)
+                finally:
+                    helper.cleanup()
+
+    def test_progress_and_timer_removal_failure_do_not_orphan_results(self):
+        helper = TimeoutHelper(lambda *_args: None, **{"clipboards.local": ("CLIPBOARD",)})
+        proxy = helper._get_proxy("CLIPBOARD")
+        results = []
+        try:
+            helper._send_clipboard_request_handler(
+                proxy, "CLIPBOARD", "test", lambda *result: results.append(result),
+            )
+            request_id = next(iter(helper._clipboard_outstanding_requests))
+            timer = helper._clipboard_outstanding_requests[request_id][0]
+            # Retain the real source and destroy it directly after injection.
+            source = gi_import("GLib").MainContext.default().find_source_by_id(timer)
+            try:
+                with patch.object(helper, "progress_cb", side_effect=RuntimeError("progress failed")):
+                    with patch.object(gi_import("GLib"), "source_remove", side_effect=RuntimeError("remove failed")):
+                        helper._clipboard_got_contents(request_id, "test", 8, b"result")
+                self.assertEqual(results, [("test", 8, b"result")])
+                self.assertFalse(helper._clipboard_outstanding_requests)
+            finally:
+                source.destroy()
+        finally:
+            helper.cleanup()
+
+    def test_timeout_helper_routes_buffer_views_without_boolean_coercion(self):
+        import ctypes
+
+        for callback_delivery in (False, True):
+            for data, expected in (
+                (memoryview(ctypes.c_ubyte(0)), b"\0"),
+                (memoryview(b""), b""),
+                (None, None),
+            ):
+                with self.subTest(callback=callback_delivery, expected=expected):
+                    packets = []
+                    helper = TimeoutHelper(lambda *packet: packets.append(packet), **{
+                        "clipboards.local": ("CLIPBOARD",), "clipboards.remote": ("CLIPBOARD",),
+                    })
+                    proxy = helper._get_proxy("CLIPBOARD")
+                    results = []
+                    callback = (lambda *result: results.append(result)) if callback_delivery else None
+                    try:
+                        helper._send_clipboard_request_handler(proxy, "CLIPBOARD", "UTF8_STRING", callback)
+                        helper._clipboard_got_contents(packets[-1][1], "UTF8_STRING", 8, data)
+                        if callback_delivery:
+                            self.assertEqual(results, [("UTF8_STRING", 8, expected)])
+                            self.assertEqual(proxy.results, [])
+                        else:
+                            self.assertEqual(proxy.results, [("UTF8_STRING", "UTF8_STRING", 8, expected)])
+                        self.assertEqual(helper._clipboard_outstanding_requests, {})
+                    finally:
+                        helper.cleanup()
+
+    def test_timeout_helper_reset_drains_callbacks_without_reentry(self):
+        packets = []
+        helper = TimeoutHelper(
+            lambda *packet: packets.append(packet),
+            **{
+                "clipboards.local": ("CLIPBOARD",),
+                "clipboards.remote": ("CLIPBOARD",),
+            },
+        )
+        proxy = helper._get_proxy("CLIPBOARD")
+        results = []
+        nested = []
+
+        def first_result(dtype, dformat, data) -> None:
+            results.append((dtype, dformat, data))
+            helper._send_clipboard_request_handler(
+                proxy, "CLIPBOARD", "nested",
+                lambda *result: nested.append(result),
+            )
+
+        try:
+            helper._send_clipboard_request_handler(
+                proxy, "CLIPBOARD", "first", first_result,
+            )
+            helper._send_clipboard_request_handler(
+                proxy, "CLIPBOARD", "second",
+                lambda *result: results.append(result),
+            )
+            self.assertEqual(len(packets), 2)
+            helper.client_reset()
+            self.assertEqual(results, [("", 0, None), ("", 0, None)])
+            self.assertEqual(nested, [("", 0, None)])
+            self.assertEqual(len(packets), 2)
+            self.assertEqual(helper._clipboard_outstanding_requests, {})
+        finally:
+            helper.cleanup()
+
+    def test_timeout_helper_preserves_legacy_proxy_delivery(self):
+        packets = []
+        helper = TimeoutHelper(
+            lambda *packet: packets.append(packet),
+            **{
+                "clipboards.local": ("CLIPBOARD",),
+                "clipboards.remote": ("CLIPBOARD",),
+            },
+        )
+        proxy = helper._get_proxy("CLIPBOARD")
+        try:
+            helper._send_clipboard_request_handler(proxy, "CLIPBOARD", "UTF8_STRING")
+            helper._clipboard_got_contents(packets[0][1], "UTF8_STRING", 8, b"legacy")
+            self.assertEqual(
+                proxy.results,
+                [("UTF8_STRING", "UTF8_STRING", 8, b"legacy")],
+            )
+        finally:
+            helper.cleanup()
+
+    def test_timeout_helper_callback_timeout_and_duplicate_are_terminal(self):
+        packets = []
+        helper = TimeoutHelper(
+            lambda *packet: packets.append(packet),
+            **{
+                "clipboards.local": ("CLIPBOARD",),
+                "clipboards.remote": ("CLIPBOARD",),
+            },
+        )
+        proxy = helper._get_proxy("CLIPBOARD")
+        results = []
+        try:
+            helper._send_clipboard_request_handler(
+                proxy, "CLIPBOARD", "UTF8_STRING",
+                lambda *result: results.append(result),
+            )
+            request_id = packets[0][1]
+            timer = helper._clipboard_outstanding_requests[request_id][0]
+            gi_import("GLib").source_remove(timer)
+            helper.timeout_request(request_id)
+            helper._clipboard_got_contents(request_id, "UTF8_STRING", 8, b"late")
+            self.assertEqual(results, [("", 0, None)])
+            self.assertEqual(helper._clipboard_outstanding_requests, {})
+        finally:
+            helper.cleanup()
 
     def test_modern_packet_omits_empty_targets(self):
         helper, proxy, packets = self.make_helper(False)

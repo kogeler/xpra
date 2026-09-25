@@ -6,7 +6,7 @@
 import os
 from io import BytesIO
 from time import monotonic
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from xpra.util.env import envint, envbool
@@ -314,13 +314,16 @@ class ClipboardProxyCore:
         pass
 
     def collect_contents(self, targets: Iterable[str], got_contents: ClipboardDataCallback,
-                         max_size: int = MAX_CLIPBOARD_TOKEN_SIZE) -> None:
+                         max_size: int = MAX_CLIPBOARD_TOKEN_SIZE,
+                         request_valid: Callable[[], bool] | None = None) -> None:
         """Collect target contents sequentially, then return the successful results."""
         pending = iter(dict.fromkeys(targets))
         target_data: ClipboardData = {}
         total_size = 0
 
         def collect_next() -> None:
+            if request_valid is not None and not request_valid():
+                return
             try:
                 target = next(pending)
             except StopIteration:
@@ -334,6 +337,8 @@ class ClipboardProxyCore:
                 if completed:
                     return
                 completed = True
+                if request_valid is not None and not request_valid():
+                    return
                 if dtype and dformat and data:
                     data_size = self._contents_size(dformat, data)
                     if max_size <= 0 or total_size + data_size <= max_size:
@@ -359,5 +364,7 @@ class ClipboardProxyCore:
             return size
         return size * get_format_size(dformat) // 8
 
-    def got_token(self, targets, target_data=None, claim=True, _synchronous_client=False) -> None:
+    def got_token(self, targets, target_data=None, claim=True, _synchronous_client=False) -> bool | None:
+        # A backend may explicitly decline ownership with False. Existing
+        # backends returning None retain their established delivery contract.
         raise NotImplementedError()

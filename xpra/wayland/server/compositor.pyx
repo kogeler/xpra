@@ -446,8 +446,20 @@ cdef class WaylandCompositor(ListenerObject):
     def get_event_loop_fd(self) -> int:
         return wl_event_loop_get_fd(self.event_loop)
 
-    def connect(self, event_name: str, handler: Callable) -> None:
+    def connect(self, event_name: str, handler: Callable):
         self.event_listeners.setdefault(event_name, []).append(handler)
+        return handler
+
+    def disconnect(self, event_name: str, handler) -> None:
+        callbacks = self.event_listeners.get(event_name)
+        if not callbacks:
+            return
+        for index, callback in enumerate(callbacks):
+            if callback is handler:
+                callbacks.pop(index)
+                if not callbacks:
+                    self.event_listeners.pop(event_name, None)
+                return
 
     cdef void new_toplevel_decoration(self, wlr_xdg_toplevel_decoration_v1 *decoration) noexcept nogil:
         if decoration == NULL or decoration.toplevel == NULL or decoration.toplevel.base == NULL:
@@ -601,7 +613,7 @@ cdef class WaylandCompositor(ListenerObject):
         self.emit("new-output", out)
 
     def emit(self, event_name: str, *args) -> None:
-        callbacks = self.event_listeners.get(event_name, ())
+        callbacks = tuple(self.event_listeners.get(event_name, ()))
         log("emit%s callbacks=%s", Ellipsizer(tuple([event_name] + list(args))), callbacks)
         for callback in callbacks:
             try:

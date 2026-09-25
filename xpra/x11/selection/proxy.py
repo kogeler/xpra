@@ -132,22 +132,38 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
         #    self.owned = False
         #    with xswallow:
         #        X11Window.XSetSelectionOwner(0, self._selection)
-        # empty replies for all pending requests,
-        # this will also cancel any pending timers:
-        rr = self.remote_requests
-        self.remote_requests = {}
-        for target in rr:
-            self.got_contents(target)
-        lr = self.local_requests
-        self.local_requests = {}
-        for target in lr:
-            self.got_local_contents(target)
+        self._enabled = False
+        for cancel in (self.cancel_emit_token, self.cancel_unblock):
+            try:
+                cancel()
+            except Exception:
+                log("failed to cancel X11 clipboard timer", exc_info=True)
         for atom in tuple(self.incr_transfers):
-            self.cancel_incr_transfer(atom)
+            try:
+                self.cancel_incr_transfer(atom)
+            except Exception:
+                log("failed to cancel X11 clipboard incremental transfer %r", atom, exc_info=True)
+        # send empty replies to pending local X11 requestors,
+        # and cancel our outstanding local conversion timers:
+        remote_requests = self.remote_requests
+        self.remote_requests = {}
+        local_requests = self.local_requests
+        self.local_requests = {}
+        for pending in remote_requests.values():
+            for requestor, target, prop, time in pending:
+                try:
+                    self.set_selection_response(requestor, target, prop, "", 0, None, time)
+                except Exception:
+                    log("failed to retire an X11 clipboard request", exc_info=True)
+        for target_requests in local_requests.values():
+            for timer, _got_contents, _request_time in target_requests.values():
+                try:
+                    GLib.source_remove(timer)
+                except Exception:
+                    log("failed to cancel X11 clipboard conversion timer", exc_info=True)
 
     def got_token(self, targets, target_data=None, claim=True, synchronous_client=False) -> None:
         # the remote end now owns the clipboard
-        self._selection_generation += 1
         # any token we have scheduled but not sent yet is left alone:
         # it belongs to a local owner change the peer has not heard about,
         # and this token was sent before the peer could know about it.
@@ -158,13 +174,16 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
         self._got_token_events += 1
         log("got token, selection=%s, targets=%s, target data=%s, claim=%s, can-receive=%s",
             self._selection, targets, Ellipsizer(target_data), claim, self._can_receive)
+        if not claim or not self._can_receive:
+            return
+        self._selection_generation += 1
         if claim:
             self._have_token = True
         if self._can_receive:
             if target_data:
                 # ensure we also expose the targets in the target_data:
                 # ie: {'UTF8_STRING': ('UTF8_STRING', 8, b'foobar')}
-                targets = list(targets) + list(target_data.keys())
+                targets = list(targets or ()) + list(target_data.keys())
             self.targets = tuple(bytestostr(x) for x in (targets or ()))
             self.target_data = target_data or {}
             self._targets_owner = self.xid
@@ -384,8 +403,14 @@ class ClipboardProxy(ClipboardProxyCore, GObject.GObject):
             return
         if self.owned or not self._can_send or xid == 0:
             return
+        needs_token = not (
+            self._block_owner_change or self._have_token or self._greedy_client or self._want_targets
+        )
         self.do_owner_changed()
-        self.schedule_emit_token()
+        # The core owner-change path schedules target-bearing and replacement
+        # tokens.  Only the plain first-token case still needs scheduling here.
+        if needs_token:
+            self.schedule_emit_token()
 
     def do_emit_token(self) -> bool:
         # we collect the targets (and contents for greedy clients) here,

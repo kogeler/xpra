@@ -26,7 +26,7 @@ class ClipboardManager(StubSubsystem):
     """
     Mixin for servers that handle clipboard synchronization.
     """
-    __slots__ = ("client", "direction", "enabled", "filter_file", "helper", "selections")
+    __slots__ = ("client", "direction", "enabled", "filter_file", "helper", "selections", "_clipboard_generation")
     PREFIX = "clipboard"
     toggle_features = ("clipboard",)
 
@@ -37,6 +37,7 @@ class ClipboardManager(StubSubsystem):
         self.filter_file = None
         self.helper = None
         self.client = None
+        self._clipboard_generation = 0
         self.selections: Sequence[str] = ()
 
     def init(self, opts) -> None:
@@ -61,12 +62,15 @@ class ClipboardManager(StubSubsystem):
         ac("clipboard-limits", "restrict clipboard transfers size", min_args=2, max_args=2, validation=[int, int])
 
     def reset_clipboard(self, *args) -> None:
+        self._clipboard_generation += 1
         ch = self.helper
         log("reset_clipboard%s helper=%s", args, ch)
         if ch:
             ch.client_reset()
 
     def cleanup(self) -> None:
+        self._clipboard_generation += 1
+        self.client = None
         if ch := self.helper:
             self.helper = None
             ch.cleanup()
@@ -75,7 +79,7 @@ class ClipboardManager(StubSubsystem):
         ch = self.helper
         if ch and self.client and self.client.protocol == protocol:
             self.client = None
-            ch.client_reset()
+            self.reset_clipboard()
 
     def parse_hello(self, ss, caps: typedict) -> str | ConnectionMessage:
         if self.enabled:
@@ -187,12 +191,19 @@ class ClipboardManager(StubSubsystem):
         return True
 
     def set_clipboard_source(self, ss) -> None:
-        if not self.can_source_own_clipboard(ss):
+        if ss is not None and not self.can_source_own_clipboard(ss):
             return
-        if self.client == ss:
+        if self.client is ss:
             return
-        self.client = ss
+        previous = self.client
+        self.client = None
+        self._clipboard_generation += 1
         ch = self.helper
+        # Empty-complete the old peer's work while neither peer can receive
+        # its callbacks, before enabling and announcing the replacement.
+        if previous is not None and ch:
+            ch.client_reset()
+        self.client = ss
         log("client %s is the clipboard peer, helper=%s", ss, ch)
         if not ch:
             return
@@ -219,22 +230,36 @@ class ClipboardManager(StubSubsystem):
             return
         self.may_record("server", *packet)
         packet_type = packet.get_type()
-        if packet_type == "clipboard-status" or (BACKWARDS_COMPATIBLE and packet_type == "set-clipboard-enabled"):
-            self._process_status(proto, packet)
-            return
         if self.client != ss:
             log("the clipboard packet %r does not come from the clipboard owner!", packet_type)
             log(" owner is %s, request from %s", self.client, ss)
             return
-        if not ss.clipboard_enabled:
-            # this can happen when we disable clipboard in the middle of transfers
-            # (especially when there is a clipboard loop)
-            log.warn("Warning: unexpected clipboard packet")
-            log.warn(" clipboard is disabled for %r", ss.uuid)
-            return
         ch = self.helper
         assert ch, "received a clipboard packet but clipboard sharing is disabled"
-        self.idle_add(ch.process_clipboard_packet, packet)
+        generation = self._clipboard_generation
+
+        def process_current_packet() -> None:
+            if (
+                not self.enabled
+                or generation != self._clipboard_generation
+                or self.helper is not ch
+                or self.client is not ss
+                or self.get_server_source(proto) is not ss
+                or self.is_readonly(proto)
+            ):
+                return
+            # Status shares the same ordered UI admission as data. Native
+            # policy teardown must never run on the packet parser thread.
+            if packet_type == "clipboard-status" or (BACKWARDS_COMPATIBLE and packet_type == "set-clipboard-enabled"):
+                self._process_status(proto, packet)
+                return
+            if not ss.clipboard_enabled:
+                log.warn("Warning: unexpected clipboard packet")
+                log.warn(" clipboard is disabled for %r", ss.uuid)
+                return
+            ch.process_clipboard_packet(packet)
+
+        self.idle_add(process_current_packet)
 
     def _process_status(self, proto, packet: Packet) -> None:
         assert self.enabled
@@ -242,9 +267,9 @@ class ClipboardManager(StubSubsystem):
             return
         clipboard_enabled = packet.get_bool(1)
         if ss := self.get_server_source(proto):
-            self.set_clipboard_enabled_status(ss, clipboard_enabled)
+            self.set_clipboard_enabled_status(ss, clipboard_enabled, _ordered=True)
 
-    def set_clipboard_enabled_status(self, ss, clipboard_enabled: bool) -> None:
+    def set_clipboard_enabled_status(self, ss, clipboard_enabled: bool, *, _ordered: bool = False) -> None:
         ch = self.helper
         if not ch:
             log.warn("Warning: client try to toggle clipboard-enabled status,")
@@ -253,16 +278,24 @@ class ClipboardManager(StubSubsystem):
         cc = self.client
         if not cc:
             return
-        cc.clipboard_enabled = clipboard_enabled
-        log("toggled clipboard to %s for %s", clipboard_enabled, ss.protocol)
-        if cc != ss or ss is None:
+        if cc is not ss:
             log("received a request to change the clipboard status,")
             log(" but it does not come from the clipboard owner! Ignoring it.")
-            log(" from %s", cc)
+            log(" from %s", ss)
             log(" owner is %s", self.client)
             return
+        changed = cc.clipboard_enabled != clipboard_enabled
+        # Ordered packet callbacks already serialize the policy boundary.
+        # Advancing their epoch here would discard fresh packets queued behind
+        # an enable notification before the UI thread has drained that queue.
+        if changed and not _ordered:
+            self._clipboard_generation += 1
+        cc.clipboard_enabled = clipboard_enabled
+        log("toggled clipboard to %s for %s", clipboard_enabled, ss.protocol)
         if not clipboard_enabled:
             ch.enable_selections()
+            if changed:
+                ch.client_reset()
 
     def clipboard_progress(self, local_requests: int, _remote_requests: int) -> None:
         assert self.enabled
@@ -306,9 +339,12 @@ class ClipboardManager(StubSubsystem):
         DIRECTIONS = ("to-server", "to-client", "both", "disabled")
         if direction not in DIRECTIONS:
             raise ValueError(f"invalid direction {direction!r}, must be one of " + csv(DIRECTIONS))
+        changed = self.direction != direction
         self.direction = direction
-        can_send = direction in ("to-server", "both")
-        can_receive = direction in ("to-client", "both")
+        if changed:
+            self._clipboard_generation += 1
+        can_send = direction in ("to-client", "both")
+        can_receive = direction in ("to-server", "both")
         ch.set_direction(can_send, can_receive)
         msg = f"clipboard direction set to {direction!r}"
         log(msg)

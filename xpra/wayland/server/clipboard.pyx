@@ -9,7 +9,6 @@
 from typing import Tuple
 
 import os
-from collections import defaultdict
 
 from libc.stdint cimport uintptr_t, uint32_t
 from libc.stdlib cimport calloc, free, malloc
@@ -17,8 +16,9 @@ from libc.string cimport memcpy
 from cpython.ref cimport Py_INCREF, Py_DECREF
 
 from xpra.clipboard.common import ClipboardCallback
+from xpra.clipboard.core import MAX_CLIPBOARD_PACKET_SIZE
 from xpra.clipboard.proxy import ClipboardProxyCore
-from xpra.clipboard.timeout import ClipboardTimeoutHelper
+from xpra.clipboard.timeout import ClipboardTimeoutHelper, REMOTE_TIMEOUT
 from xpra.os_util import gi_import
 from xpra.util.gobject import n_arg_signal, one_arg_signal
 from xpra.util.str_fn import Ellipsizer, bytestostr
@@ -46,6 +46,15 @@ log = Logger("wayland", "clipboard")
 WAYLAND_CLIPBOARDS = ("CLIPBOARD", "PRIMARY")
 ORIGIN_MIME_TYPE = "application/x-xpra-clipboard-origin"
 MAX_ORIGIN_SIZE = 64
+
+
+def remove_source(source_id) -> None:
+    try:
+        GLib.source_remove(source_id)
+    except Exception:
+        # Registries are retired before cancellation; escaped callbacks check
+        # their request identity. One failed removal must not strand other FDs.
+        log("failed to remove Wayland clipboard source", exc_info=True)
 
 
 cdef wlr_data_source_impl DATA_SOURCE_IMPL
@@ -92,18 +101,24 @@ cdef tuple source_mime_types(wl_array *mime_types):
 
 
 cdef void data_source_send(wlr_data_source *source, const char *mime_type, int fd) noexcept:
+    cdef bint transferred = False
     try:
         owner = DATA_SOURCE_OWNERS.get(<uintptr_t> source) if source != NULL else None
         if owner is None:
-            os.close(fd)
             return
-        owner.send(mime_type.decode("utf8", "replace") if mime_type != NULL else "", fd)
+        target = mime_type.decode("utf8", "replace") if mime_type != NULL else ""
+        # The wrapper/proxy owns all completion and error paths after this
+        # handoff.  Its cleanup may already close and reuse the descriptor.
+        transferred = True
+        owner.send(target, fd)
     except Exception:
         log.error("Error sending selection contents", exc_info=True)
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+    finally:
+        if not transferred:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 cdef void data_source_destroy(wlr_data_source *source) noexcept:
@@ -117,18 +132,22 @@ cdef void data_source_destroy(wlr_data_source *source) noexcept:
 
 
 cdef void primary_source_send(wlr_primary_selection_source *source, const char *mime_type, int fd) noexcept:
+    cdef bint transferred = False
     try:
         owner = <object> source.data if source != NULL and source.data != NULL else None
         if owner is None:
-            os.close(fd)
             return
-        owner.send(mime_type.decode("utf8", "replace") if mime_type != NULL else "", fd)
+        target = mime_type.decode("utf8", "replace") if mime_type != NULL else ""
+        transferred = True
+        owner.send(target, fd)
     except Exception:
         log.error("Error sending primary selection contents", exc_info=True)
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+    finally:
+        if not transferred:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 cdef void primary_source_destroy(wlr_primary_selection_source *source) noexcept:
@@ -136,8 +155,10 @@ cdef void primary_source_destroy(wlr_primary_selection_source *source) noexcept:
         owner = <object> source.data if source != NULL and source.data != NULL else None
         if owner is not None:
             source.data = NULL
-            owner.destroyed()
-            Py_DECREF(owner)
+            try:
+                owner.destroyed()
+            finally:
+                Py_DECREF(owner)
     except Exception:
         log.error("Error destroying primary selection source", exc_info=True)
     free(source)
@@ -164,10 +185,17 @@ cdef class WaylandSelectionSource:
         if self.source == NULL:
             raise MemoryError("failed to allocate selection source")
         wlr_data_source_init(self.source, &DATA_SOURCE_IMPL)
-        DATA_SOURCE_OWNERS[self.ptr()] = self
-        for target in targets or ():
-            mime = bstr(target)
-            add_mime_type(&self.source.mime_types, mime)
+        try:
+            DATA_SOURCE_OWNERS[self.ptr()] = self
+            for target in targets or ():
+                mime = bstr(target)
+                add_mime_type(&self.source.mime_types, mime)
+        except Exception:
+            # This candidate has never reached the seat. Break its native
+            # owner reference without notifying the proxy about a replacement.
+            self.proxy = None
+            self.destroy()
+            raise
 
     def ptr(self) -> int:
         return <uintptr_t> self.source
@@ -190,7 +218,7 @@ cdef class WaylandSelectionSource:
         if proxy is None:
             os.close(fd)
             return
-        proxy.send_remote_contents(mime_type, fd, self.target_data)
+        proxy.send_remote_contents(self, mime_type, fd, self.target_data)
 
 
 cdef class WaylandPrimarySource:
@@ -216,9 +244,14 @@ cdef class WaylandPrimarySource:
         wlr_primary_selection_source_init(self.source, &PRIMARY_SOURCE_IMPL)
         Py_INCREF(self)
         self.source.data = <void*> self
-        for target in targets or ():
-            mime = bstr(target)
-            add_mime_type(&self.source.mime_types, mime)
+        try:
+            for target in targets or ():
+                mime = bstr(target)
+                add_mime_type(&self.source.mime_types, mime)
+        except Exception:
+            self.proxy = None
+            self.destroy()
+            raise
 
     def ptr(self) -> int:
         return <uintptr_t> self.source
@@ -241,7 +274,7 @@ cdef class WaylandPrimarySource:
         if proxy is None:
             os.close(fd)
             return
-        proxy.send_remote_contents(mime_type, fd, self.target_data)
+        proxy.send_remote_contents(self, mime_type, fd, self.target_data)
 
 
 cdef class WaylandSelection:
@@ -255,7 +288,7 @@ cdef class WaylandSelection:
     def set_source(self, WaylandSelectionSource source) -> None:
         cdef uint32_t serial
         if self.display == NULL or self.seat == NULL:
-            return
+            raise RuntimeError("selection seat is not available")
         serial = wl_display_next_serial(self.display)
         wlr_seat_set_selection(self.seat, source.source, serial)
         self.flush()
@@ -277,11 +310,13 @@ cdef class WaylandSelection:
     def send_source(self, uintptr_t source_ptr, str target, int fd) -> None:
         cdef bytes mime = bstr(target)
         cdef wlr_data_source *source = <wlr_data_source*> source_ptr
-        if source == NULL:
-            os.close(fd)
+        if source == NULL or self.display == NULL:
             return
-        wlr_data_source_send(source, <const char*> mime, fd)
+        # wlroots transfers ownership to the source implementation, which
+        # closes this duplicate.  The caller still owns its original FD.
+        wlr_data_source_send(source, <const char*> mime, os.dup(fd))
         self.flush()
+
 
     cdef void flush(self) noexcept:
         # the wlroots calls above only queue events on the native clients' connections.
@@ -305,7 +340,7 @@ cdef class WaylandPrimarySelection:
     def set_source(self, WaylandPrimarySource source) -> None:
         cdef uint32_t serial
         if self.display == NULL or self.seat == NULL:
-            return
+            raise RuntimeError("primary selection seat is not available")
         serial = wl_display_next_serial(self.display)
         wlr_seat_set_primary_selection(self.seat, source.source, serial)
         self.flush()
@@ -327,11 +362,11 @@ cdef class WaylandPrimarySelection:
     def send_source(self, uintptr_t source_ptr, str target, int fd) -> None:
         cdef bytes mime = bstr(target)
         cdef wlr_primary_selection_source *source = <wlr_primary_selection_source*> source_ptr
-        if source == NULL:
-            os.close(fd)
+        if source == NULL or self.display == NULL:
             return
-        wlr_primary_selection_source_send(source, <const char*> mime, fd)
+        wlr_primary_selection_source_send(source, <const char*> mime, os.dup(fd))
         self.flush()
+
 
     cdef void flush(self) noexcept:
         # the wlroots calls above only queue events on the native clients' connections.
@@ -347,7 +382,7 @@ cdef class WaylandPrimarySelection:
 class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
     __gsignals__ = {
         "send-clipboard-token": one_arg_signal,
-        "send-clipboard-request": n_arg_signal(2),
+        "send-clipboard-request": n_arg_signal(3),
     }
 
     # the two selections differ only in which native objects they are made of:
@@ -360,6 +395,9 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
         GObject.GObject.__init__(self)
         self.compositor = compositor
         self.selection_api = self.SELECTION_API(compositor.get_display_ptr(), compositor.get_seat_ptr())
+        self.closing = False
+        self.compositor_handler = None
+        self.remote_generation = 0
         self.local_source_ptr = 0
         self.source_generation = 0
         self.remote_source = None
@@ -367,45 +405,102 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
         self.targets = ()
         self.target_data = {}
         self.pending_reads = {}
-        self.pending_writes = defaultdict(list)
-        compositor.connect(self.SELECTION_SIGNAL, self.selection_changed)
+        self.pending_read_timers = {}
+        self.pending_read_counter = 0
+        self.read_limit = lambda: MAX_CLIPBOARD_PACKET_SIZE
+        self.pending_writes = {}
+        self.pending_write_sources = {}
+        self.pending_write_counter = 0
+        self.compositor_handler = compositor.connect(self.SELECTION_SIGNAL, self.selection_changed)
 
     def __repr__(self):
         return "WaylandPrimaryClipboardProxy(%s)" % self._selection
 
+    def cancel_emit_token(self) -> None:
+        try:
+            super().cancel_emit_token()
+        except Exception:
+            # The base retires its timer identity before removal. A scheduler
+            # failure cannot turn a committed native replacement into refusal.
+            log("failed to cancel Wayland clipboard token", exc_info=True)
+
+    def set_enabled(self, enabled: bool) -> None:
+        revoked = self._enabled and not enabled
+        super().set_enabled(enabled)
+        if revoked:
+            self.client_reset()
+
+    def set_direction(self, can_send: bool, can_receive: bool) -> None:
+        send_revoked = self._can_send and not can_send
+        receive_revoked = self._can_receive and not can_receive
+        super().set_direction(can_send, can_receive)
+        # The other direction keeps its current owner and transfers. In
+        # particular, becoming receive-only must not clear received contents.
+        if send_revoked:
+            self.source_generation += 1
+            self.cancel_pending_reads()
+        if receive_revoked:
+            self.remote_generation += 1
+            self.cancel_pending_writes()
+            self.clear_remote_source()
+
     def cleanup(self) -> None:
-        super().cleanup()
-        for rfd, (_, source_id, _) in tuple(self.pending_reads.items()):
-            self.pending_reads.pop(rfd, None)
-            GLib.source_remove(source_id)
+        if self.closing:
+            return
+        self.closing = True
+        self.source_generation += 1
+        self.remote_generation += 1
+        try:
             try:
-                os.close(rfd)
-            except OSError:
-                pass
-        for fds in tuple(self.pending_writes.values()):
-            for fd in fds:
+                super().cleanup()
+            finally:
                 try:
-                    os.close(fd)
-                except OSError:
-                    pass
-        self.pending_writes.clear()
-        if self.remote_source:
-            self.remote_source.destroy()
-            self.remote_source = None
-            self.remote_source_ptr = 0
+                    self.cancel_pending_reads()
+                finally:
+                    try:
+                        self.cancel_pending_writes()
+                    finally:
+                        self.clear_remote_source()
+        finally:
+            self.disconnect_compositor_signal()
+
+    def disconnect_compositor_signal(self) -> None:
+        compositor = self.compositor
+        handler = self.compositor_handler
+        self.compositor_handler = None
+        self.compositor = None
+        if compositor is not None and handler is not None:
+            try:
+                compositor.disconnect(self.SELECTION_SIGNAL, handler)
+            except Exception:  # noqa: BLE001
+                log("failed to disconnect the Wayland clipboard signal", exc_info=True)
+
+    def client_reset(self) -> None:
+        if self.closing:
+            return
+        self.source_generation += 1
+        self.remote_generation += 1
+        self.cancel_pending_reads()
+        self.cancel_pending_writes()
+        self.clear_remote_source()
+        self._clipboard_origin = ""
 
     def selection_changed(self, source_ptr: int) -> None:
         log("%s selection_changed(%#x) remote=%#x", self._selection, source_ptr, self.remote_source_ptr)
+        if self.closing:
+            return
         # wlroots frees the outgoing source before a new one is allocated, and both are
         # fixed-size heap objects - so the next source can land at the address the last
         # one had. Only this counter can tell an asynchronous read that it is stale:
         self.source_generation += 1
         self.local_source_ptr = source_ptr
-        if source_ptr == self.remote_source_ptr:
-            return
+        self.cancel_pending_reads(source_ptr, notify=True)
         if source_ptr == 0:
             self.targets = ()
             self.target_data = {}
+            self._clipboard_origin = ""
+            return
+        if source_ptr == self.remote_source_ptr:
             return
         self.local_source_changed(source_ptr)
 
@@ -416,7 +511,7 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
         self.target_data = {}
 
         def got_origin(_dtype: str, dformat: int, data) -> None:
-            if generation != self.source_generation:
+            if self.closing or generation != self.source_generation:
                 return
             origin = bytestostr(data) if dformat == 8 and data else ""
             if len(origin) > MAX_ORIGIN_SIZE:
@@ -432,36 +527,117 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
             self.do_owner_changed()
 
     def source_destroyed(self, source) -> None:
+        self.cancel_pending_writes(source)
         if source is self.remote_source:
             self.remote_source = None
             self.remote_source_ptr = 0
 
+    def clear_remote_source(self) -> None:
+        source = self.remote_source
+        if source is None:
+            return
+        source_ptr = self.remote_source_ptr
+        self.remote_generation += 1
+        # Do not clear a newer local owner which has already replaced our
+        # source.  wlroots synchronously destroys the active source while
+        # installing NULL; the adapter flushes that queued selection update
+        # before this method returns.
+        try:
+            if source_ptr and self.local_source_ptr == source_ptr:
+                self.selection_api.clear()
+        finally:
+            # The setter normally destroys synchronously. Also destroy when
+            # its unavailable adapter cannot clear, without losing the owner.
+            try:
+                source.destroy()
+            finally:
+                if self.remote_source is source:
+                    self.remote_source = None
+                    self.remote_source_ptr = 0
+
+    def cancel_pending_reads(self, source_ptr=None, notify=False) -> None:
+        for read_key, pending in tuple(self.pending_reads.items()):
+            generation, pending_source_ptr, rfd, source_id, got_contents = pending
+            if (
+                source_ptr is not None
+                and generation == self.source_generation
+                and pending_source_ptr == source_ptr
+            ):
+                continue
+            self.pending_reads.pop(read_key, None)
+            remove_source(source_id)
+            if timer := self.pending_read_timers.pop(read_key, 0):
+                remove_source(timer)
+            try:
+                os.close(rfd)
+            except OSError:
+                pass
+            if notify:
+                try:
+                    got_contents("", 0, b"")
+                except Exception:  # noqa: BLE001
+                    log("failed to cancel stale Wayland clipboard read generation %i",
+                        generation, exc_info=True)
+
+    def cancel_pending_writes(self, source=None) -> None:
+        for write_key, pending in tuple(self.pending_writes.items()):
+            pending_source, _generation, _target, _fd = pending
+            if source is not None and pending_source is not source:
+                continue
+            self.finish_pending_write(write_key)
+
+    def finish_pending_write(self, write_key: int) -> None:
+        pending = self.pending_writes.pop(write_key, None)
+        for source_id in self.pending_write_sources.pop(write_key, ()):
+            remove_source(source_id)
+        if pending is not None:
+            try:
+                os.close(pending[3])
+            except OSError:
+                pass
+
     def do_owner_changed(self) -> None:
-        if not self._enabled or not self._can_send:
+        if self.closing or not self._enabled or not self._can_send:
             return
         self.schedule_emit_token()
 
     def do_emit_token(self) -> bool:
+        if self.closing or not self._enabled or not self._can_send:
+            return False
         targets = self.targets if (self._want_targets or self._greedy_client) else ()
         if not self._greedy_client:
             self.emit("send-clipboard-token", {"targets": tuple(targets), "data": {}})
             return True
         eager_targets = self.get_eager_targets(targets)
+        source_ptr = self.local_source_ptr
         generation = self.source_generation
 
+        def generation_is_current() -> bool:
+            return (
+                not self.closing
+                and self._enabled and self._can_send
+                and generation == self.source_generation
+                and source_ptr == self.local_source_ptr
+            )
+
         def got_target_data(target_data) -> None:
-            if generation != self.source_generation:
+            if not generation_is_current():
                 return
             self.emit("send-clipboard-token", {
                 "targets": tuple(targets),
                 "data": target_data,
             })
 
-        self.collect_contents(eager_targets, got_target_data)
+        self.collect_contents(
+            eager_targets, got_target_data, request_valid=generation_is_current,
+        )
         return True
 
     def get_contents(self, target: str, got_contents: ClipboardCallback) -> None:
         log("get_contents(%s, %s) source=%#x", target, got_contents, self.local_source_ptr)
+        if self.closing or not self._enabled or not self._can_send:
+            got_contents("", 0, b"")
+            return
         if target == "TARGETS":
             got_contents("ATOM", 32, self.targets)
             return
@@ -473,96 +649,260 @@ class WaylandPrimaryClipboardProxy(ClipboardProxyCore, GObject.GObject):
         if not source_ptr or source_ptr == self.remote_source_ptr:
             got_contents(target, 0, b"")
             return
+        generation = self.source_generation
+        max_size = MAX_ORIGIN_SIZE if target == ORIGIN_MIME_TYPE else self.read_limit()
         rfd, wfd = os.pipe()
-        os.set_blocking(rfd, False)
         data = bytearray()
+        read_key = self.pending_read_counter
+        self.pending_read_counter += 1
+        read_registered = False
+
+        def finish_read(valid: bool) -> None:
+            pending = self.pending_reads.pop(read_key, None)
+            if pending is None:
+                return
+            remove_source(pending[3])
+            if timer := self.pending_read_timers.pop(read_key, 0):
+                remove_source(timer)
+            try:
+                os.close(pending[2])
+            except OSError:
+                pass
+            if (
+                valid
+                and not self.closing
+                and generation == self.source_generation
+                and source_ptr == self.local_source_ptr
+            ):
+                got_contents(target, 8, bytes(data))
+            else:
+                got_contents("", 0, b"")
 
         def io_callback(fd, condition):
+            if read_key not in self.pending_reads:
+                return False
+            if condition & (GLib.IO_ERR | GLib.IO_NVAL):
+                finish_read(False)
+                return False
             if condition & GLib.IO_IN:
                 try:
                     chunk = os.read(fd, 65536)
-                except BlockingIOError:
+                except (BlockingIOError, InterruptedError):
                     return True
+                except OSError:
+                    finish_read(False)
+                    return False
                 if chunk:
+                    if max_size >= 0 and len(data) + len(chunk) > max_size:
+                        log.warn("Warning: native Wayland clipboard data exceeds its size limit")
+                        finish_read(False)
+                        return False
                     data.extend(chunk)
                     return True
-            self.pending_reads.pop(fd, None)
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            got_contents(target, 8, bytes(data))
+            finish_read(True)
             return False
 
-        source_id = GLib.io_add_watch(rfd, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, io_callback)
-        self.pending_reads[rfd] = (data, source_id, got_contents)
-        self.selection_api.send_source(source_ptr, target, wfd)
-        try:
-            os.close(wfd)
-        except OSError:
-            pass
+        def read_timeout():
+            log.warn("Warning: native Wayland clipboard source timed out")
+            finish_read(False)
+            return False
 
-    def got_token(self, targets, target_data=None, claim=True, _synchronous_client=False) -> None:
-        self.cancel_emit_token()
-        if not self._enabled:
-            return
+        try:
+            os.set_blocking(rfd, False)
+            source_id = GLib.io_add_watch(
+                rfd, GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR | GLib.IO_NVAL, io_callback,
+            )
+            self.pending_reads[read_key] = (generation, source_ptr, rfd, source_id, got_contents)
+            read_registered = True
+            self.pending_read_timers[read_key] = GLib.timeout_add(REMOTE_TIMEOUT, read_timeout)
+            self.selection_api.send_source(source_ptr, target, wfd)
+        except Exception:
+            # Release the still-owned write side before a completion can
+            # re-enter and allocate another descriptor with its old number.
+            os.close(wfd)
+            wfd = -1
+            if read_registered:
+                finish_read(False)
+            else:
+                os.close(rfd)
+                got_contents("", 0, b"")
+            raise
+        finally:
+            if wfd >= 0:
+                os.close(wfd)
+
+    def got_token(self, targets, target_data=None, claim=True, _synchronous_client=False) -> bool:
+        if self.closing or not self._enabled:
+            return False
         self._got_token_events += 1
         log("got_token(%s, %s, claim=%s)", targets, Ellipsizer(target_data), claim)
-        self.targets = tuple(
+        # An informational or receive-denied token has not replaced the native
+        # owner. Preserve its targets, origin read and pending local emission.
+        if not claim or not self._can_receive:
+            return False
+        new_targets = tuple(
             x for x in (bytestostr(y) for y in (targets or ()))
             if x != ORIGIN_MIME_TYPE
         )
-        self.target_data = dict(target_data or {})
-        self.target_data.pop(ORIGIN_MIME_TYPE, None)
-        has_contents = bool(self.targets or self.target_data)
+        new_data = dict(target_data or {})
+        new_data.pop(ORIGIN_MIME_TYPE, None)
+        has_contents = bool(new_targets or new_data)
         if self._clipboard_origin:
-            self.target_data[ORIGIN_MIME_TYPE] = (ORIGIN_MIME_TYPE, 8, self._clipboard_origin.encode())
-        if not claim or not self._can_receive:
-            return
+            new_data[ORIGIN_MIME_TYPE] = (ORIGIN_MIME_TYPE, 8, self._clipboard_origin.encode())
         if not has_contents:
-            if self.remote_source:
-                self.remote_source.destroy()
-                self.remote_source = None
-                self.remote_source_ptr = 0
+            # No advertised targets cannot establish a new native owner.
+            # Only retire our own still-active offer; an independent local
+            # source and its pending announcement remain authoritative.
+            owned = self.remote_source is not None and self.local_source_ptr == self.remote_source_ptr
+            try:
+                self.clear_remote_source()
+            except Exception:
+                # clear_remote_source destroys the wrapper in finally, so this
+                # is a completed retirement, not a failed replacement to undo.
+                log.error("Error clearing the Wayland clipboard source", exc_info=True)
+            if not owned:
+                return False
+            self.targets = ()
+            self.target_data = {}
             self._have_token = False
-            return
-        source_targets = tuple(dict.fromkeys(self.targets + tuple(self.target_data)))
-        source = self.SOURCE_CLASS(self, source_targets, self.target_data)
+            self.cancel_emit_token()
+            return True
+
+        # Finish fallible MIME construction before changing the installed
+        # source metadata. Native set_source can refuse only before its setter;
+        # after the setter its flush is noexcept.
+        source_targets = tuple(dict.fromkeys(new_targets + tuple(new_data)))
+        source = self.SOURCE_CLASS(self, source_targets, new_data)
+        previous = (
+            self.remote_source, self.remote_source_ptr, self.remote_generation,
+            self.targets, self.target_data, self._have_token,
+        )
+        self.remote_generation += 1
         self.remote_source = source
         self.remote_source_ptr = source.ptr()
-        self.selection_api.set_source(source)
-        self._have_token = True
-
-    def send_remote_contents(self, target: str, fd: int, target_data=None) -> None:
-        if target_data and target in target_data:
-            dtype, dformat, data = target_data[target]
-            self.write_fd(fd, data)
-            return
-        self.pending_writes[target].append(fd)
-        self.emit("send-clipboard-request", self._selection, target)
-
-    def got_contents(self, target: str, dtype="", dformat=0, data=b"") -> None:
-        if target == "TARGETS" and data:
-            self.targets = tuple(bytestostr(x) for x in data)
-        fds = self.pending_writes.pop(target, ())
-        for fd in fds:
-            self.write_fd(fd, data or b"")
-
-    @staticmethod
-    def write_fd(fd: int, data) -> None:
+        self.targets = new_targets
+        self.target_data = new_data
         try:
-            if isinstance(data, str):
-                data = data.encode("utf8")
-            elif isinstance(data, memoryview):
-                data = bytes(data)
-            os.write(fd, data or b"")
-        except OSError:
-            pass
-        finally:
+            # Publish identity first: wlroots synchronously destroys the old
+            # source and emits the selection signal while installing this one.
+            self.selection_api.set_source(source)
+        except Exception:
+            (self.remote_source, self.remote_source_ptr, self.remote_generation,
+             self.targets, self.target_data, self._have_token) = previous
+            source.destroy()
+            raise
+        self._have_token = True
+        self.cancel_emit_token()
+        return True
+
+    def send_remote_contents(self, source, target: str, fd: int, target_data=None) -> None:
+        if self.closing or not self._enabled or not self._can_receive or source is not self.remote_source:
             try:
                 os.close(fd)
             except OSError:
                 pass
+            return
+        write_key = self.pending_write_counter
+        self.pending_write_counter += 1
+        generation = self.remote_generation
+        self.pending_writes[write_key] = (source, generation, target, fd)
+        if target_data and target in target_data:
+            _dtype, _dformat, data = target_data[target]
+            self.write_fd(write_key, data)
+            return
+
+        def got_remote_contents(_dtype="", _dformat=0, data=b"") -> None:
+            pending = self.pending_writes.get(write_key)
+            if pending is None:
+                return
+            pending_source, pending_generation, _pending_target, _pending_fd = pending
+            if (
+                self.closing
+                or pending_source is not self.remote_source
+                or pending_generation != self.remote_generation
+            ):
+                self.finish_pending_write(write_key)
+                return
+            self.write_fd(write_key, data)
+
+        try:
+            self.emit("send-clipboard-request", self._selection, target, got_remote_contents)
+        except Exception:
+            self.finish_pending_write(write_key)
+            raise
+
+    def write_fd(self, write_key: int, data) -> None:
+        pending = self.pending_writes.get(write_key)
+        if pending is None:
+            return
+        fd = pending[3]
+        try:
+            if data is None:
+                data = b""
+            elif isinstance(data, str):
+                data = data.encode("utf8")
+            elif not isinstance(data, bytes):
+                # Byte offsets must not become element offsets for a typed
+                # or strided view.  Own a stable snapshot while output waits.
+                # Native buffers need not have a scalar truth value or length.
+                data = bytes(memoryview(data))
+            data = memoryview(data)
+            os.set_blocking(fd, False)
+        except Exception:
+            self.finish_pending_write(write_key)
+            raise
+        offset = 0
+
+        def write_ready(_fd, condition):
+            nonlocal offset
+            current = self.pending_writes.get(write_key)
+            if current is None:
+                return False
+            source, generation, _target, current_fd = current
+            if (
+                self.closing
+                or source is not self.remote_source
+                or generation != self.remote_generation
+                or condition & (GLib.IO_HUP | GLib.IO_ERR | GLib.IO_NVAL)
+            ):
+                self.finish_pending_write(write_key)
+                return False
+            try:
+                # One bounded nonblocking write per dispatch keeps the main
+                # loop responsive even when a native consumer stops reading.
+                if offset < len(data):
+                    written = os.write(current_fd, data[offset:offset + 65536])
+                    if written <= 0:
+                        self.finish_pending_write(write_key)
+                        return False
+                    offset += written
+            except (BlockingIOError, InterruptedError):
+                return True
+            except OSError:
+                self.finish_pending_write(write_key)
+                return False
+            if offset == len(data):
+                self.finish_pending_write(write_key)
+                return False
+            return True
+
+        def write_timeout():
+            log.warn("Warning: native Wayland clipboard consumer timed out")
+            self.finish_pending_write(write_key)
+            return False
+
+        if not write_ready(fd, GLib.IO_OUT):
+            return
+        try:
+            watch = GLib.io_add_watch(
+                fd, GLib.IO_OUT | GLib.IO_HUP | GLib.IO_ERR | GLib.IO_NVAL, write_ready,
+            )
+            self.pending_write_sources[write_key] = (watch,)
+            timer = GLib.timeout_add(REMOTE_TIMEOUT, write_timeout)
+            self.pending_write_sources[write_key] = (watch, timer)
+        except Exception:
+            self.finish_pending_write(write_key)
+            raise
 
 
 class WaylandClipboardProxy(WaylandPrimaryClipboardProxy):
@@ -585,7 +925,15 @@ class WaylandClipboard(ClipboardTimeoutHelper):
         self.compositor = compositor
         kwargs["clipboards.local"] = WAYLAND_CLIPBOARDS
         kwargs["clipboards.remote"] = WAYLAND_CLIPBOARDS
-        super().__init__(*args, **kwargs)
+        try:
+            super().__init__(*args, **kwargs)
+        except Exception:
+            for proxy in tuple(getattr(self, "_clipboard_proxies", {}).values()):
+                try:
+                    proxy.cleanup()
+                except Exception:
+                    log("failed to clean up a partial Wayland clipboard proxy", exc_info=True)
+            raise
         self.local_selections = WAYLAND_CLIPBOARDS
         self.remote_clipboards = WAYLAND_CLIPBOARDS
         self.local_want_targets = WAYLAND_CLIPBOARDS
@@ -594,6 +942,27 @@ class WaylandClipboard(ClipboardTimeoutHelper):
     def __repr__(self):
         return "WaylandClipboard"
 
+    def client_reset(self) -> None:
+        super().client_reset()
+        for proxy in self._clipboard_proxies.values():
+            proxy.client_reset()
+
+    def set_direction(self, can_send: bool, can_receive: bool,
+                      max_send_size: int | None = None, max_receive_size: int | None = None) -> None:
+        receive_revoked = self.can_receive and not can_receive
+        super().set_direction(can_send, can_receive, max_send_size, max_receive_size)
+        if receive_revoked:
+            # Native proxies have already retired the revoked consumers.
+            # Release their wire timers without resetting the allowed direction.
+            self.cancel_outstanding_requests()
+
+    def native_read_limit(self) -> int:
+        # Explicit send-size policy truncates before the packet-size check and
+        # records the total truncated count.  Preserve that established path.
+        if self.max_clipboard_send_size > 0:
+            return -1
+        return self.max_clipboard_packet_size
+
     def make_proxy(self, selection):
         if selection == "CLIPBOARD" and self.compositor is not None:
             proxy = WaylandClipboardProxy(selection, self.compositor)
@@ -601,7 +970,10 @@ class WaylandClipboard(ClipboardTimeoutHelper):
             proxy = WaylandPrimaryClipboardProxy(selection, self.compositor)
         else:
             raise RuntimeError(f"unsupported Wayland clipboard selection: {selection!r}")
+        # Keep constructor rollback ownership before any fallible setup.
+        self._clipboard_proxies[selection] = proxy
         proxy.set_want_targets(self.proxy_want_targets(selection))
+        proxy.read_limit = self.native_read_limit
         proxy.set_direction(self.can_send, self.can_receive)
         proxy.connect("send-clipboard-token", self._send_clipboard_token_handler)
         proxy.connect("send-clipboard-request", self._send_clipboard_request_handler)

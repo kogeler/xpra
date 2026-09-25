@@ -46,15 +46,10 @@ class ClipboardTimeoutTest(unittest.TestCase):
         patcher = patch.object(timeout, "GLib", glib)
         patcher.start()
         self.addCleanup(patcher.stop)
-        helper = ClipboardTimeoutHelper.__new__(ClipboardTimeoutHelper)
+        helper = ClipboardTimeoutHelper(lambda *packet: None, **{"clipboards.local": ()})
+        self.addCleanup(helper.cleanup)
         proxy = ClipboardProxy("CLIPBOARD")
-        helper.send = lambda *packet: None
-        helper.progress_cb = lambda *args: None
-        helper._local_to_remote = {}
         helper._clipboard_proxies = {"CLIPBOARD": proxy}
-        helper._clipboard_origins = {}
-        helper._clipboard_request_counter = 0
-        helper._clipboard_outstanding_requests = {}
         return helper, proxy, glib
 
     def request(self, helper, proxy, target="UTF8_STRING") -> None:

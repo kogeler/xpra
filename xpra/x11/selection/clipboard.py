@@ -54,8 +54,11 @@ def init_event_window(gtk_filter: bool) -> int:
         # wrapper is garbage collected, at a time unrelated to the event queue.
         event_mask |= constants["StructureNotifyMask"]
     xid = X11Window.CreateWindow(rxid, -1, -1, event_mask=event_mask, inputoutput=InputOnly)
-    prop_set(xid, "WM_TITLE", "latin1", "Xpra-Clipboard")
-    X11Window.selectSelectionInput(xid)
+    try:
+        prop_set(xid, "WM_TITLE", "latin1", "Xpra-Clipboard")
+    except Exception:
+        remove_event_window(xid)
+        raise
     log(f"init_event_window()={xid=}")
     return xid
 
@@ -82,19 +85,31 @@ class X11Clipboard(ClipboardTimeoutHelper, GObject.GObject):
 
     def __init__(self, send_packet_cb: Callable, progress_cb=noop, **kwargs):
         GObject.GObject.__init__(self)
+        self.event_window_xid = 0
         self.gtk_filter = False
         # gtk's wrapper for `event_window_xid`, which only exists to keep gtk's own
         # lookup of that window working - nothing here ever uses it, see `init_event_window`:
         self.gtk_event_window = None
+        self._proxy_signal_ids: dict[Any, list[int]] = {}
         # this also decides whether gtk is going to be processing our events:
-        self.init_gtk_filter()
-        with xsync:
-            self.event_window_xid = init_event_window(self.gtk_filter)
-            add_event_receiver(self.event_window_xid, self)
-            if self.gtk_filter:
-                # gtk must know about this window before we use it, and must keep knowing:
-                self.gtk_event_window = gtk_event_window(self.event_window_xid)
-        super().__init__(send_packet_cb, progress_cb, **kwargs)
+        try:
+            self.init_gtk_filter()
+            with xsync:
+                self.event_window_xid = init_event_window(self.gtk_filter)
+                if self.gtk_filter:
+                    # Resolve and retain the wrapper before XFixes subscribes.
+                    self.gtk_event_window = gtk_event_window(self.event_window_xid)
+                    if self.gtk_event_window is None:
+                        raise RuntimeError("failed to register the clipboard event window with GDK")
+                add_event_receiver(self.event_window_xid, self)
+            super().__init__(send_packet_cb, progress_cb, **kwargs)
+        except Exception:
+            for cleanup in (self.cleanup_partial_proxies, self.cleanup_window, self.cleanup_gtk_filter):
+                try:
+                    cleanup()
+                except Exception:
+                    log("clipboard initialization rollback failed", exc_info=True)
+            raise
 
     def init_gtk_filter(self) -> None:
         # X11 events only reach the receivers registered above if something routes them
@@ -129,10 +144,40 @@ class X11Clipboard(ClipboardTimeoutHelper, GObject.GObject):
         super().init_proxies(selections)
 
     def cleanup_window(self) -> None:
-        if xid := self.event_window_xid:
-            self.event_window_xid = 0
-            remove_event_receiver(xid, self)
-            remove_event_window(xid)
+        try:
+            if xid := self.event_window_xid:
+                self.event_window_xid = 0
+                try:
+                    remove_event_receiver(xid, self)
+                finally:
+                    remove_event_window(xid)
+        finally:
+            # The GTK branch's StructureNotifyMask preserves server-ordered
+            # retirement of its foreign-window lookup after queued XFixes.
+            self.gtk_event_window = None
+
+    def disconnect_proxy_signals(self) -> None:
+        signal_ids = self._proxy_signal_ids
+        self._proxy_signal_ids = {}
+        for proxy, handlers in signal_ids.items():
+            for handler in handlers:
+                try:
+                    if proxy.handler_is_connected(handler):
+                        proxy.disconnect(handler)
+                except Exception:
+                    log("failed to disconnect a clipboard proxy signal", exc_info=True)
+
+    def cleanup_partial_proxies(self) -> None:
+        proxies = tuple(dict.fromkeys(
+            (*getattr(self, "_clipboard_proxies", {}).values(), *self._proxy_signal_ids)
+        ))
+        self.disconnect_proxy_signals()
+        self._clipboard_proxies = {}
+        for proxy in proxies:
+            try:
+                proxy.cleanup()
+            except Exception:
+                log("failed to clean up a partially initialized clipboard proxy", exc_info=True)
 
     def cleanup_gtk_filter(self) -> None:
         if self.gtk_filter:
@@ -141,22 +186,27 @@ class X11Clipboard(ClipboardTimeoutHelper, GObject.GObject):
             cleanup_x11_filter()
 
     def cleanup(self) -> None:
-        ClipboardTimeoutHelper.cleanup(self)
-        self.cleanup_window()
-        self.cleanup_gtk_filter()
+        try:
+            self.disconnect_proxy_signals()
+        finally:
+            try:
+                ClipboardTimeoutHelper.cleanup(self)
+            finally:
+                try:
+                    self.cleanup_window()
+                finally:
+                    self.cleanup_gtk_filter()
 
     def make_proxy(self, selection):
         from xpra.x11.selection.proxy import ClipboardProxy
         xid = self.event_window_xid
         proxy = ClipboardProxy(xid, selection)
+        handlers = self._proxy_signal_ids.setdefault(proxy, [])
         proxy.set_want_targets(self.proxy_want_targets(selection))
         proxy.set_direction(self.can_send, self.can_receive)
-        proxy.connect("send-clipboard-token", self._send_clipboard_token_handler)
-        proxy.connect("send-clipboard-request", self._send_clipboard_request_handler)
-        from xpra.x11.bindings.core import get_root_xid
-        rxid = get_root_xid()
+        handlers.append(proxy.connect("send-clipboard-token", self._send_clipboard_token_handler))
+        handlers.append(proxy.connect("send-clipboard-request", self._send_clipboard_request_handler))
         xfixes_selection_input(xid, selection)
-        xfixes_selection_input(rxid, selection)
         return proxy
 
     ############################################################################

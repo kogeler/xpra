@@ -210,10 +210,19 @@ class ClipboardProtocolHelperCore(SubsystemPacketHandlers):
     def cleanup(self) -> None:
         """ during cleanup, stop sending packets """
         self.send = noop
-        for x in self._clipboard_proxies.values():
-            x.cleanup()
+        proxies = tuple(self._clipboard_proxies.values())
         self._clipboard_proxies = {}
         self._clipboard_origins = {}
+        error = None
+        for proxy in proxies:
+            try:
+                proxy.cleanup()
+            except Exception as exc:
+                if error is None:
+                    error = exc
+                log.error("Error cleaning up clipboard proxy", exc_info=True)
+        if error is not None:
+            raise error
 
     def client_reset(self) -> None:
         """Reset state associated with the disconnected clipboard peer."""
@@ -420,9 +429,6 @@ class ClipboardProtocolHelperCore(SubsystemPacketHandlers):
             if self.is_clipboard_loop(proxy._selection, origin):
                 log.warn("Warning: clipboard loop detected for %r", proxy._selection)
                 return
-            proxy._clipboard_origin = origin
-        else:
-            proxy._clipboard_origin = ""
         targets = None
         target_data = None
         if proxy._can_receive:
@@ -449,7 +455,20 @@ class ClipboardProtocolHelperCore(SubsystemPacketHandlers):
         proxy._greedy_client = options.boolget("greedy", proxy._greedy_client)
         if options.boolget("token", True):
             synchronous_client = options.boolget("synchronous", False)
-            proxy.got_token(targets, target_data, claim, synchronous_client)
+            # Only an accepted receive/claim may change the local selection's
+            # origin. A non-claiming notification can cross a local change.
+            previous_origin = proxy._clipboard_origin
+            receiving = claim and proxy._can_receive
+            if receiving:
+                proxy._clipboard_origin = origin
+            try:
+                accepted = proxy.got_token(targets, target_data, claim, synchronous_client)
+                if receiving and accepted is False:
+                    proxy._clipboard_origin = previous_origin
+            except Exception:
+                if receiving:
+                    proxy._clipboard_origin = previous_origin
+                raise
 
     def local_targets(self, remote_targets: Iterable[str]) -> Sequence[str]:
         """ filter remote targets to values that can be used locally """
