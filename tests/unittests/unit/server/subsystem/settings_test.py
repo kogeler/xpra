@@ -5,8 +5,10 @@
 # later version. See the file COPYING for details.
 
 import unittest
+from unittest.mock import Mock
 
 from xpra.net.common import Packet
+from xpra.server.subsystem.control import ControlHandler
 from xpra.server.subsystem.settings import SettingsServer
 from xpra.server.subsystem.stub import StubSubsystem
 from unit.server.subsystem.servermixintest_util import FakeServerBase
@@ -32,13 +34,17 @@ class FakeSource:
     def set_client_readonly(self, readonly: bool) -> None:
         self.client_readonly = readonly
 
+    def set_control_readonly(self, readonly: bool) -> None:
+        self.enforced_readonly = readonly
+
 
 class FakeServer(FakeServerBase):
-    """ stands in for the source lookups `ServerCore` delegates to `client-session` """
+    """Provide the typed source lookup used by the real control subsystem."""
 
     def __init__(self):
         super().__init__()
         self.sources: dict = {}
+        self.hello_request_handlers: dict = {}
 
     def get_server_source(self, proto):
         return self.sources.get(proto)
@@ -95,6 +101,41 @@ class SettingsTest(unittest.TestCase):
         self.assertFalse(source2.client_readonly)
         # unknown protocols are ignored:
         self.settings._process_change(object(), Packet("setting-change", "readonly", True))
+
+    def test_global_readonly_signal_precedes_failing_peer_send(self) -> None:
+        source = FakeSource("one")
+        self.server.sources[object()] = source
+        source.enforced_readonly = True
+        observed = []
+        self.server.connect("setting-changed", lambda _server, *args: observed.append(args))
+        source.send_setting_change = Mock(side_effect=RuntimeError("send failed"))
+        with self.assertRaisesRegex(RuntimeError, "send failed"):
+            self.settings.setting_changed("readonly", True)
+        self.assertEqual(observed, [("readonly", True, None)])
+
+    def test_control_readonly_signal_precedes_failing_peer_send(self) -> None:
+        source = FakeSource("one")
+        self.server.sources[object()] = source
+        observed = []
+        self.server.connect("setting-changed", lambda _server, *args: observed.append(args))
+        source.send_setting_change = Mock(side_effect=RuntimeError("send failed"))
+        control = ControlHandler(self.server)
+        with self.assertRaisesRegex(RuntimeError, "send failed"):
+            control.control_command_client_readonly("*", True)
+        self.assertTrue(source.enforced_readonly)
+        self.assertEqual(observed, [("readonly", True, source)])
+
+    def test_other_settings_keep_after_send_notification(self) -> None:
+        source = FakeSource("one")
+        self.server.sources[object()] = source
+        observed = []
+        self.server.connect("setting-changed", lambda _server, *args: observed.append(("signal", args)))
+        source.send_setting_change = lambda *args: observed.append(("send", args))
+        self.settings.setting_changed("session_name", "example")
+        self.assertEqual(observed, [
+            ("send", ("session_name", "example")),
+            ("signal", ("session_name", "example", None)),
+        ])
 
 
 def main():

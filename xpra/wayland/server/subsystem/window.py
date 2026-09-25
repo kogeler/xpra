@@ -1388,12 +1388,25 @@ class WaylandWindowServer(WindowServer):
             surface.frame_done()
             self.server.compositor.flush()
 
-    def _focus(self, _server_source, wid: int, modifiers) -> None:
+    def _process_focus(self, proto, packet: Packet) -> None:
+        keyboard = self.server.subsystems.get("keyboard")
+        server_source = self.get_server_source(proto)
+        if (server_source is not None and keyboard
+                and keyboard.is_recording_source(server_source)):
+            focuslog("ignoring focus packet from recording-only keyboard source")
+            return
+        super()._process_focus(proto, packet)
+
+    def _focus(self, server_source, wid: int, modifiers) -> None:
         server = self.server
         focuslog("_focus(%s, %s) current focus=%i", wid, modifiers, self.focused)
         keyboard = server.subsystems.get("keyboard")
+        if (server_source is not None and keyboard
+                and keyboard.is_recording_source(server_source)):
+            focuslog("ignoring focus change from recording-only keyboard source")
+            return
         if modifiers is not None and keyboard:
-            keyboard.update_keyboard_modifiers(modifiers)
+            keyboard.update_keyboard_modifiers(modifiers, source=server_source)
         if self.focused == wid:
             return
         for window_id, state in {

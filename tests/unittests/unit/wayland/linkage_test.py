@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 try:
-    import xpra.wayland.server
+    importlib.import_module("xpra.wayland.server")
 except ImportError:
     if __name__ == "__main__":
         raise SystemExit(0)
@@ -19,6 +19,7 @@ except ImportError:
 
 
 WAYLAND_MODULES = (
+    "xpra.wayland.server.keyboard",
     "xpra.wayland.server.events",
     "xpra.wayland.server.display",
     "xpra.wayland.server.wayland_surface",
