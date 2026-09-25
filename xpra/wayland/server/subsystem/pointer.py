@@ -123,9 +123,16 @@ class WaylandPointerManager(PointerManager):
             self.server.compositor.flush()
 
     def _update_modifiers(self, proto, wid: int, modifiers: Sequence[str]) -> None:
-        if keyboard := self.server.subsystems.get("keyboard"):
-            keyboard.update_keyboard_modifiers(modifiers)
+        # The generic path owns readonly and UI-driver arbitration.  Mirror
+        # those guards before touching the shared wlroots keyboard state.
+        if self.is_readonly(proto):
+            return
+        source = self.get_server_source(proto)
+        if not source or (self.server.ui_driver and self.server.ui_driver != source.uuid):
+            return
         super()._update_modifiers(proto, wid, modifiers)
+        if keyboard := self.server.subsystems.get("keyboard"):
+            keyboard.update_keyboard_modifiers(modifiers, source=source)
 
     def button_action(self, device_id: int, wid: int, button: int, pressed: bool, props: dict) -> None:
         try:

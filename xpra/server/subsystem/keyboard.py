@@ -72,7 +72,7 @@ class KeyboardManager(StubSubsystem):
         self.keys_pressed: dict[int, Any] = {}
 
     def init(self, opts) -> None:
-        for option in ("sync", "layout", "layouts", "variant", "variants", "options"):
+        for option in ("sync", "model", "layout", "layouts", "variant", "variants", "options"):
             v = getattr(opts, f"keyboard_{option}", None)
             if v is not None:
                 self.keymap_options[option] = v
@@ -249,7 +249,11 @@ class KeyboardManager(StubSubsystem):
         if keycode >= 0:
             try:
                 is_mod = ss.is_modifier(keyname, keycode)
-                self._handle_key(wid, pressed, keyname, keyval, keycode, modifiers, is_mod, ss.keyboard_config.sync)
+                self._handle_key(
+                    wid, pressed, keyname, keyval, keycode, modifiers,
+                    is_mod, ss.keyboard_config.sync, ss,
+                    client_keycode if client_keycode > 0 else (client_keycode, keyname or keyval),
+                )
             except Exception as e:
                 log("process_key_action%s", (proto, wid, keyname, pressed, attrs), exc_info=True)
                 log.error("Error: failed to %s key", ["unpress", "press"][pressed])
@@ -279,7 +283,8 @@ class KeyboardManager(StubSubsystem):
             self.device.press_key(keycode, press)
 
     def _handle_key(self, wid: int, pressed: bool, name: str, keyval: int, keycode: int,
-                    modifiers: list, is_mod: bool = False, sync: bool = True):
+                    modifiers: list, is_mod: bool = False, sync: bool = True,
+                    source=None, key_identity=None):
         """
             Does the actual press/unpress for keys
             Either from a packet (_process_event) or timeout (_key_repeat_timeout)
@@ -332,7 +337,10 @@ class KeyboardManager(StubSubsystem):
             else:
                 log("handle keycode %s: key %s was already unpressed, ignoring", keycode, name)
         if not is_mod and sync and self.key_repeat_delay > 0 and self.key_repeat_interval > 0:
-            self._key_repeat(wid, pressed, name, keyval, keycode, modifiers, is_mod, self.key_repeat_delay)
+            self._key_repeat(
+                wid, pressed, name, keyval, keycode, modifiers,
+                is_mod, self.key_repeat_delay, source, key_identity,
+            )
 
     def cancel_key_repeat_timer(self) -> None:
         if krt := self.key_repeat_timer:
@@ -340,7 +348,8 @@ class KeyboardManager(StubSubsystem):
             self.source_remove(krt)
 
     def _key_repeat(self, wid: int, pressed: bool, keyname: str, keyval: int, keycode: int,
-                    modifiers: list, is_mod: bool, delay_ms: int = 0) -> None:
+                    modifiers: list, is_mod: bool, delay_ms: int = 0,
+                    source=None, key_identity=None) -> None:
         """ Schedules/cancels the key repeat timeouts """
         self.cancel_key_repeat_timer()
         if pressed:
@@ -348,15 +357,19 @@ class KeyboardManager(StubSubsystem):
             log("scheduling key repeat timer with delay %s for %s / %s", delay_ms, keyname, keycode)
             now = monotonic()
             self.key_repeat_timer = self.timeout_add(delay_ms, self._key_repeat_timeout,
-                                                     now, delay_ms, wid, keyname, keyval, keycode, modifiers, is_mod)
+                                                     now, delay_ms, wid, keyname, keyval, keycode,
+                                                     modifiers, is_mod, source, key_identity)
 
     def _key_repeat_timeout(self, when, delay_ms: int, wid: int, keyname: str, keyval: int, keycode: int,
-                            modifiers: list, is_mod: bool) -> None:
+                            modifiers: list, is_mod: bool, source=None, key_identity=None) -> None:
         self.key_repeat_timer = 0
         now = monotonic()
         log("key repeat timeout for %s / '%s' - clearing it, now=%s, scheduled at %s with delay=%s",
             keyname, keycode, now, when, delay_ms)
-        self._handle_key(wid, False, keyname, keyval, keycode, modifiers, is_mod, True)
+        self._handle_key(
+            wid, False, keyname, keyval, keycode, modifiers,
+            is_mod, True, source, key_identity,
+        )
         self.keys_timedout[keycode] = now
 
     @packet_handler(KEYBOARD_SYNC, main_thread=True)
@@ -368,6 +381,9 @@ class KeyboardManager(StubSubsystem):
             return
         if kc := ss.keyboard_config:
             kc.sync = packet.get_bool(1)
+            remember_runtime = getattr(kc, "remember_applied_runtime", None)
+            if callable(remember_runtime):
+                remember_runtime()
             log("toggled keyboard-sync to %s for %s", kc.sync, ss)
 
     def _keys_changed(self) -> None:
