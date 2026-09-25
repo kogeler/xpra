@@ -16,6 +16,7 @@ log = Logger("client")
 class FakePointerSubsystem:
     def __init__(self):
         self.wheel_smooth = False
+        self.wheel_map: dict[int, int] = {}
         self.server_pointer = True
         self.middle_click = True
         self.button_transform: dict[tuple[str, int], int] = {}
