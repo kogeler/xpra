@@ -3,7 +3,7 @@
 ## Scope and completion boundary
 
 Every production `cases/<id>/README.md` is a maintained technical explanation
-of one atomic behavior, not a short patch summary or incident note. New cases
+of one atomic behavior, not a short commit summary or incident note. New cases
 must meet the same analytical depth as established cases. A small diff does
 not waive analysis of callers, state ownership, failure paths, queue
 interactions or regression limits. Do not wait for the operator to request a
@@ -11,8 +11,8 @@ second documentation pass.
 
 Apply this standard when creating a case, changing its behavior or tests,
 reassessing it after upstream changes, or migrating regression ownership.
-Complete the analysis alongside implementation, before draft promotion or
-exported handoff. During refresh it is part of the current case's checkpoint,
+Complete the analysis alongside implementation, before the case commit is
+handed off. During refresh it is part of the current case's checkpoint,
 not deferred whole-queue paperwork. Material source, test or oracle changes
 reopen the corresponding sections. Do not rewrite unrelated cases merely to
 make all headings identical.
@@ -23,6 +23,18 @@ failures, narrowing/removal criteria and retained infrastructure. Do not
 invent a production defect while that scaffold is inactive.
 
 ## Required structure and depth
+
+Directly under the H1 title, every `cases/<slug>/README.md` carries this
+reference line, with the case's own slug:
+
+```text
+Code: the `Fork-Case: <slug>` commit on `develop`
+(`make -C fork-maintenance case-show CASE=<slug>`).
+```
+
+The case commit is the only place of the case's code. Refer to it by slug
+through this line and never write its SHA into the README (see
+[case identity](case-commits.md#case-identity)).
 
 Use this ordered structure for new production cases. Existing cases may keep
 equivalent headings and additional domain-specific sections. The following
@@ -72,22 +84,24 @@ atomicity, recovery or idempotence unless the code provides it. Explain why a
 dimension is inapplicable instead of writing bare `N/A`; do not pad a narrow
 case with irrelevant scenarios.
 
-### Patch-queue and integration ownership
+### Case-commit and integration ownership
 
-Explain changed production/test paths and manifest dependencies, including why
-no dependency is needed when related cases share a file or route. Link relevant
-cases and name the invariant each owns. Discuss overlap, order and composed
-risks: independent applicability is not independent runtime behavior. Separate
+Explain the production and test paths the case commit changes and why each
+belongs to this case. Explain its manifest dependencies, including why no
+dependency is needed when related case commits share a file or route. Link
+relevant cases and name the invariant each owns. Discuss overlap, the
+commit's position in the stack and composed risks: applying alone on the base
+(`case-check`) does not make its runtime behavior independent. Separate
 shared harness/fixture ownership from installed production behavior. Do not
 absorb another case merely to make this description self-contained.
 
-### Patch ownership and non-goals
+### Commit scope and non-goals
 
-State what changes and what intentionally remains unchanged: protocol,
-feature policy, platform/backend, resources/security, packaging or application
-integration as relevant. Explain tempting but incorrect repairs when supported
-by code. Name remaining limits without disguising an unresolved required fix
-as a non-goal.
+State what the case commit changes and what intentionally remains unchanged:
+protocol, feature policy, platform/backend, resources/security, packaging or
+application integration as relevant. Explain tempting but incorrect repairs
+when supported by code. Name remaining limits without disguising an unresolved
+required fix as a non-goal.
 
 ### Regression design and clean control
 
@@ -137,12 +151,12 @@ Write in English with precise technical prose, meaningful headings and tables
 or diagrams where they clarify identities or order. There is no word/line
 quota: depth is measured by answered technical questions, not copied boilerplate.
 Conversely, two generic sections about the fix and tests are not a complete
-case README. Do not duplicate the full contract, manifest or patch.
+case README. Do not duplicate the full contract, manifest or commit diff.
 
 Keep current-source rationale, ownership and durable oracles in the README.
-Run names, timestamps, image/result/selection digests, counts, transient blockers
-and completed/pending acceptance state belong in the ignored cycle ledger under
-`work/<session>/`; lasting lessons go into the distilled
+Run names, timestamps, commit SHAs, image/result/selection digests, counts,
+transient blockers and completed/pending acceptance state belong in the ignored
+cycle ledger under `work/<session>/`; lasting lessons go into the distilled
 [session record](session-close.md). Label designed/required checks as such; planned tests and
 old results are not current acceptance evidence.
 
@@ -156,9 +170,11 @@ of unrelated requirements to copy into another case.
 
 ## Author and reviewer checklist
 
-Before promotion/export handoff or closing a case review, the agent must:
+Before handing off a new or changed case commit or closing a case review, the
+agent must:
 
-1. Re-read candidate, adjacent code, manifest and README; resolve contradictions
+1. Re-read the case commit (`case-show`), adjacent code, manifest and README,
+   including the reference line; resolve contradictions
    in behavior, naming, ownership and test scope.
 2. Check that every production hunk has a causal explanation, relevant states
    and failure paths have owners, and current-source necessity is established.
@@ -166,11 +182,11 @@ Before promotion/export handoff or closing a case review, the agent must:
    assertion, recording fixture substitutions, clean failure and blind spots.
 4. Verify dependencies, queue interactions and the invariants an upstream
    replacement must preserve, including relevant unchanged paths.
-5. Confirm case-specific analysis in all required sections, no draft
+5. Confirm case-specific analysis in all required sections, no skeleton
    placeholders, unsupported guarantees, copied results or stale assumptions.
    Record unresolved questions honestly; they do not pass the affected review.
 
 This is mandatory semantic review, not a heading-count or length test.
-`case-new` emits a draft outline and link to this standard; the outline,
-manifest validation and patch export do not certify documentation completeness.
+`case-new` emits a README skeleton and a link to this standard; the skeleton,
+manifest validation and `case-check` do not certify documentation completeness.
 The agent completes it in the same pass without another operator request.

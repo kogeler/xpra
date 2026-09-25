@@ -1,5 +1,8 @@
 # Frame-aware Wayland encoding
 
+Code: the `Fork-Case: wayland-initial-window-state` commit on `develop`
+(`make -C fork-maintenance case-show CASE=wayland-initial-window-state`).
+
 ## Boundary
 
 A native-Wayland window has a stable public `has-alpha` capability and a
@@ -36,10 +39,10 @@ coding, not a second fanout implementation.
 
 ## Embedded-source context
 
-The current source is `0a80430b6506e403f6469416d8aaa8463e331296`; the
-patch applies unchanged. Between the previous base `d95058b09169` and this one,
-upstream added per-model frame-callback pacing (`FrameCallbackModel`), which
-does not mark popups either, so popup damage moved behind image publication
+The current source is `0a80430b6506e403f6469416d8aaa8463e331296`; the case
+commit applies unchanged. Between the previous base `d95058b09169` and this
+one, upstream added per-model frame-callback pacing (`FrameCallbackModel`),
+which does not mark popups either, so popup damage moved behind image publication
 keeps the same completion owner. `094692ebf3` narrows `non_video_encodings` to
 registered encoders, which only makes this case's CSC-readiness barrier more
 accurate; transparency selection already draws from `common_encodings`, which
@@ -65,8 +68,9 @@ and opaque-region/resize selection can use the previous discard decision.
 VPC's linked repair binds derived edge geometry to its existing fanout owner.
 
 Retirement requires a code-supported replacement of every residual boundary
-and preservation of its regressions. Applicability or passing tests alone
-cannot establish either continued necessity or correctness.
+and preservation of its regressions. A case commit which still applies, or
+passing tests alone, cannot establish either continued necessity or
+correctness.
 
 ## Surrounding code and ownership map
 
@@ -469,9 +473,9 @@ queued-image, B-frame, and video-subregion cleanup belongs to
 `video-pipeline-cleanup-race`. The frame selector must remain valid when those
 cases are composed with it.
 
-## Patch-queue and integration ownership
+## Case-commit and integration ownership
 
-`fix.patch` owns exactly the paths derived in `case.toml`:
+The case commit changes exactly these paths:
 
 - `xpra/wayland/server/models/window.py`;
 - `xpra/wayland/server/models/subsurface_window.py`;
@@ -485,15 +489,16 @@ cases are composed with it.
 - new downstream test `tests/unittests/unit/wayland/window_metadata_test.py`.
 
 Both new test files carry the required `Copyright (C) 2026 kogeler` notice.
-The patch has no downstream dependency and must remain selectable against the
-clean embedded source. In the complete stack, WSSO overlaps both Wayland model
-paths and the Wayland window subsystem while VPC overlaps
+The case has no downstream dependency: its commit must keep applying alone on
+the clean embedded source and stay removable from `HEAD` (`case-check`). In the
+complete stack its commit follows the VPC and WSSO commits; WSSO overlaps both
+Wayland model paths and the Wayland window subsystem while VPC overlaps
 `video_compress.py`; upstream's `FrameCallbackModel` (which replaced the
 retired `wayland-empty-damage-throttle` case) shares the Wayland subsystem and
-`window_test.py`. Complete-stack resolution must
-preserve this case's format/image/damage order, WSSO's retained generation and
-composition state, upstream's ordinary-root acknowledgement path, and VPC's video
-resource lifecycle.
+`window_test.py`. Complete-stack resolution must preserve this case's
+format/image/damage order, WSSO's retained generation and composition state,
+upstream's ordinary-root acknowledgement path, and VPC's video resource
+lifecycle.
 
 Responsibility is split as follows:
 
@@ -501,30 +506,24 @@ Responsibility is split as follows:
 | --- | --- |
 | `wayland-initial-window-state` | Current format publication, frame-alpha policy, CSC startup barrier, popup damage order, opaque-region/resize rebinding. |
 | `wayland-subsurface-stream-ownership` | Normalized retained snapshots, stable surface identity, authoritative topology and colourspace, ordered raw RGB32 parent-backing transactions, exact packet ownership and client draw-ACK routing, atomic Cairo/OpenGL staging, native input, composite-root acknowledgement, child frame completion, and live subsurface proof. |
-| Upstream `FrameCallbackModel` (formerly `wayland-empty-damage-throttle`) | Ordinary toplevel frame-callback acknowledgement, pending-damage guard and paced empty acknowledgement; not a queue case. |
+| Upstream `FrameCallbackModel` (formerly `wayland-empty-damage-throttle`) | Ordinary toplevel frame-callback acknowledgement, pending-damage guard and paced empty acknowledgement; not a fork case. |
 | `window-source-timer-lifecycle` | Generic window-source GLib timer leases and terminal close. |
 | `video-pipeline-cleanup-race` | Codec, video queue, exact disjoint edge fanout, flush/watchdog, and video-subregion resources. |
 
-Refresh the patch only through an isolated workspace and
-`workspace-stage` / `workspace-update`; never edit its digest or path list by
-hand.
+Change this case only through its own commit: a fixup followed by
+`develop-squash`, or conflict resolution while a rebase replays it (see
+[case commits](../../docs/runbooks/case-commits.md#change-a-case)).
 
-Preserve the one-line diff context during export. The dimension-update hook
-ends immediately before `cancel_damage()`, whose opening statements belong to
-VPC; default three-line context would couple this otherwise independent
-addition to the clean-base version of VPC's cleanup body. The same narrow
-context also keeps adjacent Wayland additions independently applicable:
+The dimension-update hook ends immediately before `cancel_damage()`, whose
+opening statements belong to VPC, and several Wayland additions are equally
+close to other cases' hunks. Keep these hunks separate from the neighboring
+case commits, so that this otherwise independent addition still applies alone
+to the clean base without VPC's cleanup body (`case-check`) and the stack still
+resolves in order (`stack-check`). Never fold a neighbor's lines into this
+commit to make a conflict disappear.
 
-```bash
-GIT_CONFIG_COUNT=1 \
-GIT_CONFIG_KEY_0=diff.context \
-GIT_CONFIG_VALUE_0=1 \
-make -C fork-maintenance workspace-update \
-  CASE=wayland-initial-window-state WORKSPACE=<owned-workspace>
-```
-
-Always resolve the complete stack after export and inspect the resulting
-method and test-class ownership. Low-context application proves neither
+Always check the complete stack after a change and inspect the resulting
+method and test-class ownership. Conflict-free application proves neither
 correct placement nor behavioral composition by itself.
 
 `WaylandWindowServerFrameStateTest.test_map_applies_properties_before_first_refresh`
@@ -543,7 +542,7 @@ subscription on damage and independent disconnection. Codec scoring is
 controlled at its terminal boundary, not by replacing the frame callback or
 generic encoding-option implementation.
 
-## Patch ownership and non-goals
+## Commit scope and non-goals
 
 The production patch owns:
 
@@ -774,7 +773,7 @@ not a substitute for either frame-aware hardware profile.
 - Preserve `ImageWrapper` and encode-queue lifetime ownership.
 - Keep diagnostics to identifiers, format, and policy state; never log pixels.
 - Do not absorb timer, subsurface stream, empty-damage, or codec-cleanup
-  ownership into this patch.
+  ownership into this case commit.
 
 ## Required validation
 
@@ -796,12 +795,12 @@ After candidate freeze, fill only missing or invalidated requirements:
 | Patched standalone focused run | The four case-owned modules and existing generic compression module pass, including metadata serialization and real-model information requests. |
 | Patched standalone `wayland` run | The current native Wayland extensions compile/import and the complete subsystem boundary passes. |
 | Complete-stack focused and `wayland` runs | Adjacent cases preserve frame, map, publication, selector, and resize behavior after composition. |
-| Patch, stack, whitespace, lint, and fork-control checks | Patch digest/path authority and repository integration are exact. |
+| `case-check`, `stack-check`, `develop-check`, whitespace, lint, and fork-control checks | The case commit applies alone and is removable, the stack reproduces `HEAD`, and repository integration is exact. |
 | Clean quarantine reassessment | Every assigned upstream failure is reproduced independently before patched full results are interpreted. |
-| `full`, `full-cython`, `full-no-compat` | The complete queue passes all maintained upstream unit-test legs. |
+| `full`, `full-cython`, `full-no-compat` | The complete stack passes all maintained upstream unit-test legs. |
 | Complete-stack `live-wayland-h264-hardware` | Real Vulkan opaque-frame H.264 and alpha auxiliary behavior both satisfy the fixed profile. |
 | Complete-stack `live-wayland-opengl-h264-hardware` | The independent native OpenGL/render-node/viewport path satisfies the same frame policy. |
-| All nine complete-stack positive live profiles | `live-all STACK=develop` and `live-suite-check` prove rendering, detach, transport loss, input, clipboard, subsurface composition, hardware video, lifecycle, and owned cleanup on the current queue. |
+| All nine complete-stack positive live profiles | `live-all STACK=develop` and `live-suite-check` prove rendering, detach, transport loss, input, clipboard, subsurface composition, hardware video, lifecycle, and owned cleanup on the current stack. |
 
 Retain the exact clean failure and every named patched result below
 `.artifacts/fork-maintenance/`. Stop at the first unexplained failure. Any

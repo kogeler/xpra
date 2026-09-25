@@ -1,20 +1,17 @@
-schema = 1
-# Permanent inactive infrastructure, not a production fix. Never delete this case.
-# Enable only to disable currently broken upstream tests, after clean-source proof.
-# workspace-update removes the draft marker and derives the active patch fields.
-draft = true
+schema = 2
+# Permanent infrastructure, not a production fix. Never delete this case.
+# Inactive: no Fork-Case commit and every list below empty (not selectable).
+# Activate only to quarantine currently broken upstream tests after clean-source
+# proof: list the modules, their gates and tests, then add one
+# `Fork-Case: upstream-test-quarantine` commit changing exactly those files.
 slug = "upstream-test-quarantine"
 kind = "test-quarantine"
 title = "Quarantine failing upstream test modules"
-commit_subject = "Quarantine failing upstream test modules"
-# Empty draft placeholders: fix.patch is zero bytes and is not selectable.
-patch_sha256 = ""
 dependencies = []
-paths = []
 
 [tests]
 list = [
-  # Add the current unit.* module union before promotion, then enable these legs:
+  # Add the current unit.* module union before activation, then enable these legs:
   # "full",
   # "full-cython",
   # "full-no-compat",

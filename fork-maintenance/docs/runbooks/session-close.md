@@ -4,9 +4,11 @@
 
 A session is one agent task, from its first command to its handoff. While it
 runs, the agent may keep any amount of output below
-`.artifacts/fork-maintenance/`: job results, workspaces, caches, probes,
-copies of logs, notes. When the task is finished, and **before any commit and
-before the final handoff**, the agent closes the session. Afterwards the whole
+`.artifacts/fork-maintenance/`: job results, caches, probes, copies of logs,
+notes. Case work is not output: it lives in the case commits on `develop`
+(see [`case-commits.md`](case-commits.md)), which the agent creates during the
+task. When the task is finished, and **before any control commit and before
+the final handoff**, the agent closes the session. Afterwards the whole
 `.artifacts/` tree holds only:
 
 ```text
@@ -25,9 +27,9 @@ tree and are unaffected.
 ## Session identity and working area
 
 Choose one lowercase session ID before starting, for example
-`popup-modal-20260924`. It is also the cycle prefix of every `RUN`,
-`IMAGE_RUN` and `WORKSPACE` in the session (see
-[`cycle-cleanup.md`](cycle-cleanup.md)) and the name of its record.
+`popup-modal-20260924`. It is also the cycle prefix of every `RUN` and
+`IMAGE_RUN` in the session (see [`cycle-cleanup.md`](cycle-cleanup.md)) and
+the name of its record.
 
 Keep the session's own notes under `work/<session>/`:
 
@@ -86,14 +88,14 @@ content; HTML comments do not count. Write what saves the next agent time:
 - **Findings**: root cause or review conclusion with `path:symbol`
   references, the ownership/failure paths that mattered, and dead ends with the
   reason they failed;
-- **Changes**: cases, patches and tooling changed and why, keep/adapt/retire
-  decisions, resulting patch digests, and what was deliberately left alone;
+- **Changes**: cases (by slug) and tooling changed and why, keep/adapt/retire
+  decisions, and what was deliberately left alone;
 - **Verification**: one line per gate with its outcome; remaining or failed
   gates. Named runs are deleted by the close, so record conclusions only;
 - **Next time**: where to start, useful commands and oracles, pitfalls, open
   risks and follow-ups.
 
-Never paste logs, reports, JSON results, screenshots or patch bodies. Quote at
+Never paste logs, reports, JSON results, screenshots or diff bodies. Quote at
 most a few lines of a signature. Keep durable architecture in the case README,
 not here; the record captures the session's experience.
 
@@ -116,9 +118,8 @@ Prerequisites, all through their owning targets:
 
 1. collect every upstream-test, image-build, live and DEB job, review it, and
    run its exact `*-remove` (or `*-abort`) target;
-2. export every accepted workspace with `workspace-update`, then remove it with
-   `workspace-remove`; resolve interrupted state with `case-recover` or
-   `workspace-recover`, and finish any pending `cycle-clean` or
+2. fold every accepted product change into its case commit (no dirty product
+   path, no pending `fixup!` commit), and finish any pending `cycle-clean` or
    `artifacts-clean` transaction with its original command;
 3. move any scratch created outside `.artifacts/fork-maintenance/` into
    `work/<session>/`;
@@ -138,13 +139,12 @@ target and a `blocked` list. The close deletes nothing while a path is blocked:
 | Blocked reason | Resolution |
 | --- | --- |
 | runtime not removed, owner or transaction present | finish the job through its `collect`/`remove`/`abort` target |
-| unexported or unresolvable workspace, recovery pending | `workspace-update`/`workspace-remove`, `case-recover`, `workspace-recover` |
 | lifecycle state is not idle | finish the owning job or transaction; only empty lock files may remain |
 | knowledge: ... | fix the record, then `knowledge-index` |
 | outside `.artifacts/fork-maintenance` | move it into `work/<session>/` and re-plan |
 | unsafe path (other-writable, hard link, special file) | inspect it; it is not yours to discard blindly |
 
-Execution holds the six lifecycle locks and, without waiting, every `*.lock`
+Execution holds the four lifecycle locks and, without waiting, every `*.lock`
 file directly inside a discarded cache directory, so a concurrent cache
 publisher makes it fail instead of racing. It reuses the
 digest-bound, resumable removal engine under the identity

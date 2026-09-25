@@ -3,7 +3,9 @@
 This directory is the tracked control plane for maintaining the user's Xpra
 fork. The repository root is the Xpra source tree; there is no nested clone.
 The root `AGENTS.md` remains authoritative and this file adds rules for the
-patch queue and runners.
+case commits, their documentation, and the runners. Every case is exactly one
+commit on `develop` as specified in
+[`docs/runbooks/case-commits.md`](docs/runbooks/case-commits.md).
 
 ## Exclusive process authority
 
@@ -24,25 +26,31 @@ be read as technical source/build/test context, never as process policy.
 
 Start every task from the session registry
 `../.artifacts/fork-maintenance/knowledge/INDEX.md` and end it with the
-[session close](docs/runbooks/session-close.md) before any commit.
+[session close](docs/runbooks/session-close.md) before the final handoff and
+before any control commit that records it.
 
 Before changing this directory, read `CONTRACT.md` and the relevant document
-under `docs/runbooks/`. Before changing a case, read its complete `case.toml`,
-`README.md`, and patch. Before changing a runner, read its entry point,
-container recipe, tests, and the disabled canonical workflow it mirrors at
-`../.github/upstream-workflows/test.yml`.
+under `docs/runbooks/`. Before changing a case, read
+[`docs/runbooks/case-commits.md`](docs/runbooks/case-commits.md), the case's
+complete `case.toml` and `README.md`, and its commit
+(`make -C fork-maintenance case-show CASE=<slug>`). Before changing a runner,
+read its entry point, container recipe, tests, and the disabled canonical
+workflow it mirrors at `../.github/upstream-workflows/test.yml`.
 That inherited workflow is a technical reference for commands and dependencies;
 the fork-owned contract and runbooks alone decide when and how our checks run.
 Read and apply [the case README standard](docs/runbooks/case-documentation.md)
 whenever creating, changing or reassessing a case. Its semantic completeness
-check is part of the same pass, before draft promotion or exported handoff;
-do not leave a summary-only README for the operator to request expanding.
+check is part of the same pass as the case commit, before handoff; do not
+leave a summary-only README for the operator to request expanding.
 
 ## Layout
 
-- `cases/`: atomic production patches plus the permanent test-only quarantine
-  scaffold, active only while justified upstream failures remain;
-- `stacks/develop.toml`: the ordered complete queue;
+- `cases/`: one documentation directory (schema-2 `case.toml`, `README.md`,
+  optional local `tests/`) per case commit, plus the permanent test-only
+  quarantine scaffold, whose commit exists only while justified upstream
+  failures remain;
+- `stacks/develop.toml`: the stack-level test list; the case series is the
+  order of the case commits on `develop`;
 - `infra/upstream-tests/`: embedded-source container test runner, including its
   current image-bound `neutral/` regressions independent of case lifetime;
 - `infra/live/`: direct-transport and physical-GPU runner;
@@ -50,7 +58,7 @@ do not leave a summary-only README for the operator to request expanding.
 - `tools/background_job.py`: common owned process supervisor;
 - `tools/container_payload.py`: common validated Podman tar transport;
 - `tools/podman_policy.py`: common bounded user-namespace policy;
-- `tools/contrib.py`: branch, sync, patch-queue, and manifest safety gates;
+- `tools/contrib.py`: branch, sync, case-commit, and manifest safety gates;
 - `artifacts.toml` and `tools/artifacts.py`: permanent artifact storage classes,
   digest-confirmed mid-session housekeeping and session close;
 - `tools/knowledge.py`: distilled session records and their generated registry;
@@ -63,25 +71,26 @@ The only active GitHub workflows are `../.github/workflows/develop.yml`,
 byte-identical disabled renames below `../.github/upstream-workflows/`; they are
 not editable fork templates or historical runner snapshots.
 
-Historical results, superseded patches, publication drafts, and copied runner
-snapshots are not part of this layout. Do not recreate the removed `evidence/`,
-`investigations/`, `verifications/`, or `communications/` history as tracked
-content.
+Historical results, retired case commits, publication drafts, and copied
+runner snapshots are not part of this layout. Do not recreate the removed
+`evidence/`, `investigations/`, or `communications/` history as tracked
+content, and never store a case as a patch file.
 
 ## Current-state gates
 
-Ordinary patch investigation, workspaces, tests, CI, and live acceptance use
+Ordinary case investigation, case work, tests, CI, and live acceptance use
 the unique merge base already embedded in current `develop`. They do not fetch,
 query, or compare live master refs and do not require local `master` to be
-current. `isolated-start-check` remains on `develop`, allows dirt only in the
-fork control plane, rejects host Xpra source changes, and records that embedded
-source commit without changing a ref or the worktree.
+current. `isolated-start-check` remains on `develop`, locates that embedded
+base, refuses dirty product paths while allowing dirt in the control paths,
+and changes no ref or file.
 
-An operator-selected upstream adaptation cycle authorizes only local
-`develop-rebase` onto existing local `master`, followed by read-only
-`patch-start-check`. Fetch, master updates, remote configuration, branch
-switches, commits and publication require separate explicit operator
-instructions. Local gates do not validate remote URL spelling or live equality.
+An operator-selected upstream adaptation cycle authorizes local
+`develop-rebase` onto existing local `master` in the checkout, followed by
+read-only `patch-start-check`, and the case-commit rewrites its adaptation
+needs. Fetch, master updates, remote configuration, branch switches, control
+commits and publication require separate explicit operator instructions. Local
+gates do not validate remote URL spelling or live equality.
 The single agent entry point for the canonical **Autonomous Upstream Refresh
 and Full Queue Adaptation** procedure is:
 
@@ -93,10 +102,11 @@ This is an agent directive, not a Make target. Its complete queue-wide
 procedure is
 [`docs/runbooks/upstream-refresh.md`](docs/runbooks/upstream-refresh.md).
 Every active case receives equally deep manual correctness and necessity
-review after applicability checks. Review one case, immediately implement and
-export its justified changes (including necessary cross-case repairs), then
-re-review and checkpoint before the next case. Persist findings and concrete
-resume actions during work; do not accumulate a whole-queue read-only review
+review after the rebase has replayed its commit. Review one case, immediately
+implement its justified changes (including necessary cross-case repairs) in the
+case commits, then re-review and checkpoint before the next case. Persist
+findings and concrete resume actions during work; do not accumulate a
+whole-queue read-only review
 before implementing. The older optional `PRIMARY_CASE=<slug>` spelling affects
 only starting order, never review depth or scope. All initial
 review-driven adaptations, removals and regression migrations must be complete
@@ -107,98 +117,135 @@ unique cycle identifier and self-corrects any in-scope procedural or harness
 defect without restarting expensive evidence whose frozen semantic inputs are
 unchanged.
 
-The runbook requires clean `develop` before its local rebase. It reviews and
-preserves dirty work without committing, stashing or discarding it. The operator
-performs prerequisite Git operations or explicitly delegates them. The agent
-owns correct execution of delegated Git work; no other mutation is implicit.
-Read-only inspection and isolated workspace/test Git internals remain part of
-authorized local work and leave host Git state untouched. Refresh results
-remain uncommitted unless the operator separately requests a commit.
+The runbook requires a clean `develop` before its local rebase
+(`develop-rebase` refuses any uncommitted change); after the rebase, case
+rewrites carry uncommitted control work across with `--autostash`. It records the case map
+(`case-list`) and the old tip first, and reviews and preserves other dirty work
+without committing or discarding it. The operator performs prerequisite Git
+operations or explicitly delegates them. The agent owns correct execution of
+delegated Git work and of its own case-commit work; no other mutation is
+implicit. Read-only inspection and the runners' private test Git internals
+remain part of authorized local work. Case adaptations are stored in their
+case commits; control-plane results remain uncommitted unless the operator
+requests a control commit.
 
-A temporary non-master branch is supported only for exceptional clean
-host-worktree integration diagnosis and patch operations after it descends from
-current `develop`. The isolated workspace lifecycle requires `develop` and is
-not a temporary-branch workflow.
+There is no other branch and no Git worktree. Every case operation, check, and
+rewrite runs in the single `develop` checkout; never create a per-case, topic,
+or temporary branch and never run `git worktree`.
 
-`develop-check` validates the current embedded-base branch and requires:
+`develop-check` validates the committed `develop` model and requires:
 
-- clean `develop`;
+- a clean tree;
 - one unique embedded source boundary against local `master` (cached
   `origin/master` only when local `master` is absent);
-- no merge commits in the downstream range above that boundary;
-- no committed Xpra source changes outside the patch queue representation;
-- a resolvable `stacks/develop.toml`;
+- only valid control commits (control paths, no trailer) and case commits
+  (product paths, exactly one `Fork-Case: <slug>` trailer) above that
+  boundary, with no merge commits and no pending `fixup!`/`squash!`/`amend!`
+  commits;
+- a one-to-one correspondence of case directories and case commits (except the
+  inactive quarantine directory), with declared dependencies preceding their
+  consumers;
+- every `case-check`, `stack-check STACK=develop`, and `ci-layout-check`;
 - an effective ignore boundary for `.artifacts/fork-maintenance/`.
 
-Cached or live master freshness is deliberately not part of this check; the
+`case-check CASE=<slug>` proves one case: its schema-2 manifest is valid,
+exactly one commit carries its trailer and touches only product paths, its diff
+applies to the upstream base on its own after its declared dependencies and is
+neither already present nor ambiguous, and reverting it from `HEAD` is
+conflict-free with no other case depending on it. `stack-check STACK=develop`
+proves that every case commit resolves in order on the base and that base plus
+all case diffs reproduces exactly the product tree of `HEAD`. These proofs are
+in-memory merges; they never check out another tree or create a branch.
+
+Cached or live master freshness is deliberately not part of these checks; the
 operator owns the decision to start a separate upstream refresh.
 
-## Developing patches
+## Developing cases
 
-Run `isolated-start-check`, then create one atomic workspace with
-`workspace-create CASE=<id> WORKSPACE=<unique-name>`. Make source and regression
-changes only below that workspace, use `workspace-stage`, and export them with
-`workspace-update`; it atomically derives `fix.patch`, `patch_sha256`, and
-`paths` while leaving the host source and index untouched. The transaction
-also replaces that workspace's selection resolution and metadata, so a
-successful workspace remains current and may be edited, staged, and exported
-again before removal. Forward/reverse verification runs only in the
-transaction's temporary `candidate-lab/source`. Review both representations,
-then remove only the exact owned workspace. The old
-apply/update/unapply cycle remains available for explicit clean-host
-integration work.
-Both update paths publish an ignored `case-updates/<slug>.update.owner.json`
-and an exact transaction before replacing tracked files. Recover an interrupted
-preparation, finish a complete transaction, or clear a validated owner-only
-boundary only through `case-recover CASE=<slug>`; never edit the transaction or
-its retained `.lifecycle.lock` by hand. Recursive transaction cleanup first
-publishes `<slug>.update.remove.json`, stages the tree at
-`.<slug>.update.remove`, then deletes the update owner and finally the removal
-phase; an interrupted cleanup is completed by the same recovery target.
+Run `isolated-start-check`, then work directly in the `develop` checkout, which
+is the patched product. Follow
+[everyday operations](docs/runbooks/case-commits.md#everyday-operations):
 
-Before export, inspect every `new file mode` entry. Each new downstream-authored
-source or test file must carry `Copyright (C) <current-year> kogeler` in its
-native comment syntax; never substitute an upstream maintainer's authorship.
-Retain required notices on copied or derived content and add the `kogeler` line.
+```bash
+# change a case: edit its product files, then
+git add -- <paths>
+git -c commit.gpgsign=false commit \
+  --fixup="$(make -s -C fork-maintenance case-commit CASE=<slug>)"
+make -C fork-maintenance develop-squash
+make -C fork-maintenance case-check CASE=<slug>
+```
 
-For integration diagnosis and acceptance, create a stack workspace or use the
-embedded-source container runner. Do not export a stack as one atomic case patch.
-Host `stack-apply` and `stack-unapply` remain a clean-checkout fallback only.
+`git commit --fixup=amend:<sha>` also replaces the message. `develop-squash`
+folds every pending `fixup!`/`amend!`/`squash!` commit into its target with a
+non-interactive `git rebase --autosquash` from the upstream base; the commits
+above the target are replayed, so their SHAs change. A conflict while squashing
+means the edit overlaps another case: the cases are not independent, which is
+resolved in the design, not by a merge. A new case starts with
+`case-new CASE=<slug>` (schema-2 manifest template and README skeleton only);
+complete its documentation as control work, then create its one commit with
+the `Fork-Case: <slug>` trailer and run `case-check`. Retire a case with
+`case-drop CASE=<slug>` and remove its directory and every reference to the
+slug in the same change; never revert it. Split, merge, or reword cases with an
+explicit non-interactive `git rebase -i` sequence (`GIT_SEQUENCE_EDITOR`
+writing the prepared todo list) and update the case directories in the same
+change.
+
+Product paths must be clean before any rewrite or runner start; runners test
+committed `HEAD`. Uncommitted control work survives every rewrite through
+`--autostash`. Resolve case SHAs only when needed (`case-list`, `case-show`,
+`case-commit`); never store one in a tracked file. The scoped
+`make -C fork-maintenance typecheck` gate also runs on the `develop` checkout.
+
+Before committing, inspect every `new file mode` entry of the case diff. Each
+new downstream-authored source or test file must carry
+`Copyright (C) <current-year> kogeler` in its native comment syntax; never
+substitute an upstream maintainer's authorship. Retain required notices on
+copied or derived content and add the `kogeler` line. Commit messages follow
+[the case commit message format](docs/runbooks/case-commits.md#commit-message).
+
+For integration diagnosis, the `develop` checkout itself is the complete
+stack; for acceptance use the embedded-source runners with `STACK=develop`.
+Never fold several cases into one case commit.
 
 All known upstream-only test failures belong in
 `upstream-test-quarantine`, never in a production case. A quarantine addition
 requires a clean-source reproduction in every affected matrix leg. After each
 explicitly selected upstream rebase, complete the whole-queue manual-review
 exit gate, then run the three clean `quarantine*` gates before using that case
-in runtime validation. Isolated inspection/export is not quarantine
+in runtime validation. Inspecting or replaying its commit is not quarantine
 acceptance. Every gate runs the complete ordered module union:
 its exact gate-specific assignment must be the ignored-failure set, while the
 complement must pass without skips. A newly green assigned module makes that
-leg assignment stale; remove the module and its patch path only after it has no
-remaining failing-leg assignment. Resolve every stale or newly failing leg
-before the patched full matrix is accepted.
+leg assignment stale; remove the module and its test-file change from the
+quarantine commit only after it has no remaining failing-leg assignment.
+Resolve every stale or newly failing leg before the patched full matrix is
+accepted.
 
-No duty is currently active. Preserve `cases/upstream-test-quarantine/` as an
-inactive `draft = true` scaffold with its README, manifest and zero-byte patch.
-Keep its TOML queue and gate entries commented with the reason to enable them
-when currently broken upstream tests require quarantine. Never delete this
-infrastructure or its supporting gates/runbook because the module union is
-empty. Deactivate obsolete assignments through
-[`docs/runbooks/test-quarantine.md`](docs/runbooks/test-quarantine.md), not the
-production-case deletion flow. Record reassessment as not applicable, skip
-inactive case-specific commands and keep every production and final matrix
-gate. Do not restore retired skips.
+No duty is currently active. Preserve `cases/upstream-test-quarantine/` with
+its README and manifest as the inactive scaffold: no
+`Fork-Case: upstream-test-quarantine` commit, empty `quarantine.modules`, empty
+gate lists and an empty `tests.list`, so it is not selectable. Activation fills
+the manifest lists and creates one quarantine commit changing exactly those
+test files. Never delete this infrastructure or its supporting gates/runbook
+because the module union is empty. Deactivate obsolete assignments through
+[`docs/runbooks/test-quarantine.md`](docs/runbooks/test-quarantine.md)
+(`case-drop`, then empty the lists again), not the production-case deletion
+flow. Record reassessment as not applicable, skip inactive case-specific
+commands and keep every production and final matrix gate. Do not restore
+retired skips.
 
-When upstream absorbs a patch exactly, the resolver reports
-`already-present`. Removing it from the active queue still requires a current
-code review of all its invariants and durable replacement regression ownership.
-During a refresh, implement the uncommitted retirement candidate in the manual
-review phase, then confirm it with equivalent clean-source and resulting-stack
-checks after the whole-queue review gate; never lose the only useful test when
-deleting its old case owner. Since run output is local-only, record the
-conclusion in the external refresh handoff; a later
-operator-created commit may summarize it, but no tracked evidence archive is
-created.
+When upstream absorbs a case's diff byte for byte, `develop-rebase` drops its
+commit by itself; any other fully upstream case is retired with `case-drop`,
+and `case-check` refuses a case which is already present. Removing a case
+from the stack still requires a current code review of all its invariants and
+durable replacement regression ownership, and removal of its directory in the
+same change. During a refresh, implement the retirement in the manual review
+phase, then confirm it with equivalent clean-source and resulting-stack checks
+after the whole-queue review gate; never lose the only useful test when
+deleting its old case owner. The dropped commit stays reviewable through the
+recorded case map and the reflog. Since run output is local-only, record the
+conclusion in the session record and handoff; a later control commit may
+summarize it, but no tracked evidence archive is created.
 
 ## Development and final acceptance
 
@@ -207,7 +254,7 @@ gate in [upstream refresh](docs/runbooks/upstream-refresh.md) precedes this
 testing loop. Applicability and green tests cannot establish correctness or
 continued necessity. Analyze uncovered paths, implement the review decisions,
 and re-review affected consumers within each case iteration, saving the
-published candidate and a checkpoint before moving on. The final composed
+updated case commit and a checkpoint before moving on. The final composed
 review closes these incremental records before runtime validation starts. Narrow
 offline fork-control checks may run while review is still in progress.
 
@@ -226,7 +273,7 @@ rerun after every case adaptation. A final failure returns its owning boundary
 to development before affected expensive gates restart.
 
 Flow improvements stay in fork-owned files and use narrow infrastructure tests
-first. Preserve pending patch work and named evidence; finish collection/removal
+first. Preserve pending case work and named evidence; finish collection/removal
 before changing a shared runner or another bound input. Cache reuse follows
 actual verified input keys, never renamed labels or an assumption that focused
 tests avoid building Xpra.
@@ -238,9 +285,17 @@ merge base already embedded in their `develop` checkout. Local jobs use local
 `master`, falling back to cached `origin/master` only when it is absent. Hosted
 CI explicitly uses cached `origin/master`. These refs are history anchors;
 their freshness and equality with upstream are irrelevant to the run. Neither path
-fetches, syncs, switches, merges, or rebases. Both apply the selected queue in
-an isolated context and never package the develop working tree, `.git`,
-credentials, ignored files, or Git configuration.
+fetches, syncs, switches, merges, or rebases. Selectors and modes stay
+`CASE=<slug>` or `STACK=develop` with `PATCH_MODE=clean`, `tests-only`, or
+`patched`. At start each runner freezes the manifests plus, for every selected
+case, the diff of its commit in committed `HEAD`
+(`git diff --binary --full-index`) into its private payload, where it is
+written as that case's generated `fix.patch`; the selection digest binds those
+bytes, so a changed commit is a new candidate. `tests-only` applies only the
+`tests/` part of that diff to the clean base. Product paths must be clean at
+start; control paths may be dirty. Runners apply the selection in an isolated context and never
+package the develop working tree, `.git`, credentials, ignored files, or Git
+configuration. See [runners](docs/runbooks/case-commits.md#runners).
 
 The fixed multi-window hardware gate is `APPLICATION=hardware`,
 `ENCODING=h264`, `H264_CLIENT_POLICY=adaptive-alpha`,
@@ -279,7 +334,7 @@ Zed H.264, RGB detach, RGB transport loss, keymap input, Vulkan hardware,
 OpenGL hardware, X11 clipboard and Wayland subsurface composition. Every live
 test MUST run the entire current `stacks/develop` on both endpoints.
 Developing or running case-only, partial-stack or clean-endpoint live tests
-is forbidden. For every patch validation follow the live loop of
+is forbidden. For every case validation follow the live loop of
 `docs/runbooks/live-tests.md`: fix each failing gate and continue from it
 (`live-all ... FROM=<gate>`) to the last gate, then one complete
 `live-all STACK=develop RUN=<prefix>` pass, repeated the same way until a
@@ -293,7 +348,7 @@ forward takeovers, allowed reverse transfer, controlled client exit and event
 drain. Only a bound shutdown-only zero-owner event may be classified separately;
 late nonzero takeover fails. Subsurface composition retains its independent
 packet/pixel/ACK and continuous-producer oracle, now with upstream's frame-callback
-pacing and the rest of the queue present.
+pacing and the rest of the stack present.
 
 Their fixed Make wrappers require the
 complete `stacks/develop` selection on both endpoints. `profiles.yml` alone
@@ -307,12 +362,13 @@ result.
 DEB builds are a separate branch-agnostic source path. They use `HEAD` and
 enumerate refs whose final component is `master`, require one uniquely latest
 clean merge base, and never fetch, sync, or require a current branch name or
-remote name. Downstream merge commits and committed or dirty Xpra source after
-that boundary are forbidden. The selected master ref is recorded as frozen
-provenance only. The clean boundary receives the complete queue inside the
-package container; `stacks/develop` is the queue slug, not a checked-out branch
-requirement. Builds are unsigned, force xz Debian members, and validate each xz
-stream with a 256 MiB decoder memory limit. Builder images are cached by their
+remote name. Downstream merge commits, product changes outside valid case
+commits, and dirty product paths after that boundary are forbidden. The
+selected master ref is recorded as frozen provenance only. The clean boundary
+receives the frozen case commit diffs of `HEAD`, the complete stack, inside
+the package container; `stacks/develop` is the stack slug, not a checked-out
+branch requirement. Builds are unsigned, force xz Debian members, and validate
+each xz stream with a 256 MiB decoder memory limit. Builder images are cached by their
 complete input digest and verified labels; each package container executes the
 immutable image ID, and each accepted package result binds it. The immutable queue cache
 is `selections/<selection-sha>-<metadata-sha>/{lab,selection.json}`; a package
@@ -397,22 +453,18 @@ environment is separately serialized by retained `venvs/.environment.lock`;
 only `live-venv` may validate and recover its exact marker-owned
 `.environment.partial` state.
 
-Give every run and workspace in one work cycle a common lowercase prefix.
-After the patch and validation are final and reviewed, use `cycle-clean-plan`
-and pass its exact digest to `cycle-clean`. The planner must reject active or
-unremoved runtime state, incomplete evidence, and any workspace candidate not
-represented by the current queue. Ordinary cycle cleanup retains shared
+Give every run in one work cycle a common lowercase prefix. After the case
+commits and validation are final and reviewed, use `cycle-clean-plan` and pass
+its exact digest to `cycle-clean`. The planner must reject active or unremoved
+runtime state and incomplete evidence. Ordinary cycle cleanup retains shared
 content-verified frozen source bundles and archives, immutable DEB selection
 snapshots, input-keyed build contexts and images, ccache, and virtual
 environments. Retained source/cache/lifecycle lock files are validated; any
 source, selection, matching DEB validation, DEB abort transaction, or
-live-freeze prelaunch/abort transaction/partial blocks cleanup. Case
-creation/update and workspace create/remove/fingerprint staging also block it
-until `case-recover` or `workspace-recover` validates and resolves only that
-exact marker-backed state. Plan and execution acquire the retained
-upstream-test lifecycle, upstream image-cache, live lifecycle, DEB terminal,
-workspace lifecycle, and case-update locks in that fixed order. Before its
-first deletion, execution publishes
+live-freeze prelaunch/abort transaction/partial blocks cleanup. Plan and
+execution acquire the retained upstream-test lifecycle, upstream image-cache,
+live lifecycle, and DEB terminal locks in that fixed order. Before its first
+deletion, execution publishes
 the schema-2 `cycle-cleanups/<CYCLE>.remove.json`, binding each directory's
 device, inode, and fingerprint. Directory targets are atomically staged at
 `cycle-cleanups/.<CYCLE>.<index>.remove`; schema-1
@@ -429,26 +481,26 @@ their permanent structural allowlist; never populate it with current
 run/cycle/session names, dates, success statuses, or age heuristics. Its only
 `permanent` class is `knowledge/`; `infrastructure` holds lifecycle/recovery
 authorities; `task` holds session work (`work/`) and every filesystem cache.
-`artifacts-clean` keeps all three classes plus runtime-bound results and
-unfinished workspaces; remaining safe output is disposable regardless of
-historical report schema. `artifacts-close` refuses to delete anything while
-runtime, recovery state, non-idle infrastructure, an invalid or stale knowledge
-record, or an entry outside `.artifacts/fork-maintenance/` remains; it then
-discards session work and caches and leaves only `knowledge/` and idle lock
-files. Both reuse the six locks and resumable removal engine but perform no job
-lifecycle transition or result acceptance. Cleanup ends reuse of deleted named
+`artifacts-clean` keeps all three classes plus runtime-bound results;
+remaining safe output is disposable regardless of historical report schema.
+`artifacts-close` refuses to delete anything while runtime, recovery state,
+non-idle infrastructure, an invalid or stale knowledge record, or an entry
+outside `.artifacts/fork-maintenance/` remains; it then discards session work
+and caches and leaves only `knowledge/` and idle lock files. Both reuse the
+cycle-cleanup locks and resumable removal engine but perform no job lifecycle
+transition or result acceptance. Cleanup ends reuse of deleted named
 evidence. Durable experience is distilled into
 `knowledge/sessions/<session>.md` and indexed by `knowledge-index`; never
 preserve generated logs, reports or archives instead. Require `artifacts-check`
 or `artifacts-close-check` to report no leftovers. Report every protected
-exception explicitly; never silently discard an unexported candidate to obtain
-an empty directory.
+exception explicitly; never silently discard protected state to obtain an
+empty directory.
 
 Keep direct Xpra behavior separate from SSH or parent-product orchestration.
 The live runner owns direct-TCP detach, abrupt transport loss, RGB, adaptive
 Wayland H.264, multi-window hardware, and the full-stack X11-to-native-Wayland
 clipboard gate. Do not replace these with foreground one-off commands when
-deciding whether a patch is ready.
+deciding whether a case is ready.
 
 Invoke job lifecycle operations only through the root Makefile targets. Never
 signal recorded process groups or call destructive Podman commands directly for
@@ -480,9 +532,7 @@ A standalone image start first publishes
 boundary and normal remove/abort deletes it. Upstream-test and live terminal
 transitions each use one retained subsystem `.lifecycle.lock`; DEB
 start/collect/remove/abort uses retained `deb-packages/locks/terminal.lock`.
-All workspace operations and fingerprint publication use retained
-`upstream-tests/workspaces/.lifecycle.lock`; workspace update acquires it before
-`case-updates/.lifecycle.lock`. Retained upstream foreground payload
+Retained upstream foreground payload
 and image-cache locks serialize deterministic staging and mutable-tag handoff;
 retained DEB per-key image locks provide the same handoff guarantee. Their
 children inherit the open kernel lock. Live start holds its lifecycle lock from
@@ -500,17 +550,6 @@ authorizes read-only inspection: `live-status` validates it and reports
 `live-logs` returns only its validated digest-bound final log. Pre-main freeze
 routing remains separate, and any transaction or evidence mismatch fails closed.
 
-Workspace removal uses external
-`upstream-tests/workspaces/.<WORKSPACE>.remove.owner.json` and no-replace staging
-at `.<WORKSPACE>.remove`. Fingerprint scratch uses external schema-2
-`workspace-fingerprints/<WORKSPACE>.fingerprint.owner.json`; its recursive
-cleanup publishes `<WORKSPACE>.fingerprint.remove.json` and stages at
-`.<WORKSPACE>.fingerprint.remove`. After staging, exact device/inode identity—not
-a new hash of a partially deleted tree—authorizes retry. The fingerprint phase
-binds its owner operation ID and digest, removes that owner after the tree, and
-is itself removed last. Use only `workspace-remove` or `workspace-recover` to
-finish these transitions.
-
 GitHub CI is a thin caller, not a second automation implementation. Its YAML may
 select the `develop` push trigger, Ubuntu 26.04 runner, minimal permissions,
 six-hour timeout, a full-SHA-pinned full-history checkout without persisted
@@ -518,7 +557,7 @@ credentials, a clean worktree at the exact hosted `GITHUB_SHA`, and the exact fi
 `full`, `full-cython`, and `full-no-compat`. Each matrix job passes its value as
 `XPRA_CI_TARGET`; its only command is
 `make -C fork-maintenance ci-upstream-tests`. All source freezing, image
-building, patch application, target validation, and test implementation stay
+building, case-diff application, target validation, and test implementation stay
 behind that Make target. Do not put apt, Podman, Python, retries, skips, dynamic
 test discovery, or test commands into the workflow. Matrix fail-fast remains
 disabled and `max-parallel` remains three so all three independent results are
@@ -594,29 +633,33 @@ candidate before final acceptance, not after each documentation or two-line edit
 
 A refresh proven by exact applied-tree comparison to change only comments,
 copyright notices, or documentation does not rerun unchanged Xpra focused,
-native, or full jobs. Patch validation still requires the complete live suite.
+native, or full jobs. Case validation still requires the complete live suite.
 The embedded source, paths, modes, executable data, configuration, test
-assertions, and runner behavior must all be unchanged. Run resolution,
-whitespace, and fork-control checks and report the non-semantic proof. Any
-uncertainty falls back to the affected development checks and final gates. This
-exception is only for a patch/documentation refresh on an unchanged embedded
-source. It never applies after `develop-rebase`: a changed base requires every clean quarantine,
+assertions, and runner behavior must all be unchanged. Run `case-check`,
+`stack-check`, whitespace, and fork-control checks and report the
+non-semantic proof. Any uncertainty falls back to the affected development
+checks and final gates. This exception is only for a case/documentation
+refresh on an unchanged embedded source. It never applies after
+`develop-rebase`: a changed base requires every clean quarantine,
 fork-control, tests-only clean control or documented no-test semantic
 substitute, patched focused/native gate, durable package boundary on the
 resulting stack, full-matrix leg and all nine positive live gates with the
-complete stack selection even if the patch bytes did not need modification.
+complete stack selection even if no case commit needed modification.
 That is the final new-base acceptance set, not a per-edit development sequence.
 
 When a run fails before entering an expensive test target, validate a fix to
 that pre-test guard with the narrow control-plane unit test and direct preflight
 command. Do not launch the downstream matrix merely to test removal of the
-guard when its exact frozen fork source commit, selection and patch digests,
-image inputs, entrypoint, and test commands are unchanged. This is a
+guard when its exact frozen fork source commit, selection and case-diff
+digests, image inputs, entrypoint, and test commands are unchanged. This is a
 proportional-validation rule, not permission to skip tests whose inputs or
 execution behavior changed.
 
-No target in this directory commits, pushes the checked-out branch, creates a
-pull request, or changes the default branch. The hosted-only
+No target in this directory creates a new commit, pushes the checked-out
+branch, creates a pull request, or changes the default branch. The rewriting
+targets `develop-squash`, `case-drop`, and `develop-rebase` only fold, drop, or
+replay existing local commits of `develop` in the checkout, unsigned and with
+`--autostash`. The hosted-only
 `ci-master-sync` target may fast-forward fork `master`; `ci-deb-release` may
 create its unique draft, ordinary release with the exact version title, tag,
 and two assets and may perform only its exact just-created
@@ -631,9 +674,20 @@ order; an exact published release from a failed or cancelled earlier attempt
 may resume only this retention. Agent dispatch of either workflow requires
 separate explicit operator instructions.
 
-No runbook implies authority for a content commit. Git changes are performed
-by the operator or by the agent on explicit operator instruction. Only local
-`develop` rebase onto existing local `master` is autonomous within the refresh
-runbook, including its conflict continuation or abort. Read-only inspection
-and private patch/test indexes do not change host Git state. Refresh results
-remain uncommitted for review.
+Case commits are the storage of case work: the agent creates, fixes up,
+squashes, drops, splits, and rebases them itself, always unsigned, as part of
+the task, including the refresh runbook's local `develop` rebase onto existing
+local `master` with its conflict continuation or abort (see
+[commit authority](docs/runbooks/case-commits.md#commit-authority)). Every
+Git command of the agent that creates or rewrites a commit passes
+`-c commit.gpgsign=false`: the operator's global configuration signs with a
+hardware security token that an agent cannot operate, and that configuration is
+never changed. Agent commits and pull-request texts never name an agent as
+author or co-author ([agent commits](docs/runbooks/case-commits.md#agent-commits)).
+No runbook implies authority for a control commit: control commits follow the
+operator's instructions, and uncommitted control work survives every rewrite
+through `--autostash`. Every other Git change is performed by the operator or
+by the agent on explicit operator instruction. The agent never pushes; after
+any case rewrite the operator publishes `develop` with `--force-with-lease`
+([publication](docs/runbooks/case-commits.md#publication)). Read-only
+inspection and the runners' private test indexes do not change host Git state.

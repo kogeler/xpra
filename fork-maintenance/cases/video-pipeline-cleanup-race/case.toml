@@ -1,19 +1,7 @@
-schema = 1
+schema = 2
 slug = "video-pipeline-cleanup-race"
 title = "Own video pipeline resources through terminal cleanup"
-commit_subject = "Own video pipeline resources through terminal cleanup"
-patch_sha256 = "8476263e5703a56977b39e54a4501bee71630618fd73434479b5ee6fc6eb54bb"
 dependencies = []
-paths = [
-  "tests/unittests/unit/server/encoder_server_test.py",
-  "tests/unittests/unit/server/source/encoding_lifecycle_test.py",
-  "tests/unittests/unit/server/window/video_compress_test.py",
-  "xpra/server/source/client_connection.py",
-  "xpra/server/source/encoding.py",
-  "xpra/server/source/factory.py",
-  "xpra/server/window/video_compress.py",
-  "xpra/server/window/video_subregion.py",
-]
 
 [tests]
 list = [

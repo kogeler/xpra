@@ -1,5 +1,8 @@
 # Packet handler error boundary
 
+Code: the `Fork-Case: packet-handler-error-boundary` commit on `develop`
+(`make -C fork-maintenance case-show CASE=packet-handler-error-boundary`).
+
 ## Boundary
 
 A packet-handler error boundary must surround execution of the selected
@@ -228,12 +231,13 @@ redaction layer or a bound on bytes per traceback. It also cannot preempt a
 handler or a blocked logging backend; bounded report frequency is not a
 universal latency or denial-of-service guarantee.
 
-## Patch-queue and integration ownership
+## Case-commit and integration ownership
 
-`fix.patch` changes only `xpra/net/dispatch.py` and adds
+The case commit changes only `xpra/net/dispatch.py` and adds
 `tests/unittests/unit/net/packet_handler_error_test.py`. It has no case
-dependencies and resolves independently, but production and live validation
-always use the complete `stacks/develop` queue.
+dependencies: it applies alone on the upstream base and is removable from
+`HEAD` independently of the other case commits (`case-check`), but production
+and live validation always use the complete `develop` stack.
 
 The shared dispatch route serves the keymap, clipboard and subsurface cases
 as well as upstream handlers. Their policies and resource ownership remain
@@ -249,11 +253,12 @@ handler is not automatically protected after that handler returns. Moving
 those case-specific cleanup guarantees into this guard would conflate
 independent asynchronous lifetimes.
 
-Patch storage is atomic, not a live-product selection. Updating this case must
-not absorb adjacent fixes, replace their assertions with error-count checks,
-or introduce an isolated clipboard, input or rendering live endpoint.
+The case commit is an atomic storage unit, not a live-product selection.
+Updating this case must not absorb adjacent fixes, replace their assertions
+with error-count checks, or introduce an isolated clipboard, input or
+rendering live endpoint.
 
-## Patch ownership and non-goals
+## Commit scope and non-goals
 
 The case owns the `Exception` scope of upstream's handler and routing guards,
 the shared reporting budget and counters, and focused proof of those
@@ -332,7 +337,7 @@ existing routing and lifecycle behavior outside the new regression.
 There is no new case-only live fixture. Deterministic fault injection belongs
 to the focused real-GLib module; it neither opens a production connection nor
 claims to inject input into a real Wayland application. The complete live
-suite provides the complementary end-to-end boundary with every active patch
+suite provides the complementary end-to-end boundary with every case commit
 on both server and client.
 
 Its nine profiles cover Zed RGB and adaptive-alpha H.264, detach, transport
@@ -367,14 +372,14 @@ clipboard ownership, hardware presentation or connection teardown.
 ## Required validation
 
 Follow [development and final acceptance](../../docs/runbooks/validation.md).
-During an upstream refresh, first close the incremental whole-queue and
+During an upstream refresh, first close the incremental whole-stack and
 composed manual-review gate; runtime regression execution starts afterward.
 After an atomic behavior change, run the manifest's focused modules and a
 non-vacuous tests-only clean control in the same frozen image. Exercise the
 real GLib boundary in interpreted, Cythonized and no-compat modes; bytecode
 compilation or a mock scheduler is not a native callback substitute. Check
-the standalone case and its complete-stack composition without exporting the
-stack into this atomic patch.
+the standalone case and its complete-stack composition without folding the
+stack into this atomic case commit.
 
 Start `live-all STACK=develop RUN=<fresh-prefix>` early once focused
 prerequisites are satisfied. At candidate freeze, fill missing or invalidated

@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Validate and freeze an atomic fork-maintenance case or integration stack."""
+"""Validate and freeze an atomic fork-maintenance case or the develop stack.
+
+Every case is exactly one commit on ``develop`` carrying a ``Fork-Case: <slug>``
+trailer. On the host (git mode) the lab root is the tracked ``fork-maintenance``
+directory and each case diff is taken from its commit. A frozen payload
+(snapshot mode) carries ``selection-source.json`` and one generated
+``cases/<slug>/fix.patch`` per selected case instead.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +27,7 @@ import tomllib
 
 SLUG_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 UNIT_TEST_RE = re.compile(r"unit(?:\.[a-z0-9_]+)+")
+GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 SUPPORTED_GATES = frozenset(
     {
         "focused",
@@ -50,9 +58,24 @@ QUARANTINE_GATE_NAMES = (
     "quarantine-no-compat",
 )
 QUARANTINE_GATES = frozenset(QUARANTINE_GATE_NAMES)
-LOCAL_TEST_RE = re.compile(
-    r"(?:cases|verifications)/[a-z0-9]+(?:-[a-z0-9]+)*/tests/[A-Za-z0-9_./-]+\.py"
+LOCAL_TEST_RE = re.compile(r"cases/[a-z0-9]+(?:-[a-z0-9]+)*/tests/[A-Za-z0-9_./-]+\.py")
+CASE_FIELDS = frozenset(
+    {"schema", "slug", "kind", "title", "dependencies", "tests", "evidence", "quarantine"}
 )
+STACK_FIELDS = frozenset({"schema", "slug", "description", "tests"})
+# Paths owned by control commits; every other path is product code of a case commit.
+CONTROL_PATHS = (
+    "AGENTS.md",
+    ".gitignore",
+    ".github/workflows/",
+    ".github/upstream-workflows/",
+    "fork-maintenance/",
+)
+CASE_TRAILER = "Fork-Case"
+FIXUP_PREFIXES = ("fixup! ", "squash! ", "amend! ")
+SNAPSHOT_MARKER = "selection-source.json"
+PATCH_NAME = "fix.patch"
+BASE_REFS = ("refs/heads/master", "refs/remotes/origin/master")
 
 
 class SelectionError(ValueError):
@@ -67,6 +90,7 @@ class Case:
     manifest_bytes: bytes
     patch_path: Path
     patch_bytes: bytes
+    commit: str
     dependencies: tuple[str, ...]
     tests: tuple[str, ...]
     required_gates: tuple[str, ...]
@@ -83,6 +107,68 @@ class Selection:
     cases: tuple[Case, ...]
     subjects: tuple[str, ...]
     tests: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CaseCommit:
+    slug: str
+    commit: str
+    subject: str
+    paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DevelopMap:
+    """The classified fork history ``base..head`` of one checkout."""
+
+    base: str
+    head: str
+    cases: tuple[CaseCommit, ...]
+    control: tuple[str, ...]
+
+    def commit_of(self, slug: str) -> CaseCommit | None:
+        return next((case for case in self.cases if case.slug == slug), None)
+
+
+@dataclass(frozen=True)
+class Source:
+    """Where case diffs come from: a checkout's commits or a frozen payload."""
+
+    lab_root: Path
+    snapshot: dict[str, object] | None
+    develop: DevelopMap | None
+
+    @property
+    def series(self) -> tuple[str, ...]:
+        if self.develop is not None:
+            return tuple(case.slug for case in self.develop.cases)
+        assert self.snapshot is not None
+        return tuple(self.snapshot["series"])  # type: ignore[arg-type]
+
+    def commit(self, slug: str) -> str:
+        if self.develop is not None:
+            found = self.develop.commit_of(slug)
+            if found is None:
+                fail(f"case {slug} has no Fork-Case commit in develop")
+            return found.commit
+        assert self.snapshot is not None
+        commits = self.snapshot["commits"]
+        assert isinstance(commits, dict)
+        value = commits.get(slug)
+        if not isinstance(value, str):
+            fail(f"case {slug} is not part of the frozen selection")
+        return value
+
+    def patch_bytes(self, slug: str, *, alone: bool) -> bytes:
+        """The case diff: in stack order, or cherry-picked alone onto the base."""
+        if self.develop is not None:
+            repo = self.lab_root.parent
+            commit = self.commit(slug)
+            if alone:
+                return case_diff_alone(repo, self.develop.base, commit, slug)
+            return case_diff(repo, commit)
+        self.commit(slug)
+        return require_regular_file(self.lab_root / "cases" / slug / PATCH_NAME, "frozen case patch")
 
 
 def fail(message: str) -> NoReturn:
@@ -111,11 +197,11 @@ def require_slug(value: object, description: str) -> str:
     return value
 
 
-def require_tests(value: object, description: str) -> tuple[str, ...]:
+def require_tests(value: object, description: str, *, allow_empty: bool = False) -> tuple[str, ...]:
     if not isinstance(value, dict):
         fail(f"invalid {description}: missing [tests] table")
     entries = value.get("list")
-    if not isinstance(entries, list) or not entries:
+    if not isinstance(entries, list) or (not entries and not allow_empty):
         fail(f"invalid {description}: tests.list must be a non-empty array")
     result: list[str] = []
     for entry in entries:
@@ -152,30 +238,251 @@ def require_gates(value: object, description: str) -> tuple[str, ...]:
     return tuple(result)
 
 
-def require_paths(value: object, description: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value:
-        fail(f"invalid {description}: paths must be a non-empty array")
-    result: list[str] = []
-    for entry in value:
-        if not isinstance(entry, str):
-            fail(f"invalid {description} path: {entry!r}")
-        path = Path(entry)
+def is_control_path(path: str) -> bool:
+    return any(
+        path.startswith(prefix) if prefix.endswith("/") else path == prefix
+        for prefix in CONTROL_PATHS
+    )
+
+
+# --- git mode ---------------------------------------------------------------
+
+
+def git(repo: Path, *arguments: str, input_bytes: bytes | None = None) -> bytes:
+    result = subprocess.run(
+        ("git", "-C", str(repo), *arguments),
+        input=input_bytes,
+        capture_output=True,
+        check=False,
+        env={"GIT_NO_LAZY_FETCH": "1", "PATH": "/usr/bin:/bin:/usr/local/bin", "LC_ALL": "C"},
+    )
+    if result.returncode:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        fail(f"git {' '.join(arguments[:2])} failed: {detail}")
+    return result.stdout
+
+
+def git_text(repo: Path, *arguments: str) -> str:
+    return git(repo, *arguments).decode("utf-8")
+
+
+DIFF_OPTIONS = (
+    "--binary",
+    "--full-index",
+    "--no-renames",
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+)
+
+
+def tree_diff(repo: Path, old: str, new: str) -> bytes:
+    return git(repo, "-c", "core.quotePath=false", "diff", *DIFF_OPTIONS, old, new, "--")
+
+
+def case_diff(repo: Path, commit: str) -> bytes:
+    """The exact binary-safe diff of one case commit against its parent."""
+    return tree_diff(repo, f"{commit}^", commit)
+
+
+def case_diff_alone(repo: Path, base: str, commit: str, slug: str) -> bytes:
+    """The case commit cherry-picked onto the bare base, merged in memory.
+
+    Its own diff carries context from the cases before it; a three-way merge
+    applies only its change, and a conflict proves it is not independent.
+    """
+    result = subprocess.run(
+        ("git", "-C", str(repo), "merge-tree", "--write-tree", f"--merge-base={commit}^", base, commit),
+        capture_output=True,
+        check=False,
+        env={"GIT_NO_LAZY_FETCH": "1", "PATH": "/usr/bin:/bin:/usr/local/bin", "LC_ALL": "C"},
+    )
+    if result.returncode == 1:
+        fail(f"case {slug} does not apply alone on the upstream base (its commit conflicts with the base)")
+    if result.returncode:
+        fail(f"git merge-tree failed for case {slug}: {result.stderr.decode('utf-8', 'replace').strip()}")
+    tree = result.stdout.decode().splitlines()[0].strip()
+    if not GIT_SHA_RE.fullmatch(tree):
+        fail(f"git merge-tree returned no tree for case {slug}")
+    return tree_diff(repo, base, tree)
+
+
+def resolve_base(repo: Path, head: str, base_commit: str | None) -> str:
+    if base_commit is not None:
+        if not GIT_SHA_RE.fullmatch(base_commit):
+            fail(f"invalid base commit: {base_commit!r}")
+        ancestor = subprocess.run(
+            ("git", "-C", str(repo), "merge-base", "--is-ancestor", base_commit, head),
+            check=False,
+            capture_output=True,
+        )
+        if ancestor.returncode:
+            fail(f"base {base_commit} is not an ancestor of HEAD")
+        return base_commit
+    refs = set(git_text(repo, "for-each-ref", "--format=%(refname)", *BASE_REFS).split())
+    ref = next((candidate for candidate in BASE_REFS if candidate in refs), None)
+    if ref is None:
+        fail("no master ref (refs/heads/master or refs/remotes/origin/master) locates the upstream base")
+    bases = git_text(repo, "merge-base", "--all", ref, head).split()
+    if len(bases) != 1 or not GIT_SHA_RE.fullmatch(bases[0]):
+        fail(f"HEAD and {ref} have no single upstream base")
+    return bases[0]
+
+
+def develop_map(repo: Path, base_commit: str | None = None) -> DevelopMap:
+    """Classify every fork commit in ``base..HEAD`` and map cases to commits."""
+    head = git_text(repo, "rev-parse", "--verify", "HEAD^{commit}").strip()
+    base = resolve_base(repo, head, base_commit)
+    merges = git_text(repo, "rev-list", "--merges", f"{base}..{head}").split()
+    if merges:
+        fail(f"develop contains merge commits: {merges}")
+    commits = git_text(repo, "rev-list", "--reverse", "--topo-order", f"{base}..{head}").split()
+    cases: list[CaseCommit] = []
+    control: list[str] = []
+    seen: dict[str, str] = {}
+    for commit in commits:
+        subject = git_text(repo, "log", "-1", "--format=%s", commit).rstrip("\n")
+        if subject.startswith(FIXUP_PREFIXES):
+            fail(f"pending {subject.split()[0]} commit {commit}: run develop-squash")
+        trailers = [
+            value.strip()
+            for value in git_text(
+                repo,
+                "log",
+                "-1",
+                f"--format=%(trailers:key={CASE_TRAILER},valueonly,unfold,separator=%x00)",
+                commit,
+            ).rstrip("\n").split("\0")
+            if value.strip()
+        ]
+        paths = tuple(
+            sorted(
+                path
+                for path in git_text(
+                    repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "--no-renames", f"{commit}^", commit
+                ).splitlines()
+                if path
+            )
+        )
+        product = tuple(path for path in paths if not is_control_path(path))
+        if not trailers:
+            if product:
+                fail(f"commit {commit} changes product paths without a {CASE_TRAILER} trailer: {list(product)}")
+            control.append(commit)
+            continue
+        if len(trailers) != 1:
+            fail(f"commit {commit} has more than one {CASE_TRAILER} trailer")
+        slug = require_slug(trailers[0], f"{CASE_TRAILER} trailer of {commit}")
+        if len(product) != len(paths):
+            fail(f"case commit {commit} ({slug}) also changes control paths")
+        # an empty case commit is a refresh placeholder: its case-check fails
+        # until it is rebuilt with a fixup or retired with case-drop
+        if slug in seen:
+            fail(f"case {slug} has more than one commit: {seen[slug]} {commit}")
+        seen[slug] = commit
+        cases.append(CaseCommit(slug=slug, commit=commit, subject=subject, paths=paths))
+    return DevelopMap(base=base, head=head, cases=tuple(cases), control=tuple(control))
+
+
+def git_mode_repo(lab_root: Path) -> Path:
+    repo = lab_root.parent
+    toplevel = subprocess.run(
+        ("git", "-C", str(lab_root), "rev-parse", "--show-toplevel"),
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if toplevel.returncode or Path(toplevel.stdout.strip()).resolve() != repo.resolve():
+        fail(f"lab root is neither a frozen selection nor the fork-maintenance directory of a checkout: {lab_root}")
+    if lab_root.name != "fork-maintenance":
+        fail(f"lab root of a checkout must be its fork-maintenance directory: {lab_root}")
+    return repo
+
+
+def open_source(lab_root: Path, base_commit: str | None = None) -> Source:
+    if lab_root.is_symlink() or not lab_root.is_dir():
+        fail(f"lab root is missing or is a symlink: {lab_root}")
+    marker = lab_root / SNAPSHOT_MARKER
+    if marker.exists() or marker.is_symlink():
+        try:
+            payload = json.loads(require_regular_file(marker, "selection snapshot marker"))
+        except json.JSONDecodeError as exc:
+            fail(f"invalid selection snapshot marker: {exc}")
         if (
-            not entry
-            or path.is_absolute()
-            or ".." in path.parts
-            or path.as_posix() != entry
-            or entry == "fork-maintenance"
-            or entry.startswith("fork-maintenance/")
+            not isinstance(payload, dict)
+            or set(payload) != {"schema", "base", "head", "series", "commits"}
+            or payload.get("schema") != 1
+            or not isinstance(payload.get("series"), list)
+            or not isinstance(payload.get("commits"), dict)
+            or not all(isinstance(item, str) and SLUG_RE.fullmatch(item) for item in payload["series"])
+            or not all(
+                isinstance(key, str) and isinstance(value, str) and GIT_SHA_RE.fullmatch(value)
+                for key, value in payload["commits"].items()
+            )
+            or not set(payload["commits"]).issubset(payload["series"])
         ):
-            fail(f"invalid {description} path: {entry!r}")
-        if entry in result:
-            fail(f"duplicate {description} path: {entry}")
-        result.append(entry)
-    return tuple(result)
+            fail("selection snapshot marker is inconsistent")
+        return Source(lab_root=lab_root, snapshot=payload, develop=None)
+    repo = git_mode_repo(lab_root)
+    stray = sorted(str(path.relative_to(lab_root)) for path in (lab_root / "cases").glob(f"*/{PATCH_NAME}"))
+    if stray:
+        fail(f"stored case patches are not allowed; every case is a commit: {stray}")
+    return Source(lab_root=lab_root, snapshot=None, develop=develop_map(repo, base_commit))
 
 
-def read_case(lab_root: Path, slug: str) -> Case:
+# --- manifests ---------------------------------------------------------------
+
+
+def parse_quarantine(
+    slug: str, quarantine: object, tests: tuple[str, ...], required_gates: tuple[str, ...]
+) -> tuple[tuple[str, ...], tuple[tuple[str, tuple[str, ...]], ...]]:
+    if not isinstance(quarantine, dict):
+        fail(f"test-quarantine case {slug} requires [quarantine]")
+    if set(quarantine) != {"modules", "gates"}:
+        fail(f"test-quarantine case {slug} quarantine must contain exactly modules and gates")
+    modules = quarantine.get("modules")
+    if not isinstance(modules, list):
+        fail(f"test-quarantine case {slug} requires quarantine.modules")
+    quarantined_tests = tuple(
+        entry for entry in modules if isinstance(entry, str) and UNIT_TEST_RE.fullmatch(entry)
+    )
+    if len(quarantined_tests) != len(modules) or len(quarantined_tests) != len(set(quarantined_tests)):
+        fail(f"invalid quarantine.modules for {slug}")
+    if not set(quarantined_tests).issubset(tests):
+        fail(f"quarantined modules are not retained tests for {slug}")
+    gates = quarantine.get("gates")
+    if not isinstance(gates, dict) or set(gates) != QUARANTINE_GATES:
+        fail(f"test-quarantine case {slug} quarantine.gates must contain exactly {QUARANTINE_GATE_NAMES}")
+    assigned: set[str] = set()
+    by_gate: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    for gate in QUARANTINE_GATE_NAMES:
+        gate_modules = gates.get(gate)
+        if not isinstance(gate_modules, list):
+            fail(f"invalid quarantine.gates.{gate} for {slug}")
+        parsed = tuple(
+            entry for entry in gate_modules if isinstance(entry, str) and UNIT_TEST_RE.fullmatch(entry)
+        )
+        if len(parsed) != len(gate_modules) or len(parsed) != len(set(parsed)):
+            fail(f"invalid quarantine.gates.{gate} for {slug}")
+        parsed_set = set(parsed)
+        if not parsed_set.issubset(quarantined_tests):
+            fail(f"quarantine.gates.{gate} is not a subset of modules for {slug}")
+        if parsed != tuple(test for test in quarantined_tests if test in parsed_set):
+            fail(f"quarantine.gates.{gate} must preserve quarantine.modules order for {slug}")
+        assigned.update(parsed)
+        by_gate += ((gate, parsed),)
+    if assigned != set(quarantined_tests):
+        fail(f"every quarantined module must be assigned to at least one gate for {slug}")
+    if quarantined_tests and set(required_gates) != QUARANTINE_GATES:
+        fail(f"test-quarantine case {slug} must require all quarantine gates")
+    if not quarantined_tests and (tests or required_gates):
+        fail(f"inactive test-quarantine case {slug} must keep empty tests and gates")
+    return quarantined_tests, by_gate
+
+
+def read_manifest(lab_root: Path, slug: str) -> tuple[Path, bytes, dict[str, object]]:
     slug = require_slug(slug, "case slug")
     cases_dir = lab_root / "cases"
     if cases_dir.is_symlink() or not cases_dir.is_dir():
@@ -186,12 +493,22 @@ def read_case(lab_root: Path, slug: str) -> Case:
     manifest_path = case_dir / "case.toml"
     manifest_bytes = require_regular_file(manifest_path, "case manifest")
     manifest = parse_toml(manifest_bytes, f"case manifest {slug}")
-    if manifest.get("schema") != 1:
-        fail(f"unsupported case manifest schema: {slug}")
-    if manifest.get("draft") is True:
-        fail(f"draft case is not test-selectable: {slug}")
+    if manifest.get("schema") != 2:
+        fail(f"unsupported case manifest schema (expected 2): {slug}")
+    unknown = set(manifest) - CASE_FIELDS
+    if unknown:
+        fail(f"case manifest {slug} has unsupported fields: {sorted(unknown)}")
     if require_slug(manifest.get("slug"), "manifest case slug") != slug:
         fail(f"case manifest slug does not match its directory: {slug}")
+    title = manifest.get("title")
+    if not isinstance(title, str) or not title.strip():
+        fail(f"case manifest {slug} requires a title")
+    return manifest_path, manifest_bytes, manifest
+
+
+def read_case(source: Source, slug: str, *, alone: bool) -> Case:
+    lab_root = source.lab_root
+    manifest_path, manifest_bytes, manifest = read_manifest(lab_root, slug)
     kind = manifest.get("kind", "production")
     if not isinstance(kind, str) or kind not in CASE_KINDS:
         fail(f"invalid case kind for {slug}: {kind!r}")
@@ -199,9 +516,8 @@ def read_case(lab_root: Path, slug: str) -> Case:
         fail(f"only {TEST_QUARANTINE_SLUG} may use kind=test-quarantine")
     if slug == TEST_QUARANTINE_SLUG and kind != "test-quarantine":
         fail(f"{TEST_QUARANTINE_SLUG} must use kind=test-quarantine")
-    tests = require_tests(manifest.get("tests"), f"case {slug}")
+    tests = require_tests(manifest.get("tests"), f"case {slug}", allow_empty=kind == "test-quarantine")
     required_gates = require_gates(manifest.get("evidence"), f"case {slug}")
-    declared_paths = require_paths(manifest.get("paths"), f"case {slug}")
     for test in tests:
         if LOCAL_TEST_RE.fullmatch(test):
             if not test.startswith(f"cases/{slug}/tests/"):
@@ -210,96 +526,33 @@ def read_case(lab_root: Path, slug: str) -> Case:
     dependencies_value = manifest.get("dependencies")
     if not isinstance(dependencies_value, list):
         fail(f"invalid case dependencies: {slug}")
-    dependencies = tuple(
-        require_slug(item, f"dependency of case {slug}") for item in dependencies_value
-    )
+    dependencies = tuple(require_slug(item, f"dependency of case {slug}") for item in dependencies_value)
     if len(dependencies) != len(set(dependencies)) or slug in dependencies:
         fail(f"invalid case dependencies: {slug}")
-    patch_digest = manifest.get("patch_sha256")
-    if not isinstance(patch_digest, str) or not re.fullmatch(
-        r"[0-9a-f]{64}", patch_digest
-    ):
-        fail(f"invalid patch_sha256: {slug}")
-    patch_path = case_dir / "fix.patch"
-    patch_bytes = require_regular_file(patch_path, "case patch")
-    actual_digest = hashlib.sha256(patch_bytes).hexdigest()
-    if actual_digest != patch_digest:
-        fail(
-            f"case patch digest mismatch for {slug}: "
-            f"manifest={patch_digest} actual={actual_digest}"
-        )
-    quarantine = manifest.get("quarantine")
     quarantined_tests: tuple[str, ...] = ()
     quarantined_tests_by_gate: tuple[tuple[str, tuple[str, ...]], ...] = ()
     if kind == "production":
-        if quarantine is not None:
+        if manifest.get("quarantine") is not None:
             fail(f"production case {slug} may not declare [quarantine]")
         if set(required_gates).intersection(QUARANTINE_GATES):
             fail(f"production case {slug} may not declare quarantine gates")
     else:
         if dependencies:
             fail(f"test-quarantine case {slug} may not have dependencies")
-        if not isinstance(quarantine, dict):
-            fail(f"test-quarantine case {slug} requires [quarantine]")
-        if set(quarantine) != {"modules", "gates"}:
-            fail(
-                f"test-quarantine case {slug} quarantine must contain exactly "
-                "modules and gates"
-            )
-        modules = quarantine.get("modules")
-        if not isinstance(modules, list) or not modules:
-            fail(f"test-quarantine case {slug} requires quarantine.modules")
-        quarantined_tests = tuple(
-            entry
-            for entry in modules
-            if isinstance(entry, str) and UNIT_TEST_RE.fullmatch(entry)
+        quarantined_tests, quarantined_tests_by_gate = parse_quarantine(
+            slug, manifest.get("quarantine"), tests, required_gates
         )
-        if len(quarantined_tests) != len(modules) or len(quarantined_tests) != len(
-            set(quarantined_tests)
-        ):
-            fail(f"invalid quarantine.modules for {slug}")
-        if not set(quarantined_tests).issubset(tests):
-            fail(f"quarantined modules are not retained tests for {slug}")
-        gates = quarantine.get("gates")
-        if not isinstance(gates, dict) or set(gates) != QUARANTINE_GATES:
-            fail(
-                f"test-quarantine case {slug} quarantine.gates must contain exactly "
-                f"{QUARANTINE_GATE_NAMES}"
-            )
-        assigned: set[str] = set()
-        for gate in QUARANTINE_GATE_NAMES:
-            gate_modules = gates.get(gate)
-            if not isinstance(gate_modules, list):
-                fail(f"invalid quarantine.gates.{gate} for {slug}")
-            parsed = tuple(
-                entry
-                for entry in gate_modules
-                if isinstance(entry, str) and UNIT_TEST_RE.fullmatch(entry)
-            )
-            if len(parsed) != len(gate_modules) or len(parsed) != len(set(parsed)):
-                fail(f"invalid quarantine.gates.{gate} for {slug}")
-            parsed_set = set(parsed)
-            if not parsed_set.issubset(quarantined_tests):
-                fail(f"quarantine.gates.{gate} is not a subset of modules for {slug}")
-            ordered = tuple(test for test in quarantined_tests if test in parsed_set)
-            if parsed != ordered:
-                fail(
-                    f"quarantine.gates.{gate} must preserve quarantine.modules order "
-                    f"for {slug}"
-                )
-            assigned.update(parsed)
-            quarantined_tests_by_gate += ((gate, parsed),)
-        if assigned != set(quarantined_tests):
-            fail(f"every quarantined module must be assigned to at least one gate for {slug}")
-        if set(required_gates) != QUARANTINE_GATES:
-            fail(f"test-quarantine case {slug} must require all quarantine gates")
+        if not quarantined_tests:
+            fail(f"inactive test-quarantine case {slug} is not selectable")
+    commit = source.commit(slug)
     case = Case(
         slug=slug,
         kind=kind,
         manifest_path=manifest_path,
         manifest_bytes=manifest_bytes,
-        patch_path=patch_path,
-        patch_bytes=patch_bytes,
+        patch_path=manifest_path.parent / PATCH_NAME,
+        patch_bytes=source.patch_bytes(slug, alone=alone),
+        commit=commit,
         dependencies=dependencies,
         tests=tests,
         required_gates=required_gates,
@@ -307,8 +560,8 @@ def read_case(lab_root: Path, slug: str) -> Case:
         quarantined_tests_by_gate=quarantined_tests_by_gate,
     )
     paths = tuple(path.as_posix() for path in patch_source_paths(case))
-    if tuple(sorted(declared_paths)) != paths:
-        fail(f"case manifest paths do not match patch for {slug}: {paths}")
+    if any(is_control_path(path) for path in paths):
+        fail(f"case {slug} changes control paths: {paths}")
     if kind == "test-quarantine":
         expected = tuple(
             sorted(f"tests/unittests/{item.replace('.', '/')}.py" for item in quarantined_tests)
@@ -318,78 +571,31 @@ def read_case(lab_root: Path, slug: str) -> Case:
     return case
 
 
-def read_verification(lab_root: Path, slug: str) -> tuple[Case, tuple[str, ...]]:
-    slug = require_slug(slug, "verification slug")
-    verification_dir = lab_root / "verifications" / slug
-    if verification_dir.is_symlink() or not verification_dir.is_dir():
-        fail(f"verification directory is missing or is a symlink: {slug}")
-    manifest_path = verification_dir / "verification.toml"
-    manifest_bytes = require_regular_file(manifest_path, "verification manifest")
-    manifest = parse_toml(manifest_bytes, f"verification manifest {slug}")
-    if manifest.get("schema") != 1:
-        fail(f"unsupported verification manifest schema: {slug}")
-    if require_slug(manifest.get("slug"), "manifest verification slug") != slug:
-        fail(f"verification manifest slug does not match its directory: {slug}")
-    subjects_value = manifest.get("subjects")
-    if not isinstance(subjects_value, list) or not subjects_value:
-        fail(f"invalid verification subjects: {slug}")
-    subjects = tuple(
-        require_slug(item, f"subject of verification {slug}") for item in subjects_value
-    )
-    if len(subjects) != len(set(subjects)):
-        fail(f"duplicate verification subject: {slug}")
-    tests = require_tests(manifest.get("tests"), f"verification {slug}")
-    required_gates = require_gates(manifest.get("evidence"), f"verification {slug}")
-    for test in tests:
-        if LOCAL_TEST_RE.fullmatch(test):
-            if not test.startswith(f"verifications/{slug}/tests/"):
-                fail(f"verification {slug} references an external local test: {test}")
-            require_regular_file(lab_root / test, "verification local test")
-    patch_digest = manifest.get("patch_sha256")
-    if not isinstance(patch_digest, str) or not re.fullmatch(
-        r"[0-9a-f]{64}", patch_digest
-    ):
-        fail(f"invalid verification patch_sha256: {slug}")
-    patch_path = verification_dir / "tests.patch"
-    patch_bytes = require_regular_file(patch_path, "verification test patch")
-    actual_digest = hashlib.sha256(patch_bytes).hexdigest()
-    if actual_digest != patch_digest:
-        fail(
-            f"verification patch digest mismatch for {slug}: "
-            f"manifest={patch_digest} actual={actual_digest}"
-        )
-    verification = Case(
-        slug=slug,
-        kind="verification",
-        manifest_path=manifest_path,
-        manifest_bytes=manifest_bytes,
-        patch_path=patch_path,
-        patch_bytes=patch_bytes,
-        dependencies=(),
-        tests=tests,
-        required_gates=required_gates,
-        quarantined_tests=(),
-        quarantined_tests_by_gate=(),
-    )
-    if any(
-        not path.parts or path.parts[0] != "tests"
-        for path in patch_source_paths(verification)
-    ):
-        fail(f"verification {slug} patch may only modify tests/")
-    return verification, subjects
+def read_stack_manifest(lab_root: Path, slug: str) -> tuple[Path, bytes, dict[str, object]]:
+    stacks_dir = lab_root / "stacks"
+    if stacks_dir.is_symlink() or not stacks_dir.is_dir():
+        fail(f"stacks directory is missing or is a symlink: {stacks_dir}")
+    manifest_path = stacks_dir / f"{slug}.toml"
+    manifest_bytes = require_regular_file(manifest_path, "stack manifest")
+    manifest = parse_toml(manifest_bytes, f"stack manifest {slug}")
+    if manifest.get("schema") != 2:
+        fail(f"unsupported stack manifest schema (expected 2): {slug}")
+    unknown = set(manifest) - STACK_FIELDS
+    if unknown:
+        fail(f"stack manifest {slug} has unsupported fields: {sorted(unknown)}")
+    if require_slug(manifest.get("slug"), "manifest stack slug") != slug:
+        fail(f"stack manifest slug does not match its filename: {slug}")
+    return manifest_path, manifest_bytes, manifest
 
 
-def load_selection(lab_root: Path, name: str) -> Selection:
-    if lab_root.is_symlink() or not lab_root.is_dir():
-        fail(f"lab root is missing or is a symlink: {lab_root}")
-    match = re.fullmatch(
-        r"(cases|stacks|verifications)/([a-z0-9]+(?:-[a-z0-9]+)*)", name
-    )
+def load_selection(source: Source, name: str) -> Selection:
+    lab_root = source.lab_root
+    match = re.fullmatch(r"(cases|stacks)/([a-z0-9]+(?:-[a-z0-9]+)*)", name)
     if not match or not SLUG_RE.fullmatch(match.group(2)):
         fail(f"invalid selection: {name}")
     kind, slug = match.groups()
     if kind == "cases":
-        case = read_case(lab_root, slug)
+        case = read_case(source, slug, alone=True)
         return Selection(
             name=name,
             kind="case",
@@ -399,47 +605,16 @@ def load_selection(lab_root: Path, name: str) -> Selection:
             subjects=(case.slug,),
             tests=case.tests,
         )
-
-    if kind == "verifications":
-        verification, subjects = read_verification(lab_root, slug)
-        return Selection(
-            name=name,
-            kind="verification",
-            manifest_path=verification.manifest_path,
-            manifest_bytes=verification.manifest_bytes,
-            cases=(verification,),
-            subjects=subjects,
-            tests=verification.tests,
-        )
-
-    stacks_dir = lab_root / "stacks"
-    if stacks_dir.is_symlink() or not stacks_dir.is_dir():
-        fail(f"stacks directory is missing or is a symlink: {stacks_dir}")
-    manifest_path = stacks_dir / f"{slug}.toml"
-    manifest_bytes = require_regular_file(manifest_path, "stack manifest")
-    manifest = parse_toml(manifest_bytes, f"stack manifest {slug}")
-    if manifest.get("schema") != 1:
-        fail(f"unsupported stack manifest schema: {slug}")
-    if require_slug(manifest.get("slug"), "manifest stack slug") != slug:
-        fail(f"stack manifest slug does not match its filename: {slug}")
-    series = manifest.get("series")
-    if not isinstance(series, list) or not series:
-        fail(f"invalid stack series: {slug}")
-    case_slugs = tuple(require_slug(item, "stack case slug") for item in series)
-    if len(case_slugs) != len(set(case_slugs)):
-        fail(f"duplicate case in stack series: {slug}")
-    cases = tuple(read_case(lab_root, case_slug) for case_slug in case_slugs)
+    manifest_path, manifest_bytes, manifest = read_stack_manifest(lab_root, slug)
+    case_slugs = source.series
+    if not case_slugs:
+        fail(f"stack {slug} has no case commits")
+    cases = tuple(read_case(source, case_slug, alone=False) for case_slug in case_slugs)
     preceding: set[str] = set()
-    selected = set(case_slugs)
     for case in cases:
-        missing = tuple(
-            dep for dep in case.dependencies if dep in selected and dep not in preceding
-        )
+        missing = tuple(dep for dep in case.dependencies if dep not in preceding)
         if missing:
-            fail(
-                f"stack {slug} must place dependencies before {case.slug}: "
-                f"{', '.join(missing)}"
-            )
+            fail(f"case {case.slug} must come after its dependencies: {', '.join(missing)}")
         preceding.add(case.slug)
     return Selection(
         name=name,
@@ -524,11 +699,19 @@ def iter_case_test_files(case: Case, lab_root: Path) -> Iterator[tuple[Path, byt
             fail(f"case test path is not regular: {relative}")
 
 
+def series_entry(selection: Selection) -> tuple[str, bytes]:
+    """Bind the stack order, which no manifest records any more."""
+    relative = selection.manifest_path.with_suffix(".series").name
+    return f"stacks/{relative}", "".join(f"{slug}\n" for slug in selection.subjects).encode()
+
+
 def selection_digest(selection: Selection, lab_root: Path) -> str:
     digest = hashlib.sha256()
     entries: list[tuple[str, bytes]] = [
         (str(selection.manifest_path.relative_to(lab_root)), selection.manifest_bytes)
     ]
+    if selection.kind == "stack":
+        entries.append(series_entry(selection))
     for case in selection.cases:
         entries.extend(
             (
@@ -536,9 +719,7 @@ def selection_digest(selection: Selection, lab_root: Path) -> str:
                 (str(case.patch_path.relative_to(lab_root)), case.patch_bytes),
             )
         )
-        entries.extend(
-            (str(path), data) for path, data in iter_case_test_files(case, lab_root)
-        )
+        entries.extend((str(path), data) for path, data in iter_case_test_files(case, lab_root))
     for relative, data in sorted(set(entries), key=lambda item: item[0]):
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
@@ -559,43 +740,34 @@ def patch_source_paths(case: Case) -> tuple[Path, ...]:
         try:
             name = raw_name[2:].decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise SelectionError(
-                f"case {case.slug} has a non-UTF-8 patch path"
-            ) from exc
+            raise SelectionError(f"case {case.slug} has a non-UTF-8 patch path") from exc
         path = Path(name)
-        if (
-            path.is_absolute()
-            or ".." in path.parts
-            or path.as_posix() != name
-            or not path.parts
-        ):
+        if path.is_absolute() or ".." in path.parts or path.as_posix() != name or not path.parts:
             fail(f"case {case.slug} has an unsafe patch path: {name!r}")
         found.add(path)
+    if not found:
+        for raw_line in case.patch_bytes.splitlines():
+            # binary-only or mode-only diffs name their paths in the header
+            if raw_line.startswith(b"diff --git a/"):
+                name = raw_line.split(b" b/", 1)[-1].decode("utf-8", "replace")
+                found.add(Path(name))
     if not found:
         fail(f"case {case.slug} patch contains no source paths")
     return tuple(sorted(found))
 
 
-def run_git_apply(tree: Path, patch: Path, *arguments: str) -> int:
+def run_git_apply(tree: Path, patch_bytes: bytes, *arguments: str) -> int:
     return subprocess.run(
-        (
-            "git",
-            "apply",
-            *arguments,
-            "--whitespace=error-all",
-            str(patch),
-        ),
+        ("git", "apply", *arguments, "--whitespace=error-all", "-"),
         cwd=tree,
+        input=patch_bytes,
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     ).returncode
 
 
-def omitted_dependencies(
-    selection: Selection,
-    lab_root: Path,
-) -> tuple[tuple[str, Case], ...]:
+def omitted_dependencies(selection: Selection, source: Source) -> tuple[tuple[str, Case], ...]:
     selected = {case.slug for case in selection.cases}
     result: list[tuple[str, Case]] = []
     seen: set[tuple[str, str]] = set()
@@ -605,57 +777,45 @@ def omitted_dependencies(
             if dependency in selected or key in seen:
                 continue
             seen.add(key)
-            result.append((case.slug, read_case(lab_root, dependency)))
+            result.append((case.slug, read_case(source, dependency, alone=True)))
     return tuple(result)
 
 
 def resolve_selection(
     selection: Selection,
-    lab_root: Path,
+    source: Source,
     source_tree: Path,
     source_commit: str,
 ) -> dict[str, object]:
-    if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+    lab_root = source.lab_root
+    if not GIT_SHA_RE.fullmatch(source_commit):
         fail(f"invalid source commit: {source_commit!r}")
     if source_tree.is_symlink() or not source_tree.is_dir():
         fail(f"source tree is missing or is a symlink: {source_tree}")
     source_tree = source_tree.resolve(strict=True)
-    base_dependencies = omitted_dependencies(selection, lab_root)
+    base_dependencies = omitted_dependencies(selection, source)
     source_cases = (*selection.cases, *(case for _consumer, case in base_dependencies))
-    all_paths = sorted(
-        {path for case in source_cases for path in patch_source_paths(case)}
-    )
+    all_paths = sorted({path for case in source_cases for path in patch_source_paths(case)})
     with tempfile.TemporaryDirectory(prefix="xpra-selection-") as raw:
         scratch = Path(raw)
         for relative in all_paths:
-            source = source_tree / relative
-            if source.is_symlink():
+            origin = source_tree / relative
+            if origin.is_symlink():
                 fail(f"source path is a symlink: {relative}")
-            if not source.exists():
+            if not origin.exists():
                 continue
-            if not source.is_file() or not source.resolve().is_relative_to(source_tree):
+            if not origin.is_file() or not origin.resolve().is_relative_to(source_tree):
                 fail(f"source path is not a safe regular file: {relative}")
             destination = scratch / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+            shutil.copy2(origin, destination)
 
         dependency_entries: list[dict[str, str]] = []
         for consumer, dependency in base_dependencies:
-            forward = run_git_apply(scratch, dependency.patch_path, "--check") == 0
-            reverse = (
-                run_git_apply(
-                    scratch,
-                    dependency.patch_path,
-                    "--reverse",
-                    "--check",
-                )
-                == 0
-            )
+            forward = run_git_apply(scratch, dependency.patch_bytes, "--check") == 0
+            reverse = run_git_apply(scratch, dependency.patch_bytes, "--reverse", "--check") == 0
             if forward or not reverse:
-                fail(
-                    f"case {consumer} has unresolved base dependency "
-                    f"{dependency.slug} at {source_commit}"
-                )
+                fail(f"case {consumer} has unresolved base dependency {dependency.slug} at {source_commit}")
             dependency_entries.append(
                 {
                     "case": consumer,
@@ -668,22 +828,17 @@ def resolve_selection(
 
         entries: list[dict[str, str]] = []
         for case in selection.cases:
-            forward = run_git_apply(scratch, case.patch_path, "--check") == 0
-            reverse = (
-                run_git_apply(scratch, case.patch_path, "--reverse", "--check") == 0
-            )
+            forward = run_git_apply(scratch, case.patch_bytes, "--check") == 0
+            reverse = run_git_apply(scratch, case.patch_bytes, "--reverse", "--check") == 0
             if forward == reverse:
                 state = "ambiguous" if forward else "diverged"
-                fail(
-                    f"case {case.slug} is {state} at base {source_commit}; "
-                    "refresh the patch and case metadata"
-                )
+                fail(f"case {case.slug} is {state} at base {source_commit}; rework its commit")
             status = "apply" if forward else "already-present"
             if forward and (
-                run_git_apply(scratch, case.patch_path) != 0
-                or run_git_apply(scratch, case.patch_path, "--reverse", "--check") != 0
+                run_git_apply(scratch, case.patch_bytes) != 0
+                or run_git_apply(scratch, case.patch_bytes, "--reverse", "--check") != 0
             ):
-                fail(f"case {case.slug} failed deterministic patch application")
+                fail(f"case {case.slug} failed deterministic application")
             entries.append(
                 {
                     "case": case.slug,
@@ -701,9 +856,7 @@ def resolve_selection(
         "declared_cases": [case.slug for case in selection.cases],
         "base_dependencies": dependency_entries,
         "patches": entries,
-        "applied_cases": [
-            entry["case"] for entry in entries if entry["status"] == "apply"
-        ],
+        "applied_cases": [entry["case"] for entry in entries if entry["status"] == "apply"],
         "already_present_cases": [
             entry["case"] for entry in entries if entry["status"] == "already-present"
         ],
@@ -715,11 +868,12 @@ def resolve_selection(
 
 def validate_resolution_document(
     selection: Selection,
-    lab_root: Path,
+    source: Source,
     document: object,
     source_commit: str,
     expected_selection_digest: str,
 ) -> str:
+    lab_root = source.lab_root
     if not isinstance(document, dict):
         fail("selection resolution must be a JSON object")
     expected_keys = {
@@ -736,7 +890,7 @@ def validate_resolution_document(
     }
     if set(document) != expected_keys:
         fail("selection resolution fields are inconsistent")
-    if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+    if not GIT_SHA_RE.fullmatch(source_commit):
         fail(f"invalid source commit: {source_commit!r}")
     current_digest = selection_digest(selection, lab_root)
     if expected_selection_digest != current_digest:
@@ -757,7 +911,7 @@ def validate_resolution_document(
             "patch_sha256": hashlib.sha256(dependency.patch_bytes).hexdigest(),
             "status": "already-present",
         }
-        for consumer, dependency in omitted_dependencies(selection, lab_root)
+        for consumer, dependency in omitted_dependencies(selection, source)
     ]
     if document.get("base_dependencies") != expected_dependencies:
         fail("selection resolution base dependencies are inconsistent")
@@ -785,10 +939,7 @@ def validate_resolution_document(
             already_present.append(case.slug)
         else:
             fail("selection resolution has an invalid patch status")
-    if (
-        document.get("applied_cases") != applied
-        or document.get("already_present_cases") != already_present
-    ):
+    if document.get("applied_cases") != applied or document.get("already_present_cases") != already_present:
         fail("selection resolution effective series is inconsistent")
     recorded_digest = document.get("resolution_sha256")
     payload = dict(document)
@@ -800,14 +951,17 @@ def validate_resolution_document(
     return actual_digest
 
 
-def snapshot(selection: Selection, lab_root: Path, destination: Path) -> None:
+def snapshot(selection: Selection, source: Source, destination: Path) -> None:
+    """Freeze manifests, local tests and each selected commit's diff."""
+    lab_root = source.lab_root
     if destination.exists():
         fail(f"snapshot destination already exists: {destination}")
     destination.mkdir(parents=True, mode=0o700)
+    all_cases = (*selection.cases, *(case for _consumer, case in omitted_dependencies(selection, source)))
     paths: list[tuple[Path, bytes]] = [
         (selection.manifest_path.relative_to(lab_root), selection.manifest_bytes)
     ]
-    for case in selection.cases:
+    for case in all_cases:
         paths.extend(
             (
                 (case.manifest_path.relative_to(lab_root), case.manifest_bytes),
@@ -823,12 +977,42 @@ def snapshot(selection: Selection, lab_root: Path, destination: Path) -> None:
         output = destination / relative
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(data)
+    if source.develop is not None:
+        base, head = source.develop.base, source.develop.head
+    else:
+        assert source.snapshot is not None
+        base, head = str(source.snapshot["base"]), str(source.snapshot["head"])
+    marker = {
+        "schema": 1,
+        "base": base,
+        "head": head,
+        "series": list(source.series),
+        "commits": {case.slug: case.commit for case in all_cases},
+    }
+    (destination / SNAPSHOT_MARKER).write_text(json.dumps(marker, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def develop_map_document(source: Source) -> dict[str, object]:
+    if source.develop is None:
+        fail("develop-map needs the fork-maintenance directory of a checkout")
+    develop = source.develop
+    return {
+        "schema": 1,
+        "base": develop.base,
+        "head": develop.head,
+        "cases": [
+            {"slug": case.slug, "commit": case.commit, "subject": case.subject, "paths": list(case.paths)}
+            for case in develop.cases
+        ],
+        "control": list(develop.control),
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--lab-root", type=Path, required=True)
-    parser.add_argument("--selection", required=True)
+    parser.add_argument("--selection")
+    parser.add_argument("--base-commit")
     parser.add_argument("--gate", choices=QUARANTINE_GATE_NAMES)
     parser.add_argument(
         "action",
@@ -847,6 +1031,7 @@ def main() -> int:
             "resolution-patches",
             "snapshot",
             "verify-resolution",
+            "develop-map",
         ),
     )
     parser.add_argument("--destination", type=Path)
@@ -863,7 +1048,13 @@ def main() -> int:
         if args.lab_root.is_symlink():
             fail(f"lab root is a symlink: {args.lab_root}")
         lab_root = args.lab_root.resolve(strict=True)
-        selection = load_selection(lab_root, args.selection)
+        source = open_source(lab_root, args.base_commit)
+        if args.action == "develop-map":
+            print(json.dumps(develop_map_document(source), indent=2, sort_keys=True))
+            return 0
+        if args.selection is None:
+            fail("--selection is required")
+        selection = load_selection(source, args.selection)
         if args.action == "kind":
             print(selection.kind)
         elif args.action == "cases":
@@ -874,10 +1065,7 @@ def main() -> int:
                 print(case.patch_path.relative_to(lab_root))
         elif args.action == "local-tests":
             seen: set[str] = set()
-            tests = (
-                *selection.tests,
-                *(test for case in selection.cases for test in case.tests),
-            )
+            tests = (*selection.tests, *(test for case in selection.cases for test in case.tests))
             for test in tests:
                 if LOCAL_TEST_RE.fullmatch(test) and test not in seen:
                     seen.add(test)
@@ -899,12 +1087,7 @@ def main() -> int:
         elif args.action == "resolve":
             if args.source_tree is None or args.source_commit is None:
                 fail("--source-tree and --source-commit are required for resolve")
-            resolution = resolve_selection(
-                selection,
-                lab_root,
-                args.source_tree,
-                args.source_commit,
-            )
+            resolution = resolve_selection(selection, source, args.source_tree, args.source_commit)
             print(json.dumps(resolution, indent=2, sort_keys=True))
         elif args.action in {"resolution-patches", "verify-resolution"}:
             if (
@@ -917,23 +1100,15 @@ def main() -> int:
                     "--resolution, --digest-file, --source-commit, and "
                     "--selection-sha256 are required for verify-resolution"
                 )
-            resolution_bytes = require_regular_file(
-                args.resolution, "selection resolution"
-            )
-            digest_bytes = require_regular_file(
-                args.digest_file, "selection resolution digest"
-            )
+            resolution_bytes = require_regular_file(args.resolution, "selection resolution")
+            digest_bytes = require_regular_file(args.digest_file, "selection resolution digest")
             try:
                 document = json.loads(resolution_bytes)
                 recorded_digest = digest_bytes.decode("ascii")
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 fail(f"invalid selection resolution output: {exc}")
             digest = validate_resolution_document(
-                selection,
-                lab_root,
-                document,
-                args.source_commit,
-                args.selection_sha256,
+                selection, source, document, args.source_commit, args.selection_sha256
             )
             if recorded_digest != f"{digest}\n":
                 fail("selection resolution digest file is inconsistent")
@@ -954,7 +1129,7 @@ def main() -> int:
         elif args.action == "snapshot":
             if args.destination is None:
                 fail("--destination is required for snapshot")
-            snapshot(selection, lab_root, args.destination)
+            snapshot(selection, source, args.destination)
     except (OSError, SelectionError) as exc:
         print(f"selection error: {exc}", file=sys.stderr)
         return 2

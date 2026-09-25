@@ -1,5 +1,8 @@
 # Flush the shutdown disconnect before closing client protocols
 
+Code: the `Fork-Case: server-shutdown-disconnect-flush` commit on `develop`
+(`make -C fork-maintenance case-show CASE=server-shutdown-disconnect-flush`).
+
 ## Boundary
 
 When a server exits cleanly while a client is attached, the client must be
@@ -221,15 +224,16 @@ The interval runs once per server exit, with or without connected clients
 other servers that do not derive from `ServerBase` keep their own
 `do_cleanup()`, but get the other two fixes.
 
-## Patch-queue and integration ownership
+## Case-commit and integration ownership
 
-The patch changes `xpra/net/protocol/socket_handler.py`,
+The case commit changes `xpra/net/protocol/socket_handler.py`,
 `xpra/server/core.py` and `xpra/server/base.py`, and adds
 `tests/unittests/unit/net/protocol_flush_test.py` and
-`tests/unittests/unit/server/shutdown_flush_test.py`. No other queue case
+`tests/unittests/unit/server/shutdown_flush_test.py`. No other case commit
 touches `SocketProtocol`, `ServerCore.handle_invalid_packet()`,
 `ServerBase.do_cleanup()` or the protocol close path, and it has no
-dependencies. The client and every other protocol user share
+dependencies: it applies alone on the upstream base and is removable from
+`HEAD` (`case-check`). The client and every other protocol user share
 `SocketProtocol`; the RFB protocol has its own write queue and is not changed.
 
 `packet-handler-error-boundary` owns exceptions escaping packet handlers in
@@ -239,7 +243,7 @@ dependencies. The client and every other protocol user share
 per-connection encode and packet lifetimes inside `ClientConnection`; they run
 during `cleanup_protocol()` and are unaffected by when the socket closes.
 
-## Patch ownership and non-goals
+## Commit scope and non-goals
 
 The case keeps a disconnecting protocol open until its last packet has been
 written during shutdown, makes `flush_then_close()` wait for the write it

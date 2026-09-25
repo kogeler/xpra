@@ -23,15 +23,13 @@ inherit that lock. If creation was interrupted, the next `live-venv` validates
 
 Verify Podman and the private process-supervisor state, inspect the default
 render-node and Zed-path availability, and prove repository identity plus
-current complete patch resolution. Always use the complete stack, including
+current complete stack resolution. Always use the complete stack, including
 early live diagnosis; no case-selected live product is admitted:
 
 ```bash
 make -C fork-maintenance doctor
 make -C fork-maintenance isolated-start-check
-make -C fork-maintenance workspace-create \
-  STACK=develop WORKSPACE=live-preflight-01 PATCH_MODE=patched
-make -C fork-maintenance workspace-remove WORKSPACE=live-preflight-01
+make -C fork-maintenance stack-check STACK=develop
 ```
 
 `doctor` reports optional hardware/input-path availability; it does not turn
@@ -51,10 +49,12 @@ containers alive while a separately owned `--userns=auto:size=2048` container
 is created and run, then removes only those explicitly labelled test objects.
 
 The runner freezes the unique source merge base already embedded in current
-`develop` and applies the selected case or stack in its build context; the
-examples use the complete `stacks/develop.toml` queue. It performs no fetch or
-live master comparison, and cached/upstream master freshness is not a live-test
-precondition. The host develop source need not be patched.
+`develop` and applies the frozen diffs of the selected case commits in its
+build context (see [`case-commits.md`](case-commits.md#runners)); the examples
+use the complete `STACK=develop` selection. It performs no fetch or live
+master comparison, and cached/upstream master freshness is not a live-test
+precondition. It tests committed `HEAD`: product paths must be clean at start,
+while uncommitted control paths are allowed.
 
 Before publishing the main live owner, `live-start` first publishes inspectable
 `jobs/live/<RUN>.freeze-prelaunch.json`, then launches and durably publishes
@@ -146,11 +146,11 @@ they do not use a separate `IMAGE_RUN`. A retry therefore uses a new live
 
 Every live test applies the entire current `stacks/develop` queue to BOTH
 endpoints. Developing or running isolated-case, partial-stack or clean-endpoint
-live tests is forbidden. Atomic source patches and focused unit controls remain
+live tests is forbidden. Atomic case commits and focused unit controls remain
 useful; isolated live product configurations do not represent production.
 
-For validation of any patch, including an unchanged-base repair, all nine must
-pass in one complete pass:
+For validation of any case change, including an unchanged-base repair, all
+nine must pass in one complete pass:
 
 ```bash
 make -C fork-maintenance live-all STACK=develop RUN=<fresh-prefix>
@@ -221,7 +221,7 @@ The exact set is `live-rgb`, `live-h264`, `live-xpra-detach`,
 `live-xpra-transport-loss`, `live-xpra-hardware`,
 `live-xpra-opengl-hardware`, `live-wayland-keyboard`,
 `live-x11-clipboard` and `live-wayland-subsurface`. Per-profile wrappers are
-member-level lifecycle interfaces, not independent patch acceptance.
+member-level lifecycle interfaces, not independent case acceptance.
 `live-suite-check` recomputes all nine retained reports, checks the current
 complete queue and harness, and rejects missing, failed, stale or mixed inputs.
 After each collected/removed member, and again during suite verification, the
@@ -235,8 +235,9 @@ the application and per-profile oracles; they do not replace them.
 The same Zed payload is required in RGB and H.264. Review/save the summary in the
 session ledger (`work/<session>/`) before cleanup removes its underlying
 evidence; only its distilled conclusion survives the session close.
-A changed patch invalidates the whole live suite. Unchanged exact-input evidence
-may be reread; the old clean-client/case-only architecture never qualifies.
+A changed case commit invalidates the whole live suite. Unchanged exact-input
+evidence may be reread; the old clean-client/case-only architecture never
+qualifies.
 
 ## Client keymap synchronization with a native-Wayland server
 
