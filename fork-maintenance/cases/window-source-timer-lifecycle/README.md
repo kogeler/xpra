@@ -31,8 +31,11 @@ leaving a direct assignment there would bypass the base lease contract.
 ## Embedded-source context
 
 The case resolves against source commit
-`d95058b0916913fe6ae5296fb702f66d833898b0`, embedded in the current `develop`
-history. The resulting implementation keeps each public numeric timer slot for
+`0a80430b6506e403f6469416d8aaa8463e331296`, embedded in the current `develop`
+history. Upstream still creates and removes every generic window-source
+timeout with bare `GLib.timeout_add()` / `GLib.source_remove()` and no
+ownership lock, so the pending-publication, stale-callback and
+callback-versus-cleanup races below remain reachable. The resulting implementation keeps each public numeric timer slot for
 compatibility with adjacent scheduling and diagnostic code, while its named
 lease, retained source object, epoch, and terminal state are the ownership
 authority. The surrounding
@@ -49,8 +52,16 @@ source provides the policies this case preserves:
 
 Upstream already clears the icon timer in its UI callback, calls the icon
 superclass cleanup, clears a queued icon payload during cleanup, and guarantees
-execution of accepted encode items without an `optional` argument. This case
-preserves those corrections. They do not own an in-flight GLib attachment or
+execution of accepted encode items without an `optional` argument. Since
+`9eb00d12ca`, `cancel_damage()` also acknowledges a dropped delayed region
+through `window.acknowledge_changes()`, so a Wayland client is not left
+waiting for a frame that will never be sent. This case preserves those
+corrections: its cleanup tail still calls `cancel_damage()` while `self.window`
+is set (it is cleared only by the later `ui_cleanup()`), and closing the timer
+leases first does not suppress that acknowledgement. The timer-lifecycle
+fixture therefore supplies the constructor-owned `window` slot like upstream's
+own `cancel_damage` tests; without it a cleanup which drops a delayed region
+raises instead of reaching the ordering assertions. They do not own an in-flight GLib attachment or
 wait for an already claimed timer callback before releasing window state.
 
 The patch changes ownership and terminal ordering, not any of those policies.

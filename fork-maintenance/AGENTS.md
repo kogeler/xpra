@@ -44,7 +44,7 @@ do not leave a summary-only README for the operator to request expanding.
   scaffold, active only while justified upstream failures remain;
 - `stacks/develop.toml`: the ordered complete queue;
 - `infra/upstream-tests/`: embedded-source container test runner, including its
-  current image-bound `neutral/` protocol regressions independent of case lifetime;
+  current image-bound `neutral/` regressions independent of case lifetime;
 - `infra/live/`: direct-transport and physical-GPU runner;
 - `infra/deb-packages/`: branch-agnostic Ubuntu/Debian package runner;
 - `tools/background_job.py`: common owned process supervisor;
@@ -279,8 +279,12 @@ Zed H.264, RGB detach, RGB transport loss, keymap input, Vulkan hardware,
 OpenGL hardware, X11 clipboard and Wayland subsurface composition. Every live
 test MUST run the entire current `stacks/develop` on both endpoints.
 Developing or running case-only, partial-stack or clean-endpoint live tests
-is forbidden. For every patch validation run `live-all STACK=develop RUN=<prefix>`;
-`live-suite-check` must verify the complete current nine-profile result.
+is forbidden. For every patch validation follow the live loop of
+`docs/runbooks/live-tests.md`: fix each failing gate and continue from it
+(`live-all ... FROM=<gate>`) to the last gate, then one complete
+`live-all STACK=develop RUN=<prefix>` pass, repeated the same way until a
+complete pass succeeds without a fix; never rerun the whole set to test a fix.
+`live-suite-check` must verify that complete current nine-profile pass.
 Topical fixtures and case `required_gates` metadata do not waive this policy.
 
 The clipboard profile retains its private-command-armed, real-F8 reverse
@@ -288,8 +292,8 @@ takeover and compositor confirmation; the same XFixes monitor covers the two
 forward takeovers, allowed reverse transfer, controlled client exit and event
 drain. Only a bound shutdown-only zero-owner event may be classified separately;
 late nonzero takeover fails. Subsurface composition retains its independent
-packet/pixel/ACK and continuous-producer oracle, now with WEDT and the rest of
-the queue present.
+packet/pixel/ACK and continuous-producer oracle, now with upstream's frame-callback
+pacing and the rest of the queue present.
 
 Their fixed Make wrappers require the
 complete `stacks/develop` selection on both endpoints. `profiles.yml` alone

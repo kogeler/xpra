@@ -10,9 +10,11 @@ dispatcher into PyGObject. A burst of malformed events can therefore produce
 one unhandled traceback per queued event and make diagnostic output dominate
 the main loop.
 
-This case wraps the selected callable before passing it to the existing
-thread/toolkit adapter. Ordinary `Exception` failures finish that invocation
-and enter one dispatcher-wide, thread-safe reporting budget. The first report
+Upstream now keeps that invocation, and a guard around it, in the dispatcher
+itself, but the guard catches only four exception classes and reports every
+failure. This case widens both dispatcher guards to `Exception`, so that ordinary
+failures finish that invocation, and routes them into one dispatcher-wide,
+thread-safe reporting budget. The first report
 retains the original traceback; further reports are admitted no more often
 than once every five seconds. Successful packets are not delayed, dropped,
 retried or redirected by the reporting policy.
@@ -26,36 +28,40 @@ packet into a valid event.
 ## Embedded-source context
 
 The case resolves against embedded source commit
-`d95058b0916913fe6ae5296fb702f66d833898b0`. Upstream commit
+`0a80430b6506e403f6469416d8aaa8463e331296`. Upstream commit
 `b0bd1265eb7f206c3583fabe63b5f8bd1aec019b` moved namespaced handler lookup into
 the owning subsystems while retaining flat-registry precedence, legacy aliases
 and default handlers. Commit `457e7598d3fb925e9e51cd94615b1abe61cbaf1c` also
 made the clipboard helper use the shared subsystem registry. Those registration
 boundaries are preserved; the patch does not replace them with a second router.
 
-At this source boundary, the inner dispatch guard catches only
-`AssertionError`, `TypeError`, `ValueError` and `RuntimeError` around
-`call_packet_handler()`. The outer guard catches `RuntimeError` and
-`AssertionError` around lookup and dispatch. Neither guard remains on the
-stack when a deferred GLib callback runs. Merely adding exception classes to
-those guards, or lowering the log level of a subsystem, cannot close that
-asynchronous gap.
+Upstream `92a3d65a5ff8087cef58f4ec6e30c8565edf4df1` then fixed the asynchronous
+gap which this case originally wrapped around. `call_packet_handler()` now owns
+the call and its guard for every endpoint. The client and GLib server keep only
+two hooks: `packet_handler_args()` (the client drops `proto`) and
+`call_in_main_thread()` (both defer through `idle_add`). The guard therefore runs
+where the handler runs, including in the idle callback. The old downstream
+wrapper and its adapter-facing composition are obsolete and have been removed.
 
-On an upstream refresh, equivalent replacement must protect actual deferred
-execution on both endpoints, preserve the adapter and lifecycle semantics,
-and bound reporting across packet types and peers. A nearby `try/except` or a
-fix for one malformed pointer packet is not equivalent protection. Upstream
-history is technical provenance; fork workflow remains governed by the
-[validation runbook](../../docs/runbooks/validation.md).
+Two defects remain in that upstream boundary. The deferred guard and the outer
+routing/scheduling guard still catch only `AssertionError`, `TypeError`,
+`ValueError` and `RuntimeError` (the outer one only the first and last). A
+handler raising `IndexError`, `KeyError`, `AttributeError` or `OSError`
+therefore still escapes into PyGObject from a UI callback, or through
+`dispatch_packet()` from a network one. Every contained failure is also logged
+with its own traceback. The commit notes that nothing rate-limits what a peer can make us
+log. A malformed-packet burst still produces one report per packet.
 
-The current manual decision is **keep unchanged**. The selected-callable
-guard is still absent in clean source; the current server/client adapters
-retain their deferred execution and argument conventions. Review of routing,
-closed-protocol defaults, reporting interleavings and the existing native
-regression identifies no production adjustment required by this rebase.
-Other queue changes keep their own resource and stale-owner checks; this
-wrapper cannot replace them. That conclusion is code review, not a claim of
-new-base test acceptance.
+The current manual decision is **adapt and narrow**. The patch widens the two
+existing `except` clauses to `Exception` and sends both to the dispatcher's
+shared reporting budget. It keeps upstream's hooks, call structure and one-shot
+`call()`. On an upstream refresh, equivalent replacement must contain every
+ordinary exception on both endpoints and bound reporting across packet types
+and peers. A nearby `try/except` or a fix for one malformed pointer packet is
+not equivalent protection. Upstream history is technical provenance; fork
+workflow remains governed by the
+[validation runbook](../../docs/runbooks/validation.md). This conclusion is
+code review, not a claim of new-base test acceptance.
 
 ## Surrounding code and ownership map
 
@@ -64,8 +70,8 @@ new-base test acceptance.
 | `xpra/net/protocol/socket_handler.py` | Receives, decodes and wraps wire data as `Packet`, invokes the endpoint callback, and owns transport errors and connection-loss delivery. |
 | `xpra/net/dispatch.py` | Selects aliases, flat/default handlers and subsystem handlers; owns the guarded invocation and shared reporting state. |
 | `SubsystemPacketHandlers` / `find_packet_handler()` | Keep registration with the owning subsystem and resolve namespace prefixes without changing handler signatures. |
-| `xpra/server/glib_server.py` | Invokes server handlers as `(proto, packet)`, directly or through the server's main-context scheduler. |
-| `xpra/client/base/client.py` | Invokes client handlers as `(packet)` and supplies the corresponding deferred/direct adapter. |
+| `xpra/server/glib_server.py` | Keeps the default `(proto, packet)` arguments and defers main-thread calls through `call_in_main_thread()` / `idle_add`. |
+| `xpra/client/base/client.py` | Drops `proto` through `packet_handler_args()` and defers main-thread calls through `call_in_main_thread()` / `idle_add`. |
 | `xpra/util/glib_scheduler.py` / GLib | Register and dispatch real idle sources; the patch does not replace the scheduler or own its source IDs. |
 | `xpra/net/common.py` / `xpra/server/subsystem/pointer.py` | Validate packet fields and execute pointer policy; a rejected unsigned button is one concrete handler failure. |
 | `xpra/log.py` | Formats and emits an admitted report, including the current exception traceback. |
@@ -76,30 +82,30 @@ The patched main-thread path is:
 ```text
 endpoint receives a Packet
   -> dispatcher resolves its name and chooses the existing handler
-  -> dispatcher wraps that handler and passes it to the endpoint adapter
-  -> adapter registers its one-shot call with GLib
+  -> call_packet_handler() takes the endpoint's packet_handler_args()
+     and builds the guarded one-shot call()
+  -> call_in_main_thread() registers that call with GLib
   -> dispatch_packet returns
 
-GLib invokes the adapter later
-  -> adapter supplies the server or client argument list
-  -> wrapper executes the selected handler
+GLib invokes call() later
+  -> call() executes the selected handler
   -> on Exception: account for the failure and possibly report it
-  -> wrapper returns None; the idle invocation completes
+  -> call() returns None; the idle invocation completes
 ```
 
-For non-main-thread handlers, the adapter invokes the same wrapper directly.
+For non-main-thread handlers, the dispatcher invokes the same `call()` directly.
 Errors raised during lookup or scheduling enter the outer dispatch guard and
 use the same reporting budget; they need not reach a handler body first.
 
 ## Routing, admission and callback semantics
 
 Alias resolution precedes handler selection. An alias creates the same renamed
-`Packet` as upstream; the wrapper neither changes its fields nor performs
+`Packet` as upstream; the guard neither changes its fields nor performs
 another conversion. For authenticated, open protocols the existing priority
 remains flat UI handlers, flat non-UI handlers, then the owning subsystem.
 Default UI and default non-UI handlers remain the subsequent fallback.
 
-The wrapper captures the already selected callable and packet type. It does
+Upstream's `call()` captures the already selected callable and packet. It does
 not re-route the packet when the idle callback eventually runs, add a new
 authentication decision, or replace subsystem-specific stale-owner checks.
 In particular, default lifecycle handlers remain eligible after the protocol
@@ -107,19 +113,20 @@ is closed. Moving the open-protocol check around all callbacks would suppress
 the `connection-lost` cleanup path and is not part of this change.
 
 Client handlers must still receive one argument and server handlers two.
-That difference remains in `call_packet_handler()`, not in packet inspection
-or a guessed endpoint type. The generic dispatcher still invokes its direct
-server-style handler. No adapter implementation or registration API is patched.
+That difference remains upstream's `packet_handler_args()` override, not
+packet inspection or a guessed endpoint type. The generic dispatcher still
+invokes its direct server-style handler. No endpoint hook or registration API
+is patched.
 
-Both successful and failing wrapped calls return `None`. A handler's truthy
-return value must not escape into a repeating GLib idle source. The existing
-adapters already discard handler return values; the new wrapper preserves
+Both successful and failing calls return `None`. A handler's truthy
+return value must not escape into a repeating GLib idle source. Upstream's
+`call()` discards handler return values; the widened guard preserves
 that one-shot contract rather than introducing retries. It does not serialize
 network and UI handlers into one total order or change their established
 scheduling order.
 
 Unknown packet types retain `handle_invalid_packet()` and its existing logging
-and connection close. The error wrapper does not make unknown packets
+and connection close. The error guard does not make unknown packets
 acceptable or keep a connection alive against an existing explicit close
 decision. It adds no automatic disconnect for an ordinary handler exception.
 
@@ -239,7 +246,7 @@ a previous native state on their behalf.
 Likewise, the timer and video lifecycle cases protect their own callbacks,
 worker queues and cleanup ordering. A callback scheduled inside a packet
 handler is not automatically protected after that handler returns. Moving
-those case-specific cleanup guarantees into this wrapper would conflate
+those case-specific cleanup guarantees into this guard would conflate
 independent asynchronous lifetimes.
 
 Patch storage is atomic, not a live-product selection. Updating this case must
@@ -248,8 +255,9 @@ or introduce an isolated clipboard, input or rendering live endpoint.
 
 ## Patch ownership and non-goals
 
-The case owns actual handler exception containment, the shared reporting
-budget and counters, and focused proof of those boundaries. It does not:
+The case owns the `Exception` scope of upstream's handler and routing guards,
+the shared reporting budget and counters, and focused proof of those
+boundaries. It does not:
 
 - alter wire packet layouts, field validation, aliases, feature negotiation or
   subsystem registration;
@@ -292,7 +300,7 @@ The tests cover these distinct boundaries:
   leak no exceptions to PyGObject. A truthy successful return remains one-shot.
 - A real registered `PointerManager` receives 256 modern packets with button
   `-1`, followed by a valid press/release pair. The original unsigned-field
-  validation must fail inside the wrapper, while the valid pair reaches the
+  validation must fail inside the guard, while the valid pair reaches the
   recording device hook. The peer source, UI-driver selection and terminal
   input hook are substituted; the parser and subsystem route are real.
 - Flat/default and aliased routes, different peers and different error
@@ -308,7 +316,7 @@ The tests cover these distinct boundaries:
   the handler body.
 - Closed protocols reject ordinary packets while still delivering the
   default `connection-lost` lifecycle callback on both adapters.
-- `BaseException` control-flow values propagate from the wrapper rather than
+- `BaseException` control-flow values propagate from the guard rather than
   being silently converted to routine packet-error reports.
 
 The tests-only clean-source control must reach real handler execution and
@@ -338,7 +346,7 @@ clipboard ownership, hardware presentation or connection teardown.
 
 ## Invariants not to simplify
 
-- Guard the selected callable before handing it to the adapter; a guard around
+- Keep the guard inside upstream's deferred `call()`; a guard around
   `idle_add` alone cannot contain the deferred body.
 - Preserve client/server signatures, routing precedence, aliases, closed-
   protocol defaults and the existing thread choice.
@@ -378,7 +386,7 @@ validation contract; this case introduces no packaging or ABI change.
 
 The [scoped mypy gate](../../docs/runbooks/typecheck.md) currently checks
 `xpra/server/source/queued_packet.py`, not `xpra/net/dispatch.py`. A green
-result there cannot be claimed as type-checking this wrapper or proving its
+result there cannot be claimed as type-checking this guard or proving its
 thread and callback semantics.
 
 Keep exact source, selection, resolution, image and named-result identities

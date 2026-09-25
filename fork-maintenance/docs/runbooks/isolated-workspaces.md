@@ -82,8 +82,8 @@ broken patch to the host or making an intermediate control-plane commit:
 
 ```bash
 make -C fork-maintenance workspace-create \
-  CASE=wayland-empty-damage-throttle \
-  WORKSPACE=refresh-empty-damage-01 \
+  CASE=x11-client-clipboard-events \
+  WORKSPACE=refresh-clipboard-01 \
   PATCH_MODE=reconstruct
 ```
 
@@ -174,6 +174,9 @@ every changed path first and opt in explicitly:
 make -C fork-maintenance workspace-stage \
   WORKSPACE=wayland-audit-01 ALLOW_PATH_CHANGE=1
 ```
+
+The export below compares the staged paths with the manifest again, so pass
+the same `ALLOW_PATH_CHANGE=1` to that `workspace-update` as well.
 
 Export the staged atomic candidate:
 

@@ -147,10 +147,10 @@ and completed/pending acceptance state belong in the ignored cycle ledger under
 old results are not current acceptance evidence.
 
 Calibrate analytical depth against
-[client codec startup](../../cases/client-codec-startup-order/README.md),
 [packet dispatch](../../cases/packet-handler-error-boundary/README.md),
-[GTK scrolling](../../cases/gtk-client-scroll-deduplication/README.md), and
-[native codec packaging](../../cases/debian-libva-codecs-package/README.md).
+[GTK scrolling](../../cases/gtk-client-scroll-deduplication/README.md),
+[video pipeline cleanup](../../cases/video-pipeline-cleanup-race/README.md), and
+[Wayland keymap synchronization](../../cases/wayland-client-keymap-sync/README.md).
 These are examples of explanation quality, not workflow authority or sources
 of unrelated requirements to copy into another case.
 

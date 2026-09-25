@@ -152,11 +152,21 @@ since `c1183c29edd`, and `xterm`, the real application in the position/color
 test. A missing application is an environment failure, not a quarantine
 assignment, even when the gate correctly reports the expected failing module.
 It pins Cython to **3.2.9** for every clean and patched
-mode. On embedded source `d95058b0916913fe6ae5296fb702f66d833898b0`, Cython
-3.3.0 rejects the duplicate local `size: int` annotations added to
-`xpra/opengl/backing.py` by `3be68afe1a8c3ddbe5a0d7511c2821a93f885053`, before
-any compiled-leg tests run. Cython 3.2.9 translates that exact unchanged module;
-this is a compiler compatibility boundary, not a quarantine test failure.
+mode. The pin was introduced at embedded source
+`d95058b0916913fe6ae5296fb702f66d833898b0`, where Cython 3.3.0 rejected the
+duplicate local `size: int` annotations added to `xpra/opengl/backing.py` by
+`3be68afe1a8c3ddbe5a0d7511c2821a93f885053` before any compiled-leg tests ran.
+Upstream `e7da3a4e42` declares that variable once, and upstream's own CI
+installs an unpinned current Cython. At `0a80430b6506e403f6469416d8aaa8463e331296`
+the pin is therefore reproducibility policy, no longer a known workaround.
+Changing it remains a separate tooling change, accepted only with the clean and
+patched compiled legs described below. This is a compiler compatibility
+boundary, not a quarantine test failure.
+
+The image package list follows upstream's Ubuntu 26.04 unit-test job, including
+`python3-asyncssh`, `weston`, `wl-clipboard` and `wtype` added in the
+`0a80430b6506` workflow. Compare the list with `.github/workflows/test.yml` at
+every refresh; the workflow digest is part of the image key.
 
 The pin retains annotation typing, all compiled module selection and all test
 assertions. It neither repairs nor edits clean production. Its exact image
@@ -315,10 +325,12 @@ native tests-only controls must expose the retained input-admission/initial
 X11 sample failure. A green native run without that subject is incomplete,
 not proof of upstream replacement. This adds no skip or reduced test list.
 
-The current [neutral pointer protocol regression](../../infra/upstream-tests/neutral/README.md)
-is runner-owned after upstream absorbed its production fix. The image-bound
-helper installs/stages only its two declared test files in the private source
-copy after case application, in clean, tests-only and patched modes alike.
+The current [neutral regressions](../../infra/upstream-tests/neutral/README.md)
+(the native pointer protocol pair and the client codec-startup module) are
+runner-owned after upstream absorbed their production fixes. The image-bound
+helper installs/stages only its declared test files, each into its declared
+upstream test package, in the private source copy after case application,
+in clean, tests-only and patched modes alike.
 It verifies the frozen source HEAD and rejects symlinks, missing inputs and
 target collisions before publication. It never replaces upstream tests or
 modifies host/installed production source. Logs retain exact neutral file
@@ -328,8 +340,10 @@ After the manual-review exit, compare `STACK=develop PATCH_MODE=clean
 TARGET=wayland` with the same image/source `STACK=develop PATCH_MODE=patched
 TARGET=wayland` using separate fresh named runs. Both must execute the actual
 version-5/version-8 native consumers; clean production is now expected to pass.
-The complete stack also declares the neutral module and adjacent pointer tests
-for its focused variants. This supported ownership survives case retirement
+The complete stack also declares the neutral modules and adjacent pointer tests
+for its focused variants. The codec-startup module has no native gate and the
+focused runner rejects `PATCH_MODE=clean`, so its clean-source proof is the
+clean full leg described below. This supported ownership survives case retirement
 without reviving historical verification selections or introducing a test-only
 production case. Full-stack live coverage remains mandatory and unchanged.
 
@@ -507,6 +521,16 @@ and either the PID/start-time/process-group identity or the immutable container
 ID and full labels, then force-removes only that exact runtime state. Use Make
 lifecycle targets exclusively; never signal a job or run destructive Podman
 commands directly.
+
+Both the image-cache lock and this lifecycle lock are taken without waiting.
+A `test-start` issued while another start holds the image lease fails with
+`image cache is in active use`; a start, wait, collect or remove issued while
+another collection or abort holds the lifecycle lock fails with
+`collection or abort is already active`. Such a refusal creates no prelaunch,
+owner or result and is not test evidence. When several jobs run concurrently,
+issue their start and collection commands one at a time (or retry exactly the
+refused command after the other transition finishes); the detached payloads
+themselves still run in parallel.
 
 Prefix every `RUN` and `IMAGE_RUN` with the current cycle identity. Once the
 complete cycle is finalized, reviewed, and individually removed, follow

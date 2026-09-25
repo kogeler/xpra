@@ -84,7 +84,7 @@ still uses the loop below without imposing a new whole-queue refresh review.
    semantics, compatibility disabled for compatibility policy, and a relevant
    real live profile for runtime behavior. A mock cannot replace the disputed
    display, codec, packet, or event route. Subject modules must fail, not skip,
-   if unavailable. Start the complete live suite early after its prerequisite
+   if unavailable. Start the live loop early after its prerequisite
    focused/native checks; full upstream suites are **not** its prerequisite.
 5. Review/export/resolve the candidate; run whitespace, applicable lint and
    affected fork-control tests. Continue this loop until code, tests and the
@@ -93,8 +93,14 @@ still uses the loop below without imposing a new whole-queue refresh review.
    it rather than starting broader jobs in the hope they explain it.
 
 Do not run all three full upstream legs or both DEB builds automatically after
-each edit. Every live validation pass runs the full nine-profile suite with all
-patches on both endpoints; stop at the first failure and diagnose before retrying. Full builds
+each edit, and never rerun the whole live set to test a fix. Live validation
+follows [the live loop](live-tests.md#the-live-loop-fix-and-continue-then-one-complete-pass):
+every live profile runs with all patches on both endpoints; at a failure,
+diagnose and fix, then continue from that same gate (`live-all FROM=<gate>`)
+to the last one; once every failure is fixed, one complete pass from the first
+gate, repeated with the same fix-and-continue rule until a complete pass
+succeeds without a fix. The same principle holds for upstream tests: prove a
+fix with the failing module (a focused run) before a complete leg. Full builds
 are useful early only when their actual build/package boundary is the subject,
 or when a narrower control cannot reproduce a demonstrated failure. Record that
 reason before launching one. Independent diagnosis and code review can continue
@@ -195,8 +201,10 @@ Fill the ledger's gaps on the reviewed stable candidate:
    legs: `full`, `full-cython`, `full-no-compat`.
 3. All nine positive live profiles with the complete `stacks/develop` queue on
    both endpoints, for every patch validation, including an unchanged-base fix.
-   Use `live-all STACK=develop RUN=<fresh-prefix>`; `live-suite-check` rejects
-   missing profiles, failed or stale results and mixed candidate inputs.
+   Reach it through the live loop; the acceptance is one complete
+   `live-all STACK=develop RUN=<fresh-prefix>` pass without a fix in between,
+   and `live-suite-check` on that prefix rejects missing profiles, failed or
+   stale results and mixed candidate inputs.
    Developing or accepting case-only, partial-stack or clean-endpoint live tests
    is forbidden. Case ownership describes the regression oracle, never a live
    selection. Applicable durable package boundaries remain required; full
@@ -241,7 +249,7 @@ or an assumption that a small diff is harmless.
 | Regression or oracle changes | Recheck that assertion against its subject; redo the clean control if its trigger/assertion changes. Do not reuse the old weaker assertion as proof of the new one. |
 | Production-only edit with identical clean control | Retain the clean result only with exact tests-only applied-tree, commands, mode, image and relevant environment equivalence; patch digest equality alone is not the criterion. |
 | Runner preflight guard only | Narrow runner regression and direct preflight reproduction; no full Xpra run when the downstream source, selection, entrypoint, image inputs and commands are unchanged. |
-| Live harness only | Test the affected control behavior and run the complete live suite. Do not rerun upstream suites or DEBs when their inputs are unchanged. Rebuild an image only when its actual input key changes. |
+| Live harness only | Test the affected control behavior (replay an oracle change on the retained evidence), continue the live loop from the affected gate, then finish with one complete pass. Do not rerun upstream suites or DEBs when their inputs are unchanged. Rebuild an image only when its actual input key changes. |
 | Non-semantic source/documentation refresh | Resolve, check whitespace and fork controls. Unchanged focused/native/full checks may be reused under the strict contract. Patch validation still requires the complete nine-profile live suite. |
 | Build/ABI/toolchain/installed-module composition | Exercise the actual affected build/import boundary; image tag equality alone cannot justify reuse. |
 

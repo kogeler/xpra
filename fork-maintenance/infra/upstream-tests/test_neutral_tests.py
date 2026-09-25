@@ -21,9 +21,12 @@ class NeutralTestsTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.source = self.root / "source"
         self.source.mkdir()
-        self.parent = self.source / neutral_tests.TARGET_ROOT
-        self.parent.mkdir(parents=True)
-        (self.parent / "existing_test.py").write_text("VALUE = 1\n", encoding="utf-8")
+        self.parents = tuple(self.source / root for root in dict.fromkeys(neutral_tests.ASSET_TARGETS.values()))
+        for parent in self.parents:
+            parent.mkdir(parents=True)
+            (parent / "existing_test.py").write_text("VALUE = 1\n", encoding="utf-8")
+        # the native pointer fixture's package, which the symlink controls redirect:
+        self.parent = self.source / neutral_tests.ASSET_TARGETS[neutral_tests.ASSETS[0]]
         self.production = self.source / "xpra" / "subject.py"
         self.production.parent.mkdir()
         self.production.write_text("VALUE = 1\n", encoding="utf-8")
@@ -37,8 +40,12 @@ class NeutralTestsTest(unittest.TestCase):
         self.assets = self.root / "assets"
         shutil.copytree(neutral_tests.ASSET_ROOT, self.assets, ignore=shutil.ignore_patterns("__pycache__"))
 
+    def target(self, name: str) -> Path:
+        return self.source / neutral_tests.ASSET_TARGETS[name] / name
+
     def assert_no_installed_files(self):
-        self.assertEqual(tuple(self.parent.iterdir()), (self.parent / "existing_test.py",))
+        for parent in self.parents:
+            self.assertEqual(tuple(parent.iterdir()), (parent / "existing_test.py",))
         self.assertEqual(neutral_tests.git(self.source, "status", "--porcelain"), "")
 
     def test_install_on_clean_and_patched_production_preserves_exact_ownership(self):
@@ -58,7 +65,10 @@ class NeutralTestsTest(unittest.TestCase):
                 self.assertEqual(neutral_tests.git(clone, "diff", "--cached", "--", "xpra"), before)
                 self.assertEqual(neutral_tests.git(clone, "diff", "--name-only"), "")
                 self.assertEqual(neutral_tests.git(clone, "ls-files", "--others", "--exclude-standard"), "")
-                self.assertEqual(len(rows), 2)
+                self.assertEqual(
+                    [path for path, _digest in rows],
+                    [(root / name).as_posix() for name, root in neutral_tests.ASSET_TARGETS.items()],
+                )
                 for path, digest in rows:
                     target = clone / path
                     self.assertEqual(target.read_bytes(), (self.assets / target.name).read_bytes())
@@ -72,23 +82,38 @@ class NeutralTestsTest(unittest.TestCase):
             neutral_tests.install(self.source, "0" * 40, self.assets)
         self.assert_no_installed_files()
 
-    def test_missing_second_input_does_not_publish_the_first(self):
-        (self.assets / neutral_tests.ASSETS[1]).unlink()
+    def test_missing_last_input_does_not_publish_the_others(self):
+        (self.assets / neutral_tests.ASSETS[-1]).unlink()
         with self.assertRaisesRegex(neutral_tests.NeutralTestError, "input"):
             neutral_tests.install(self.source, self.commit, self.assets)
         self.assert_no_installed_files()
 
     def test_existing_upstream_or_case_test_is_not_overwritten_even_if_identical(self):
-        existing = self.parent / neutral_tests.ASSETS[1]
-        data = (self.assets / existing.name).read_bytes()
-        existing.write_bytes(data)
-        with self.assertRaisesRegex(neutral_tests.NeutralTestError, "already exists"):
+        for name in neutral_tests.ASSETS[1:]:
+            with self.subTest(name=name):
+                existing = self.target(name)
+                data = (self.assets / name).read_bytes()
+                existing.write_bytes(data)
+                try:
+                    with self.assertRaisesRegex(neutral_tests.NeutralTestError, "already exists"):
+                        neutral_tests.install(self.source, self.commit, self.assets)
+                    self.assertEqual(existing.read_bytes(), data)
+                    self.assertFalse(self.target(neutral_tests.ASSETS[0]).exists())
+                finally:
+                    existing.unlink()
+
+    def test_missing_target_package_is_rejected_before_writes(self):
+        # an upstream refresh which moves a test package must reassess its neutral tests:
+        package = self.parents[-1]
+        (package / "existing_test.py").unlink()
+        package.rmdir()
+        with self.assertRaisesRegex(neutral_tests.NeutralTestError, "parent"):
             neutral_tests.install(self.source, self.commit, self.assets)
-        self.assertEqual(existing.read_bytes(), data)
-        self.assertFalse((self.parent / neutral_tests.ASSETS[0]).exists())
+        for parent in self.parents[:-1]:
+            self.assertEqual(tuple(parent.iterdir()), (parent / "existing_test.py",))
 
     def test_symlinked_input_is_rejected(self):
-        asset = self.assets / neutral_tests.ASSETS[1]
+        asset = self.assets / neutral_tests.ASSETS[-1]
         asset.unlink()
         asset.symlink_to(neutral_tests.ASSET_ROOT / asset.name)
         with self.assertRaisesRegex(neutral_tests.NeutralTestError, "input"):
@@ -118,17 +143,18 @@ class NeutralTestsTest(unittest.TestCase):
         self.assertEqual(tuple(outside.iterdir()), (outside / "existing_test.py",))
 
     def test_dangling_target_symlink_is_rejected(self):
-        target = self.parent / neutral_tests.ASSETS[1]
+        target = self.target(neutral_tests.ASSETS[-1])
         target.symlink_to(self.root / "missing")
         with self.assertRaisesRegex(neutral_tests.NeutralTestError, "already exists"):
             neutral_tests.install(self.source, self.commit, self.assets)
         self.assertTrue(target.is_symlink())
-        self.assertFalse((self.parent / neutral_tests.ASSETS[0]).exists())
+        self.assertFalse(self.target(neutral_tests.ASSETS[0]).exists())
 
     def test_undeclared_neighbor_is_not_installed(self):
         (self.assets / "not-a-neutral-input.py").write_text("NO = 1\n", encoding="utf-8")
         neutral_tests.install(self.source, self.commit, self.assets)
-        self.assertFalse((self.parent / "not-a-neutral-input.py").exists())
+        for parent in self.parents:
+            self.assertFalse((parent / "not-a-neutral-input.py").exists())
 
 
 class NeutralImageInputsTest(unittest.TestCase):

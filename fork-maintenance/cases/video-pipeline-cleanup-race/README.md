@@ -51,8 +51,15 @@ that instruction.
 ## Embedded-source context
 
 The case resolves against source commit
-`d95058b0916913fe6ae5296fb702f66d833898b0`, embedded in the current `develop`
-history. That source already supplies the following surrounding behavior:
+`0a80430b6506e403f6469416d8aaa8463e331296`, embedded in the current `develop`
+history. Between the previous base `d95058b09169` and this one, upstream
+changed only codec-selection policy in this file set: `094692ebf3` limits
+`non_video_encodings` to encoders actually registered in `_encoders`, and
+`4c74513c10` reuses a cached scaling only within the candidate encoder's
+limits. Neither touches pipeline publication, timers or teardown; their
+upstream regressions (`NonVideoEncodingsTest`, `ScalingCacheTest`) live in the
+same module as this case's lifecycle tests and run in both clean and patched
+modes. That source already supplies the following surrounding behavior:
 
 - every client connection has one FIFO encode worker shared by its window
   sources;
@@ -818,7 +825,7 @@ Responsibility is divided as follows:
 | `window-source-timer-lifecycle` | Generic `WindowSource` timer leases, callback completion accounting, terminal idempotence, icon timer, and exception-complete generic cleanup. |
 | `wayland-initial-window-state` | Current Wayland buffer format, frame-alpha selector, CSC readiness, popup publication order, and opaque-region/dimension rebinding. |
 | `wayland-subsurface-stream-ownership` | Retained normalized root/child rasters, stable surface identity, authoritative topology, ordered raw RGB32 parent-backing transactions, exact packet ownership and client draw-ACK routing, atomic Cairo/OpenGL staging, native pointer targeting, composite-root acknowledgement, child frame completion, and its live gate. |
-| `wayland-empty-damage-throttle` | Ordinary non-composite toplevel frame-callback acknowledgement, empty-damage guard, and damage/no-damage pacing. |
+| Upstream `FrameCallbackModel` (formerly `wayland-empty-damage-throttle`) | Ordinary toplevel frame-callback acknowledgement, pending-damage guard and paced empty acknowledgement; not a queue case. |
 
 The timer case and this case both modify video call sites, but neither is a
 production dependency of the other. The timer case must retain the inherited

@@ -34,7 +34,7 @@ deduplicate already transmitted packets on the server.
 ## Embedded-source context
 
 The case resolves against source commit
-`d95058b0916913fe6ae5296fb702f66d833898b0`, embedded in current `develop`.
+`0a80430b6506e403f6469416d8aaa8463e331296`, embedded in current `develop`.
 Upstream commit `9d9d1d09d84` moved wheel handling into the common client
 pointer subsystem. The GTK window remains its toolkit adapter: it translates
 GDK smooth deltas through `wheel_event()` and discrete directions through a
@@ -45,9 +45,18 @@ Upstream `f74c91e7320671a91d1d5a7db85a804e2b59e3b5` now suppresses
 `XPRA_SKIP_DUPLICATE_SCROLL_EVENTS`, enabled by default. The current decision is
 **adapt and narrow**: preserve that implementation and its opt-out, while
 retaining only the missing X11 zero-baseline recovery and complete scroll
-admission. The clean handler still drops the first/reset X11 emulated step and
-its smooth route does not enforce server-readonly, disabled pointer or coarse
-policy like the button route does.
+admission. The clean handler still drops the first/reset X11 emulated step.
+
+Upstream `10a9c3ca12` now rejects client/server readonly and a disabled server
+pointer inside `PointerClient.wheel_event()` for every adapter, and
+`b2ee40bcdb` holds back button presses under the same policy. The GTK adapter
+still forwards smooth deltas under coarse policy, and its discrete route never
+consults an empty `wheel_map`. This refresh keeps the patch unchanged. Its
+adapter admission deliberately repeats the upstream readonly/server-pointer
+conditions, because each denial must also retire the X11 zero-baseline
+allowance. The same test covers every denial kind. `cb32a201c9`
+(button polling releases the recorded press) composes; the regression still
+requires an empty `button_pressed` table after every sequence.
 
 `wheel_smooth` and `wheel_map` remain pointer-subsystem policy. This patch reads
 them, and keeps upstream's process-level suppression setting, rather than
@@ -321,6 +330,10 @@ through that widget path. A real `PointerClient` performs mapping and packet
 serialization; only the endpoint packet queue, surrounding subsystem shells
 and coordinate transform are fixtures. Assertions inspect outgoing wheel
 and button packets, not a mocked call to the adapter's final send method.
+Since upstream `68afeba7b8`, releasing the last button calls
+`cancel_moveresize_cursor()`, which the full client window defines outside
+`PointerWindow`; the harness provides it as a no-op because it never starts a
+move/resize drag. Without it the GTK handler raises before the release packet.
 
 The fixture pins the normal process setting to suppression enabled and checks
 that value. Separate replay controls temporarily change only the public module

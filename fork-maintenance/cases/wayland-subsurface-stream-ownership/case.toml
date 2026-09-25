@@ -3,7 +3,7 @@ slug = "wayland-subsurface-stream-ownership"
 kind = "production"
 title = "Compose native Wayland surface trees atomically"
 commit_subject = "Compose native Wayland surface trees atomically"
-patch_sha256 = "bd4dca6656ec3b3afe89ef17f080d03408598829dc991882bdd7f3e4cb584036"
+patch_sha256 = "a99c660b3285ab4efe9b421aade3eaeb6f7c032fe048b5872df80da0b6be9087"
 dependencies = []
 paths = [
   "tests/unittests/unit/client/cairo_backing_test.py",

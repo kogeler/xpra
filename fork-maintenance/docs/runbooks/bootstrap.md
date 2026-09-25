@@ -44,9 +44,12 @@ kernel lock. After an interruption, the next `live-venv` validates that marker
 and removes only its exact partial before retrying. A markerless or ambiguous
 partial fails closed.
 
-Run offline source checks before host/GPU diagnostics:
+Run offline source checks before host/GPU diagnostics. `check` runs the
+live-runner unit tests with that hash-locked interpreter, never the host
+Python, whose distribution packages (for example Pillow) may be older:
 
 ```bash
+make -C fork-maintenance live-venv
 make -C fork-maintenance check
 make -C fork-maintenance doctor
 ```
@@ -154,8 +157,15 @@ exact resolution:
 ```bash
 git status --short
 git add -- <resolved-paths>
-git rebase --continue
+git -c commit.gpgsign=false rebase --continue
 ```
+
+Agent-created and replayed commits are never signed; the operator's signing
+key is interactive. In a partial (`blob:none`) clone, `develop-rebase` first
+backfills missing objects of local `master` credential-free from the public
+canonical repository; `make -C fork-maintenance objects-backfill` runs that
+step alone. Make targets export `GIT_NO_LAZY_FETCH=1`, so no command lazily
+contacts the SSH promisor or opens a key prompt.
 
 Repeat until the rebase completes. If a correct resolution cannot be proved,
 run `git rebase --abort` and stop. Do not begin patch work in a conflicted or

@@ -44,7 +44,24 @@ backings, poll their pixels, or create a new stateful child codec stream.
 ## Frozen source and refresh boundary
 
 The case resolves against embedded source commit
-`d95058b0916913fe6ae5296fb702f66d833898b0`. Upstream now records raw buffer
+`0a80430b6506e403f6469416d8aaa8463e331296`. Since the previous base
+`d95058b09169`, upstream answers Wayland frame callbacks through a shared
+`models.frame.FrameCallbackModel` used by both `Window` and the
+`SubsurfaceWindow` facade (`8e6590188a`, `42c163be03`, `32f423fe6c`,
+`d77c6729dc`): real damage arms a 1 s pending-damage safety timer before
+fanout, an undamaged commit schedules a coalesced 16 ms answer, and
+`acknowledge_changes()` cancels both before `frame_done()`. Upstream child
+facades now publish their own `surface` and `display`, and the upstream-only
+`Subsurface.commit()` emits `subsurface-empty-commit` instead of recapturing
+an undamaged child. WSSO keeps its own atomic child commit emitter (every
+child commit, damaged or not, reaches the adapter exactly once) and routes
+root-only completion through that upstream model; see
+[Root and child frame callbacks](#root-and-child-frame-callbacks). Its child
+damage extraction reuses upstream's shared `get_damage_areas()`. Upstream's
+avoidance of a readback for undamaged child commits is not adopted: WSSO's
+snapshot generation contract still captures every child commit with a buffer,
+which costs a readback but never re-encodes, because only non-empty damage is
+forwarded. Upstream also records raw buffer
 FourCC, separates internal per-frame alpha from stable backing capability,
 and requires damage options at packet publication. Raster bounds use the
 current `xpra.constants.MAX_WINDOW_SIZE` owner, not its removed `xpra.common`
@@ -1453,7 +1470,7 @@ Mapped root completion follows one exact ownership matrix:
 
 | Root state | Empty/damage state | Completion owner |
 | --- | --- | --- |
-| Root-only | No explicit damage and no successful current-root repair | The optional WEDT `schedule_empty_damage_ack()` delegate; without WEDT, the ordinary immediate fallback |
+| Root-only | No explicit damage and no successful current-root repair | The model's paced `schedule_empty_acknowledgement()` |
 | Root-only | Explicit damage delivered to an eligible source or a successful current-root full repair | The ordinary `WindowSource` damage path; explicit fanout follows cancel/mark, while a reconciliation repair remains the sole source request and ACK owner |
 | Active composite | Empty and no successful current-root repair | One direct root acknowledgement after reconciliation, independent of peer count |
 | Active composite | Explicit damage or a successful current-root full repair | One direct root acknowledgement in the commit adapter's `finally` boundary after every peer has received its transaction input |
@@ -1464,18 +1481,34 @@ not invent a `WindowSource` completion owner. Conversely, a successfully
 scheduled repair prevents both empty pacing and a second ordinary damage
 request for that source.
 
-WSSO calls the optional empty-damage delegates only at these integration seams.
-It does not own their timer, delay, coalescing consumer, or cleanup policy. The
-server-level cancel and model-level pending mark happen once before explicit
-ordinary root damage fanout, not once per connection. Reconciliation prepares
-that same ownership before the first full-repair request, so even a
-synchronous source completion observes the guard in the correct order. If no
-peer accepts any repair, rollback clears only a guard acquired by this attempt;
-it cannot clear an older outstanding damage owner. The successful
+WSSO calls upstream's frame-callback model only at these integration seams. It
+does not own the pacing timer, its delay, coalescing, the pending-damage
+safety timeout or their cleanup: `FrameCallbackModel` owns them and
+`unmanage()` cancels them. Before explicit ordinary root damage fanout the
+adapter calls `cancel_empty_ack_timer()` and then `mark_damage_frame_pending()`
+once, not once per connection. Reconciliation prepares that same ownership
+before the first full-repair request, so even a synchronous source completion
+observes the guard in the correct order. The model has no public predicate for
+its guard; the adapter reads whether the pending-damage timer was already
+armed. If no peer accepts any repair, rollback calls
+`cancel_damage_frame_timer()` only for a guard acquired by this attempt; it
+cannot clear an older outstanding damage owner. The successful
 repaired-source identity suppresses a duplicate explicit request.
-Composite commits cancel any ordinary empty timer, do not mark the ordinary
-model guard, and complete the native root exactly once even when several Xpra
-peers receive independent transactions.
+Composite commits cancel any ordinary empty-answer timer, do not arm the
+pending-damage guard, and complete the native root exactly once through
+`acknowledge_changes()` even when several Xpra peers receive independent
+transactions.
+
+A child commit is completed directly by `frame_done()` on its native
+subsurface and a compositor flush in the commit adapter's `finally` block.
+The `SubsurfaceWindow` facade derives from the same upstream model and
+publishes the child surface and display, but WSSO never arms the facade's
+timers; `unmanage()` on facade removal only releases its surface reference.
+Upstream's ordinary child `subsurface_image` and `subsurface_empty_commit`
+handlers stay textually present for the legacy list path but are not
+connected: the WSSO native emitter publishes only `subsurface-commit`, so an
+unhandled `subsurface-empty-commit` can never leave a child callback
+unanswered.
 
 ## Cleanup and terminal ordering
 
@@ -1615,38 +1648,28 @@ An active composite forces the root and children through the base raw capture
 and packet-construction path for that transaction. Root-only toplevel video
 behavior remains VPC authority.
 
-### `wayland-empty-damage-throttle`
+### Upstream frame-callback model (formerly `wayland-empty-damage-throttle`)
 
-The empty-damage case owns the generic mapped-empty commit guard, bounded
-pacing/coalescing timer, consumer replacement, and terminal timer cleanup.
-WSSO owns the commit-classification adapter around that policy. A root-only
-empty generation with no successful repair delegates to WEDT's scheduler. A
-root-only explicit damage cancels the WEDT entry and marks the model frame
-pending before ordinary source fanout. A reconciliation repair uses the same
-cancel/mark guard before its first source handoff; success is recorded
-separately and remains the only ordinary request and ACK owner. An active
-composite cancels the ordinary
-entry and acknowledges the root exactly once after transaction input has been
-distributed. WSSO also owns the exactly-once child commit callback.
+Upstream now owns what the retired empty-damage case owned: the mapped-empty
+commit guard, bounded pacing/coalescing timer and terminal timer cleanup, in
+`models.frame.FrameCallbackModel`. WSSO owns only the commit-classification
+adapter around that policy. A root-only empty generation with no successful
+repair schedules the model's paced answer. A root-only explicit damage cancels
+that answer and marks the model frame pending before ordinary source fanout. A
+reconciliation repair uses the same cancel/mark guard before its first source
+handoff; success is recorded separately and remains the only ordinary request
+and ACK owner. An active composite cancels the ordinary answer and acknowledges
+the root exactly once after transaction input has been distributed. WSSO also
+owns the exactly-once child commit callback.
 
-The delegate lookup is optional so the WSSO case remains independently
-selectable: without WEDT, only the root-only empty case uses the ordinary
-immediate acknowledgement fallback. With the complete stack, WEDT remains the
-sole owner of timer allocation, replacement, firing, and terminal cancellation;
-WSSO never stores a duplicate timer or consumer.
-
-The topology regression initializes WEDT's optional reservation and terminal
-admission fields alongside its timer/map fields. This is fixture composition,
-not a WSSO implementation of timer ownership: the combined ordinary-root
-controls still call WEDT's real schedule/cancel/model methods.
-
-Normalized native damage is an immutable tuple; the standalone upstream/WEDT
-path may supply a list. Both use sequence emptiness, not the container type,
-to select this handoff. The shared live log observer consequently recognizes
-the exact empty `rects=()` and `rects=[]` fields, retaining mapped-state and
+Normalized native damage is an immutable tuple; the standalone upstream path
+may supply a list. Both use sequence emptiness, not the container type, to
+select this handoff. The shared live log observer consequently recognizes the
+exact empty `rects=()` and `rects=[]` fields, retaining mapped-state and
 exact-window guards. Positive damage requires a valid nonempty rectangle
 sequence; malformed text is not evidence of either state. This representation
-choice changes neither WEDT's pacing policy nor the number of native callbacks.
+choice changes neither upstream's pacing policy nor the number of native
+callbacks.
 
 Do not implement an empty-damage timer inside WSSO, use a composite watchdog as
 a frame-pacing timer, or make child transaction retries acknowledge unrelated
@@ -1762,7 +1785,7 @@ option parsing.
 | --- | --- |
 | `unit.server.window.subsurface_source_test` | Source policy, eligibility/refusal, damage deferral, atomic snapshot ownership, continuous-generation progress, transaction order, scheduler/watchdog, publication, ACK, genuine composition drain, mmap, teardown, and fanout |
 | `unit.wayland.subsurface_discovery_test` and its C protocol client | Real compositor discovery, stable identity, raw-format transitions, oversized viewport refusal, empty-commit capture recovery, and terminal registry cleanup |
-| `unit.wayland.subsurface_stream_test` | Deterministic native-adapter/model controls: stable identity, role loss/reparent, authoritative tuple dispatch, root-indexed reconciliation, WEDT handoff, topology, transforms, scale/viewport, XDG canvas, snapshots, colourspace, and child callbacks |
+| `unit.wayland.subsurface_stream_test` | Deterministic native-adapter/model controls: stable identity, role loss/reparent, authoritative tuple dispatch, root-indexed reconciliation, frame-model handoff, topology, transforms, scale/viewport, XDG canvas, snapshots, colourspace, and child callbacks |
 | `unit.wayland.pointer_test` | Native pointer adapter hit testing, move/reparent coordinates, no-target clearing, lifecycle, and failure paths |
 | `unit.client.cairo_backing_test` | Exact validation, premultiplied staging, atomic swap, invalidation, scaling, and failures |
 | `unit.client.opengl_backing_test` | Real mapped FBO staging, reset, blend/state restoration, direct-present rectangles, format handling, atomic commit, deferred-context ownership, backing replacement, close, and failures |
@@ -1916,9 +1939,9 @@ owns capability advertisement and rendering. The fixed live client uses Cairo.
 The mapped OpenGL NumPy/ctypes regressions run in every Debian client build and
 the remaining GL tests retain focused/native coverage.
 
-The complete queue includes WEDT, clipboard and keymap patches. Therefore this
-live profile exercises their real integration with WSSO, including ordinary
-empty-root timer ownership. Standalone compatibility fallbacks remain unit-test
+The complete queue includes the clipboard and keymap patches. Therefore this
+live profile exercises their real integration with WSSO, together with
+upstream's ordinary empty-root frame pacing. Standalone compatibility fallbacks remain unit-test
 subjects, never alternative live products.
 
 ### Fixture schema and geometry
@@ -2328,13 +2351,14 @@ Future work must preserve all of these invariants.
 - Pointer hit testing uses the current native input leaf on every packet.
 - Pointer focus clears before native role or surface invalidation.
 - One native commit produces one surface callback, not one callback per peer.
-- Root-only empty pacing remains WEDT authority; ordinary root damage uses its
-  cancel/mark guards, while composite root commits acknowledge directly once.
+- Root-only empty pacing remains upstream frame-model authority; ordinary root
+  damage uses its cancel/mark guards, while composite root commits acknowledge
+  directly once.
 - Scheduler retries and watchdogs are bounded and owned by one connection.
 - Cleanup attempts every owned source and reports the first error afterward.
 - Diagnostics bind identities without logging raw pixel data.
 - The schema-6 live oracle remains independent of implementation summaries.
-- WIS, generic timer, VPC, and empty-damage ownership remain separate.
+- WIS, generic timer, VPC, and upstream frame-pacing ownership remain separate.
 
 ## Required validation
 
@@ -2373,8 +2397,9 @@ escalation at the first unexplained failure. The development boundaries are:
 5. Run `unit.wayland.window_test` and the repository's `wayland` native leg.
    Resolve the complete stack and repeat both
    `unit.wayland.subsurface_stream_test` and `unit.wayland.window_test` there;
-   the pair binds WSSO's commit adapter to WEDT's real scheduler, model guard,
-   and cleanup owner while preserving the ordinary compatibility path. Run
+   the pair binds WSSO's commit adapter to upstream's real frame-model
+   scheduler, pending-damage guard and cleanup owner while preserving the
+   ordinary compatibility path. Run
    VPC's calculator/CUDA consumer regressions and WSSO's exact-source provider
    regressions on the complete queue as well.
 6. Run case resolution, whitespace, manifest/path/digest, fork-control, and

@@ -286,6 +286,8 @@ def run(
     cwd: Path | None = None,
     check: bool = True,
     text: bool = True,
+    env: dict[str, str] | None = None,
+    input: str | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     try:
         podman_policy.validate_podman_argv(command)
@@ -297,6 +299,8 @@ def run(
         check=False,
         capture_output=True,
         text=text,
+        env=None if env is None else {**os.environ, **env},
+        input=input,
     )
     if check and result.returncode:
         stdout = result.stdout if text else result.stdout.decode(errors="replace")
@@ -7313,13 +7317,72 @@ def master_update(repo: Path) -> str:
     return base
 
 
+# Automation never reaches for the operator's credentials or signing key. A
+# partial clone would otherwise lazily fetch a missing blob from its promisor
+# remote, which can open an interactive SSH/security-key prompt.
+NONINTERACTIVE_GIT_ENV = {
+    "GIT_NO_LAZY_FETCH": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+}
+
+
+def missing_objects(repo: Path, *revisions: str) -> list[str]:
+    result = run(
+        ("git", "-C", str(repo), "rev-list", "--objects", "--missing=print", *revisions),
+        env=NONINTERACTIVE_GIT_ENV,
+    )
+    return sorted({line[1:] for line in result.stdout.splitlines() if line.startswith("?")})
+
+
+def backfill_missing_objects(repo: Path, *revisions: str, source: str = UPSTREAM_URL) -> int:
+    """Complete a partial clone from the public canonical repository.
+
+    Objects are content-addressed, so fetching exactly the missing IDs over
+    anonymous HTTPS supplies identical bytes without credentials. Nothing
+    names a remote, updates a ref or FETCH_HEAD, or changes configuration.
+    """
+    missing = missing_objects(repo, *revisions)
+    if not missing:
+        return 0
+    run(
+        (
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "credential.helper=",
+            "-c",
+            "fetch.negotiationAlgorithm=noop",
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--recurse-submodules=no",
+            "--stdin",
+            source,
+        ),
+        env={**NONINTERACTIVE_GIT_ENV, "GIT_ASKPASS": "false", "SSH_ASKPASS": "false"},
+        input="".join(f"{oid}\n" for oid in missing),
+    )
+    remaining = missing_objects(repo, *revisions)
+    if remaining:
+        fail(f"{len(remaining)} objects are still missing after backfill from {source}")
+    return len(missing)
+
+
 def develop_rebase(repo: Path) -> str:
     verify_repo(repo, ())
     require_clean(repo)
     if current_branch(repo) != INTEGRATION_BRANCH:
         fail(f"current branch must be {INTEGRATION_BRANCH}")
     base = require_local_master(repo)
-    result = git(repo, "rebase", f"refs/heads/{BASE_BRANCH}", check=False)
+    backfill_missing_objects(repo, f"refs/heads/{BASE_BRANCH}", "HEAD")
+    # Replayed fork commits are never signed: the operator's signing key is
+    # interactive, and publication does not require signatures.
+    result = run(
+        ("git", "-C", str(repo), "-c", "commit.gpgsign=false", "rebase", f"refs/heads/{BASE_BRANCH}"),
+        check=False,
+        env=NONINTERACTIVE_GIT_ENV,
+    )
     if result.returncode:
         detail = "\n".join(
             part for part in (result.stdout.strip(), result.stderr.strip()) if part
@@ -7327,7 +7390,7 @@ def develop_rebase(repo: Path) -> str:
         suffix = f"\n{detail}" if detail else ""
         fail(
             "develop rebase stopped; resolve every conflict, stage the resolutions, "
-            "and run git rebase --continue, or abort and stop patch work"
+            "and run git -c commit.gpgsign=false rebase --continue, or abort and stop patch work"
             f"{suffix}"
         )
     require_rebased_develop(repo, base)
@@ -7645,6 +7708,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="explicitly rebase develop during an operator-selected upstream refresh",
     )
     commands.add_parser(
+        "objects-backfill",
+        help="complete partial-clone objects of local master and HEAD from public upstream",
+    )
+    commands.add_parser(
         "patch-start-check",
         help="verify an explicitly completed upstream sync and develop rebase",
     )
@@ -7760,6 +7827,10 @@ def main(argv: list[str] | None = None) -> int:
         base = master_update(repo)
         print(f"master={base}")
         print("master_update=passed")
+    elif args.command == "objects-backfill":
+        verify_repo(repo, ())
+        count = backfill_missing_objects(repo, f"refs/heads/{BASE_BRANCH}", "HEAD")
+        print(f"objects_backfilled={count}")
     elif args.command == "develop-rebase":
         base = develop_rebase(repo)
         print(f"develop_base={base}")

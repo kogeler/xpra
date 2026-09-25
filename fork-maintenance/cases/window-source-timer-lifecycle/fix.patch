@@ -1,14 +1,15 @@
 diff --git a/tests/unittests/unit/server/window/compress_test.py b/tests/unittests/unit/server/window/compress_test.py
-index 0323f173da940c79af07fba47abd40b220031eee..a390933424e20ed96b3d2674a5277e2a523b9cb3 100644
+index bb615735c8d9314516fc4597c0132551a358f1bd..6d22ed9a46b20e89f898c763aec344577c4b4023 100644
 --- a/tests/unittests/unit/server/window/compress_test.py
 +++ b/tests/unittests/unit/server/window/compress_test.py
-@@ -7,7 +7,145 @@
+@@ -5,11 +5,149 @@
+ # later version. See the file COPYING for details.
+ 
  import unittest
 +import warnings
 +from threading import Condition, Event, Lock, Thread
  from types import SimpleNamespace
--from unittest.mock import patch
-+from unittest.mock import Mock, patch
+ from unittest.mock import Mock, patch
  
 -from xpra.server.window import compress
 -from xpra.server.window.compress import WindowSource
@@ -151,7 +152,11 @@ index 0323f173da940c79af07fba47abd40b220031eee..a390933424e20ed96b3d2674a5277e2a
 +            raise WaitInterrupted("timer callback wait interrupted")
 +        return super().wait(timeout)
  
-@@ -185,3 +323,1104 @@ class CompressTest(unittest.TestCase):
+ 
+ class CompressTest(unittest.TestCase):
+@@ -220,5 +358,1108 @@ class CompressTest(unittest.TestCase):
+         self.assertEqual(source.get_transparent_encoding(*size, {"quality": 80}, "auto"), "jpega")
+ 
  
 +class WindowSourceTimerLifecycleTest(unittest.TestCase):
 +
@@ -181,7 +186,9 @@ index 0323f173da940c79af07fba47abd40b220031eee..a390933424e20ed96b3d2674a5277e2a
 +        )
 +        source.call_in_encode_thread = Mock(return_value=None)
 +        # These slots are initialized by the real constructors, outside
-+        # init_vars(), in the clean embedded source.
++        # init_vars(), in the clean embedded source. Cleanup acknowledges a
++        # dropped delayed region through `window` (upstream 9eb00d12ca).
++        source.window = Mock()
 +        source.send_window_icon_timer = 0
 +        source.window_icon_queued = False
 +        source.av_sync = True
@@ -1258,14 +1265,20 @@ index 0323f173da940c79af07fba47abd40b220031eee..a390933424e20ed96b3d2674a5277e2a
 -    unittest.main()
 +    unittest.main(failfast=True)
 diff --git a/xpra/server/window/compress.py b/xpra/server/window/compress.py
-index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..f8d835c4da6c91fa771aa7fa1cbed9fa25dbf985 100644
+index 76b12da81ed48731f5172d08bbeb1b0b2d57053c..2be0ae95d9c37206d9ec2950e2cebdb9972d219d 100644
 --- a/xpra/server/window/compress.py
 +++ b/xpra/server/window/compress.py
-@@ -13,2 +13,3 @@ from time import monotonic, sleep
+@@ -11,6 +11,7 @@ from collections import deque
+ from dataclasses import dataclass
+ from time import monotonic, sleep
  from contextlib import nullcontext
 +from threading import Condition, Lock, get_ident
  from typing import ContextManager, Any
-@@ -163,2 +164,12 @@ class DelayedRegions:
+ from collections.abc import Callable, Iterable, Sequence
+ 
+@@ -161,6 +162,16 @@ class DelayedRegions:
+         )
+ 
  
 +@dataclass
 +class _TimerLease:
@@ -1278,7 +1291,11 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..f8d835c4da6c91fa771aa7fa1cbed9fa
 +
 +
  def capr(v: int) -> int:
-@@ -207,2 +218,14 @@ class WindowSource(WindowIconSource):
+     return min(100, max(0, int(v)))
+ 
+@@ -205,6 +216,18 @@ class WindowSource(WindowIconSource):
+ 
+     (also by 'send_window_icon' and clipboard packets)
      """
 +
 +    TIMER_SLOTS = (
@@ -1293,15 +1310,27 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..f8d835c4da6c91fa771aa7fa1cbed9fa
 +    )
 +
      def __init__(self,
-@@ -223,2 +246,3 @@ class WindowSource(WindowIconSource):
+                  ww: int, wh: int,
+                  record_congestion_event: Callable, queue_size: Callable,
+@@ -221,6 +244,7 @@ class WindowSource(WindowIconSource):
+                  rgb_formats: Sequence[str],
+                  default_encoding_options,
                   mmap_write_area, bandwidth_limit: int, jitter: int, datagram=0):
 +        self._init_timer_lifecycle()
          super().__init__(window_icon_encodings, icons_encoding_options)
-@@ -247,3 +271,2 @@ class WindowSource(WindowIconSource):
+         # mmap:
+         # (this is a `BaseMmapArea` but we can't depend on the mmap module here)
+@@ -245,7 +269,6 @@ class WindowSource(WindowIconSource):
+         self.av_sync_delay_target = av_sync_delay       # the av-sync delay we want at this point in time (can vary quickly)
+         self.av_sync_delay_base = av_sync_delay         # the total av-sync delay we are trying to achieve (including video encoder delay)
          self.av_sync_frame_delay: int = 0              # how long frames spend in the video encoder
 -        self.av_sync_timer: int = 0
          self.encode_queue: list[tuple] = []
-@@ -409,2 +432,264 @@ class WindowSource(WindowIconSource):
+         self.encode_queue_max_size: int = 10
+         self.last_scroll_event: float = 0
+@@ -407,6 +430,268 @@ class WindowSource(WindowIconSource):
+     def __repr__(self) -> str:
+         return f"WindowSource({self.wid:#x} : {self.window_dimensions})"
  
 +    def _init_timer_lifecycle(self) -> None:
 +        """Initialize timer ownership once; unlike ``init_vars``, this state is terminal."""
@@ -1566,16 +1595,28 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..f8d835c4da6c91fa771aa7fa1cbed9fa
 +                self._timer_condition.notify_all()
 +
      def insert_encoder(self, encoder_name: str, encoding: str, encode_fn: Callable) -> None:
-@@ -459,2 +744,3 @@ class WindowSource(WindowIconSource):
+         log(f"insert_encoder({encoder_name}, {encoding}, {encode_fn})")
+         self._all_encoders.setdefault(encoding, []).insert(0, encode_fn)
+@@ -457,6 +742,7 @@ class WindowSource(WindowIconSource):
+         self.picture_encodings = tuple(picture_encodings)
+ 
      def init_vars(self) -> None:
 +        self._init_timer_lifecycle()
          self.server_core_encodings = ()
-@@ -478,4 +764,2 @@ class WindowSource(WindowIconSource):
+         self.server_encodings = ()
+         self.encoding = ""
+@@ -476,8 +762,6 @@ class WindowSource(WindowIconSource):
+         self.strict = STRICT_MODE
+         self.decoder_speed = typedict()
          #
 -        self.decode_error_refresh_timer: int = 0
 -        self.may_send_timer: int = 0
          self.auto_refresh_delay = 0
-@@ -488,7 +772,3 @@ class WindowSource(WindowIconSource):
+         self.base_auto_refresh_delay = 0
+         self.min_auto_refresh_delay = 50
+@@ -486,11 +770,7 @@ class WindowSource(WindowIconSource):
+         self.refresh_speed = AUTO_REFRESH_SPEED
+         self.refresh_event_time: float = 0.0
          self.refresh_target_time: float = 0.0
 -        self.refresh_timer: int = 0
          self.refresh_regions: list[rectangle] = []
@@ -1583,7 +1624,11 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..f8d835c4da6c91fa771aa7fa1cbed9fa
 -        self.expire_timer: int = 0
 -        self.soft_timer: int = 0
          self.soft_expired: int = 0
-@@ -528,13 +808,53 @@ class WindowSource(WindowIconSource):
+         self.max_soft_expired = MAX_SOFT_EXPIRED
+         self.is_OR = False
+@@ -526,17 +806,57 @@ class WindowSource(WindowIconSource):
+         self._damage_packet_sequence: int = 1
+ 
      def cleanup(self) -> None:
 -        # `WindowIconSource.cleanup` cancels the window icon timer:
 -        super().cleanup()
@@ -1648,7 +1693,11 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..f8d835c4da6c91fa771aa7fa1cbed9fa
 +            # after this owner has attempted the mandatory encode-ended barrier.
 +            self._finish_terminal_cleanup()
  
-@@ -940,6 +1260,5 @@ class WindowSource(WindowIconSource):
+     def encode_ended(self) -> None:
+         log("encode_ended()")
+@@ -938,10 +1258,9 @@ class WindowSource(WindowIconSource):
+             return  # already up to date
+         if self.av_sync_timer:
              return  # already scheduled
 -        self.av_sync_timer = GLib.timeout_add(delay, self.update_av_sync_delay)
 +        self._schedule_timer("av_sync_timer", delay, self.update_av_sync_delay)
@@ -1656,7 +1705,11 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..f8d835c4da6c91fa771aa7fa1cbed9fa
      def update_av_sync_delay(self) -> None:
 -        self.av_sync_timer = 0
          delta = self.av_sync_delay_target-self.av_sync_delay
-@@ -1313,20 +1632,12 @@ class WindowSource(WindowIconSource):
+         if delta == 0:
+             return
+@@ -1318,36 +1637,24 @@ class WindowSource(WindowIconSource):
+             self.window.acknowledge_changes()
+ 
      def cancel_expire_timer(self) -> None:
 -        if et := self.expire_timer:
 -            self.expire_timer = 0
@@ -1681,7 +1734,8 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..f8d835c4da6c91fa771aa7fa1cbed9fa
 -            GLib.source_remove(rt)
 +        if self._cancel_timer("refresh_timer"):
              self.refresh_event_time = 0
-@@ -1335,10 +1646,6 @@ class WindowSource(WindowIconSource):
+             self.refresh_target_time = 0
+ 
      def cancel_timeout_timer(self) -> None:
 -        if tt := self.timeout_timer:
 -            self.timeout_timer = 0
@@ -1694,73 +1748,124 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..f8d835c4da6c91fa771aa7fa1cbed9fa
 -            GLib.source_remove(avst)
 +        self._cancel_timer("av_sync_timer")
  
-@@ -1704,3 +2011,3 @@ class WindowSource(WindowIconSource):
+     def is_cancelled(self, sequence=MAX_SEQUENCE) -> bool:
+         """ See cancel_damage(wid) """
+@@ -1709,7 +2016,7 @@ class WindowSource(WindowIconSource):
+                       (x, y, w, h, options), self.wid, len(regions), 1000*(now-delayed.damage_time))
+             if not self.expire_timer and not self.soft_timer and self.soft_expired == 0:
                  log.error("Error: bug, found a delayed region without a timer!")
 -                self.expire_timer = GLib.timeout_add(0, self.expire_delayed_region, now)
 +                self._schedule_timer("expire_timer", 0, self.expire_delayed_region, now)
              return
-@@ -1763,3 +2070,3 @@ class WindowSource(WindowIconSource):
+ 
+         # create a new delayed region:
+@@ -1768,7 +2075,7 @@ class WindowSource(WindowIconSource):
+         damagelog(" delay=%i, elapsed=%i, resize_elapsed=%i, congestion_elapsed=%i, batch=%i, min=%i, inc=%i",
+                   delay, elapsed, resize_elapsed, congestion_elapsed, self.batch_config.delay, min_delay, inc)
          due = now+expire_delay/1000.0
 -        self.expire_timer = GLib.timeout_add(expire_delay, self.expire_delayed_region, due, target_delay)
 +        self._schedule_timer("expire_timer", expire_delay, self.expire_delayed_region, due, target_delay)
  
-@@ -1797,3 +2104,2 @@ class WindowSource(WindowIconSource):
+     def may_update_window_dimensions(self) -> tuple[int, int]:
+         ww, wh = self.window.get_dimensions()
+@@ -1802,7 +2109,6 @@ class WindowSource(WindowIconSource):
+         """ mark the region as expired so damage_packet_acked can send it later,
+             and try to send it now.
          """
 -        self.expire_timer = 0
          delayed = self._damage_delayed
-@@ -1821,3 +2127,3 @@ class WindowSource(WindowIconSource):
+         if not delayed:
+             damagelog("expire_delayed_region() already processed")
+@@ -1826,7 +2132,7 @@ class WindowSource(WindowIconSource):
+             # not due yet, don't allow soft expiry, just try again later:
+             delay = int(1000*(due-now))
              expire_delay = max(self.batch_config.min_delay, min(self.batch_config.expire_delay, delay))
 -            self.expire_timer = GLib.timeout_add(expire_delay, self.expire_delayed_region, due)
 +            self._schedule_timer("expire_timer", expire_delay, self.expire_delayed_region, due)
              return False
-@@ -1833,3 +2139,3 @@ class WindowSource(WindowIconSource):
+         # the region has not been sent yet because we are waiting for damage ACKs from the client
+         max_soft_expired = min(1+self.statistics.damage_events_count//2, self.max_soft_expired)
+@@ -1838,7 +2144,7 @@ class WindowSource(WindowIconSource):
+             # we have already waited for "expire delay" to get here,
+             # wait gradually longer as we soft-expire more regions:
              soft_delay = self.soft_expired*target_delay
 -            self.soft_timer = GLib.timeout_add(soft_delay, self.delayed_region_soft_timeout)
 +            self._schedule_timer("soft_timer", soft_delay, self.delayed_region_soft_timeout)
          else:
-@@ -1852,4 +2158,4 @@ class WindowSource(WindowIconSource):
+             damagelog("expire_delayed_region: soft expire limit reached: %i", max_soft_expired)
+             if max_soft_expired == self.max_soft_expired:
+@@ -1857,19 +2163,17 @@ class WindowSource(WindowIconSource):
+             # but if somehow they go missing... clean it up from a timeout:
+             if not self.timeout_timer:
                  delayed_region_time = delayed.damage_time
 -                self.timeout_timer = GLib.timeout_add(self.batch_config.timeout_delay,
 -                                                      self.delayed_region_timeout, delayed_region_time)
 +                self._schedule_timer("timeout_timer", self.batch_config.timeout_delay,
 +                                     self.delayed_region_timeout, delayed_region_time)
          return False
-@@ -1857,3 +2163,2 @@ class WindowSource(WindowIconSource):
+ 
      def delayed_region_soft_timeout(self) -> bool:
 -        self.soft_timer = 0
          log("delayed_region_soft_timeout() soft_expired=%i, max_soft_expired=%i",
-@@ -1864,3 +2169,2 @@ class WindowSource(WindowIconSource):
+             self.soft_expired, self.max_soft_expired)
+         self.do_send_delayed()
+         return False
+ 
      def delayed_region_timeout(self, delayed_region_time) -> bool:
 -        self.timeout_timer = 0
          delayed = self._damage_delayed
-@@ -1901,5 +2205,2 @@ class WindowSource(WindowIconSource):
+         if delayed is None:
+             # delayed region got sent
+@@ -1906,9 +2210,6 @@ class WindowSource(WindowIconSource):
+                 log_fn(" %6i %-5s: %3is", seq, coding, elapsed)
+ 
      def _may_send_delayed(self) -> None:
 -        # this method is called from the timer,
 -        # we know we can clear it (and no need to cancel it):
 -        self.may_send_timer = 0
          self.may_send_delayed()
-@@ -1945,3 +2246,3 @@ class WindowSource(WindowIconSource):
+ 
+     def may_send_delayed(self) -> None:
+@@ -1950,7 +2251,7 @@ class WindowSource(WindowIconSource):
+         def check_again(delay=actual_delay/10.0):
+             # schedules a call to check again:
              delay = int(min(self.batch_config.max_delay, max(10.0, delay)))
 -            self.may_send_timer = GLib.timeout_add(delay, self._may_send_delayed)
 +            self._schedule_timer("may_send_timer", delay, self._may_send_delayed)
          # locked means a fixed delay we try to honour,
-@@ -2429,3 +2730,3 @@ class WindowSource(WindowIconSource):
+         # this code ensures that we don't fire too early if called from damage_packet_acked
+         if self.batch_config.locked:
+@@ -2434,7 +2735,7 @@ class WindowSource(WindowIconSource):
+                 int(self.base_auto_refresh_delay * mult),
+             )
              self.refresh_target_time = now + sched_delay/1000.0
 -            self.refresh_timer = GLib.timeout_add(sched_delay, self.refresh_timer_function, options)
 +            self._schedule_timer("refresh_timer", sched_delay, self.refresh_timer_function, options)
              rec(f"scheduling refresh in {sched_delay}ms (pct={pct}, batch={self.batch_config.delay})")
-@@ -2491,4 +2792,3 @@ class WindowSource(WindowIconSource):
+             return
+         # some of those rectangles may overlap,
+@@ -2496,8 +2797,7 @@ class WindowSource(WindowIconSource):
+             We figure out if now is the right time to do the refresh,
+             and if not re-schedule.
          """
 -        self.refresh_timer = 0
 -        # timer is running now, clear it so that we don't try to cancel it somewhere else:
 +        # The lease wrapper has already retired this one-shot timer.
          # re-do some checks that may have changed:
-@@ -2506,3 +2806,3 @@ class WindowSource(WindowIconSource):
+         if not self.can_refresh():
+             self.refresh_event_time = 0
+@@ -2511,7 +2811,7 @@ class WindowSource(WindowIconSource):
+             self.timer_full_refresh()
+             return False
          # re-schedule ourselves:
 -        self.refresh_timer = GLib.timeout_add(int(delta*1000), self.refresh_timer_function, damage_options)
 +        self._schedule_timer("refresh_timer", int(delta*1000), self.refresh_timer_function, damage_options)
          refreshlog("refresh_timer_function: rescheduling auto refresh timer with extra delay %ims", int(1000*delta))
-@@ -2819,9 +3119,5 @@ class WindowSource(WindowIconSource):
+         return False
+ 
+@@ -2824,13 +3124,9 @@ class WindowSource(WindowIconSource):
+ 
+     def client_decode_error(self, error: float | int, message: str) -> None:
          """
 -            This is called from `damage_packet_acked`, so it runs in the network parse thread.
 -            `decode_error_refresh_timer` is tested and assigned without any locking whilst
@@ -1773,7 +1878,11 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..f8d835c4da6c91fa771aa7fa1cbed9fa
 +            The named lease owns publication and cancellation against UI cleanup;
 +            `full_quality_refresh` retains the existing cancelled-window policy.
          """
-@@ -2842,6 +3138,5 @@ class WindowSource(WindowIconSource):
+         # don't print error code -1, which is just a generic code for error
+         emsg = {-1: ""}.get(error, error)
+@@ -2847,16 +3143,13 @@ class WindowSource(WindowIconSource):
+         self.global_statistics.decode_errors += 1
+         if self.window and not self.decode_error_refresh_timer:
              delay = min(1000, 250+self.global_statistics.decode_errors*100)
 -            self.decode_error_refresh_timer = GLib.timeout_add(delay, self.decode_error_refresh)
 +            self._schedule_timer("decode_error_refresh_timer", delay, self.decode_error_refresh)
@@ -1781,42 +1890,61 @@ index 9462296a76b62b6c10b7f4171c50a63d70dcf77f..f8d835c4da6c91fa771aa7fa1cbed9fa
      def decode_error_refresh(self) -> None:
 -        self.decode_error_refresh_timer = 0
          self.full_quality_refresh({})
-@@ -2849,5 +3144,3 @@ class WindowSource(WindowIconSource):
+ 
      def cancel_decode_error_refresh_timer(self) -> None:
 -        if dert := self.decode_error_refresh_timer:
 -            self.decode_error_refresh_timer = 0
 -            GLib.source_remove(dert)
 +        self._cancel_timer("decode_error_refresh_timer")
  
+     def may_use_scrolling(self, _image: ImageWrapper, _options: typedict) -> bool:
+         # overridden in video source
 diff --git a/xpra/server/window/video_compress.py b/xpra/server/window/video_compress.py
-index 8aac38e996f354d3015988f7beac347fcbd3603d..1cd24a936c358102dcf722ab547029f443ea5c77 100644
+index 0169b910a1907945fa9e7414b5f9ad4f45c8c39c..9328e7fdecb0f9b164607fe3297749e8297872e3 100644
 --- a/xpra/server/window/video_compress.py
 +++ b/xpra/server/window/video_compress.py
-@@ -932,3 +932,3 @@ class WindowVideoSource(WindowSource):
+@@ -935,7 +935,7 @@ class WindowVideoSource(WindowSource):
+         else:
+             self._damage_delayed = DelayedRegions(damage_time, encoding=coding, options=options, regions=regions)
              sublog("send_regions: delaying non video regions %s some more by %ims", regions, delay)
 -            self.expire_timer = GLib.timeout_add(delay, self.expire_delayed_region)
 +            self._schedule_timer("expire_timer", delay, self.expire_delayed_region)
  
+     def must_encode_full_frame(self, encoding: str) -> bool:
+         non_video = self.non_video_encodings
 diff --git a/xpra/server/window/windowicon.py b/xpra/server/window/windowicon.py
 index ca65fe6266e0d84aa37c5ee4b8843b6d3a3dce5a..56f4d287c9ef452f800753da577aceec142213c3 100644
 --- a/xpra/server/window/windowicon.py
 +++ b/xpra/server/window/windowicon.py
-@@ -87,2 +87,3 @@ class WindowIconSource:
+@@ -85,6 +85,7 @@ class WindowIconSource:
+ 
+         self.window_icon_data: tuple[int, int, str, bytes] | None = None
          self.send_window_icon_timer = 0
 +        self.window_icon_queued = False
          self.theme_default_icons = icons_encoding_options.strtupleget("default.icons")
-@@ -113,2 +114,5 @@ class WindowIconSource:
+         self.window_icon_greedy = icons_encoding_options.boolget("greedy", False)
+         self.window_icon_size = icons_encoding_options.intpair("size", (64, 64))
+@@ -111,6 +112,9 @@ class WindowIconSource:
+         self.window_icon_data = None
+ 
      def cancel_window_icon_timer(self) -> None:
 +        if cancel_timer := getattr(self, "_cancel_timer", None):
 +            cancel_timer("send_window_icon_timer")
 +            return
          if swit := self.send_window_icon_timer:
-@@ -232,3 +236,3 @@ class WindowIconSource:
+             self.send_window_icon_timer = 0
+             GLib.source_remove(swit)
+@@ -230,14 +234,17 @@ class WindowIconSource:
+             log("no suitable icon")
+             return
          self.window_icon_data = icon
 -        if not self.send_window_icon_timer:
 +        if not self.send_window_icon_timer and not self.window_icon_queued:
              # call compress via the work queue
-@@ -239,3 +243,6 @@ class WindowIconSource:
+             # and delay sending it by a bit to allow basic icon batching:
+             w, h = self.window_icon_data[:2]
+             delay = min(1000, max(50, w * h * self.batch_config.delay_per_megapixel // 1000000))
+             log("send_window_icon() window=%s, wid=%#x, compression scheduled in %sms for batch delay=%i",
                  self.window, self.wid, delay, self.batch_config.delay_per_megapixel)
 -            self.send_window_icon_timer = GLib.timeout_add(delay, self.queue_window_icon)
 +            if schedule_timer := getattr(self, "_schedule_timer", None):
@@ -1824,7 +1952,11 @@ index ca65fe6266e0d84aa37c5ee4b8843b6d3a3dce5a..56f4d287c9ef452f800753da577aceec
 +            else:
 +                self.send_window_icon_timer = GLib.timeout_add(delay, self.queue_window_icon)
  
-@@ -247,3 +254,8 @@ class WindowIconSource:
+     def queue_window_icon(self) -> None:
+         # the timer has fired, so the source is gone:
+@@ -245,10 +252,16 @@ class WindowIconSource:
+         # otherwise `cancel_window_icon_timer` would try to remove a source
+         # which no longer exists - and would fail to cancel anything:
          self.send_window_icon_timer = 0
 -        self.call_in_encode_thread(self.compress_and_send_window_icon)
 +        self.window_icon_queued = True
@@ -1834,7 +1966,9 @@ index ca65fe6266e0d84aa37c5ee4b8843b6d3a3dce5a..56f4d287c9ef452f800753da577aceec
 +            self.window_icon_queued = False
 +            raise
  
-@@ -251,2 +263,3 @@ class WindowIconSource:
+     def compress_and_send_window_icon(self) -> None:
          # this runs in the work queue
 +        self.window_icon_queued = False
          idata = self.window_icon_data
+         if not idata or not self.has_png:
+             return

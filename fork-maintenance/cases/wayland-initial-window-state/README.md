@@ -36,8 +36,16 @@ coding, not a second fanout implementation.
 
 ## Embedded-source context
 
-The current source is `d95058b0916913fe6ae5296fb702f66d833898b0`.
-The earlier case was based on `212038243d0067b6860ebe7d6953692179ef353f`.
+The current source is `0a80430b6506e403f6469416d8aaa8463e331296`; the
+patch applies unchanged. Between the previous base `d95058b09169` and this one,
+upstream added per-model frame-callback pacing (`FrameCallbackModel`), which
+does not mark popups either, so popup damage moved behind image publication
+keeps the same completion owner. `094692ebf3` narrows `non_video_encodings` to
+registered encoders, which only makes this case's CSC-readiness barrier more
+accurate; transparency selection already draws from `common_encodings`, which
+upstream derives from `_encoders`. `popup.pyx` still emits `commit` before
+`surface-image`, and none of the residual boundaries below changed. The earlier
+case was based on `212038243d0067b6860ebe7d6953692179ef353f`.
 Manual reassessment on the refreshed source removes the absorbed lazy
 `notify::pixel-format` lease and four-string classification. Upstream now
 publishes `frame-has-alpha` before the image, connects its notification once
@@ -480,10 +488,11 @@ Both new test files carry the required `Copyright (C) 2026 kogeler` notice.
 The patch has no downstream dependency and must remain selectable against the
 clean embedded source. In the complete stack, WSSO overlaps both Wayland model
 paths and the Wayland window subsystem while VPC overlaps
-`video_compress.py`; WEDT overlaps the Wayland subsystem and
+`video_compress.py`; upstream's `FrameCallbackModel` (which replaced the
+retired `wayland-empty-damage-throttle` case) shares the Wayland subsystem and
 `window_test.py`. Complete-stack resolution must
 preserve this case's format/image/damage order, WSSO's retained generation and
-composition state, WEDT's ordinary-root acknowledgement path, and VPC's video
+composition state, upstream's ordinary-root acknowledgement path, and VPC's video
 resource lifecycle.
 
 Responsibility is split as follows:
@@ -492,7 +501,7 @@ Responsibility is split as follows:
 | --- | --- |
 | `wayland-initial-window-state` | Current format publication, frame-alpha policy, CSC startup barrier, popup damage order, opaque-region/resize rebinding. |
 | `wayland-subsurface-stream-ownership` | Normalized retained snapshots, stable surface identity, authoritative topology and colourspace, ordered raw RGB32 parent-backing transactions, exact packet ownership and client draw-ACK routing, atomic Cairo/OpenGL staging, native input, composite-root acknowledgement, child frame completion, and live subsurface proof. |
-| `wayland-empty-damage-throttle` | Ordinary non-composite toplevel frame-callback acknowledgement, empty-damage guard, and damage/no-damage pacing. |
+| Upstream `FrameCallbackModel` (formerly `wayland-empty-damage-throttle`) | Ordinary toplevel frame-callback acknowledgement, pending-damage guard and paced empty acknowledgement; not a queue case. |
 | `window-source-timer-lifecycle` | Generic window-source GLib timer leases and terminal close. |
 | `video-pipeline-cleanup-race` | Codec, video queue, exact disjoint edge fanout, flush/watchdog, and video-subregion resources. |
 
