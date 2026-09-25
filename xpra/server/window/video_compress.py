@@ -935,7 +935,7 @@ class WindowVideoSource(WindowSource):
         else:
             self._damage_delayed = DelayedRegions(damage_time, encoding=coding, options=options, regions=regions)
             sublog("send_regions: delaying non video regions %s some more by %ims", regions, delay)
-            self.expire_timer = GLib.timeout_add(delay, self.expire_delayed_region)
+            self._schedule_timer("expire_timer", delay, self.expire_delayed_region)
 
     def must_encode_full_frame(self, encoding: str) -> bool:
         non_video = self.non_video_encodings

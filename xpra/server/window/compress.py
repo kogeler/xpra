@@ -11,6 +11,7 @@ from collections import deque
 from dataclasses import dataclass
 from time import monotonic, sleep
 from contextlib import nullcontext
+from threading import Condition, Lock, get_ident
 from typing import ContextManager, Any
 from collections.abc import Callable, Iterable, Sequence
 
@@ -161,6 +162,16 @@ class DelayedRegions:
         )
 
 
+@dataclass
+class _TimerLease:
+    epoch: int
+    source_id: int = 0
+    source: GLib.Source | None = None
+
+
+_PENDING_TIMER = -1
+
+
 def capr(v: int) -> int:
     return min(100, max(0, int(v)))
 
@@ -205,6 +216,18 @@ class WindowSource(WindowIconSource):
 
     (also by 'send_window_icon' and clipboard packets)
     """
+
+    TIMER_SLOTS = (
+        "decode_error_refresh_timer",
+        "may_send_timer",
+        "refresh_timer",
+        "timeout_timer",
+        "expire_timer",
+        "soft_timer",
+        "av_sync_timer",
+        "send_window_icon_timer",
+    )
+
     def __init__(self,
                  ww: int, wh: int,
                  record_congestion_event: Callable, queue_size: Callable,
@@ -221,6 +244,7 @@ class WindowSource(WindowIconSource):
                  rgb_formats: Sequence[str],
                  default_encoding_options,
                  mmap_write_area, bandwidth_limit: int, jitter: int, datagram=0):
+        self._init_timer_lifecycle()
         super().__init__(window_icon_encodings, icons_encoding_options)
         # mmap:
         # (this is a `BaseMmapArea` but we can't depend on the mmap module here)
@@ -245,7 +269,6 @@ class WindowSource(WindowIconSource):
         self.av_sync_delay_target = av_sync_delay       # the av-sync delay we want at this point in time (can vary quickly)
         self.av_sync_delay_base = av_sync_delay         # the total av-sync delay we are trying to achieve (including video encoder delay)
         self.av_sync_frame_delay: int = 0              # how long frames spend in the video encoder
-        self.av_sync_timer: int = 0
         self.encode_queue: list[tuple] = []
         self.encode_queue_max_size: int = 10
         self.last_scroll_event: float = 0
@@ -407,6 +430,268 @@ class WindowSource(WindowIconSource):
     def __repr__(self) -> str:
         return f"WindowSource({self.wid:#x} : {self.window_dimensions})"
 
+    def _init_timer_lifecycle(self) -> None:
+        """Initialize timer ownership once; unlike ``init_vars``, this state is terminal."""
+        if hasattr(self, "_timer_lock"):
+            return
+        self._timer_lock = Lock()
+        self._timer_condition = Condition(self._timer_lock)
+        self._timer_epoch = 0
+        self._timer_closed = False
+        self._cleanup_started = False
+        self._cleanup_complete = False
+        self._cleanup_requested = False
+        self._cleanup_owner = 0
+        self._damage_unregistering = False
+        self._active_timer_callbacks = 0
+        self._active_timer_callback_threads: dict[int, int] = {}
+        self._timer_leases: dict[str, _TimerLease] = {}
+        for slot in self.TIMER_SLOTS:
+            setattr(self, slot, 0)
+
+    def _schedule_timer(self, slot: str, delay: int, callback: Callable, *args) -> int:
+        """Publish one named GLib timeout without losing it across terminal cleanup."""
+        self._init_timer_lifecycle()
+        with self._timer_lock:
+            if self._timer_closed or self._cleanup_requested or slot in self._timer_leases:
+                return 0
+            lease = _TimerLease(self._timer_epoch)
+            self._timer_leases[slot] = lease
+            setattr(self, slot, _PENDING_TIMER)
+
+        def timer_callback(*_user_data) -> bool:
+            callback_owner = get_ident()
+            run_deferred_cleanup = False
+            with self._timer_condition:
+                if self._timer_leases.get(slot) is not lease:
+                    return False
+                # A zero-delay source may be dispatched by the main context before
+                # Source.attach() has returned its ID to a producer thread. Keep it
+                # alive until publication can either commit or remove it exactly.
+                if not lease.source_id:
+                    return True
+                if self._timer_closed or self._cleanup_requested or lease.epoch != self._timer_epoch:
+                    self._timer_leases.pop(slot, None)
+                    if getattr(self, slot, 0) == lease.source_id:
+                        setattr(self, slot, 0)
+                    return False
+                self._timer_leases.pop(slot, None)
+                if getattr(self, slot, 0) == lease.source_id:
+                    setattr(self, slot, 0)
+                self._active_timer_callbacks += 1
+                self._active_timer_callback_threads[callback_owner] = (
+                    self._active_timer_callback_threads.get(callback_owner, 0) + 1
+                )
+            callback_error: tuple[BaseException, Any] | None = None
+            cleanup_error: tuple[BaseException, Any] | None
+            try:
+                # Arbitrary callback code must not run under the timer lock: an
+                # ACK may enter timer cancellation while holding the connection
+                # damage-packet lock, and a callback may publish through that
+                # same connection lock. Terminal cleanup waits on the separate
+                # active-callback count before releasing window resources.
+                callback(*args)
+            except BaseException as e:
+                callback_error = e, e.__traceback__
+            finally:
+                with self._timer_condition:
+                    self._active_timer_callbacks -= 1
+                    callback_depth = self._active_timer_callback_threads[callback_owner] - 1
+                    if callback_depth:
+                        self._active_timer_callback_threads[callback_owner] = callback_depth
+                    else:
+                        self._active_timer_callback_threads.pop(callback_owner, None)
+                    run_deferred_cleanup = (
+                        not self._active_timer_callbacks
+                        and self._cleanup_requested
+                        and not self._cleanup_owner
+                        and not self._cleanup_complete
+                    )
+                    self._timer_condition.notify_all()
+                # A callback cannot synchronously wait for its own completion.
+                # The last active callback converts a terminal request into the
+                # ordinary cleanup path only after leaving the active registry.
+                cleanup_error = None
+                if run_deferred_cleanup:
+                    try:
+                        self.cleanup()
+                    except BaseException as e:
+                        cleanup_error = e, e.__traceback__
+                if callback_error:
+                    if cleanup_error:
+                        error, traceback = cleanup_error
+                        log.error("Additional error during timer-requested window source cleanup: %s", error,
+                                  exc_info=(type(error), error, traceback))
+                    error, traceback = callback_error
+                    raise error.with_traceback(traceback)
+                if cleanup_error:
+                    error, traceback = cleanup_error
+                    raise error.with_traceback(traceback)
+            return False
+
+        timer_source = None
+        try:
+            timer_source = GLib.timeout_source_new(delay)
+            timer_source.set_callback(timer_callback)
+            source_id = timer_source.attach(None)
+        except BaseException:
+            with self._timer_lock:
+                if self._timer_leases.get(slot) is lease:
+                    self._timer_leases.pop(slot, None)
+                    if getattr(self, slot, 0) == _PENDING_TIMER:
+                        setattr(self, slot, 0)
+            if timer_source is not None:
+                timer_source.destroy()
+            raise
+        with self._timer_lock:
+            lease.source_id = source_id
+            lease.source = timer_source
+            if (not self._timer_closed and not self._cleanup_requested
+                    and lease.epoch == self._timer_epoch
+                    and self._timer_leases.get(slot) is lease):
+                setattr(self, slot, source_id)
+                return source_id
+            if self._timer_leases.get(slot) is lease:
+                self._timer_leases.pop(slot, None)
+                if getattr(self, slot, 0) == _PENDING_TIMER:
+                    setattr(self, slot, 0)
+        # Cancellation may have let an already-dispatched callback return
+        # False before attach() returned. Destroy the retained Source itself:
+        # its numeric ID may already be absent or belong to another source.
+        timer_source.destroy()
+        return 0
+
+    def _cancel_timer(self, slot: str) -> bool:
+        """Cancel the exact lease for ``slot``, including pending publication."""
+        self._init_timer_lifecycle()
+        with self._timer_lock:
+            lease = self._timer_leases.pop(slot, None)
+            timer_source = lease.source if lease else None
+            owned = lease is not None
+            setattr(self, slot, 0)
+        if timer_source is not None:
+            timer_source.destroy()
+        return owned
+
+    def _take_timer_leases_locked(self) -> tuple[bool, tuple[GLib.Source, ...]]:
+        if self._timer_closed:
+            return False, ()
+        self._timer_closed = True
+        self._timer_epoch += 1
+        leases, self._timer_leases = tuple(self._timer_leases.items()), {}
+        for slot, _lease in leases:
+            setattr(self, slot, 0)
+        sources = tuple(lease.source for _slot, lease in leases if lease.source is not None)
+        return True, sources
+
+    def _wait_for_timer_callbacks(self) -> None:
+        wait_errors: list[tuple[BaseException, Any]] = []
+        with self._timer_condition:
+            while self._active_timer_callbacks:
+                try:
+                    self._timer_condition.wait()
+                except BaseException as e:
+                    # Completion remains the release boundary even when the
+                    # waiting thread is interrupted.  Preserve the interrupt,
+                    # finish waiting, and let terminal cleanup aggregate it.
+                    wait_errors.append((e, e.__traceback__))
+        if wait_errors:
+            for later_error, later_traceback in wait_errors[1:]:
+                log.error("Additional error waiting for a window source timer callback: %s", later_error,
+                          exc_info=(type(later_error), later_error, later_traceback))
+            error, traceback = wait_errors[0]
+            raise error.with_traceback(traceback)
+
+    @staticmethod
+    def _destroy_timer_sources(sources: tuple[GLib.Source, ...]) -> None:
+        remove_errors: list[tuple[BaseException, Any]] = []
+        for source in sources:
+            try:
+                source.destroy()
+            except BaseException as e:
+                remove_errors.append((e, e.__traceback__))
+        if remove_errors:
+            for later_error, later_traceback in remove_errors[1:]:
+                log.error("Additional error removing a window source timer: %s", later_error,
+                          exc_info=(type(later_error), later_error, later_traceback))
+            error, traceback = remove_errors[0]
+            raise error.with_traceback(traceback)
+
+    def _begin_terminal_cleanup(
+        self,
+    ) -> tuple[bool, tuple[GLib.Source, ...], list[tuple[BaseException, Any]]]:
+        """Deactivate external packet ownership, then atomically close timer publication."""
+        self._init_timer_lifecycle()
+        cleanup_owner = get_ident()
+        wait_errors: list[tuple[BaseException, Any]] = []
+        while True:
+            with self._timer_condition:
+                if self._cleanup_complete:
+                    return False, (), wait_errors
+                if self._active_timer_callback_threads.get(cleanup_owner, 0):
+                    # Synchronous teardown cannot wait for the callback which
+                    # invoked it.  Reject new timer publication now; the last
+                    # active callback will enter cleanup after it unwinds.
+                    self._cleanup_requested = True
+                    return False, (), wait_errors
+                if self._cleanup_owner == cleanup_owner:
+                    # Cleanup callbacks may re-enter this method on the owner
+                    # thread.  Waiting for our own terminal transition would
+                    # deadlock; the outer invocation retains all ownership.
+                    return False, (), wait_errors
+                if self._cleanup_owner:
+                    try:
+                        self._timer_condition.wait()
+                    except BaseException as e:
+                        # A competing caller may be the connection teardown
+                        # boundary which publishes the worker sentinel next.
+                        # Preserve its interrupt, but do not let it return
+                        # before the current owner reaches its terminal tail.
+                        wait_errors.append((e, e.__traceback__))
+                    continue
+                self._cleanup_owner = cleanup_owner
+                self._damage_unregistering = True
+                unregister_damage_packets = getattr(self, "unregister_damage_packets", None)
+
+            try:
+                if unregister_damage_packets:
+                    unregister_damage_packets(self)
+            except BaseException as unregister_error:
+                # Packet deactivation is a prerequisite for timer teardown.
+                # Leave the terminal transition unclaimed so one waiter or a
+                # later explicit cleanup call can retry this idempotent hook.
+                with self._timer_condition:
+                    self._damage_unregistering = False
+                    self._cleanup_owner = 0
+                    self._timer_condition.notify_all()
+                if wait_errors:
+                    error, traceback = wait_errors[0]
+                    log.error("Additional error deactivating window damage packets: %s", unregister_error,
+                              exc_info=(type(unregister_error), unregister_error,
+                                        unregister_error.__traceback__))
+                    raise error.with_traceback(traceback)
+                raise
+
+            with self._timer_condition:
+                self._damage_unregistering = False
+                if unregister_damage_packets:
+                    self.unregister_damage_packets = noop
+                self._cleanup_started = True
+                _, timer_sources = self._take_timer_leases_locked()
+                # The closed epoch is now the authoritative publication fence.
+                self._cleanup_requested = False
+                self._timer_condition.notify_all()
+                return True, timer_sources, wait_errors
+
+    def _finish_terminal_cleanup(self) -> None:
+        """Release cleanup waiters after the owner has published its terminal tail."""
+        with self._timer_condition:
+            if self._cleanup_owner == get_ident():
+                self._cleanup_complete = True
+                self._cleanup_requested = False
+                self._cleanup_owner = 0
+                self._timer_condition.notify_all()
+
     def insert_encoder(self, encoder_name: str, encoding: str, encode_fn: Callable) -> None:
         log(f"insert_encoder({encoder_name}, {encoding}, {encode_fn})")
         self._all_encoders.setdefault(encoding, []).insert(0, encode_fn)
@@ -457,6 +742,7 @@ class WindowSource(WindowIconSource):
         self.picture_encodings = tuple(picture_encodings)
 
     def init_vars(self) -> None:
+        self._init_timer_lifecycle()
         self.server_core_encodings = ()
         self.server_encodings = ()
         self.encoding = ""
@@ -476,8 +762,6 @@ class WindowSource(WindowIconSource):
         self.strict = STRICT_MODE
         self.decoder_speed = typedict()
         #
-        self.decode_error_refresh_timer: int = 0
-        self.may_send_timer: int = 0
         self.auto_refresh_delay = 0
         self.base_auto_refresh_delay = 0
         self.min_auto_refresh_delay = 50
@@ -486,11 +770,7 @@ class WindowSource(WindowIconSource):
         self.refresh_speed = AUTO_REFRESH_SPEED
         self.refresh_event_time: float = 0.0
         self.refresh_target_time: float = 0.0
-        self.refresh_timer: int = 0
         self.refresh_regions: list[rectangle] = []
-        self.timeout_timer: int = 0
-        self.expire_timer: int = 0
-        self.soft_timer: int = 0
         self.soft_expired: int = 0
         self.max_soft_expired = MAX_SOFT_EXPIRED
         self.is_OR = False
@@ -526,17 +806,57 @@ class WindowSource(WindowIconSource):
         self._damage_packet_sequence: int = 1
 
     def cleanup(self) -> None:
-        # `WindowIconSource.cleanup` cancels the window icon timer:
-        super().cleanup()
-        self.cancel_damage(MAX_SEQUENCE)
-        log("encoding_totals for wid=%#x with primary encoding=%s : %s",
-            self.wid, self.encoding, self.statistics.encoding_totals)
-        self.init_vars()
-        self._mmap = None
-        self.batch_config.cleanup()
-        # we can only clear the encoders after clearing the whole encoding queue:
-        # (because mmap cannot be cancelled once queued for encoding)
-        self.call_in_encode_thread(self.encode_ended)
+        # A connection-level damage registry may call timer cancellation while
+        # holding its own lock. Deactivate this source before entering the timer
+        # lifecycle, without requiring that optional connection integration.
+        # Concurrent callers serialize this external handoff, and a failed
+        # handoff leaves the terminal transition retryable.
+        cleanup_started, timer_sources, cleanup_errors = self._begin_terminal_cleanup()
+        if not cleanup_started:
+            if cleanup_errors:
+                for later_error, later_traceback in cleanup_errors[1:]:
+                    log.error("Additional error waiting for window source cleanup: %s", later_error,
+                              exc_info=(type(later_error), later_error, later_traceback))
+                error, traceback = cleanup_errors[0]
+                raise error.with_traceback(traceback)
+            return
+        try:
+            def run_cleanup_step(callback: Callable, *args) -> None:
+                try:
+                    callback(*args)
+                except BaseException as e:
+                    cleanup_errors.append((e, e.__traceback__))
+
+            run_cleanup_step(self._destroy_timer_sources, timer_sources)
+            # This wait reports an interrupt only after every claimed callback
+            # has returned, so the remaining terminal steps are safe to run.
+            run_cleanup_step(self._wait_for_timer_callbacks)
+            run_cleanup_step(super().cleanup)
+            run_cleanup_step(self.cancel_damage, MAX_SEQUENCE)
+
+            def log_encoding_totals() -> None:
+                log("encoding_totals for wid=%#x with primary encoding=%s : %s",
+                    self.wid, self.encoding, self.statistics.encoding_totals)
+
+            run_cleanup_step(log_encoding_totals)
+            run_cleanup_step(self.init_vars)
+            self._mmap = None
+            run_cleanup_step(self.batch_config.cleanup)
+            # We can only clear the encoders after clearing the whole encoding queue
+            # because mmap cannot be cancelled once queued for encoding. This barrier
+            # must still be attempted when an earlier cleanup step raises.
+            run_cleanup_step(self.call_in_encode_thread, self.encode_ended)
+            if cleanup_errors:
+                for later_error, later_traceback in cleanup_errors[1:]:
+                    log.error("Additional error during window source cleanup: %s", later_error,
+                              exc_info=(type(later_error), later_error, later_traceback))
+                error, traceback = cleanup_errors[0]
+                raise error.with_traceback(traceback)
+        finally:
+            # An external caller may use cleanup return as the ordering boundary
+            # before publishing the connection worker sentinel.  Wake it only
+            # after this owner has attempted the mandatory encode-ended barrier.
+            self._finish_terminal_cleanup()
 
     def encode_ended(self) -> None:
         log("encode_ended()")
@@ -938,10 +1258,9 @@ class WindowSource(WindowIconSource):
             return  # already up to date
         if self.av_sync_timer:
             return  # already scheduled
-        self.av_sync_timer = GLib.timeout_add(delay, self.update_av_sync_delay)
+        self._schedule_timer("av_sync_timer", delay, self.update_av_sync_delay)
 
     def update_av_sync_delay(self) -> None:
-        self.av_sync_timer = 0
         delta = self.av_sync_delay_target-self.av_sync_delay
         if delta == 0:
             return
@@ -1318,36 +1637,24 @@ class WindowSource(WindowIconSource):
             self.window.acknowledge_changes()
 
     def cancel_expire_timer(self) -> None:
-        if et := self.expire_timer:
-            self.expire_timer = 0
-            GLib.source_remove(et)
+        self._cancel_timer("expire_timer")
 
     def cancel_may_send_timer(self) -> None:
-        if mst := self.may_send_timer:
-            self.may_send_timer = 0
-            GLib.source_remove(mst)
+        self._cancel_timer("may_send_timer")
 
     def cancel_soft_timer(self) -> None:
-        if st := self.soft_timer:
-            self.soft_timer = 0
-            GLib.source_remove(st)
+        self._cancel_timer("soft_timer")
 
     def cancel_refresh_timer(self) -> None:
-        if rt := self.refresh_timer:
-            self.refresh_timer = 0
-            GLib.source_remove(rt)
+        if self._cancel_timer("refresh_timer"):
             self.refresh_event_time = 0
             self.refresh_target_time = 0
 
     def cancel_timeout_timer(self) -> None:
-        if tt := self.timeout_timer:
-            self.timeout_timer = 0
-            GLib.source_remove(tt)
+        self._cancel_timer("timeout_timer")
 
     def cancel_av_sync_timer(self) -> None:
-        if avst := self.av_sync_timer:
-            self.av_sync_timer = 0
-            GLib.source_remove(avst)
+        self._cancel_timer("av_sync_timer")
 
     def is_cancelled(self, sequence=MAX_SEQUENCE) -> bool:
         """ See cancel_damage(wid) """
@@ -1709,7 +2016,7 @@ class WindowSource(WindowIconSource):
                       (x, y, w, h, options), self.wid, len(regions), 1000*(now-delayed.damage_time))
             if not self.expire_timer and not self.soft_timer and self.soft_expired == 0:
                 log.error("Error: bug, found a delayed region without a timer!")
-                self.expire_timer = GLib.timeout_add(0, self.expire_delayed_region, now)
+                self._schedule_timer("expire_timer", 0, self.expire_delayed_region, now)
             return
 
         # create a new delayed region:
@@ -1768,7 +2075,7 @@ class WindowSource(WindowIconSource):
         damagelog(" delay=%i, elapsed=%i, resize_elapsed=%i, congestion_elapsed=%i, batch=%i, min=%i, inc=%i",
                   delay, elapsed, resize_elapsed, congestion_elapsed, self.batch_config.delay, min_delay, inc)
         due = now+expire_delay/1000.0
-        self.expire_timer = GLib.timeout_add(expire_delay, self.expire_delayed_region, due, target_delay)
+        self._schedule_timer("expire_timer", expire_delay, self.expire_delayed_region, due, target_delay)
 
     def may_update_window_dimensions(self) -> tuple[int, int]:
         ww, wh = self.window.get_dimensions()
@@ -1802,7 +2109,6 @@ class WindowSource(WindowIconSource):
         """ mark the region as expired so damage_packet_acked can send it later,
             and try to send it now.
         """
-        self.expire_timer = 0
         delayed = self._damage_delayed
         if not delayed:
             damagelog("expire_delayed_region() already processed")
@@ -1826,7 +2132,7 @@ class WindowSource(WindowIconSource):
             # not due yet, don't allow soft expiry, just try again later:
             delay = int(1000*(due-now))
             expire_delay = max(self.batch_config.min_delay, min(self.batch_config.expire_delay, delay))
-            self.expire_timer = GLib.timeout_add(expire_delay, self.expire_delayed_region, due)
+            self._schedule_timer("expire_timer", expire_delay, self.expire_delayed_region, due)
             return False
         # the region has not been sent yet because we are waiting for damage ACKs from the client
         max_soft_expired = min(1+self.statistics.damage_events_count//2, self.max_soft_expired)
@@ -1838,7 +2144,7 @@ class WindowSource(WindowIconSource):
             # we have already waited for "expire delay" to get here,
             # wait gradually longer as we soft-expire more regions:
             soft_delay = self.soft_expired*target_delay
-            self.soft_timer = GLib.timeout_add(soft_delay, self.delayed_region_soft_timeout)
+            self._schedule_timer("soft_timer", soft_delay, self.delayed_region_soft_timeout)
         else:
             damagelog("expire_delayed_region: soft expire limit reached: %i", max_soft_expired)
             if max_soft_expired == self.max_soft_expired:
@@ -1857,19 +2163,17 @@ class WindowSource(WindowIconSource):
             # but if somehow they go missing... clean it up from a timeout:
             if not self.timeout_timer:
                 delayed_region_time = delayed.damage_time
-                self.timeout_timer = GLib.timeout_add(self.batch_config.timeout_delay,
-                                                      self.delayed_region_timeout, delayed_region_time)
+                self._schedule_timer("timeout_timer", self.batch_config.timeout_delay,
+                                     self.delayed_region_timeout, delayed_region_time)
         return False
 
     def delayed_region_soft_timeout(self) -> bool:
-        self.soft_timer = 0
         log("delayed_region_soft_timeout() soft_expired=%i, max_soft_expired=%i",
             self.soft_expired, self.max_soft_expired)
         self.do_send_delayed()
         return False
 
     def delayed_region_timeout(self, delayed_region_time) -> bool:
-        self.timeout_timer = 0
         delayed = self._damage_delayed
         if delayed is None:
             # delayed region got sent
@@ -1906,9 +2210,6 @@ class WindowSource(WindowIconSource):
                 log_fn(" %6i %-5s: %3is", seq, coding, elapsed)
 
     def _may_send_delayed(self) -> None:
-        # this method is called from the timer,
-        # we know we can clear it (and no need to cancel it):
-        self.may_send_timer = 0
         self.may_send_delayed()
 
     def may_send_delayed(self) -> None:
@@ -1950,7 +2251,7 @@ class WindowSource(WindowIconSource):
         def check_again(delay=actual_delay/10.0):
             # schedules a call to check again:
             delay = int(min(self.batch_config.max_delay, max(10.0, delay)))
-            self.may_send_timer = GLib.timeout_add(delay, self._may_send_delayed)
+            self._schedule_timer("may_send_timer", delay, self._may_send_delayed)
         # locked means a fixed delay we try to honour,
         # this code ensures that we don't fire too early if called from damage_packet_acked
         if self.batch_config.locked:
@@ -2434,7 +2735,7 @@ class WindowSource(WindowIconSource):
                 int(self.base_auto_refresh_delay * mult),
             )
             self.refresh_target_time = now + sched_delay/1000.0
-            self.refresh_timer = GLib.timeout_add(sched_delay, self.refresh_timer_function, options)
+            self._schedule_timer("refresh_timer", sched_delay, self.refresh_timer_function, options)
             rec(f"scheduling refresh in {sched_delay}ms (pct={pct}, batch={self.batch_config.delay})")
             return
         # some of those rectangles may overlap,
@@ -2496,8 +2797,7 @@ class WindowSource(WindowIconSource):
             We figure out if now is the right time to do the refresh,
             and if not re-schedule.
         """
-        self.refresh_timer = 0
-        # timer is running now, clear it so that we don't try to cancel it somewhere else:
+        # The lease wrapper has already retired this one-shot timer.
         # re-do some checks that may have changed:
         if not self.can_refresh():
             self.refresh_event_time = 0
@@ -2511,7 +2811,7 @@ class WindowSource(WindowIconSource):
             self.timer_full_refresh()
             return False
         # re-schedule ourselves:
-        self.refresh_timer = GLib.timeout_add(int(delta*1000), self.refresh_timer_function, damage_options)
+        self._schedule_timer("refresh_timer", int(delta*1000), self.refresh_timer_function, damage_options)
         refreshlog("refresh_timer_function: rescheduling auto refresh timer with extra delay %ims", int(1000*delta))
         return False
 
@@ -2824,13 +3124,9 @@ class WindowSource(WindowIconSource):
 
     def client_decode_error(self, error: float | int, message: str) -> None:
         """
-            This is called from `damage_packet_acked`, so it runs in the network parse thread.
-            `decode_error_refresh_timer` is tested and assigned without any locking whilst
-            the UI thread may be cancelling that same timer, so we can end up scheduling
-            two refresh timers - or losing a cancellation.
-            Neither is worth paying for a lock: the worst case is one extra refresh,
-            and `full_quality_refresh` does nothing at all
-            once the window is gone or the window source is cancelled.
+            Called from `damage_packet_acked` in the network parse thread.
+            The named lease owns publication and cancellation against UI cleanup;
+            `full_quality_refresh` retains the existing cancelled-window policy.
         """
         # don't print error code -1, which is just a generic code for error
         emsg = {-1: ""}.get(error, error)
@@ -2847,16 +3143,13 @@ class WindowSource(WindowIconSource):
         self.global_statistics.decode_errors += 1
         if self.window and not self.decode_error_refresh_timer:
             delay = min(1000, 250+self.global_statistics.decode_errors*100)
-            self.decode_error_refresh_timer = GLib.timeout_add(delay, self.decode_error_refresh)
+            self._schedule_timer("decode_error_refresh_timer", delay, self.decode_error_refresh)
 
     def decode_error_refresh(self) -> None:
-        self.decode_error_refresh_timer = 0
         self.full_quality_refresh({})
 
     def cancel_decode_error_refresh_timer(self) -> None:
-        if dert := self.decode_error_refresh_timer:
-            self.decode_error_refresh_timer = 0
-            GLib.source_remove(dert)
+        self._cancel_timer("decode_error_refresh_timer")
 
     def may_use_scrolling(self, _image: ImageWrapper, _options: typedict) -> bool:
         # overridden in video source
