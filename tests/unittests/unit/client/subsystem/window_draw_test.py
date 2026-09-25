@@ -209,7 +209,8 @@ class Fragments(Draw):
     def source_remove(self, _timer):
         pass
 
-    def add_decode_work(self, _fn, request):
+    def add_decode_work(self, _fn, request, *_args):
+        # (`queue_draw` also passes the target captured for subsurface composites)
         self.drawn.append(request)
 
 

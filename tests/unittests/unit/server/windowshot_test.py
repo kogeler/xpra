@@ -141,7 +141,11 @@ class WindowshotTest(unittest.TestCase):
         for _ in range(2):
             self.request("Wayland")
             self.network.send_disconnect.assert_not_called()
-            self.assertIs(window.get_image(0, 0, 2, 2), image)
+            # The model hands out borrowed wrappers over the pixels it retains
+            # (wayland-subsurface-stream-ownership): freeing one leaves them usable.
+            retained = window._gproperties["image"]
+            self.assertIs(window.get_image(0, 0, 2, 2).get_plane(0), retained.get_plane(0))
+            self.assertFalse(retained.freed)
             self.assertFalse(image.freed)
         self.assertEqual(self.proto.send_now.call_count, 2)
 

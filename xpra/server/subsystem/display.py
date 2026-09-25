@@ -60,8 +60,9 @@ def set_window_refresh_rate(ss, rrate: int):
         ss.default_batch_config.match_vrefresh(rrate)
     if hasattr(ss, "global_batch_config"):
         ss.global_batch_config.match_vrefresh(rrate)
-    if hasattr(ss, "all_window_sources"):
-        for window_source in ss.all_window_sources():
+    all_sources = getattr(ss, "all_pixel_sources", getattr(ss, "all_window_sources", None))
+    if all_sources:
+        for window_source in all_sources():
             if bc := window_source.batch_config:
                 bc.match_vrefresh(rrate)
 

@@ -40,7 +40,11 @@ class WindowConnectionTest(unittest.TestCase):
         source = Connection()
         WindowsConnection.init_state(source)
         encoding.EncodingsConnection.init_state(source)
-        source.window_sources = {1: window_source((100, 100, 200, 200)), 2: window_source(maximized=True)}
+        # pixel source operations only lend registered sources, looked up by their own ID
+        # (wayland-subsurface-stream-ownership): register them as `_activate_pixel_source` does
+        source.window_sources = {1: window_source((100, 100, 200, 200), wid=1), 2: window_source(maximized=True, wid=2)}
+        for pixel_source in source.window_sources.values():
+            source.configure_pixel_source(pixel_source)
         source.get_focus = lambda: 2
         source.statistics = None
         source.protocol = SimpleNamespace(is_closed=lambda: False, _conn=SimpleNamespace(output_bytecount=0))

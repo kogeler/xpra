@@ -24,40 +24,97 @@ class WaylandPointerManager(PointerManager):
     def cleanup(self) -> None:
         super().cleanup()
         if device := self.pointer_device:
-            device.cleanup()
-            self.pointer_device = None
+            try:
+                self.clear_pointer_focus()
+            finally:
+                device.cleanup()
+                self.pointer_device = None
         self.pointer_device_map = {}
 
-    def set_pointer_focus(self, wid: int, pointer: Sequence) -> None:
+    def clear_pointer_focus(self, *surface_wids: int) -> bool:
+        """Clear an exact native focus before its surface role is detached."""
+        window = self.server.subsystems.get("window")
+        focus_wid = getattr(window, "pointer_focus", 0)
+        if surface_wids and focus_wid not in surface_wids:
+            return False
+        if not focus_wid and surface_wids:
+            return False
+        cleared = bool(focus_wid)
+        if self.pointer_device:
+            try:
+                self.pointer_device.leave_surface()
+            except BaseException:
+                # Native role teardown must continue even when an already
+                # failing seat cannot emit its final leave event.
+                log.error("Error clearing native Wayland pointer focus", exc_info=True)
+        if window is not None:
+            window.pointer_focus = 0
+        try:
+            self.server.compositor.flush()
+        except BaseException:
+            # The focused identity is already invalidated.  A downstream
+            # display flush failure cannot leave topology cleanup half-done.
+            log.error("Error flushing cleared Wayland pointer focus", exc_info=True)
+        return cleared
+
+    def set_pointer_focus(self, wid: int, pointer: Sequence):
+        # `pointer` is already resolved to parent-local coordinates by the
+        # target hook, where modern window-position properties are available.
         server = self.server
         window = server.subsystems["window"]
         log("set_pointer_focus(%i, %s)", wid, pointer)
-        if window.pointer_focus == wid:
-            log(" focus unchanged")
-            return
         log(" current focus=%i", window.pointer_focus)
-        if window.pointer_focus and wid == 0:
-            self.pointer_device.leave_surface()
-            window.pointer_focus = 0
-            return
+        if wid == 0:
+            self.clear_pointer_focus()
+            return pointer
         surface = window.get_surface(wid)
         log("surface(%i)=%s", wid, surface)
-        if surface and len(pointer) >= 4 and (ptr := surface.xdg_surface_ptr):
-            x, y = pointer[2:4]
-            if self.pointer_device.enter_surface(ptr, x, y):
-                window.pointer_focus = wid
-        server.compositor.flush()
+        try:
+            if not surface or len(pointer) < 2 or not (ptr := surface.xdg_surface_ptr):
+                self.clear_pointer_focus()
+                return None
+            x, y = pointer[:2]
+            target = self.pointer_device.enter_surface(ptr, x, y)
+            if not target:
+                self.clear_pointer_focus()
+                return None
+            target_ptr = int(target[0])
+            target_wid = window.get_surface_wid(target_ptr, wid)
+            if not target_wid:
+                log.error(
+                    "Error: native pointer target %#x is not registered under root %#x",
+                    target_ptr, wid,
+                )
+                self.clear_pointer_focus()
+                return None
+            # This is the internal native surface identity.  Wire pointer
+            # packets and synchronized peer events continue to use `wid`.
+            previous_wid = window.pointer_focus
+            window.pointer_focus = target_wid
+            if target_wid != previous_wid:
+                log.info(
+                    "Wayland pointer target root=%#x surface=%#x local=%.3f,%.3f",
+                    wid, target_wid, float(target[1]), float(target[2]),
+                )
+        except BaseException:
+            log.error("Error resolving native pointer target for root %#x", wid, exc_info=True)
+            self.clear_pointer_focus()
+            return None
+        else:
+            server.compositor.flush()
+            return pointer
 
-    def _adjust_pointer(self, proto, device_id: int, wid: int, pointer):
-        # entering the surface is what makes the position meaningful:
-        self.set_pointer_focus(wid, pointer)
-        return super()._adjust_pointer(proto, device_id, wid, pointer)
-
-    def get_pointer_target(self, proto, wid: int, pos, props=None) -> tuple[int, int]:
-        # wayland surfaces are fed surface-relative coordinates:
-        if len(pos) >= 4:
-            return pos[2], pos[3]
-        return pos[0], pos[1]
+    def get_pointer_target(self, proto, wid: int, pos, props=None) -> tuple[int, int] | None:
+        # Modern packets carry an absolute pair and window-position properties;
+        # the shared helper also understands an older four-coordinate tuple.
+        # Resolve after generic adjustment, before entering the native leaf.
+        pointer = self.get_pointer_window_position(pos, props)
+        if pointer is None:
+            self.clear_pointer_focus()
+            # A root/global event clears focus but may still move the device.
+            # For a window, desktop coordinates are not a local fallback.
+            return tuple(pos[:2]) if wid == 0 else None
+        return self.set_pointer_focus(wid, pointer)
 
     def _move_pointer(self, device_id: int, wid: int, pos, props=None) -> None:
         try:
