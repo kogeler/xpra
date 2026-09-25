@@ -183,6 +183,8 @@ class CompressTest(unittest.TestCase):
         source.client_bit_depth = 24
         source.client_render_size = (0, 0)
         source.window_dimensions = 3840, 2160
+        # the alpha of the current frame is not known yet:
+        source._current_frame_has_alpha = None
         return source
 
     @staticmethod
