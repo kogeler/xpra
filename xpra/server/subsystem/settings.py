@@ -34,12 +34,15 @@ class SettingsServer(StubSubsystem):
         self.add_client_setting("readonly", "get_bool", self.set_client_readonly)
 
     def setting_changed(self, setting: str, value: Any) -> None:
+        if setting == "readonly":
+            # Settle input under changed policy before any fallible peer send.
+            self.server.emit("setting-changed", setting, value, None)
         for ss in self.get_sources_by_type():
             # `readonly` is enforced per client:
             sv = ss.server_enforced_readonly() if setting == "readonly" else value
             ss.send_setting_change(setting, sv)
-        # and let the subsystems react to it:
-        self.server.emit("setting-changed", setting, value, None)
+        if setting != "readonly":
+            self.server.emit("setting-changed", setting, value, None)
 
     def add_client_setting(self, setting: str, getter: str, apply: Callable[[Any, Any], None]) -> None:
         """

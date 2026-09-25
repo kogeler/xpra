@@ -26,6 +26,8 @@ class GTKKeyboardHelper(KeyboardHelper):
         # used for delaying the sending of keymap changes
         # (as we may be getting dozens of such events at a time)
         self._keymap_changing = False
+        self._keymap_change_timer = 0
+        self._keymap_closed = False
         self._keymap_change_handler_id = 0
         self._keymap = get_default_keymap()
         self.update()
@@ -52,9 +54,11 @@ class GTKKeyboardHelper(KeyboardHelper):
 
     def keymap_changed(self, *args) -> None:
         log("keymap_changed%s", args)
+        if self._keymap_closed:
+            return
         if self._keymap_change_handler_id:
             self._keymap.disconnect(self._keymap_change_handler_id)
-            self._keymap_change_handler_id = None
+            self._keymap_change_handler_id = 0
         self._keymap = get_default_keymap()
         if self._keymap_changing:
             # timer is already due
@@ -62,8 +66,12 @@ class GTKKeyboardHelper(KeyboardHelper):
         self._keymap_changing = True
 
         def do_keys_changed() -> None:
+            if self._keymap_closed:
+                return
+            self._keymap_change_timer = 0
             # re-register the change handler:
-            self._keymap_change_handler_id = self._keymap.connect("keys-changed", self.keymap_changed)
+            if self._keymap:
+                self._keymap_change_handler_id = self._keymap.connect("keys-changed", self.keymap_changed)
             self._keymap_changing = False
             if self.locked:
                 # automatic changes not allowed!
@@ -74,10 +82,15 @@ class GTKKeyboardHelper(KeyboardHelper):
                 log.info(" sending updated mappings to the server")
                 self.send_config()
 
-        GLib.timeout_add(500, do_keys_changed)
+        self._keymap_change_timer = GLib.timeout_add(500, do_keys_changed)
 
     def update(self) -> bool:
         old_hash = self.hash
+        if is_X11():
+            # The X11 backend caches modifier meanings.  A keys-changed signal
+            # covers both RMLVO and modifier-map changes, so invalidate before
+            # query_xkbmap builds the packet rather than one update later.
+            self.keyboard.invalidate_keymap_modifiers()
         super().update()
         if is_X11():
             with log.trap_error("Error querying modifier map"):
@@ -89,13 +102,26 @@ class GTKKeyboardHelper(KeyboardHelper):
         return get_gtk_keymap()
 
     def cleanup(self) -> None:
-        super().cleanup()
-        if self._keymap_change_handler_id:
+        # Retire callback ownership before resetting negotiated state.  A
+        # dispatched callback may still run after source_remove and must never
+        # query the backend or reconnect the keymap's signal after teardown.
+        self._keymap_closed = True
+        self._keymap_changing = False
+        if timer := self._keymap_change_timer:
+            self._keymap_change_timer = 0
             try:
-                self._keymap.disconnect(self._keymap_change_handler_id)
-                self._keymap_change_handler_id = 0
+                GLib.source_remove(timer)
+            except Exception as e:
+                log.warn("failed to remove keymap change timer: %s", e)
+        if self._keymap_change_handler_id:
+            handler_id = self._keymap_change_handler_id
+            self._keymap_change_handler_id = 0
+            try:
+                self._keymap.disconnect(handler_id)
             except Exception as e:
                 log.warn("failed to disconnect keymap change handler: %s", e)
+        self._keymap = None
+        super().cleanup()
 
 
 def main() -> None:

@@ -123,8 +123,8 @@ class ControlHandler(StubSubsystem):
             if not hasattr(ss, "set_control_readonly"):
                 continue
             ss.set_control_readonly(onoff)
-            ss.send_setting_change("readonly", ss.server_enforced_readonly())
             self.server.emit("setting-changed", "readonly", ss.effective_readonly(), ss)
+            ss.send_setting_change("readonly", ss.server_enforced_readonly())
             count += 1
         msg = f"set client readonly={onoff} for {count} client(s)"
         log.info(msg)
