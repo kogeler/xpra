@@ -779,6 +779,8 @@ class WindowSource(WindowIconSource):
         self.is_tray = False
         self.is_shadow = False
         self.has_alpha = False
+        self._alpha_capable = False
+        self._current_frame_has_alpha: bool | None = None
         self.window_dimensions = 0, 0
         self.fullscreen = False
         self.scaling_control = None
@@ -1151,15 +1153,23 @@ class WindowSource(WindowIconSource):
         """
         window = self.window
         has_alpha = HAS_ALPHA and window.has_alpha()
-        if has_alpha and "frame-has-alpha" in window.get_internal_property_names():
-            has_alpha = bool(window.get_property("frame-has-alpha"))
         if has_alpha and BROWSER_ALPHA_FIX and not self.is_OR:
             # remove alpha from 'NORMAL' browser windows
             # of a size greater than 200x200:
             ww, wh = self.window_dimensions
             if "browser" in self.content_types and "NORMAL" in self.window_type and ww >= 200 and wh >= 200:
                 has_alpha = False
-        self.has_alpha = has_alpha
+        # A captured wrapper can outlive the newest model frame. Keep the
+        # stable policy separately: a later XRGB buffer must not authorize
+        # losing an earlier captured ARGB buffer's alpha.
+        self._alpha_capable = has_alpha
+        frame_has_alpha = None
+        if "frame-has-alpha" in window.get_internal_property_names():
+            frame_has_alpha = window.get_property("frame-has-alpha")
+            if frame_has_alpha is not None:
+                frame_has_alpha = bool(frame_has_alpha)
+        self._current_frame_has_alpha = frame_has_alpha
+        self.has_alpha = has_alpha and frame_has_alpha is not False
 
     def frame_has_alpha_changed(self, window, *args) -> bool:
         self.update_has_alpha()
@@ -1171,8 +1181,8 @@ class WindowSource(WindowIconSource):
     def window_opaque_region_changed(self, window, *args) -> bool:
         self._opaque_region = window.get_property("opaque-region") or ()
         log("window_opaque_region_changed(%s, %s) opaque-region=%s", window, args, self._opaque_region)
-        self.update_encoding_options()
         self.update_discard_alpha()
+        self.update_encoding_options()
         return True
 
     def update_discard_alpha(self) -> None:
