@@ -667,5 +667,8 @@ class ServerCore(GLibServer):
             packet_type = packet.get_type()
             netlog.error(f"Error: unknown or invalid packet type {packet_type!r}")
             netlog.error(f" received from {proto}")
-        if not ss:
+        # a detached protocol has already been disconnected (ie: shutdown, detach),
+        # and it is closed once its disconnect packet has been sent:
+        # closing it here could drop that packet
+        if not ss and not detached:
             proto.close()
