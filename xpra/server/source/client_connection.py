@@ -8,7 +8,7 @@
 from typing import Any, TypeAlias
 from collections.abc import Callable, Sequence
 from time import sleep, monotonic
-from threading import Event, Lock
+from threading import Event, Lock, RLock
 from collections import deque
 from queue import SimpleQueue
 
@@ -76,6 +76,9 @@ class ClientConnection(StubClientConnection):
         self.encode_work_queue: SimpleQueue[ENCODE_WORK_ITEM] = SimpleQueue()
         self.encode_thread = None
         self.encode_thread_lock = Lock()
+        self._encode_queue_closed = False
+        self._cleanup_lock = RLock()
+        self._cleanup_started = False
         # functions to call from the encode thread when closing,
         # once every subsystem has queued the encoding work it needed:
         self.encode_at_end: list[tuple[Callable, Sequence[Any]]] = []
@@ -132,20 +135,24 @@ class ClientConnection(StubClientConnection):
     # The encode thread loop management:
     #
     def start_queue_encode(self, item: ENCODE_WORK_ITEM) -> None:
-        # start the encode work queue:
-        # holds functions to call to compress data (pixels, clipboard)
-        # items placed in this queue are picked off by the "encode" thread,
-        # the functions should add the packets they generate to the 'packet_queue'
-        # this can be called concurrently from more than one thread,
-        # and we must only ever start a single encode thread:
-        # threads that got here with a stale `queue_encode` reference
-        # just queue their item, in the order in which they acquire the lock
-        put = self.encode_work_queue.put
+        # Keep every producer behind the same admission lock, including after
+        # worker startup. Replacing queue_encode with SimpleQueue.put would let
+        # a retained producer append work behind the terminal sentinel.
+        if item is None:
+            raise ValueError("only stop_encode_thread may terminate the encode queue")
         with self.encode_thread_lock:
-            if not self.encode_thread:
-                self.encode_thread = start_thread(self.encode_loop, "encode")
-                self.queue_encode = put
-            put(item)
+            if self._encode_queue_closed:
+                raise RuntimeError("cannot queue work after encode termination")
+            self._start_encode_thread_locked()
+            # No fallible diagnostic/callout may follow successful admission:
+            # returning transfers the item and all of its resources to the worker.
+            self.encode_work_queue.put(item)
+
+    def _start_encode_thread_locked(self) -> None:
+        # Start before accepting an item so a startup failure leaves its caller
+        # owning the resource. The existing lock still guarantees one worker.
+        if self.encode_thread is None:
+            self.encode_thread = start_thread(self.encode_loop, "encode")
 
     def encode_queue_size(self) -> int:
         return self.encode_work_queue.qsize()
@@ -169,18 +176,28 @@ class ClientConnection(StubClientConnection):
             the cuda context and the mmap areas can only be freed
             once the encode thread has finished using them.
         """
-        self.encode_at_end.append((fn, args))
+        with self.encode_thread_lock:
+            if self._encode_queue_closed:
+                raise RuntimeError("cannot register cleanup after encode termination")
+            self.encode_at_end.append((fn, args))
 
     def stop_encode_thread(self) -> None:
         # this subsystem is always the first one in `CC_BASES` and the subsystems
         # are cleaned up in reverse order, so we get here last:
         # all the other subsystems have queued the encoding work they needed,
         # which makes it safe to run the deferred cleanups and to add the end of queue marker
-        at_end = self.encode_at_end
-        self.encode_at_end = []
-        for fn, args in at_end:
-            self.queue_encode((fn, args))
-        self.queue_encode(None)
+        with self.encode_thread_lock:
+            if self._encode_queue_closed:
+                return
+            self._start_encode_thread_locked()
+            # Upstream's at-end API remains the sole tail owner, including the
+            # mmap, CUDA and EncoderServer callers. Seal it atomically with all
+            # producers; repeat close cannot enqueue a second tail or sentinel.
+            self._encode_queue_closed = True
+            at_end, self.encode_at_end = self.encode_at_end, []
+            for fn, args in at_end:
+                self.encode_work_queue.put((fn, args))
+            self.encode_work_queue.put(None)
 
     def queue_packet(self, packet: Packet, wid=0, pixels=0,
                      wait_for_more=False) -> None:
@@ -214,12 +231,10 @@ class ClientConnection(StubClientConnection):
             fn, args = item
             try:
                 fn(*args)
-            except Exception as e:
-                if self.is_closed():
-                    log("ignoring encoding error calling %s because the source is already closed:", item)
-                    log(" %s", e)
-                else:
-                    log.error("Error during encoding:", exc_info=True)
+            except BaseException as e:
+                # Every accepted item owns resources. An earlier callback,
+                # including a failing cleanup, cannot abort the mandatory tail.
+                log.error("Error during encoding callback %s: %s", fn, e, exc_info=True)
                 del e
             if YIELD:
                 sleep(0)

@@ -167,21 +167,35 @@ def get_client_connection_class(caps: typedict):
             return False
 
         def close(self) -> None:
+            # Serialize the complete muxer traversal, not just its final queue
+            # sentinel. Re-entrant or repeated close must not replay cleanups.
+            with self._cleanup_lock:
+                if self._cleanup_started:
+                    return
+                self._cleanup_started = True
+                # Preserve upstream's early closed-state publication, before
+                # any subsystem cleanup and the base-owned worker tail.
+                self.close_event.set()
+                self._cleanup_subsystems()
+
+        def _cleanup_subsystems(self) -> None:
             log("%s.close() %s", self, csv(CC_BASES))
-            # `close_event` belongs to the `ClientConnection` subsystem, which is always
-            # the first one - and therefore the last one to be cleaned up below.
-            # Set it here so that `is_closed()` is already `True` for the whole teardown:
-            self.close_event.set()
+            cleanup_errors: list[tuple[type, BaseException, Any]] = []
             for bc in reversed(CC_BASES):
                 log("%s.cleanup()", bc)
                 try:
                     bc.cleanup(self)
-                except Exception as e:
+                except BaseException as e:
                     log("%s.cleanup()", bc, exc_info=True)
                     log.error("Error closing connection,")
                     log.error(" %s in %s module:", type(e).__name__, bc.__name__)
                     log.estr(e)
-                    raise RuntimeError(f"failed to close {bc}: {e}") from None
+                    cleanup_errors.append((bc, e, e.__traceback__))
+            if cleanup_errors:
+                bc, error, traceback = cleanup_errors[0]
+                if isinstance(error, Exception):
+                    raise RuntimeError(f"failed to close {bc}: {error}") from None
+                raise error.with_traceback(traceback)
 
         def send_hello(self, server_capabilities: dict) -> None:
             capabilities = server_capabilities.copy()
