@@ -9,7 +9,7 @@ import os
 from collections.abc import Sequence, Iterable
 from typing import Any
 
-from xpra.common import noop
+from xpra.common import noop, SUBSURFACE_COMPOSITE_MODE
 from xpra.util.objects import typedict
 from xpra.util.str_fn import csv
 from xpra.util.env import envint, envbool, first_time, IgnoreWarningsContext, ignorewarnings
@@ -143,6 +143,45 @@ class GTKXpraClient(GObjectClientAdapter, UIXpraClient):
         self._group_leader_wids = {}
         # `_window_with_grab` is owned by the `window` subsystem (grab.py)
         self.video_max_size = VIDEO_MAX_SIZE
+
+    def get_window_backing_caps(self) -> dict[str, Any]:
+        # The capability is global, so every backing selectable after hello
+        # must implement it. Cairo is the per-window and GL-failure fallback;
+        # a supported-but-currently-disabled GL backend may be toggled later.
+        from xpra.client.gui import widget_base
+        if widget_base.USE_FAKE_BACKING or self.ClientWindowClass is None:
+            return {}
+        try:
+            def get_modes(backing_type) -> tuple[str, ...]:
+                declared = backing_type.SUBSURFACE_COMPOSITE_MODES
+                if (type(declared) is not tuple
+                        or any(type(mode) is not str for mode in declared)):
+                    raise TypeError(
+                        f"invalid subsurface-composite modes for {backing_type.__name__}: {declared!r}"
+                    )
+                # The current wire contract defines one exact version.  A
+                # backend may know future modes, but they are not claimable
+                # until the common endpoint contract also defines them.
+                return tuple(mode for mode in declared if mode == SUBSURFACE_COMPOSITE_MODE)
+
+            from xpra.cairo.backing import CairoBacking
+            modes = get_modes(CairoBacking)
+            gl = self.get_subsystem("opengl")
+            if gl and gl.GLClientWindowClass:
+                from xpra.opengl.backing import GLWindowBackingBase
+                gl_modes = get_modes(GLWindowBackingBase)
+                modes = tuple(mode for mode in modes if mode in gl_modes)
+        except Exception:
+            # Backing discovery is part of the hello path.  A broken optional
+            # backend must not make us claim a global rendering contract (or
+            # abort the connection), but programming and import failures must
+            # remain visible to the operator.
+            opengllog.error(
+                "Error querying subsurface-composite backing support",
+                exc_info=True,
+            )
+            return {}
+        return {"subsurface-composite": modes} if modes else {}
 
     def setup_frame_request_windows(self) -> None:
         # query the window manager to get the frame size:

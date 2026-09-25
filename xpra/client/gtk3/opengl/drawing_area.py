@@ -3,8 +3,7 @@
 # Xpra is released under the terms of the GNU GPL v2, or, at your option, any
 # later version. See the file COPYING for details.
 
-from typing import Any
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 
 from xpra.os_util import gi_import, WIN32, OSX
 from xpra.util.str_fn import Ellipsizer
@@ -21,7 +20,6 @@ Gdk = gi_import("Gdk")
 class GLDrawingArea(GLWindowBackingBase):
 
     def __init__(self, wid: int, window_alpha: bool, pixel_depth: int = 0):
-        self.on_realize_cb: list[tuple[Callable, Sequence[Any]]] = []
         self.window_context = None
         self.context: GLContext | None = None
         super().__init__(wid, window_alpha, pixel_depth)
@@ -66,14 +64,10 @@ class GLDrawingArea(GLWindowBackingBase):
     def on_realize(self, *args) -> None:
         from xpra.platform.gui import setup_gl_drawing_area
         setup_gl_drawing_area(self.get_backing_handle())
-        onrcb = self.on_realize_cb
-        log("GLDrawingArea.on_realize%s callbacks=%s", args, tuple(Ellipsizer(x) for x in onrcb))
-        self.on_realize_cb = []
+        log("GLDrawingArea.on_realize%s callbacks=%i", args, len(self._pending_gl_context_callbacks))
         gl_context = self.gl_context()
         with gl_context:
-            for callback, args in onrcb:
-                with log.trap_error("Error calling realize callback %s", Ellipsizer(callback)):
-                    callback(gl_context, *args)
+            self.run_gl_context_callbacks(gl_context)
 
     def with_gl_context(self, cb: Callable, *args) -> None:
         da = self._backing
@@ -83,9 +77,11 @@ class GLDrawingArea(GLWindowBackingBase):
                     cb(gl_context, *args)
             else:
                 cb(None, *args)
+        elif not da:
+            cb(None, *args)
         else:
             log("GLDrawingArea.with_gl_context delayed: %s%s", cb, Ellipsizer(args))
-            self.on_realize_cb.append((cb, args))
+            self.defer_gl_context_callback(cb, *args)
 
     def get_bit_depth(self, pixel_depth=0) -> int:
         return pixel_depth or self.context.get_bit_depth() or 24
