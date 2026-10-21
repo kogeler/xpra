@@ -178,31 +178,30 @@ re-read the working tree once the rebase has completed.
 
 Resolve one reviewed Ruff executable before the first control-plane check and
 record its version. `<ruff>` below is its absolute path. A system `ruff` or an
-operator-provisioned executable outside the repository is valid. An
-operator-provisioned `.artifacts/fork-maintenance/tooling-venv/bin/ruff` is
-also valid after its ownership and executable-file boundary are reviewed, but
-it is session state that `artifacts-close` discards. The optional tooling venv
-is not created by this runbook and is not acceptance evidence.
+operator-provisioned executable outside the repository is valid. A
+`.artifacts/fork-maintenance/tooling-venv/bin/ruff` is also valid after its
+ownership and executable-file boundary are reviewed, but it is session state
+that `artifacts-close` discards. The optional tooling venv is not acceptance
+evidence.
 
 When none exists, the agent provisions the version pinned in
-`.pre-commit-config.yaml` in a disposable container and uses a wrapper outside
-the repository, for example `/tmp/<user>/ruff`, that mounts the repository
-read-only at its own path:
+`.pre-commit-config.yaml` in a private session tooling venv. Review the artifact
+ancestors first, refuse an existing unreviewed tooling path, and do not install
+packages into system Python. From the repository root:
 
 ```bash
-printf 'FROM docker.io/library/python:3.13-slim\nRUN pip install --no-cache-dir ruff==<pinned>\n' |
-  podman build -q -t localhost/ruff-tool:<pinned> -
-cat > /tmp/<user>/ruff <<'SH'
-#!/bin/sh
-root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-exec podman run --rm --network=none -e RUFF_NO_CACHE=true \
-  -v "$root":"$root":ro -w "$PWD" localhost/ruff-tool:<pinned> ruff "$@"
-SH
-chmod 755 /tmp/<user>/ruff
+test ! -e .artifacts/fork-maintenance/tooling-venv
+test ! -L .artifacts/fork-maintenance/tooling-venv
+python3 -m venv .artifacts/fork-maintenance/tooling-venv
+.artifacts/fork-maintenance/tooling-venv/bin/python -m pip install \
+  --no-cache-dir 'ruff==<pinned>'
+.artifacts/fork-maintenance/tooling-venv/bin/ruff --version
 ```
 
-Record the pinned version and image ID in the ledger. The image is tooling,
-not a maintenance cache, and is not acceptance evidence.
+Record the pinned version and absolute executable/interpreter paths in the
+ledger, then pass the absolute Ruff path as `RUFF` to Make. Keep generated
+tooling below the artifact root; a repository bind mount or a generated
+wrapper under `/tmp` is not an allowed provisioning route.
 
 If the retained artifact inventory contains an owner from the retired
 `xpra-lab-*` namespace, use only the exact retired-namespace classification in
@@ -318,7 +317,9 @@ make -C fork-maintenance RUFF=<ruff> check
 )
 ```
 
-`repo-status` does not report local `master`, so record it explicitly. A
+`repo-status` does not require named remotes and reports missing cached refs;
+do not add a remote to make this local inventory pass. It does not report local
+`master`, so record it explicitly. A
 missing local `master` blocks the rebase until the operator prepares it or
 explicitly delegates that operation. Refresh never creates or updates it.
 `develop-check` proves on the clean tree that every fork commit is a valid

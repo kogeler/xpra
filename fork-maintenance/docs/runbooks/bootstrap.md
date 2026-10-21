@@ -66,8 +66,12 @@ hardware encoder is assumed in CI.
 
 ## Repository and remotes
 
-The parent of `fork-maintenance/` must be the Xpra Git top level. Required
-remotes are:
+The parent of `fork-maintenance/` must be the Xpra Git top level. Local
+inspection, case work and refresh use the recorded local source refs and do
+not require remote configuration. `doctor` validates the local repository and
+artifact boundary; `repo-status` reports unavailable cached refs as missing.
+
+The separately requested `repo-sync` operation requires these named remotes:
 
 ```text
 origin    https://github.com/kogeler/xpra.git
@@ -80,8 +84,9 @@ Inspect local state without fetching:
 make -C fork-maintenance repo-status
 ```
 
-Do not initialize a nested checkout. If a remote is missing or has a different
-identity, stop for owner review rather than rewriting it automatically.
+Do not initialize a nested checkout. Before a separately requested network
+operation, have the operator prepare any missing remote or resolve an unexpected
+identity. Never add or rewrite a remote to make local inspection or refresh pass.
 
 ## Optional fork-master refresh
 

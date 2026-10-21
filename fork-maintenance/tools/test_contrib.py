@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import unittest
 from collections.abc import Callable
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -30,6 +32,49 @@ def command(*arguments: str, cwd: Path | None = None) -> str:
         text=True,
     )
     return result.stdout.strip()
+
+
+class LocalInspectionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.repo = Path(self.temporary.name)
+        command("git", "init", "-q", "-b", "develop", str(self.repo))
+        (self.repo / ".gitignore").write_text("/.artifacts/\n", encoding="utf-8")
+        command("git", "add", ".gitignore", cwd=self.repo)
+        command(
+            "git", "-c", "user.name=Local Inspection Test",
+            "-c", "user.email=local-inspection@example.invalid",
+            "commit", "-q", "-m", "local source", cwd=self.repo,
+        )
+        self.head = command("git", "rev-parse", "HEAD", cwd=self.repo)
+        command("git", "branch", "master", self.head, cwd=self.repo)
+
+    def test_local_commands_work_without_remote_configuration(self) -> None:
+        for operation in ("doctor", "repo-status"):
+            with self.subTest(operation=operation), redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(contrib.main(["--repo", str(self.repo), operation]), 0)
+            self.assertIn(f"repository={self.repo}", output.getvalue())
+            if operation == "doctor":
+                self.assertIn("doctor=passed", output.getvalue())
+            else:
+                self.assertIn("cached_upstream_master=<missing>", output.getvalue())
+                self.assertIn("cached_origin_master=<missing>", output.getvalue())
+            self.assertEqual(command("git", "remote", cwd=self.repo), "")
+            self.assertEqual(command("git", "rev-parse", "HEAD", cwd=self.repo), self.head)
+            self.assertEqual(command("git", "status", "--porcelain=v1", cwd=self.repo), "")
+
+    def test_doctor_still_rejects_an_unprotected_artifact_root(self) -> None:
+        (self.repo / ".gitignore").write_text("", encoding="utf-8")
+        with self.assertRaisesRegex(contrib.ContribError, "does not protect"):
+            contrib.main(["--repo", str(self.repo), "doctor"])
+
+    def test_explicit_sync_still_requires_both_remotes(self) -> None:
+        with self.assertRaisesRegex(contrib.ContribError, "no 'origin' remote"):
+            contrib.sync_repo(self.repo)
+        command("git", "remote", "add", "origin", contrib.FORK_URL, cwd=self.repo)
+        with self.assertRaisesRegex(contrib.ContribError, "no 'upstream' remote"):
+            contrib.sync_repo(self.repo)
 
 
 class MasterSyncTest(unittest.TestCase):
@@ -628,6 +673,8 @@ class IsolatedStartTest(unittest.TestCase):
 
     def test_remote_transport_and_location_do_not_change_local_admission(self) -> None:
         command("git", "remote", "add", "origin", "git@github.com:kogeler/xpra.git", cwd=self.repo)
+        # get-url expands insteadOf; only the stored value proves config was untouched.
+        command("git", "config", "url.https://github.com/.insteadOf", "git@github.com:", cwd=self.repo)
         for url in ("git@github.com:kogeler/xpra.git", "ssh://git@example.invalid/fork", "/local/mirror"):
             with self.subTest(url=url):
                 command("git", "remote", "set-url", "origin", url, cwd=self.repo)
@@ -635,7 +682,7 @@ class IsolatedStartTest(unittest.TestCase):
                 with patch.object(contrib, "fetch_master", side_effect=AssertionError("unexpected fetch")):
                     state = contrib.isolated_start_check(self.repo)
                 self.assertEqual(state.source_commit, self.base)
-                self.assertEqual(command("git", "remote", "get-url", "origin", cwd=self.repo), url)
+                self.assertEqual(command("git", "config", "--local", "--get", "remote.origin.url", cwd=self.repo), url)
                 self.assertEqual(command("git", "status", "--porcelain=v1", cwd=self.repo), before)
 
     def test_allows_dirty_control_plane_without_touching_the_branch(self) -> None:
