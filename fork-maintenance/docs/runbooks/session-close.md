@@ -155,9 +155,10 @@ Deleting named results ends their reuse window in [`validation.md`](validation.m
 The next session rebuilds caches on demand: `live-venv` recreates the live
 environment, the [typecheck venv](typecheck.md) is provisioned again, source
 archives, bundles, selections and build contexts are regenerated, and
-label-verified Podman images are reused where their input keys still match. A
-Ruff executable should live outside the repository; a `tooling-venv/` below
-`.artifacts/fork-maintenance/` is session state and does not survive.
+label-verified Podman images are reused where their input keys still match.
+A system Ruff executable may live outside the repository. The refresh runbook's
+fallback `tooling-venv/` below `.artifacts/fork-maintenance/` is session state
+and does not survive; recreate its pinned tool when needed.
 
 ## When not to close yet
 

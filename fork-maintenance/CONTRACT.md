@@ -49,6 +49,12 @@ to admit source inspection, case work, builds or tests. They verify the
 actual local source boundary and frozen inputs. Hosted service identity is
 validated separately through its Actions repository, workflow and checkout.
 
+The local `doctor` and `repo-status` commands do not require named remotes.
+They validate the repository top level; `doctor` also enforces the artifact
+boundary, while `repo-status` reports missing cached master refs explicitly.
+Only an explicitly requested network operation such as `repo-sync` requires
+its corresponding named remotes.
+
 `upstream/master` is the canonical source, but its current tip is not an input
 to ordinary work on an existing `develop`. The operator owns the decision to
 start a new upstream-refresh cycle. Until then, case work, tests, CI, and live
