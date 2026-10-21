@@ -4442,14 +4442,14 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     repo = args.repo.resolve()
     if args.command == "doctor":
-        verify_repo(repo)
+        verify_repo(repo, ())
         artifact_boundary_check(repo)
         print(f"repository={repo}")
         print(f"case_directories={len(case_directories())}")
         print(f"case_commits={len(develop_map(repo).cases)}")
         print("doctor=passed")
     elif args.command == "repo-status":
-        verify_repo(repo)
+        verify_repo(repo, ())
         print(f"repository={repo}")
         print(f"branch={current_branch(repo)}")
         print(f"head={rev_parse(repo, 'HEAD')}")

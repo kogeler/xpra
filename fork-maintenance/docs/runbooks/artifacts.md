@@ -219,8 +219,10 @@ The live analysis environment uses retained `venvs/.environment.lock` plus
 deterministic `.environment.partial` and `.environment.partial.owner.json`
 paths. A later `live-venv` validates the marker and recovers only that partial
 under the kernel lock; cycle cleanup retains this shared environment state.
-The optional `tooling-venv/` is operator-provisioned host tooling state; no
-Make lifecycle creates or removes it, and it is not acceptance evidence.
+The optional `tooling-venv/` holds host tooling provisioned by the operator or
+the refresh runbook, with Ruff pinned to the source pre-commit configuration.
+No job lifecycle creates or removes it; session close discards it. The venv
+itself is not acceptance evidence.
 
 Upstream-test and live terminal transitions each use one retained subsystem
 `.lifecycle.lock`; DEB start/collect/remove/abort transitions use the retained
