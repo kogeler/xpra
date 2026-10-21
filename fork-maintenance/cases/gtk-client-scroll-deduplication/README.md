@@ -37,7 +37,7 @@ deduplicate already transmitted packets on the server.
 ## Embedded-source context
 
 The case resolves against source commit
-`0a80430b6506e403f6469416d8aaa8463e331296`, embedded in current `develop`.
+`646b712d1bff46b08b8f26ddc7a83229d65ba5bc`, embedded in current `develop`.
 Upstream commit `9d9d1d09d84` moved wheel handling into the common client
 pointer subsystem. The GTK window remains its toolkit adapter: it translates
 GDK smooth deltas through `wheel_event()` and discrete directions through a
@@ -64,6 +64,16 @@ releases the recorded press) composes; the regression still requires an empty
 `wheel_smooth` and `wheel_map` remain pointer-subsystem policy. This patch reads
 them, and keeps upstream's process-level suppression setting, rather than
 inventing another configuration or modifying common packet serialization.
+
+Current upstream `f538ec11ac` removed pre-7 senders and legacy aliases; ordinary
+and no-compat runs now use the same modern pointer packets. The optional
+client-side wheel-to-button fallback remains a device/emulation capability
+decision, not a restored legacy transport. `798ec0b187` added a weak
+`moveresize_click` hook before ordinary button handling for local window drags;
+the scroll patch preserves it. The focused harness never initiates such a drag,
+so its absent hook follows the real ordinary path without a new fixture shim.
+Neither change supplies the missing X11 zero-axis recovery or adapter admission,
+and the current case code remains unchanged after this source review.
 
 On an upstream refresh, replacement is behavioral. Clean source must admit
 one representation, preserve the first X11 whole step after a baseline reset,

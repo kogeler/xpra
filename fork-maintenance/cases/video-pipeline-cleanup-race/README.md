@@ -54,15 +54,23 @@ that instruction.
 ## Embedded-source context
 
 The case resolves against source commit
-`0a80430b6506e403f6469416d8aaa8463e331296`, embedded in the current `develop`
-history. Between the previous base `d95058b09169` and this one, upstream
-changed only codec-selection policy in this file set: `094692ebf3` limits
+`646b712d1bff46b08b8f26ddc7a83229d65ba5bc`, embedded in the current `develop`
+history. The earlier upstream codec-selection fixes remain: `094692ebf3` limits
 `non_video_encodings` to encoders actually registered in `_encoders`, and
 `4c74513c10` reuses a cached scaling only within the candidate encoder's
 limits. Neither touches pipeline publication, timers or teardown; their
 upstream regressions (`NonVideoEncodingsTest`, `ScalingCacheTest`) live in the
 same module as this case's lifecycle tests and run in both clean and patched
-modes. That source already supplies the following surrounding behavior:
+modes. This refresh also brings `bbca5edf19`, which consumes a flush tuple
+before rejecting a replaced/closed encoder. The case already consumes it in
+the locked generation claim; it must not repeat that write after releasing the
+lock, where it could erase a later producer's tuple. All three upstream flush
+regressions remain, with an additional diagnostic-boundary interleaving control
+for replacement publication after claim. Upstream `1064b9e297` serializes the
+CUDA backend's own free/push/pop operations; it does not fence connection-level
+construction, calculator completion or encode-tail ordering. Its backend code
+is retained unchanged. The renamed `encoding_subsystem` reinitialization
+argument is retained too. This source supplies the following surrounding behavior:
 
 - every client connection has one FIFO encode worker shared by its window
   sources;
@@ -491,6 +499,13 @@ cleanup cannot publish the worker tail between the callback's live check and
 its queue insertion. The worker rechecks its captured generation and closed state; later codec
 cleanup remains authoritative for an invalidated request. Native
 flush work does not execute under the lock.
+
+Consumption of the current tuple belongs exclusively to that locked worker
+claim. Diagnostics and stale-encoder checks run afterward and must not clear
+the public slot again: a producer can already have published a newer tuple.
+`test_flush_claim_does_not_erase_later_publication` publishes that replacement
+at the diagnostic callout and requires both its exact tuple and timer to survive
+the old request's early return, without flushing either encoder.
 
 `flush_video_encoder_now()` invalidates only the timer identity, retains the
 flush tuple, and performs the same guarded worker handoff. Full cancellation

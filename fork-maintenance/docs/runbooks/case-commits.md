@@ -112,6 +112,14 @@ make -C fork-maintenance case-check CASE=<slug>
 a new subject). `develop-squash` folds every pending `fixup!`/`amend!`/`squash!`
 commit into its target with a non-interactive `git rebase --autosquash` from the
 upstream base; the commits above the target are replayed, so their SHAs change.
+The target is resolved only among earlier valid case commits, never among
+control commits with an identical historical subject. The runner supplies a
+full-SHA rebase plan, retaining control order and `fixup`/`squash`/`amend`
+semantics. A missing or ambiguous case target, or a fixup touching control
+paths, is refused before rewriting. If two active cases share a subject,
+replace only your pending fixup's subject with `fixup! <exact-case-sha>`
+(`git -c commit.gpgsign=false commit --amend -m "fixup! <exact-case-sha>"`)
+and retry; do not resolve a conflict against a historical control commit.
 A conflict while squashing means the edit overlaps another case: the cases are
 not independent. Abort (`git rebase --abort`), then resolve it in the design,
 not by a merge. `--fixup=amend:` opens an editor for the new message; supply it

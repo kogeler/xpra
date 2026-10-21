@@ -267,7 +267,8 @@ The currently retained active cases, in stack order, are:
 - `x11-client-clipboard-events`;
 - `packet-handler-error-boundary`;
 - `gtk-client-scroll-deduplication`;
-- `server-shutdown-disconnect-flush`.
+- `server-shutdown-disconnect-flush`;
+- `printing-cli-timer-cleanup`.
 
 There is currently no active quarantine duty case, but
 `fork-maintenance/cases/upstream-test-quarantine/` is permanent infrastructure.

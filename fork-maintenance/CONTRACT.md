@@ -316,7 +316,8 @@ Only these case commits exist, in this stack order:
 6. `x11-client-clipboard-events`;
 7. `packet-handler-error-boundary`;
 8. `gtk-client-scroll-deduplication`;
-9. `server-shutdown-disconnect-flush`.
+9. `server-shutdown-disconnect-flush`;
+10. `printing-cli-timer-cleanup`.
 
 ## Stack contract
 
@@ -374,7 +375,10 @@ a new case commit). Runners always test committed `HEAD`.
   `make -s -C fork-maintenance case-commit CASE=<slug>`. Then run
   `develop-squash` and `case-check CASE=<slug>`. `develop-squash` folds every
   pending `fixup!`/`amend!`/`squash!` commit into its target with a
-  non-interactive `git rebase --autosquash` from the upstream base; the commits
+  non-interactive `git rebase --autosquash` from the upstream base with an
+  explicit full-SHA plan resolved only against earlier case commits. Identical
+  historical control subjects cannot receive a case fixup; an ambiguous case
+  target or a control-path fixup fails before rewriting. The commits
   above the target are replayed, so their SHAs change. A conflict while
   squashing means the edit overlaps another case: the cases are not
   independent, and that is resolved in the design, never by a merge.
@@ -644,6 +648,17 @@ released only after durable owner publication. Status and abort recognize the
 prelaunch marker; normal remove/abort deletes it. Hosted foreground image
 creation streams the tracked context inputs directly and creates no
 `.ci-image.*` host staging directory.
+
+Standalone image results use status schema 4 (distinct from schema-3 test
+results). `image_input_sha256` binds the requested owner inputs even when no
+image was produced; `image_labels_sha256` hashes the complete observed
+maintenance-label namespace. Success requires that digest to equal the exact
+owner-derived label set, not merely the observed builder/input labels. Failed
+absent or mislabeled builds remain removable through the ordinary result-bound
+transaction without reclassifying them as successful. For cleanup only, a
+schema-2 failed build with nonzero numeric exit, no IID/image/labels/input,
+complete log binding and completion timestamp has a narrow compatibility path;
+it does not admit legacy successful image evidence or a changed nonempty hash.
 
 A live start first publishes
 `jobs/live/<RUN>.freeze-prelaunch.json`, then launches and durably publishes the
@@ -1129,6 +1144,17 @@ and warning category appear in failure diagnostics, never clipboard-bearing
 log contents. This check supplements all existing application, pixel, input,
 transport and lifecycle oracles.
 
+Opaque Zed RGB profiles retain a zero-error, single-server-frame pixel oracle.
+Their direct and screen XWD requests execute adjacently before host transfer or
+analysis; a bounded readiness wait requires one nonuniform opaque, byte-equal
+client capture pair. A changed pair is retried as a whole, never mixed across
+attempts. The retained pair must independently match the same saved server
+frame. Persistent mismatch/unready content fails; no tolerance increase, region
+mask, substituted source image or moving-content alternative is permitted.
+Zero-limit decisions use actual byte equality, not a mean error rounded to
+zero for display; even a one-channel change in one large-frame pixel fails.
+H.264 and alpha-bearing fixture capture contracts remain unchanged.
+
 Admission uses the complete fixed profile tuple and exactly `stacks/develop`
 with kind `stack`. No `CASE`, alternate stack or clean source is admitted, even
 if its manifest names all live gates. The supervisor rejects invalid selection
@@ -1429,10 +1455,11 @@ replacement on the same connection. Acceptance requires the patched client's
 flat `keyboard-config` packet with `representation=versioned` to be received,
 to install the expected hash,
 and to be explicitly accepted after normalization in that exact order; a
-preceding `layout-changed` application, nested legacy update, an identical-only
+removed legacy packet, unversioned-only update, an identical-only
 or silent packet, or any rejected-configuration status cannot pass. Each
-injection also binds a bounded patched-client log interval containing exactly the real `key-action`
-press and release sent by Xpra, including its keycode, group, keysym, name,
+injection also binds a bounded patched-client log interval containing exactly the real `keyboard-event`
+press and release sent by Xpra in the current five-field packet plus exact
+attribute dictionary, including its keycode, group, keysym, name,
 Unicode string, and the exact internal Xpra ID of the forwarded fixture window;
 successful XTEST calls alone are not client observation. The
 post-input server information must expose the exact effective RMLVO, compiled

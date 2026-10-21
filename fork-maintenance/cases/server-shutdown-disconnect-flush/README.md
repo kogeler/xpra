@@ -6,7 +6,7 @@ Code: the `Fork-Case: server-shutdown-disconnect-flush` commit on `develop`
 ## Boundary
 
 When a server exits cleanly while a client is attached, the client must be
-told why: `ServerCore.cleanup()` sends every protocol a `connection-close`
+told why: `ServerCore.cleanup()` asks its network subsystem to send every protocol a `connection-close`
 packet with `server shutdown` (or the exit/upgrade reason), and the client then
 logs `server requested disconnect` and exits with status 0. Instead, the
 client intermittently logs only `Connection lost` and exits with status 1,
@@ -61,13 +61,21 @@ meet the first way; they are not part of this case, see the non-goals.
 ## Embedded-source context
 
 The case resolves against embedded source
-`0a80430b6506e403f6469416d8aaa8463e331296`.
+`646b712d1bff46b08b8f26ddc7a83229d65ba5bc`.
 
-`ServerCore.cleanup()` in `xpra/server/core.py` dispatches subsystem cleanup,
-calls `cleanup_all_protocols()`, then `do_cleanup()`, then
-`cleanup_sockets()`. For every protocol, `disconnect_protocol()` logs
+Current upstream `cf0f17835b`, `94db9c1ce9` and `09e9cfd0d7` moved the connection
+layer to `NetworkServer` in `xpra/server/subsystem/network.py` and removed the
+temporary core forwarders. `820d6db451` replaced the core's dispatch wrapper
+with shared `xpra.util.subsystem.call()`. The case preserves those boundaries:
+its production guard still belongs to the current core packet dispatcher;
+network cleanup and disconnection remain with their new owner.
+
+`ServerCore.cleanup()` dispatches subsystem cleanup through the shared helper,
+calls `network.cancel_touch_timer()` and `network.cleanup_all_protocols()`,
+then `do_cleanup()`, then `network.cleanup_sockets()`.
+For every protocol, `NetworkServer.disconnect_protocol()` logs
 `Disconnecting client`, calls `protocol.send_disconnect(reasons)` and then
-`cleanup_protocol()`, which removes the protocol from `_potential_protocols`
+`server.cleanup_protocol()`, which removes the protocol from `network._potential_protocols`
 and its source from the `client-session` subsystem: from then on the protocol
 is *detached*.
 
@@ -100,8 +108,12 @@ queued, which implicitly gave them time to leave. The refactor moved subsystem
 cleanup ahead of `cleanup_all_protocols()` and left the override emitting only
 the `exit` server event.
 
-All three defects are in the previous embedded source too; the new upstream
-does not change these paths. An upstream replacement must establish, for every
+All three defects remain in the current embedded source despite those owner
+moves. The flush regression now installs its boundary stubs in the real
+`subsystems["network"]` slot and executes the actual shared cleanup dispatch;
+the detached-protocol fixture also supplies the current network owner and
+uses `window-focus`, not the removed `focus` wire alias. Missing old forwarders
+must not become a false clean-source failure. An upstream replacement must establish, for every
 server class derived from `ServerCore`/`ServerBase`:
 
 - a packet received during shutdown from a protocol without a source does not
@@ -116,28 +128,28 @@ server class derived from `ServerCore`/`ServerBase`:
 | Owner | Responsibility |
 | --- | --- |
 | `ServerCore.clean_quit()` | Arms a 5 s `force_quit`, marks the server closing (`_closing = True`), runs `cleanup()`, then `quit_worker()`. |
-| `ServerCore.cleanup()` | Subsystem cleanup, `cleanup_all_protocols()`, `do_cleanup()`, `cleanup_sockets()`, asyncio loop stop. |
-| `ServerCore.disconnect_protocol()` / `cleanup_protocol()` | Log `Disconnecting client`, `protocol.send_disconnect(reasons)`, then detach the protocol: remove it from `_potential_protocols` and its source from `client-session`. |
+| `ServerCore.cleanup()` | Shared subsystem cleanup dispatch, network protocol cleanup, `do_cleanup()`, network socket cleanup, asyncio loop stop. |
+| `NetworkServer.disconnect_protocol()` / `ServerCore.cleanup_protocol()` | Log `Disconnecting client`, `protocol.send_disconnect(reasons)`, then detach the protocol: remove it from `network._potential_protocols` and its source from `client-session`. |
 | `ServerCore.process_packet()` / `PacketDispatcher.dispatch_packet()` | Parse thread: route each packet by type and by whether the protocol still has a source; unknown ones go to `handle_invalid_packet()`. |
 | `ServerCore.handle_invalid_packet()` | Logs unexpected packets and closes protocols without a source; with this case not while the server is closing. |
 | `SocketProtocol.do_flush_then_close()` | Best effort: takes the write lock, waits for the write queue, queues the last packet and closes once it is sent (checked at once, then by GLib timers, with a 5 s fallback). With this case "sent" means that the write thread finished that queue item. |
 | Protocol write thread (`_write()`, `write_items()`, `write_buffers()`) | Daemon thread: takes one item off the write queue, writes it and stops writing once the protocol is closed. With this case it marks each item done (`task_done()`) after writing it. |
 | `ServerBase.do_cleanup()` | Emits the `exit` server event; with this case it also keeps `ServerCore`'s flush interval. |
-| `quit_worker()` -> `ServerCore.quit()` -> `late_cleanup()` -> `do_quit()` | Force-closes the protocols still registered (`get_all_protocols()`: potential protocols and sources); detached protocols are not among them. Then the main loop quits and the process exits, ending the daemon write threads. |
+| `quit_worker()` -> `ServerCore.quit()` -> `late_cleanup()` -> `do_quit()` | Asks network to force-close the protocols still registered (`network.get_all_protocols()`: potential protocols and sources); detached protocols are not among them. Then the main loop quits and the process exits, ending the daemon write threads. |
 
 Order on a clean exit:
 
 ```text
 clean_quit                              _closing = True
   cleanup
-    _dispatch_fire("cleanup")           subsystems
-    cleanup_all_protocols()
-      disconnect_protocol(p)
+    dispatch.call(..., "cleanup")       subsystems, reverse order
+    network.cleanup_all_protocols()
+      network.disconnect_protocol(p)
         p.send_disconnect()             queue connection-close
         cleanup_protocol(p)             detach p
                                         <- late client packet: parse thread
     do_cleanup()                        ServerBase: exit event, flush interval
-    cleanup_sockets()                   listening sockets
+    network.cleanup_sockets()           listening sockets
   quit_worker(quit)
     quit -> late_cleanup                registered protocols only
          -> do_quit                     main loop quits, process exits
@@ -279,14 +291,14 @@ another.
 
 - `test_late_client_packet_does_not_close_the_disconnecting_protocol` calls
   the real `ServerCore.handle_invalid_packet()` with a closing server
-  namespace, no source, no potential protocols and a mock protocol receiving a
-  `focus` packet, in the style of upstream's
+  namespace, no source, no network potential protocols and a mock protocol receiving a
+  `window-focus` packet, in the style of upstream's
   `test_handle_invalid_packet_from_detached_protocol`. It requires no error
   log and no `close()`. On clean source `close()` is called.
 - `test_disconnect_packets_get_the_flush_interval_before_sockets_close`
   constructs a real `ServerBase` object without running its initializer and
   calls the real `ServerCore.cleanup()`. It substitutes only the side effects:
-  subsystem dispatch, protocol disconnection, the `exit` server event, the
+  a registered network subsystem's cleanup/disconnect/socket effects, the `exit` server event, the
   flush `sleep` in `xpra.server.core`, socket close and the asyncio loop stop,
   each recording its position. It requires the order subsystems, disconnect,
   `exit` event, a 0.1 s flush, sockets. On clean source the flush entry is
