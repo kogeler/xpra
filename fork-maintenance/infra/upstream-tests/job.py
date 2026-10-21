@@ -929,6 +929,11 @@ def exact_maintenance_labels(actual: dict[str, str], expected: dict[str, str]) -
     } == expected
 
 
+def maintenance_labels_sha256(labels: dict[str, str]) -> str:
+    owned = {key: value for key, value in labels.items() if key.startswith("io.xpra.fork-maintenance.")}
+    return hashlib.sha256(json.dumps(owned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def exact_test_container_labels(
     actual: dict[str, str], expected: dict[str, str], image_id: str
 ) -> bool:
@@ -2333,7 +2338,7 @@ def _image_collect_locked(args: argparse.Namespace, name: str) -> int:
         and not finished.startswith("0001-")
     )
     values = {
-        "schema": 2,
+        "schema": 4,
         "owner": IMAGE_OWNER,
         "run_id": record["job_id"],
         "name": name,
@@ -2345,7 +2350,8 @@ def _image_collect_locked(args: argparse.Namespace, name: str) -> int:
         "image_exists": int(image_ok),
         "image_id": image_id,
         "image_builder": labels.get("io.xpra.fork-maintenance.image-builder", ""),
-        "image_input_sha256": labels.get("io.xpra.fork-maintenance.image-input", ""),
+        "image_input_sha256": record["input_sha256"],
+        "image_labels_sha256": maintenance_labels_sha256(labels),
         "source": record["source"],
         "workflow_sha256": record["workflow_sha256"],
         "runner_sha256": record["runner_sha256"],
@@ -2378,12 +2384,31 @@ def image_wait(args: argparse.Namespace) -> int:
 def verify_image_evidence(name: str, record: dict[str, Any]) -> None:
     status = parse_record(status_path(name))
     ensure_private_regular(log_path(name))
+    # Old collectors published an empty input when the build failed before an
+    # image existed. Accept only that exact failed/no-image legacy state for
+    # cleanup, never as successful image evidence or a general hash bypass.
+    legacy_absent = (
+        status.get("schema") == "2"
+        and status.get("result") == "failed"
+        and status.get("validation_ok") == "0"
+        and status.get("exit_code") not in {None, "0"}
+        and re.fullmatch(r"-?[0-9]+", status.get("exit_code", "")) is not None
+        and status.get("logs_ok") == "1"
+        and bool(status.get("finished"))
+        and all(status.get(key) == "0" for key in ("iid_ok", "image_exists"))
+        and all(status.get(key) == "" for key in ("image_id", "image_builder", "image_input_sha256"))
+        and "image_labels_sha256" not in status
+    )
+    if status.get("schema") != "4" and not legacy_absent:
+        raise JobError("collected image evidence has an unsupported schema")
+    if not legacy_absent and not SHA256_RE.fullmatch(status.get("image_labels_sha256", "")):
+        raise JobError("collected image label digest is invalid")
     expected = {
         "owner": IMAGE_OWNER,
         "run_id": str(record["job_id"]),
         "name": name,
         "image": str(record["image"]),
-        "image_input_sha256": str(record["input_sha256"]),
+        "image_input_sha256": "" if legacy_absent else str(record["input_sha256"]),
         "runner_sha256": str(record["runner_sha256"]),
         "source": str(record["source"]),
         "workflow_sha256": str(record["workflow_sha256"]),
@@ -2394,11 +2419,13 @@ def verify_image_evidence(name: str, record: dict[str, Any]) -> None:
     if status.get("log_sha256") != sha256_file(log_path(name)):
         raise JobError("collected image log digest does not match")
     validation_ok = (
-        status.get("exit_code") == "0"
+        not legacy_absent
+        and status.get("exit_code") == "0"
         and status.get("iid_ok") == "1"
         and status.get("image_exists") == "1"
         and SHA256_RE.fullmatch(status.get("image_id", "")) is not None
         and status.get("image_builder") == "true"
+        and status.get("image_labels_sha256") == maintenance_labels_sha256(built_image_labels(record))
         and status.get("logs_ok") == "1"
         and bool(status.get("finished"))
         and not status["finished"].startswith("0001-")

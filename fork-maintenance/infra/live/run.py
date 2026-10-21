@@ -4945,11 +4945,19 @@ def pixel_pipeline_evidence(
         if comparison["direct"]["same_size"]
         and comparison["focused_screen"]["same_size"]
     ]
+
+    def within_limit(comparison: dict[str, Any]) -> bool:
+        # The rounded mean is a diagnostic: a one-channel, one-pixel error in
+        # a large image can round to 0.0 without the images being byte-equal.
+        if maximum_error == 0:
+            return comparison["exact"]
+        return comparison["mean_absolute_error"] <= maximum_error
+
     matching = [
         comparison
         for comparison in comparable
-        if comparison["direct"]["mean_absolute_error"] <= maximum_error
-        and comparison["focused_screen"]["mean_absolute_error"] <= maximum_error
+        if within_limit(comparison["direct"])
+        and within_limit(comparison["focused_screen"])
     ]
     selected = min(
         comparable,
@@ -4968,12 +4976,12 @@ def pixel_pipeline_evidence(
         direct_frames = [
             (time_ms, comparison) for time_ms, comparison in timed
             if time_ms is not None
-            and comparison["direct"]["mean_absolute_error"] <= maximum_error
+            and within_limit(comparison["direct"])
         ]
         focused_frames = [
             (time_ms, comparison) for time_ms, comparison in timed
             if time_ms is not None
-            and comparison["focused_screen"]["mean_absolute_error"] <= maximum_error
+            and within_limit(comparison["focused_screen"])
         ]
         pairs = [
             (focused_time - direct_time, direct, focused)
@@ -9634,6 +9642,54 @@ def capture_window_when_ready(
     return evidence
 
 
+def capture_static_window_pair(
+    container: str,
+    window_id: str,
+    directory: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Wait for one byte-exact opaque window/screen pair, not two UI frames."""
+    evidence: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None
+    attempts = 0
+
+    def capture() -> bool:
+        nonlocal evidence, attempts
+        attempts += 1
+        # Keep both XWD requests adjacent. Host transfer/conversion/analysis
+        # between them otherwise lets even a status spinner change the frame.
+        podman_exec(
+            container,
+            [
+                "sh", "-eu", "-c",
+                'export DISPLAY="$1"\n'
+                'xwd -silent -id "$2" -out /artifacts/window-direct.xwd\n'
+                'xwd -silent -screen -id "$2" -out /artifacts/window-focused-screen.xwd\n'
+                'xwd -silent -root -out /artifacts/root-after.xwd\n',
+                "capture-static-window-pair", CLIENT_DISPLAY, window_id,
+            ],
+            announce=False,
+        )
+        pull_container_artifacts(
+            container, directory,
+            ("window-direct.xwd", "window-focused-screen.xwd", "root-after.xwd"),
+        )
+        direct = convert_xwd(directory, "window-direct")
+        focused = convert_xwd(directory, "window-focused-screen")
+        root = convert_xwd(directory, "root-after")
+        evidence = direct, focused, root
+        return bool(
+            client_window_content_ready("zed", direct)
+            and compare_rgb_images(
+                directory / "window-direct.rgb.png",
+                directory / "window-focused-screen.rgb.png",
+            )["exact"]
+        )
+
+    wait_for("byte-exact static client capture pair", capture)
+    assert evidence is not None
+    print(f"Static capture pair attempts: {attempts}", flush=True)
+    return evidence
+
+
 def client_window_content_ready(
     application: str,
     evidence: dict[str, Any],
@@ -10511,11 +10567,16 @@ def parse_keyboard_client_trace(
             values = ast.literal_eval(f"({match.group('arguments')})")
         except (SyntaxError, ValueError) as error:
             raise LabFailure("keyboard client trace has invalid packet arguments") from error
-        if not isinstance(values, tuple) or len(values) != 9:
+        if not isinstance(values, tuple) or len(values) != 5:
             raise LabFailure("keyboard client trace has an invalid packet shape")
-        packet, window, keyname, pressed, modifiers, keyval, keystr, keycode, group = values
+        packet, window, keyname, pressed, attrs = values
+        if not isinstance(attrs, dict) or set(attrs) != {"modifiers", "keyval", "string", "keycode", "group"}:
+            raise LabFailure("keyboard client trace has invalid packet attributes")
+        modifiers, keyval, keystr, keycode, group = (
+            attrs[name] for name in ("modifiers", "keyval", "string", "keycode", "group")
+        )
         if (
-            packet != "key-action"
+            packet != "keyboard-event"
             or _exact_int(window, positive=True) is None
             or not _bounded_utf8_string(keyname, 256, nonempty=True)
             or not isinstance(pressed, bool)
@@ -10551,6 +10612,20 @@ def parse_keyboard_client_trace(
         "events": events,
         "sha256": hashlib.sha256(payload).hexdigest(),
     }
+
+
+def keyboard_client_packet_patterns(
+    window: int, keysym: int, keycode: int, group: int, text_value: str,
+) -> tuple[str, str]:
+    """Wait for the exact current helper shape; retained parsing proves values."""
+    keyname = r"(?:'(?:\\.|[^'\\\r\n])*'|\"(?:\\.|[^\"\\\r\n])*\")"
+    prefix = rf"do_send_keyboard\('keyboard-event', {window}, " + keyname
+    suffix = (
+        rf", \{{'modifiers': \[[^\]\r\n]*\], 'keyval': {keysym}, "
+        + r"'string': " + re.escape(repr(text_value))
+        + rf", 'keycode': {keycode}, 'group': {group}\}}\)"
+    )
+    return prefix + r", True" + suffix, prefix + r", False" + suffix
 
 
 def parse_keyboard_server_trace(
@@ -11759,21 +11834,8 @@ def exercise_wayland_keyboard(
             client_keyname = client_record.get("keysym_name")
             if client_keysym is None or not isinstance(client_keyname, str):
                 raise LabFailure("keyboard XTEST driver returned invalid symbol evidence")
-            client_packet_keyname = (
-                r"(?:'(?:\\.|[^'\\\r\n])*'|\"(?:\\.|[^\"\\\r\n])*\")"
-            )
-            client_packet_prefix = (
-                rf"do_send_keyboard\('key-action', {xpra_window_id}, "
-                + client_packet_keyname
-            )
-            client_packet_suffix = (
-                rf", \[[^\]\r\n]*\], {client_keysym}, "
-                + re.escape(repr(item["expected_text"]))
-                + rf", {physical_keycode}, {group}\)"
-            )
-            client_patterns = (
-                client_packet_prefix + r", True" + client_packet_suffix,
-                client_packet_prefix + r", False" + client_packet_suffix,
+            client_patterns = keyboard_client_packet_patterns(
+                xpra_window_id, client_keysym, physical_keycode, group, item["expected_text"],
             )
             wait_for(
                 f"full-stack Xpra client press/release trace for input {input_index + 1}",
@@ -20375,13 +20437,23 @@ def run_scenario(
             directory / "window-xwininfo.txt",
         )
 
-        direct = capture_window_when_ready(
-            client,
-            window_id,
-            directory,
-            application=args.application,
-            expect_content=frame_outcome in {"success", "picture-fallback"},
+        static_capture_pair = (
+            args.application == "zed"
+            and args.encoding == "rgb"
+            and frame_outcome == "success"
         )
+        if static_capture_pair:
+            direct, focused_screen, root_after = capture_static_window_pair(
+                client, window_id, directory,
+            )
+        else:
+            direct = capture_window_when_ready(
+                client,
+                window_id,
+                directory,
+                application=args.application,
+                expect_content=frame_outcome in {"success", "picture-fallback"},
+            )
         background_rgb = tuple(
             compositor["background_capture"]["image"]["dominant_rgb"]
         )
@@ -20417,16 +20489,17 @@ def run_scenario(
                 "xwd": {"capture": "grim-crop"},
             }
         else:
-            capture_xwd(
-                client,
-                directory,
-                "window-focused-screen.xwd",
-                window_id=window_id,
-                screen=True,
-            )
-            capture_xwd(client, directory, "root-after.xwd")
-            focused_screen = convert_xwd(directory, "window-focused-screen")
-            root_after = convert_xwd(directory, "root-after")
+            if not static_capture_pair:
+                capture_xwd(
+                    client,
+                    directory,
+                    "window-focused-screen.xwd",
+                    window_id=window_id,
+                    screen=True,
+                )
+                capture_xwd(client, directory, "root-after.xwd")
+                focused_screen = convert_xwd(directory, "window-focused-screen")
+                root_after = convert_xwd(directory, "root-after")
             root_crop = crop_composited_window(
                 directory,
                 "root-after",

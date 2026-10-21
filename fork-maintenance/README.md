@@ -34,7 +34,8 @@ The active case commits, in stack order, are:
 6. `x11-client-clipboard-events`;
 7. `packet-handler-error-boundary`;
 8. `gtk-client-scroll-deduplication`;
-9. `server-shutdown-disconnect-flush`.
+9. `server-shutdown-disconnect-flush`;
+10. `printing-cli-timer-cleanup`.
 
 No quarantine duty case is currently active. The permanent
 [`upstream-test-quarantine` scaffold](cases/upstream-test-quarantine/README.md)

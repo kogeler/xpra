@@ -248,6 +248,12 @@ required by `setup.py unittests`. Reusing the dependency image and ccache does
 not make these build-free or incremental installed-Xpra tests. The focused
 modes select narrow modules, not the complete final upstream matrix.
 
+The frozen workflow at source `646b712d1bff` also installs `python3-cups` for
+printing tests. The runner dependency image includes it alongside the retained
+Wayland clipboard/input and asyncssh dependencies. A dependency-image change
+requires the normal input-keyed image lifecycle, not an in-container install
+workaround or a skip of the affected module.
+
 First run the retained regression against unmodified embedded-source production
 code by applying only the selected test paths in the relevant mode:
 

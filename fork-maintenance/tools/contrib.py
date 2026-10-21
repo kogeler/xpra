@@ -1126,11 +1126,11 @@ def selection_module() -> Any:
     return _SELECTION_MODULE
 
 
-def develop_map(repo: Path, base: str | None = None) -> Any:
+def develop_map(repo: Path, base: str | None = None, *, allow_pending_fixups: bool = False) -> Any:
     """Classify base..HEAD: control commits and one commit per case."""
     selection = selection_module()
     try:
-        return selection.develop_map(repo, base)
+        return selection.develop_map(repo, base, allow_pending_fixups=allow_pending_fixups)
     except selection.SelectionError as error:
         fail(str(error))
 
@@ -1258,6 +1258,49 @@ def case_rows(repo: Path) -> list[tuple[str, str, str]]:
     return rows
 
 
+def case_squash_todo(repo: Path, state: IsolatedState) -> str:
+    """Resolve fixups against case identities, never an equal control subject."""
+    mapping = develop_map(repo, state.source_commit, allow_pending_fixups=True)
+    if mapping.head != state.head:
+        fail("HEAD changed while planning case fixups")
+    selection = selection_module()
+    commits = git(repo, "rev-list", "--reverse", f"{state.source_commit}..{state.head}").stdout.split()
+    positions = {commit: index for index, commit in enumerate(commits)}
+    subjects = {commit: git(repo, "log", "-1", "--format=%s", commit).stdout.rstrip("\n") for commit in commits}
+    fixups: dict[str, list[str]] = {}
+    pending: set[str] = set()
+    for commit in commits:
+        subject = subjects[commit]
+        prefix = next((value for value in selection.FIXUP_PREFIXES if subject.startswith(value)), "")
+        if not prefix:
+            continue
+        pending.add(commit)
+        target = subject[len(prefix):]
+        # Git may produce a fixup of a pending fixup. Its nested subject still
+        # resolves to the original case, without moving any control commit.
+        while nested := next((value for value in selection.FIXUP_PREFIXES if target.startswith(value)), ""):
+            target = target[len(nested):]
+        previous = [case for case in mapping.cases if positions[case.commit] < positions[commit]]
+        exact = [case for case in previous if target == case.commit or target == case.subject]
+        candidates = exact or [
+            case for case in previous
+            if target and (case.commit.startswith(target) or case.subject.startswith(target))
+        ]
+        if len(candidates) != 1:
+            fail(f"fixup {commit} does not identify exactly one earlier case; use its exact commit SHA")
+        paths = git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "--no-renames", f"{commit}^", commit).stdout.splitlines()
+        if any(allowed_develop_path(path) for path in paths):
+            fail(f"case fixup {commit} also changes control paths")
+        action = {"fixup! ": "fixup", "squash! ": "squash", "amend! ": "fixup -C"}[prefix]
+        fixups.setdefault(candidates[0].commit, []).append(f"{action} {commit}\n")
+    todo = []
+    for commit in commits:
+        if commit not in pending:
+            todo.append(f"pick {commit}\n")
+            todo.extend(fixups.get(commit, ()))
+    return "".join(todo)
+
+
 def develop_squash(repo: Path) -> str:
     """Fold every pending fixup!/amend!/squash! commit into its case commit."""
     verify_repo(repo, ())
@@ -1265,13 +1308,20 @@ def develop_squash(repo: Path) -> str:
         fail(f"current branch must be {INTEGRATION_BRANCH}")
     require_clean_product(repo, "develop-squash")
     state = embedded_develop_state(repo, "develop squash", allow_pending_fixups=True)
+    todo = case_squash_todo(repo, state)
+    # Self-contained: control files can be old/absent during the rebase. The
+    # editor touches only Git's supplied todo, not refs, config or host index.
+    editor = shlex.join((
+        sys.executable, "-c",
+        "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(" + repr(todo) + ", encoding='utf-8')",
+    ))
     result = run(
         (
             "git", "-C", str(repo), "-c", "commit.gpgsign=false", "rebase", "-i",
             "--autosquash", "--autostash", "--empty=drop", state.source_commit,
         ),
         check=False,
-        env={**NONINTERACTIVE_GIT_ENV, "GIT_SEQUENCE_EDITOR": "true", "GIT_EDITOR": "true"},
+        env={**NONINTERACTIVE_GIT_ENV, "GIT_SEQUENCE_EDITOR": editor, "GIT_EDITOR": "true"},
     )
     if result.returncode:
         fail(
@@ -1674,7 +1724,7 @@ def require_status_keys(
 def validate_upstream_status(values: dict[str, str], name: str, root: Path) -> str:
     """Validate one finalized upstream-test or standalone-image status record."""
     schema = values.get("schema")
-    if schema not in {"2", "3"}:
+    if schema not in {"2", "3", "4"}:
         fail(f"collected upstream result has an unsupported schema: {name}")
     common = {
         "exit_code",
@@ -1775,8 +1825,23 @@ def validate_upstream_status(values: dict[str, str], name: str, root: Path) -> s
         "image_id",
         "image_input_sha256",
     }
+    if schema == "4":
+        image_fields.add("image_labels_sha256")
     if set(values) != common | image_fields:
         fail(f"collected upstream image result is not the current owned schema: {name}")
+    if schema == "4":
+        if not SHA256_RE.fullmatch(values["image_input_sha256"]) or not SHA256_RE.fullmatch(values["image_labels_sha256"]):
+            fail(f"collected upstream image digests are invalid: {name}")
+        labels = {
+            "io.xpra.fork-maintenance.image-builder": "true",
+            "io.xpra.fork-maintenance.image-build-run-id": values["run_id"],
+            "io.xpra.fork-maintenance.image-input": values["image_input_sha256"],
+            "io.xpra.fork-maintenance.source": values["source"],
+            "io.xpra.fork-maintenance.workflow": values["workflow_sha256"],
+        }
+        expected_labels_sha256 = sha256_bytes(json.dumps(labels, sort_keys=True, separators=(",", ":")).encode())
+        if validation == "1" and values["image_labels_sha256"] != expected_labels_sha256:
+            fail(f"successful upstream image labels do not match its owner: {name}")
     if values["selection_resolution_ok"] != "0" or values["selection_resolution_sha256"]:
         fail(f"collected upstream image result has unexpected patch resolution: {name}")
     if validation == "1" and (
@@ -1858,8 +1923,20 @@ def validate_upstream_remove_transaction(
         or record.get("kind") != "image-build"
         or str(record.get("job_id", "")) != status_values["run_id"]
         or str(record.get("image", "")) != status_values["image"]
-        or str(record.get("input_sha256", ""))
-        != status_values["image_input_sha256"]
+        or not SHA256_RE.fullmatch(str(record.get("input_sha256", "")))
+        or (
+            str(record.get("input_sha256", "")) != status_values["image_input_sha256"]
+            and not (
+                status_values["schema"] == "2"
+                and status_values["result"] == "failed"
+                and status_values["validation_ok"] == "0"
+                and status_values["exit_code"] != "0"
+                and status_values["iid_ok"] == status_values["image_exists"] == "0"
+                and status_values["image_id"] == status_values["image_builder"] == status_values["image_input_sha256"] == ""
+                and status_values["logs_ok"] == "1"
+                and bool(status_values["finished"])
+            )
+        )
     ):
         fail(f"upstream image removal ownership differs: {name}")
 

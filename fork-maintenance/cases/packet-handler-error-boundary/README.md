@@ -31,12 +31,21 @@ packet into a valid event.
 ## Embedded-source context
 
 The case resolves against embedded source commit
-`0a80430b6506e403f6469416d8aaa8463e331296`. Upstream commit
+`646b712d1bff46b08b8f26ddc7a83229d65ba5bc`. Upstream commit
 `b0bd1265eb7f206c3583fabe63b5f8bd1aec019b` moved namespaced handler lookup into
-the owning subsystems while retaining flat-registry precedence, legacy aliases
+the owning subsystems while retaining flat-registry precedence
 and default handlers. Commit `457e7598d3fb925e9e51cd94615b1abe61cbaf1c` also
 made the clipboard helper use the shared subsystem registry. Those registration
 boundaries are preserved; the patch does not replace them with a second router.
+
+Current upstream `f538ec11ac` removed legacy packet aliases, and
+`0bf05633ee` requires subsystem handlers to stay in their own namespace rather
+than forwarding foreign packets into a global owner. Those removals are
+preserved. The cross-route regression now exercises actual flat, default and
+namespaced subsystem handlers, and asserts that all three execute; it does not
+recreate the removed alias registry. New shared subsystem helpers and the move
+of network/control ownership do not widen the upstream exception guards or add
+a common reporting budget.
 
 Upstream `92a3d65a5ff8087cef58f4ec6e30c8565edf4df1` then fixed the asynchronous
 gap which this case originally wrapped around. `call_packet_handler()` now owns
@@ -71,7 +80,7 @@ code review, not a claim of new-base test acceptance.
 | Component | Responsibility |
 | --- | --- |
 | `xpra/net/protocol/socket_handler.py` | Receives, decodes and wraps wire data as `Packet`, invokes the endpoint callback, and owns transport errors and connection-loss delivery. |
-| `xpra/net/dispatch.py` | Selects aliases, flat/default handlers and subsystem handlers; owns the guarded invocation and shared reporting state. |
+| `xpra/net/dispatch.py` | Selects flat/default and namespaced subsystem handlers; owns the guarded invocation and shared reporting state. |
 | `SubsystemPacketHandlers` / `find_packet_handler()` | Keep registration with the owning subsystem and resolve namespace prefixes without changing handler signatures. |
 | `xpra/server/glib_server.py` | Keeps the default `(proto, packet)` arguments and defers main-thread calls through `call_in_main_thread()` / `idle_add`. |
 | `xpra/client/base/client.py` | Drops `proto` through `packet_handler_args()` and defers main-thread calls through `call_in_main_thread()` / `idle_add`. |
@@ -102,9 +111,9 @@ use the same reporting budget; they need not reach a handler body first.
 
 ## Routing, admission and callback semantics
 
-Alias resolution precedes handler selection. An alias creates the same renamed
-`Packet` as upstream; the guard neither changes its fields nor performs
-another conversion. For authenticated, open protocols the existing priority
+The current packet name is used without legacy alias rewriting; the guard
+neither changes its fields nor performs another conversion. For authenticated,
+open protocols the existing priority
 remains flat UI handlers, flat non-UI handlers, then the owning subsystem.
 Default UI and default non-UI handlers remain the subsequent fallback.
 
@@ -141,9 +150,9 @@ unsigned range excludes `-1`. The resulting `ValueError` is correct validation;
 loosening the field range would move invalid input further into device code.
 
 One source of `-1` is the client's button-mapping path: an unmapped button above
-the ordinary three buttons gets that sentinel. The legacy `button-action`
-branch suppresses it, but the modern branch at the embedded source constructs
-a packet with it. An empty wheel map can expose this path. Wheel configuration
+the ordinary three buttons gets that sentinel. The current `pointer-button`
+sender constructs a packet with it; the former legacy `button-action` branch
+no longer exists. An empty wheel map can expose this path. Wheel configuration
 and sender-side suppression are separate responsibilities, not reasons to
 special-case the dispatcher by packet type or application.
 
@@ -221,8 +230,8 @@ can be suppressed behind the first; it does not retain one sample per kind.
 
 The budget covers this boundary's reports only. Existing logs inside a
 handler, debug packet logging, unknown-packet diagnostics and transport/parser
-errors keep their own behavior. Packet-type extraction and alias rewriting
-precede the guarded routing block. Arbitrary exceptions outside that block,
+errors keep their own behavior. Packet-type extraction precedes the guarded
+routing block. Arbitrary exceptions outside that block,
 or in independent callbacks a handler schedules for later, are not covered.
 
 The report does not deliberately append the complete packet or peer, but the
@@ -264,7 +273,7 @@ The case owns the `Exception` scope of upstream's handler and routing guards,
 the shared reporting budget and counters, and focused proof of those
 boundaries. It does not:
 
-- alter wire packet layouts, field validation, aliases, feature negotiation or
+- alter wire packet layouts, field validation, feature negotiation or
   subsystem registration;
 - change mousewheel, cursor-shape, notification or DPI policy;
 - catch `KeyboardInterrupt`, `SystemExit`, `GeneratorExit` or other
@@ -308,7 +317,7 @@ The tests cover these distinct boundaries:
   validation must fail inside the guard, while the valid pair reaches the
   recording device hook. The peer source, UI-driver selection and terminal
   input hook are substituted; the parser and subsystem route are real.
-- Flat/default and aliased routes, different peers and different error
+- Flat/default and real namespaced subsystem routes, different peers and different error
   messages share one budget; alternating keys cannot multiply log output.
 - Controlled clock values cover just before and exactly at the deadline,
   suppression-summary resumption, the first error at zero, independent
@@ -353,7 +362,7 @@ clipboard ownership, hardware presentation or connection teardown.
 
 - Keep the guard inside upstream's deferred `call()`; a guard around
   `idle_add` alone cannot contain the deferred body.
-- Preserve client/server signatures, routing precedence, aliases, closed-
+- Preserve client/server signatures, routing precedence, namespace ownership, closed-
   protocol defaults and the existing thread choice.
 - Keep callback completion one-shot and leave retries to their actual owner.
 - Catch `Exception`, not `BaseException`, without weakening packet validation.
