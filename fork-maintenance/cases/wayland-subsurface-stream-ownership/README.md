@@ -47,8 +47,7 @@ backings, poll their pixels, or create a new stateful child codec stream.
 ## Frozen source and refresh boundary
 
 The case resolves against embedded source commit
-`0a80430b6506e403f6469416d8aaa8463e331296`. Since the previous base
-`d95058b09169`, upstream answers Wayland frame callbacks through a shared
+`646b712d1bff46b08b8f26ddc7a83229d65ba5bc`. Upstream answers Wayland frame callbacks through a shared
 `models.frame.FrameCallbackModel` used by both `Window` and the
 `SubsurfaceWindow` facade (`8e6590188a`, `42c163be03`, `32f423fe6c`,
 `d77c6729dc`): real damage arms a 1 s pending-damage safety timer before
@@ -71,6 +70,18 @@ current `xpra.constants.MAX_WINDOW_SIZE` owner, not its removed `xpra.common`
 export. Preserve those upstream
 owners. They do not replace persistent child identity, negotiated atomic
 composition, exact source lifetimes or terminal mmap ownership.
+
+This refresh removes pre-7.0 compatibility (`f538ec11ac`): `WINDOW_DRAW` and
+`WINDOW_ACK` are now unconditionally `window-draw` and `window-ack`, and the
+ordinary mmap producer always sends empty data plus metadata chunks. WSSO's
+pre-failure drain marker matches that current representation; stale queue
+validation still preserves the exact incoming chunks. `PaintCallbacks` moved
+to `xpra.common`; obsolete compatibility imports and the removed `new_tray`
+factory are not restored. Upstream's dropped-damage UI acknowledgement remains
+intact. OpenGL changes `083faf30e9` and `e6b53dde36` introduce device-pixel
+presentation scaling: ordinary overlays retain that conversion while private
+composition explicitly targets backing pixels, independent of `present_scale`.
+Both coordinate/uniform and real mapped-pixel regressions bind this distinction.
 
 A child's raw buffer format follows its attached buffer, not effective
 visibility. Its synchronized commit can precede the parent's first map;
@@ -1165,15 +1176,19 @@ performed generic transport side effect.
 
 Packet vocabulary and mmap descriptor layout remain upstream protocol owners.
 Publication, dequeue filtering, and their tests use `WINDOW_DRAW` from
-`xpra.net.packet_type`: it resolves to the legacy `draw` name only when
-backwards compatibility is enabled, and otherwise to `window-draw`. A
-no-compatibility build must not recognize a fabricated legacy packet merely to
-exercise the filter. The mmap encoder always publishes the exact descriptor
-in `options["chunks"]`; only compatibility builds also duplicate those chunks
-in the packet's data slot. Without compatibility that slot is empty bytes.
-Terminal drains preserve this active-mode layout while changing only the wire
-target and ownership, and the regression checks both the exact chunks and the
-mode-specific payload in the ordinary and no-compatibility test legs.
+`xpra.net.packet_type`, now unconditionally `window-draw`. Neither normal nor
+no-compatibility builds may recognize a fabricated legacy opcode merely to
+exercise the filter. The mmap encoder publishes the exact descriptor in
+`options["chunks"]` and empty bytes in the packet data slot in both modes.
+Its private pre-failure marker uses that same representation. Terminal drains
+change only wire target and ownership; the regression checks exact chunks,
+empty producer payload and marker agreement in normal and no-compatibility legs.
+Synthetic stale queue inputs retain their exact representation, including a
+v7 duplicated descriptor supplied by the test: filtering does not rewrite
+the packet. Supported v7 packets still require metadata chunks; draw ingress
+may ignore a duplicate data descriptor, but the mmap subsystem no longer
+recovers absent chunks from data. The real-ring stale-backing regression
+therefore supplies authoritative metadata in every tested compatibility mode.
 
 ## Client ingress and backing identity
 
@@ -1325,6 +1340,13 @@ and scroll transitions, reentry, resize, and close, without treating output
 quantization as an intermediate compositing operation.
 
 The premultiplied shader clamps sampling coordinates to source pixel centres.
+Its viewport height and rectangle are backing pixels, even when a previous
+presentation recorded a non-unit device/client scale. Screen overlays instead
+convert render coordinates using the current device factor and retain
+`viewport_size`/`dst_scaling` uniforms. The focused coordinate control covers
+both branches; the native source-over pixel control retains non-unit
+presentation state before each offscreen paint, so a presentation-scale leak
+changes real FBO pixels rather than only mock call arguments.
 Blending uses:
 
 ```text
@@ -1413,10 +1435,19 @@ already committed transaction.
 
 ## Pointer hit testing and native focus
 
-Wire pointer packets continue to name the root WID and carry XDG-backing-local
-coordinates. They are not rewritten to an internal child WID.
+Wire pointer packets continue to name the root WID. The current client sends
+the desktop absolute pair in the pointer field and XDG-backing-local coordinates
+in `props["window-position"]`; the shared upstream coordinate helper also
+accepts an older four-coordinate tuple. Packets are not rewritten to an internal
+child WID, nor may desktop coordinates stand in for missing local coordinates.
 
-Every adjusted pointer packet calls `enter_surface()` for the root XDG surface.
+The `get_pointer_target()` hook runs after generic pointer adjustment and
+readonly admission, where properties are still available. It resolves the local
+pair with `get_pointer_window_position()` and then calls `enter_surface()` for
+the root XDG surface on every event. Resolving native focus in `_adjust_pointer`
+would discard modern two-coordinate packets before that property-bearing hook.
+Absent or invalid local coordinates clear native focus and drop window events;
+a root/global event clears focus without guessing a window-local target.
 The native path adds the XDG geometry origin and calls
 `wlr_surface_surface_at()`, which applies the current mapped topology and input
 regions and returns the exact leaf `wl_surface` plus fractional leaf-local
@@ -1792,7 +1823,7 @@ option parsing.
 | `unit.server.window.subsurface_source_test` | Source policy, eligibility/refusal, damage deferral, atomic snapshot ownership, continuous-generation progress, transaction order, scheduler/watchdog, publication, ACK, genuine composition drain, mmap, teardown, and fanout |
 | `unit.wayland.subsurface_discovery_test` and its C protocol client | Real compositor discovery, stable identity, raw-format transitions, oversized viewport refusal, empty-commit capture recovery, and terminal registry cleanup |
 | `unit.wayland.subsurface_stream_test` | Deterministic native-adapter/model controls: stable identity, role loss/reparent, authoritative tuple dispatch, root-indexed reconciliation, frame-model handoff, topology, transforms, scale/viewport, XDG canvas, snapshots, colourspace, and child callbacks |
-| `unit.wayland.pointer_test` | Native pointer adapter hit testing, move/reparent coordinates, no-target clearing, lifecycle, and failure paths |
+| `unit.wayland.pointer_test` | Actual current client motion/button/wheel serialization through real Wayland server handlers, distinct absolute/local coordinates and local origin, property precedence, readonly/missing-local rejection, older tuple support, native adapter hit testing, lifecycle and failure paths |
 | `unit.client.cairo_backing_test` | Exact validation, premultiplied staging, atomic swap, invalidation, scaling, and failures |
 | `unit.client.opengl_backing_test` | Real mapped FBO staging, reset, blend/state restoration, direct-present rectangles, format handling, atomic commit, deferred-context ownership, backing replacement, close, and failures |
 | `unit.client.x11_client_paint_test` | Existing real Xpra X11 server/client PNG, WebP and forced-OpenGL quadrant pixels; preserves ordinary non-transactional rendering through the changed shared backing/paint path, including compiled mode |

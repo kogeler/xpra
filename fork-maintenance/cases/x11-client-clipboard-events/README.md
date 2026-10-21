@@ -90,7 +90,7 @@ owns the cross-backend oracle, but acceptance requires all nine profiles through
 ## Upstream provenance
 
 The case is based on the source commit embedded in the current `develop`
-history, `0a80430b6506e403f6469416d8aaa8463e331296`.  It does not compare or
+history, `646b712d1bff46b08b8f26ddc7a83229d65ba5bc`. It does not compare or
 follow moving master refs.  The relevant implementation is the result of a
 maintainer-authored 2025 refactor followed by the 2026 token-state work:
 
@@ -148,6 +148,14 @@ peer/policy admission. Standard compositor selection service with forwarding
 off is now upstream (`54e156591c`).
 Tests challenge this keep/adapt conclusion; they do not replace the call-path
 and ownership analysis.
+
+The current refresh removes pre-7.0 clipboard wire routes (`f538ec11ac`): all
+supported modes use `clipboard-data` and `clipboard-status`, never
+`clipboard-token` or `set-clipboard-enabled`. The queued status/data regression
+follows the registered current route, and the real X11 observer requires the
+current announcement. New upstream target bounds (`5b18c964ed`) and INCR
+watchdog/completion changes (`f78110d1f8`, `bd5bab8892`) remain upstream owners;
+the case must preserve them while retiring its own exact pending requests.
 
 ## Surrounding ownership map
 
@@ -477,6 +485,38 @@ replace these guards with unconditional immediate emission, reuse a remote
 target list for a local owner, or remove `_block_owner_change`; those are the
 loop, stale-data, and ownership-storm boundaries around this fix.
 
+One remote-to-local-to-remote transition has two native notifications, not one.
+After Xpra claims the local selection for received text, a local application
+taking it produces both `SelectionClear` and XFixes owner-change callbacks.
+The first can immediately start asynchronous target/data collection and arm
+the shared emit block. The second advances the generation, invalidating that
+collection. Returning under the block without scheduling a replacement loses
+the only announcement: the peer can keep the old remote text even though the
+local selection already contains new text. Pasting the old text first must not
+be required to make the next local copy visible.
+
+For a blocked, enabled, send-allowed X11 owner change in want-targets or greedy
+mode, the proxy therefore retains a replacement through the existing scheduler.
+It uses normal backoff, reads the actual owner when it emits, and still rejects
+old generations; it does not remove the shared block, echo Xpra-owned data,
+reuse remote target caches or create a polling path. Plain tokens complete
+synchronously, so the paired notification must not schedule a second plain
+announcement. Denied/disabled send policy still schedules nothing. This
+repair is X11-specific; GTK-fallback/Windows/macOS ownership mechanisms and
+independent native clipboard-manager behavior are not inferred from it.
+
+The paired-event regression uses the real proxy, core scheduler and content
+collector with controlled asynchronous target answers in both notification
+orders and all want-targets/greedy/plain modes. It requires the actual new-text
+announcement, not only a scheduling count; stale answers must not publish.
+A separate Xvfb/GDK test receives and claims remote text through the real helper,
+optionally pastes it locally through GTK, then copies different local text and
+checks exact outgoing UTF-8 data, a fresh origin, native conversion agreement
+and no duplicate after settling. These are unit/display boundaries, not a
+claim that a particular desktop clipboard manager or the remote application's
+complete UI has been exercised. The full-stack live boundary remains required
+when acceptance resumes.
+
 Direction policy remains layered rather than inferred from event presence:
 
 - `to-server` and `both` set `_can_send` on the X11 client proxy;
@@ -568,24 +608,20 @@ ownership transition and the later X11 owner/conversion.  Merely calling a
 fixture's `Gtk.Clipboard.set_text`, seeing a token counter, or matching bytes
 already held by the original X11 owner proves only a prefix of this route.
 
-The ownership announcement has two wire representations selected when
-`xpra.net.common` reads `XPRA_BACKWARDS_COMPATIBLE` at import time:
+The ownership announcement is always `clipboard-data` with selection and an
+options dictionary containing `claim`, `greedy`, a bounded origin, optional
+targets, and all accepted eager data items. `token` defaults true on receipt.
+The origin is remembered and rejected on a loop; current target filtering,
+count and size limits apply before native target use. Missing eager data still
+uses the request/contents round trip.
 
-| Mode | Ownership announcement | Semantics which must remain equivalent |
-| --- | --- | --- |
-| Compatibility mode (`BACKWARDS_COMPATIBLE=true`) | `clipboard-token` with positional selection and optional targets.  The legacy form can embed at most one eager data item; older short forms default to claiming the selection.  Newer positional fields carry `claim`, `greedy`, and optional synchronous-client behavior. | Direction still controls the sender's `claim`; a missing eager item must fall back to the request/contents round trip.  This format has no modern origin field. |
-| No-compat mode (`BACKWARDS_COMPATIBLE=false`) | `clipboard-data` with an options dictionary containing `claim`, `greedy`, a bounded origin, optional targets, and a map of all accepted eager data items.  `token` defaults true when the receiver processes this packet. | The bounded origin is remembered and rejected on a loop, target filtering and size limits still apply, and the same on-demand fallback remains available. |
-
-`clipboard-request`, `clipboard-contents`, and `clipboard-contents-none` are
-the request/data response pair in both modes.  Compatibility mode registers
-both token representations, while no-compat mode deliberately does not
-register `clipboard-token`.  Focused assertions therefore recognize the
-representation selected by the test process rather than hard-coding the
-legacy name; `focused-no-compat` exercises the modern `clipboard-data`
-announcement and absence of the legacy handler during development, while
-`full-no-compat` retains complete-stack final coverage. An upstream
-adaptation must preserve behavior across both representations instead of
-making the X11 event fix depend on one packet layout.
+`clipboard-request`, `clipboard-contents`, and `clipboard-contents-none` retain
+their request-ID response contract. Neither compatibility mode registers
+`clipboard-token`, and neither supports the old status alias. Focused, compiled
+and no-compat legs exercise this same current clipboard route; the no-compat
+leg remains required for complete-stack coverage of other compatibility
+boundaries. Existing target-based proxy callbacks are a platform API fallback,
+not permission to restore obsolete wire packets.
 
 ## Wayland publication, listener, and ownership lifecycle
 
@@ -1131,7 +1167,10 @@ source pointer, requires one empty completion, and proves late bytes cannot
 revive it.  A greedy two-target variant requires cancellation to stop the old
 sequential collector before it requests target two from the replacement.
 Separate assertions cover NULL-owner cache/origin reset, idempotent wrapper
-destruction when the selection adapter cannot clear, and cleanup of both
+destruction when the selection adapter cannot clear (entered through the
+existing empty `got_token(())` boundary, not a downstream-only helper, so clean
+native controls fail on the missing adapter clear rather than a missing API),
+and cleanup of both
 custom compositor event registrations.  A real uninitialized
 `WaylandCompositor` instance binds the exact connect/emit/disconnect API rather
 than substituting GObject signal IDs.
@@ -1477,7 +1516,7 @@ checkpoints and composed-review exit; no runtime gate starts before that exit:
 | The same focused modules and `wayland` gate through `STACK=develop` | Prove that earlier and later case commits do not change those semantics, take accidental ownership of the filter, or break the Wayland lifecycle contract. |
 | `case-check`, `stack-check`, `develop-check`, whitespace, lint, and fork-control units | Prove that the case is exactly one product-only commit which applies alone on the base and is removable from `HEAD`, dependency order, that the stack reproduces `HEAD`, and automation contracts; they do not prove runtime clipboard delivery. |
 | Clean quarantine reassessment | Separates currently assigned upstream failures from this case before patched results are interpreted. |
-| `full` | Runs the complete applied stack under the normal compatibility setting, including the legacy `clipboard-token` registration and default compiled-runtime behavior. |
+| `full` | Runs the complete applied stack under the normal compatibility setting, with current `clipboard-data`/`clipboard-status` registration and default compiled-runtime behavior. |
 | `full-cython` | Rebuilds the current upstream X11 filter and modified Wayland selection/compositor `.pyx` implementations rather than trusting stale generated binaries or cached extensions, then runs the complete Cython-enabled author suite. |
 | `full-no-compat` | Sets the process-wide compatibility mode before imports and exercises the modern `clipboard-data` path without the legacy token handler. |
 | Full-stack `live-x11-clipboard` | Proves the installed Debian client-only package contains and executes `xpra.x11.gtk.__init__`, both endpoints use the complete stack, every permitted new offer and native source request is delivered without incidental input, `off` retains standard native ownership without a forwarding helper, and real X11 owner events cross to a native-Wayland compositor and back under the exact `both` / `to-server` / `off` oracle while rendering, input, stderr, process, privacy, and cleanup remain positive. |

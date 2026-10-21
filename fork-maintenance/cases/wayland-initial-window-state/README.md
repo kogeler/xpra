@@ -39,15 +39,15 @@ coding, not a second fanout implementation.
 
 ## Embedded-source context
 
-The current source is `0a80430b6506e403f6469416d8aaa8463e331296`; the case
-commit applies unchanged. Between the previous base `d95058b09169` and this
-one, upstream added per-model frame-callback pacing (`FrameCallbackModel`),
+The current source is `646b712d1bff46b08b8f26ddc7a83229d65ba5bc`; the case
+replays without an additional behavior change. Upstream retains per-model
+frame-callback pacing (`FrameCallbackModel`),
 which does not mark popups either, so popup damage moved behind image publication
 keeps the same completion owner. `094692ebf3` narrows `non_video_encodings` to
 registered encoders, which only makes this case's CSC-readiness barrier more
 accurate; transparency selection already draws from `common_encodings`, which
 upstream derives from `_encoders`. `popup.pyx` still emits `commit` before
-`surface-image`, and none of the residual boundaries below changed. The earlier
+`surface-image`, and none of the residual boundaries below is replaced. The earlier
 case was based on `212038243d0067b6860ebe7d6953692179ef353f`.
 Manual reassessment on the refreshed source removes the absorbed lazy
 `notify::pixel-format` lease and four-string classification. Upstream now
@@ -59,6 +59,12 @@ video candidates locally, applies client map properties to existing sources,
 withholds 0x0 Wayland windows, and provides image locks and mandatory
 `call_in_encode_thread(callback, *args)` ownership. These are preserved,
 not reimplemented here.
+
+The newer upstream main-thread dropped-damage acknowledgement (`c9e167ee48`)
+changes completion dispatch, not alpha admission or map negotiation. Its
+OpenGL viewport fixes and wlroots 0.20 support remain intact in their native
+owners. WSSO adapts the shared renderer's offscreen/presentation distinction;
+WIS introduces no viewport, native ABI or packet-vocabulary workaround.
 
 The remaining necessity follows concrete current paths: the popup commit
 precedes image publication, internal metadata names are unhandled, initial CSC
@@ -223,7 +229,10 @@ accepts future names as provenance without assigning them new codec semantics.
 Both models declare `pixel-format` alongside `frame-has-alpha` in their
 internal names, not public or dynamic client metadata. The current format starts
 empty and follows the image. Generic `WindowServer.get_window_info()` enumerates
-internal properties, so the serializer explicitly supports both: empty string
+internal properties of registered windows. The subsurface facade is held only
+in `subsurface_facades`, not the registered window map, and has no public
+`geometry` property; it must not be passed to that generic enumerator. The
+shared metadata serializer explicitly supports both properties: empty string
 is the format default, true is the conservative frame-alpha default, and
 ordinary `skip_defaults`, unset values and `XPRA_SKIP_METADATA` semantics
 remain intact. Unknown property names still take the normal error path.
@@ -585,9 +594,13 @@ default omission and explicit metadata suppression. Its format-value
 assertions fail on clean source because the serializer drops this property.
 
 `unit.wayland.window_metadata_test` uses real GObject toplevel and subsurface
-models and the real `WindowServer.get_window_info()` method. It changes their
-current format, requires the exact value and unchanged size/alpha capability
-in each information reply, and rejects the metadata-error logging path. It
+models. The toplevel exercises the real `WindowServer.get_window_info()` method,
+including current-source geometry reporting. The internal subsurface exercises
+the shared serializer directly: it is not a registered public window, so
+calling the generic information method would invent a production route and
+fail its unrelated geometry requirement. Both tests change the current format,
+require the exact value and unchanged dimensions/alpha capability, and reject
+the metadata-error logging path. They
 also verifies that the format remains internal and absent from the public and
 dynamic client property lists. This module imports no native-extension stubs;
 the existing publication tests retain their separate controlled native seam.
@@ -647,7 +660,8 @@ The clean tests-only selection must fail non-vacuously at these behavior
 assertions on the frozen source. The patched standalone selection must pass
 all four case-owned focused modules plus the existing generic compression module;
 those modules must pass through the complete stack after
-the adjacent subsurface, timer, empty-damage, and video-cleanup cases compose.
+the adjacent subsurface, timer and video-cleanup cases compose with upstream's
+frame-callback model.
 
 Resize controls use the actual `WindowPerformanceStatistics` owner, including
 its numeric packet counter and resize history, through generic encoding-option

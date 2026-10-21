@@ -908,6 +908,43 @@ and relevant maintainer-authored history between the old and new source.
 History explains intent; current executable code is the authority for
 behavior.
 
+When upstream moves a subsystem owner or removes a protocol generation, trace
+the registered current entrypoints before retaining a replayed override.
+Unregistered old handlers and tests which call them directly are not proof of
+the supported protocol. Move still-required behavior to the actual new owner,
+migrate its regressions through current packets, and inspect package/live
+parsers, wait patterns and independent fixtures for the same representation
+change. Preserve their exact input/application oracles and update the contract
+and case/runbook explanations together; do not restore a removed API merely
+to satisfy an old fixture. Perform this work in the current case iteration,
+with only offline harness checks before the whole-queue manual exit.
+
+Trace coordinate representation through the real pointer serializer as well as
+packet names. Current motion/button/wheel packets put the absolute pair in the
+pointer field and window-local coordinates in `window-position` properties.
+A regression passing four coordinates straight to a Wayland manager misses
+that boundary. Resolve local coordinates at the property-bearing target hook,
+after generic admission/adjustment; exercise the real client serializer and
+server handlers with distinct desktop/local values and the local origin.
+
+If the operator explicitly requests fixing a newly exposed upstream production
+bug, keep it atomic in its own production case rather than disabling its test
+or putting the repair in the case being reviewed. A one-shot CLI must not
+acquire a long-lived subsystem watcher merely because the corresponding GUI
+client needs that initialization. Trace allocation and exit, including missing
+external services, and retain a real subprocess-exit regression; a mocked
+successful return alone cannot expose a non-daemon timer keeping Python alive.
+
+Include test-fixture call signatures in that trace: a removed legacy-mode
+argument can leave downstream tests calling an old helper signature even when
+all production hunks and imports replay and lint cleanly. Migrate those calls
+without weakening the behavioral assertions; a fixture `TypeError` is not a
+non-vacuous clean regression. Also review ownership roundtrips, not only one-way
+events: losing a received clipboard selection can deliver both SelectionClear
+and XFixes notifications while asynchronous target collection is in flight.
+Single-event scheduling counts alone cannot prove that a current-generation
+announcement survives that transition.
+
 ### Required reasoning for every case
 
 Build the following map in the ignored cycle ledger. Identify concrete source

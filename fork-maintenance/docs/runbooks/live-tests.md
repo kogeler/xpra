@@ -265,7 +265,7 @@ stack-selected keyboard gate can remain valid without that case.
 
 The full-stack client uses `setxkbmap` on its actual X11 display. This
 live gate requires the negotiated versioned `keyboard-config` transport;
-legacy compatibility and native-Wayland client discovery also have
+unversioned dictionary normalization and native-Wayland client discovery also have
 focused/native coverage.
 The bound scenario first uses model `pc104` with four ordered groups
 (`us,fr,ru,ara`), then replaces it with model `pc105` and `ge,am,us,fr`
@@ -275,17 +275,18 @@ each phase, the runner verifies the queried RMLVO values and
 requires the patched client's flat `keyboard-config` packet with
 `representation=versioned` to receive, install,
 and explicitly accept the expected hash in that exact order. A preceding
-legacy `layout-changed` application, nested `keymap-changed` update, or an
+removed legacy packet, unversioned-only update, or an
 identical-only structured result cannot satisfy this proof. The runner also
 records `xpra info`, which must expose
 the exact effective RMLVO, group count, and final exercised group with no
-rejected configuration; a generic application marker from `layout-changed`
+rejected configuration; a generic application marker from an obsolete packet
 cannot satisfy this boundary.
 The native driver focuses the forwarded fixture window, locks each real XKB
 group, and uses XTEST for one complete physical press/release pair. It never
 types text, pastes, constructs an Xpra packet, or sends Unicode directly.
 For every injection the report freezes and reparses a bounded `client.stdout`
-interval with exactly one Xpra-client `key-action` press and release,
+interval with exactly one Xpra-client `keyboard-event` press and release,
+using its current five-field shape and exact attribute dictionary,
 matching the driver's keycode, group, keysym, name, and Unicode string, and the
 fixture's exact internal Xpra window ID. The driver's XTEST success booleans
 cannot substitute for these client observations.
@@ -657,6 +658,23 @@ make -C fork-maintenance live-remove RUN=develop-rgb-01
 The profile requires direct RGB transport, visible nonuniform pixels, real
 input response, ordered lifecycle, and complete owned-object cleanup. RGB must
 not silently become video.
+
+The opaque Zed RGB control retains a byte-exact single-server-frame oracle.
+Its direct-window and composited-screen XWD requests run consecutively in one
+container command, before transferring or analysing either capture. Because
+even an onboarding status indicator can change between those requests, the
+existing bounded readiness wait requires a nonuniform opaque window and an
+identical RGB pair; it retries the pair as a whole, never mixes attempts. The
+retained pair must still match one saved server frame at zero pixel error.
+Zero-limit source comparisons require actual byte equality; rounded mean-error
+diagnostics are not an acceptance predicate. A one-channel change in one pixel
+of a large image must fail even when its displayed mean error is `0.0`.
+A perpetually changing/mismatched pair times out and fails. No source screenshot
+is substituted for either client capture, no UI region is masked, and the
+moving-content two-frame alternative is not enabled for this static control.
+`Static capture pair attempts` records readiness retries in the normal log.
+The same preparation applies to the Zed RGB detach/transport-loss profiles;
+alpha-bearing fixtures and H.264 keep their existing capture contracts.
 
 After the established Zed main-window pointer control, this profile also runs
 the native `xpra-empty-damage-fixture`. The fixture creates two independently

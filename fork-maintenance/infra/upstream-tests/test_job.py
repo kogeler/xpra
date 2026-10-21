@@ -213,8 +213,8 @@ class CiImageTest(unittest.TestCase):
         self.assertIn("rsync", shlex.split(install, comments=True))
         self.assertIn("xterm", shlex.split(install, comments=True))
         # upstream's unit-test job installs these for its Wayland clipboard/input
-        # and asyncssh transport tests:
-        for package in ("python3-asyncssh", "weston", "wl-clipboard", "wtype"):
+        # and asyncssh transport / CUPS printing tests:
+        for package in ("python3-asyncssh", "python3-cups", "weston", "wl-clipboard", "wtype"):
             self.assertIn(package, shlex.split(install, comments=True))
         compiler = next(command for command in commands if "-m pip install" in command)
         self.assertEqual(
@@ -856,6 +856,104 @@ class CiImageTest(unittest.TestCase):
             status = publish.call_args.args[1]
             self.assertEqual(status["validation_ok"], 0)
             self.assertEqual(status["result"], "failed")
+
+
+class ImageEvidenceTest(unittest.TestCase):
+    @contextmanager
+    def image_result(self, *, exit_code=0, labels=None, present=True):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            logs, images = root / "logs", root / "images"
+            logs.mkdir(mode=0o700)
+            images.mkdir(mode=0o700)
+            name = "image-result"
+            context = images / name
+            context.mkdir(mode=0o700)
+            record = {
+                "schema": 3,
+                "kind": "image-build",
+                "owner": job.IMAGE_OWNER,
+                "input_sha256": "1" * 64,
+                "job_id": "12345678-1234-4abc-8def-123456789abc",
+                "name": name,
+                "image": "localhost/xpra:test",
+                "runner_sha256": "2" * 64,
+                "source": "3" * 40,
+                "workflow_sha256": "4" * 64,
+            }
+            job.publish_json(context / "owner.json", record)
+            runtime_log = context / "runtime.log"
+            job.publish_bytes(runtime_log, b"actual build output\n")
+            observed = (job.built_image_labels(record) if labels is None else labels) if present else {}
+            with (
+                patch.object(job, "LOG_ROOT", logs),
+                patch.object(job, "IMAGE_BUILD_ROOT", images),
+                patch.object(job, "prepare_state"),
+                patch.object(job, "image_cache_lock", return_value=nullcontext()),
+                patch.object(job, "load_image_record", return_value=record),
+                patch.object(job.background_job, "runtime_log_path", return_value=runtime_log),
+                patch.object(job.background_job, "process_state", return_value={
+                    "state": "completed", "exit_code": exit_code,
+                    "finished_at": "2026-10-21T00:00:00+00:00",
+                }),
+                patch.object(job, "inspect_built_image", return_value=(present, "5" * 64 if present else "", observed)),
+            ):
+                result = job.image_collect(argparse.Namespace(name=name))
+                yield name, record, job.parse_record(logs / f"{name}.status"), result
+
+    def test_collected_absent_mislabeled_and_successful_images_can_be_removed(self):
+        for state in ("absent", "extra", "wrong-source", "wrong-input", "success"):
+            labels = None
+            if state in ("extra", "wrong-source", "wrong-input"):
+                labels = {
+                    "io.xpra.fork-maintenance.image-builder": "true",
+                    "io.xpra.fork-maintenance.image-build-run-id": "12345678-1234-4abc-8def-123456789abc",
+                    "io.xpra.fork-maintenance.image-input": "1" * 64,
+                    "io.xpra.fork-maintenance.source": "3" * 40,
+                    "io.xpra.fork-maintenance.workflow": "4" * 64,
+                }
+                field = {"extra": "unexpected", "wrong-source": "source", "wrong-input": "image-input"}[state]
+                labels[f"io.xpra.fork-maintenance.{field}"] = "a" * 64
+            with self.subTest(state=state), self.image_result(
+                exit_code=2 if state == "absent" else 0, labels=labels, present=state != "absent",
+            ) as (name, record, status, result):
+                self.assertEqual(result, 0 if state == "success" else 1)
+                self.assertEqual(status["schema"], "4")
+                self.assertEqual(status["image_input_sha256"], record["input_sha256"])
+                job.verify_image_evidence(name, record)
+                self.assertEqual(job.image_remove(argparse.Namespace(name=name)), 0)
+                self.assertFalse(job.image_context(name).exists())
+                self.assertTrue(job.log_path(name).is_file())
+                self.assertTrue(job.status_path(name).is_file())
+                self.assertTrue(job.remove_transaction_path(name).is_file())
+
+    def test_image_evidence_rejects_changed_owner_input_and_log(self):
+        with self.image_result() as (name, record, _status, _result):
+            for field in ("input_sha256", "job_id", "source", "workflow_sha256", "runner_sha256"):
+                with self.subTest(field=field), self.assertRaisesRegex(job.JobError, "mismatch"):
+                    job.verify_image_evidence(name, {**record, field: "a" * 64})
+            job.log_path(name).write_bytes(b"changed output\n")
+            with self.assertRaisesRegex(job.JobError, "log digest"):
+                job.verify_image_evidence(name, record)
+
+    def test_only_exact_legacy_failed_absent_image_is_cleanup_compatible(self):
+        with self.image_result(exit_code=2, present=False) as (name, record, status, _result):
+            legacy = {**status, "schema": "2", "image_input_sha256": ""}
+            legacy.pop("image_labels_sha256")
+            with patch.object(job, "parse_record", return_value=legacy):
+                job.verify_image_evidence(name, record)
+            for field, value in (
+                ("validation_ok", "1"), ("result", "success"), ("exit_code", "0"),
+                ("exit_code", "bad"), ("image_exists", "1"), ("iid_ok", "1"),
+                ("image_id", "5" * 64), ("image_builder", "true"),
+                ("image_input_sha256", "a" * 64), ("logs_ok", "0"), ("finished", ""),
+            ):
+                with (
+                    self.subTest(field=field, value=value),
+                    patch.object(job, "parse_record", return_value={**legacy, field: value}),
+                    self.assertRaises(job.JobError),
+                ):
+                    job.verify_image_evidence(name, record)
 
 
 class BackgroundContainerTest(unittest.TestCase):

@@ -17,6 +17,27 @@ runner prerequisite. The lifecycle creates no systemd unit and never invokes
 `systemctl`; the upstream-compatible image's `libsystemd-dev` package is only a
 source-build dependency.
 
+An application may export a private `DBUS_SESSION_BUS_ADDRESS` which is not the
+host user bus. With Podman's systemd cgroup manager this can fail at the first
+container command with `org.freedesktop.systemd1` unavailable, even though
+`podman info` succeeds. Compare the inherited bus with the standard user bus
+using read-only `busctl --user list` and
+`env -u DBUS_SESSION_BUS_ADDRESS busctl --user list`; do not start services or
+change Podman/host configuration. If only the private bus lacks the existing
+host service, collect and remove the failed named job normally, then invoke
+the same supported Make lifecycle with a fresh name under
+`env -u DBUS_SESSION_BUS_ADDRESS make ...`. Use that environment for later
+named starts in the session too. This is an invocation-environment repair,
+not authority to disable cgroups or claim the failed build as test evidence.
+If the standard host bus is also unavailable, diagnose the actual Podman host
+prerequisite rather than assuming this private-bus cause.
+
+Image collection keeps the requested input digest separate from the observed
+complete label-set digest (status schema 4). A failed build before IID creation
+can therefore be collected and removed normally, with its failed result
+retained. Older schema-2 no-image failures have only an exact cleanup-compatible
+path; never edit a status/owner file to fill in a digest or manufacture success.
+
 Rootless Podman needs one subordinate UID and GID range that can supply at
 least the reviewed 2048-ID allocation. The runners bound every allocating
 `keep-id`, `nomap`, or `auto` namespace with an explicit `size`; they never use

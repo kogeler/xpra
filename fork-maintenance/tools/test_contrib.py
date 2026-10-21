@@ -1625,13 +1625,13 @@ class CycleCleanupTest(unittest.TestCase):
         payload = f"selection_resolution_sha256={digest}\ncomplete\n".encode()
         self.write_upstream_result(name, payload, digest)
 
-    def collected_image_result(self, name: str) -> tuple[Path, Path]:
+    def collected_image_result(self, name: str, *, absent=False, legacy=False) -> tuple[Path, Path]:
         payload = b"image build complete\n"
         log = self.logs / f"{name}.log"
         status = self.logs / f"{name}.status"
         log.write_bytes(payload)
         values = {
-            "schema": "2",
+            "schema": "4",
             "owner": contrib.UPSTREAM_TEST_OWNER,
             "run_id": "12345678-1234-4abc-8def-123456789abc",
             "name": name,
@@ -1653,6 +1653,24 @@ class CycleCleanupTest(unittest.TestCase):
             "log_sha256": hashlib.sha256(payload).hexdigest(),
             "finished": "2026-08-28T12:00:00Z",
         }
+        labels = {
+            "io.xpra.fork-maintenance.image-builder": "true",
+            "io.xpra.fork-maintenance.image-build-run-id": values["run_id"],
+            "io.xpra.fork-maintenance.image-input": values["image_input_sha256"],
+            "io.xpra.fork-maintenance.source": values["source"],
+            "io.xpra.fork-maintenance.workflow": values["workflow_sha256"],
+        }
+        if absent:
+            values.update(result="failed", exit_code="2", validation_ok="0", iid_ok="0",
+                          image_exists="0", image_id="", image_builder="")
+            labels = {}
+        values["image_labels_sha256"] = hashlib.sha256(
+            json.dumps(labels, sort_keys=True, separators=(",", ":")).encode(),
+        ).hexdigest()
+        if legacy:
+            values["schema"] = "2"
+            values["image_input_sha256"] = ""
+            values.pop("image_labels_sha256")
         status.write_text(
             "".join(f"{key}={value}\n" for key, value in values.items()),
             encoding="utf-8",
@@ -1669,7 +1687,7 @@ class CycleCleanupTest(unittest.TestCase):
                 "name": name,
                 "job_id": values["run_id"],
                 "image": values["image"],
-                "input_sha256": values["image_input_sha256"],
+                "input_sha256": "b" * 64,
                 "source": values["source"],
                 "workflow_sha256": values["workflow_sha256"],
                 "runner_sha256": values["runner_sha256"],
@@ -2051,6 +2069,21 @@ class CycleCleanupTest(unittest.TestCase):
         )
         remove = self.logs / "audit-image-01.remove.json"
         self.assertEqual({target.path for target in plan.targets}, {status, log, remove})
+
+    def test_cleanup_accepts_failed_absent_image_and_narrow_legacy_result(self) -> None:
+        for legacy in (False, True):
+            name = f"audit-image-absent-{int(legacy)}"
+            status, log = self.collected_image_result(name, absent=True, legacy=legacy)
+            plan = contrib.build_cleanup_plan(self.repo, "audit", inspect_runtime=False)
+            self.assertIn(status, {target.path for target in plan.targets})
+            self.assertIn(log, {target.path for target in plan.targets})
+
+    def test_cleanup_rejects_successful_image_with_changed_label_digest(self) -> None:
+        status, _log = self.collected_image_result("audit-image-01")
+        values = contrib.parse_status_file(status)
+        values["image_labels_sha256"] = "0" * 64
+        with self.assertRaisesRegex(contrib.ContribError, "labels do not match"):
+            contrib.validate_upstream_status(values, values["name"], self.root)
 
     def test_cleanup_rejects_an_incomplete_upstream_status(self) -> None:
         self.collected_result("audit-focused-01")
@@ -3569,6 +3602,79 @@ class CaseCommitTest(unittest.TestCase):
         folded = command("git", "show", mapping.cases[0].commit, "--", "xpra/a.py", cwd=self.repo)
         self.assertIn("+line six", folded)
         self.assertIn("+line five", folded)
+
+    def test_fixup_ignores_an_earlier_control_with_the_same_subject(self) -> None:
+        self.write({"fork-maintenance/old-notes.txt": "historical control\n"})
+        old_control = self.commit("implement one")
+        one = self.add_case("one", self.edit("xpra/a.py", "line 5\n", "line five\n"))
+        self.add_case("two", {"xpra/b.py": "two\n"})
+        self.write(self.edit("xpra/a.py", "line 6\n", "line six\n"))
+        command("git", "add", "-A", cwd=self.repo)
+        command("git", "commit", "-q", f"--fixup={one}", cwd=self.repo)
+        (self.control / "old-notes.txt").write_text("operator draft\n", encoding="utf-8")
+
+        contrib.develop_squash(self.repo)
+
+        mapping = contrib.develop_map(self.repo)
+        self.assertIn(old_control, mapping.control)
+        self.assertEqual([case.slug for case in mapping.cases], ["one", "two"])
+        folded = command("git", "show", mapping.cases[0].commit, cwd=self.repo)
+        self.assertIn("+line five", folded)
+        self.assertIn("+line six", folded)
+        self.assertEqual((self.control / "old-notes.txt").read_text(encoding="utf-8"), "operator draft\n")
+        self.assertEqual(command("git", "show", f"{old_control}:xpra/a.py", cwd=self.repo), LINES.rstrip())
+
+    def test_ambiguous_case_subject_fails_before_rewrite_and_hash_disambiguates(self) -> None:
+        one = self.add_case("one", self.edit("xpra/a.py", "line 5\n", "line five\n"))
+        self.add_case("two", {"xpra/b.py": "two\n"})
+        command("git", "commit", "-q", "--amend", "-m", "implement one",
+                "--trailer", "Fork-Case: two", cwd=self.repo)
+        self.write(self.edit("xpra/a.py", "line 6\n", "line six\n"))
+        command("git", "add", "-A", cwd=self.repo)
+        command("git", "commit", "-q", f"--fixup={one}", cwd=self.repo)
+        before = command("git", "rev-parse", "HEAD", cwd=self.repo)
+        with self.assertRaisesRegex(contrib.ContribError, "exactly one earlier case"):
+            contrib.develop_squash(self.repo)
+        self.assertEqual(command("git", "rev-parse", "HEAD", cwd=self.repo), before)
+        self.assertFalse((self.repo / ".git/rebase-merge").exists())
+
+        command("git", "commit", "-q", "--amend", "-m", f"fixup! {one}", cwd=self.repo)
+        contrib.develop_squash(self.repo)
+        mapping = contrib.develop_map(self.repo)
+        self.assertEqual([case.slug for case in mapping.cases], ["one", "two"])
+        self.assertIn("+line six", command("git", "show", mapping.cases[0].commit, cwd=self.repo))
+
+    def test_squash_and_amend_fixups_keep_the_single_case_trailer(self) -> None:
+        self.write({"fork-maintenance/old-notes.txt": "control\n"})
+        old_control = self.commit("implement one")
+        one = self.add_case("one", self.edit("xpra/a.py", "line 5\n", "line five\n"))
+        self.write(self.edit("xpra/a.py", "line 6\n", "line six\n"))
+        command("git", "add", "-A", cwd=self.repo)
+        command("git", "-c", "core.editor=true", "commit", "-q", f"--squash={one}", cwd=self.repo)
+        contrib.develop_squash(self.repo)
+        one = contrib.develop_map(self.repo).commit_of("one").commit
+        self.write(self.edit("xpra/a.py", "line 7\n", "line seven\n"))
+        command("git", "add", "-A", cwd=self.repo)
+        command("git", "-c", "core.editor=true", "commit", "-q", f"--fixup=amend:{one}", cwd=self.repo)
+        contrib.develop_squash(self.repo)
+
+        mapping = contrib.develop_map(self.repo)
+        self.assertIn(old_control, mapping.control)
+        self.assertEqual([case.slug for case in mapping.cases], ["one"])
+        folded = command("git", "show", mapping.cases[0].commit, cwd=self.repo)
+        self.assertIn("+line six", folded)
+        self.assertIn("+line seven", folded)
+        self.assertEqual(folded.count("Fork-Case: one"), 1)
+
+    def test_case_fixup_refuses_control_changes_before_rewrite(self) -> None:
+        one = self.add_case("one", self.edit("xpra/a.py", "line 5\n", "line five\n"))
+        self.write({"fork-maintenance/control-fixup.txt": "not case code\n"})
+        command("git", "add", "-A", cwd=self.repo)
+        command("git", "commit", "-q", f"--fixup={one}", cwd=self.repo)
+        before = command("git", "rev-parse", "HEAD", cwd=self.repo)
+        with self.assertRaisesRegex(contrib.ContribError, "also changes control paths"):
+            contrib.develop_squash(self.repo)
+        self.assertEqual(command("git", "rev-parse", "HEAD", cwd=self.repo), before)
 
     def test_adjacent_cases_are_each_independent_and_removable(self) -> None:
         # two cases change neighbouring lines: each commit's own diff carries the

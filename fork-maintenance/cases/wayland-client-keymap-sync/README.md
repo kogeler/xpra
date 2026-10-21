@@ -22,7 +22,7 @@ promotion, and release/repeat identity therefore form one atomic behavior.
 
 ## Current upstream boundary and retained necessity
 
-At source `0a80430b6506e403f6469416d8aaa8463e331296`, upstream
+At source `646b712d1bff46b08b8f26ddc7a83229d65ba5bc`, upstream
 `ac732233d68` installs client keymaps and `6b79cb2db5a` combines the layouts
 of connected clients, limits that union to four groups, and returns
 `(keycode, group)` from native lookup. That is a partial replacement, not this
@@ -53,11 +53,24 @@ subsystem's `idle_add()` instead of releasing keys and reinstalling the native
 
 The current upstream parser/install test module is retained and adapted,
 rather than overwritten by the older downstream new-file hunk. Its useful
-hello, flat-packet, legacy update, identical-install, configured-default,
+hello, flat-packet, normalized update, identical-install, configured-default,
 readonly, disabled-keyboard, rejection and no-device boundaries remain.
 Union, truncation and deduplication expectations are explicitly replaced by
 exact positional identity and stable owner assertions. Downstream-specific
 normalizer tests live in the separate `keyboard_rmlvo_test.py` module.
+
+The current refresh removes the pre-7.0 wire routes (`f538ec11ac`). Both
+client and server now use `keyboard-config` and `keyboard-event`; the case does
+not restore unregistered `layout-changed`, `keymap-changed` or `key-action`
+handlers. Their owner, delayed-completion, readonly-promotion and group-safety
+regressions run through the current packets instead, in every compatibility
+leg. Unversioned dictionaries and their singular/query precedence remain
+normalizer inputs, not permission to resurrect removed transport. Upstream
+`2df332ef9f` and `830feefe13` add input validation: its invalid-string/layout
+tests are retained, requiring the stronger bounded atomic rejection and
+last-known-good preservation rather than piecemeal sanitization. Readonly
+control notification follows its new owner, `subsystem/control.py`, without
+restoring the removed `ServerCore` forwarding method.
 
 ## Surrounding code and ownership map
 
@@ -68,7 +81,7 @@ in the current source:
 | Layer | Relevant responsibility |
 | --- | --- |
 | `xpra/client/subsystem/keyboard.py` | Creates the GUI helper, puts keyboard properties in the hello packet, schedules delayed configuration after the handshake, and records the server's exact-RMLVO capability before that callback runs. |
-| `xpra/client/gui/keyboard_helper.py` | Combines platform discovery with command-line overrides and builds the versioned exact RMLVO block. A server which advertises the same version receives one flat `keyboard-config`; an unnegotiated server retains the established `layout-changed` then nested `keymap-changed` compatibility flow. |
+| `xpra/client/gui/keyboard_helper.py` | Combines platform discovery with command-line overrides and builds the versioned exact RMLVO block. Every supported peer receives one flat `keyboard-config`, including absent exact-RMLVO negotiation or an alternate backend. |
 | `xpra/client/gtk3/keyboard_helper.py`, `xpra/platform/keyboard_base.py`, and `xpra/platform/posix/keyboard.py` | React to a real X11 keymap change and invalidate the cached modifier meanings before the refreshed packet is built. |
 | `xpra/server/source/keyboard.py` | Stores one `keyboard_config` per connection and distinguishes a requested recording client from one which was actually authorized to record, preserving upstream event accounting and recording delivery. |
 | `xpra/server/subsystem/keyboard.py` | Owns generic packet decoding, key injection, UI-driver arbitration, keyboard-sync, and repeat interfaces. This case extends its internal key/repeat calls with source and wire-key identity without changing the non-Wayland behavior. |
@@ -76,7 +89,7 @@ in the current source:
 | `xpra/wayland/server/subsystem/keyboard.py` | Owns policy and the shared-seat state machine: per-source configurations, deterministic map ownership, validation versus installation, group translation, modifiers, held keys, repeat timers, promotion, rollback, and keyboard information. |
 | `xpra/wayland/server/keyboard.pyx` and `wlroots.pxd` | Compile libxkbcommon candidates, build the group-aware lookup index, prepare and swap the native `wlr_keyboard`, verify symbols under an XKB state, and notify the seat. |
 | `xpra/wayland/server/subsystem/pointer.py` and `window.py` | Attribute modifier and focus changes to the source which caused them. The pointer path mirrors readonly and UI-driver arbitration before forwarding modifiers; the window path keeps generic readonly handling and adds recording-source guards, while writable non-owner focus remains supported. |
-| `xpra/server/subsystem/settings.py` and `xpra/server/core.py` | Publish readonly changes before notification side effects so the Wayland manager can settle input and reconcile ownership for client, control-command, and global transitions. |
+| `xpra/server/subsystem/settings.py` and `xpra/server/subsystem/control.py` | Publish readonly changes before notification side effects so the Wayland manager can settle input and reconcile ownership for client, control-command, and global transitions. |
 
 There is one `wlr_seat` and one installed `wlr_keyboard`, not one native device
 per Xpra connection. The per-client `KeyboardConfig` objects describe and
@@ -152,25 +165,20 @@ value. Only the former is allowed to override later detection. Conflating the
 two makes the first detected non-empty option sticky: a subsequent option
 change or explicit clear is silently replaced with the old value, can leave
 the stable hash unchanged, and can suppress the update entirely. An explicit
-`options=none` is normalized to the empty value in both the versioned packet
-and the legacy `layout-changed`/`keymap-changed` path, including an alternate
-keyboard backend which emits only `layout-changed`.
+`options=none` is normalized to the empty value in the current flat packet,
+including an alternate keyboard backend. It cannot restore a previous detected
+option merely because the backend or negotiated representation changes.
 
-The helper continues to carry legacy fields for older servers. It must not let
-those compatibility fields overwrite versioned `layouts` or `variants` after
-the exact block is constructed. The Wayland server advertises
-`keyboard.rmlvo-version=1`; only an exact integer version supported by the
-client enables the one-packet flat path. Boolean, string, absent, or unsupported
-versions retain legacy behavior. This negotiation occurs while parsing the
-server hello, before the queued post-handshake `send_config()` callback runs.
-An uninitialized helper which cannot produce an exact block also falls back,
-even if the server advertises the capability. The server accepts all three
-established shapes:
-
-- hello and legacy `keymap-changed` data nested below `keymap`;
-- current flat `keyboard-config` properties; and
-- the older `layout-changed` packet, which updates layout, variant, and options
-  while preserving fields that packet cannot represent.
+The helper carries ordinary query/singular fields alongside exact RMLVO and
+must not let them overwrite versioned `layouts` or `variants`. The Wayland
+server advertises `keyboard.rmlvo-version=1`; only an exact supported integer
+records version 1. Boolean, string, absent or unsupported versions record zero,
+but no longer select a different packet family: upstream always sends one
+flat `keyboard-config`. An uninitialized helper omits the unavailable exact
+block while retaining that current packet shape. Hello can still contain a
+nested `keymap` dictionary, and the normalizer also accepts that dictionary
+inside current config packets. These input shapes share atomic normalization;
+none creates a separate partial-layout transport update.
 
 The post-handshake ordering needs an explicit barrier rather than relying on
 the nominal keyboard-data delay. GTK may deliver `keys-changed`, and its
@@ -178,7 +186,7 @@ the nominal keyboard-data delay. GTK may deliver `keys-changed`, and its
 version. Every writable helper therefore starts with `server_rmlvo_pending`
 set and registers one handshake-completion callback. While that flag is set,
 `send_config()` records only `config_pending`; it must not serialize or queue a
-legacy packet through the client's own `after_handshake()` send wrapper.
+stale configuration through the client's own `after_handshake()` send wrapper.
 Parsing server capabilities records version 0 or 1 but deliberately leaves the
 barrier in place until all handshake parsing has completed. The callback then
 clears the barrier and sends the newest configuration at most once. With
@@ -186,7 +194,7 @@ clears the barrier and sends the newest configuration at most once. With
 delay disabled it sends only when an early change actually occurred. Thus
 multiple pre-handshake changes coalesce, a delayed client always completes its
 reservation, and a no-delay client retains the established no-initial-packet
-compatibility behavior without racing exact-RMLVO negotiation.
+behavior without racing exact-RMLVO negotiation.
 
 GTK's coalescing timeout is owned by the helper for its whole lifetime. Cleanup
 retires that timeout before resetting negotiated state, disconnects the keymap
@@ -201,11 +209,11 @@ envelopes remain strict: nested and flat payloads must be dictionaries, their
 lists are read as raw exact builtin sequences and bounded before normalization
 or proportional copies. Key-event modifier decoding still belongs to the
 generic packet path and must not be mistaken for this structured-map bound.
-Current and legacy event groups which are boolean, non-integer, negative, or
+Current event groups which are boolean, non-integer, negative, or
 outside the usable map fall back to zero. Signed integer packet values are
 decoded first and bounded by the manager before any wlroots call; flat event
 attributes are read without coercing strings, floats, or booleans into an
-integer. An absent legacy key-action group uses the protocol's group-zero
+integer. An absent keyboard-event group uses the protocol's group-zero
 default, while the separate internal modifier-only sentinel preserves the
 current valid group. The `keyboard` and nested `delay` capability booleans retain
 `typedict.boolget()` compatibility, including the scalar wrapper
@@ -221,25 +229,19 @@ server may validate that map and reserve a vacant owner slot while the installed
 startup/default device remains active. A negotiated patched client ends this
 interval with one forced flat `keyboard-config`, so a rules/model plus
 layout/variant/options change is one complete transaction. It must not also
-send the legacy prefix, because that prefix cannot represent rules or model and
-would expose a transient hybrid map.
+send any partial prefix: rules, model, layout, variant and options arrive as
+one forced current packet, without a transient hybrid map.
 
-An unnegotiated client retains the established wire contract. In the clean
-X11/no-backend compatibility path a truthy layout sends `layout-changed` before
-the nested `keymap-changed`; a non-empty alternate keyboard backend may send
-only `layout-changed`. A client connected to the patched native Wayland server
-uses the negotiated complete flat map even when the helper reports an alternate
-backend; backend/name are legacy hints and the generic Wayland `set_backend()`
-hook is intentionally a no-op. The legacy packet remains an immediate usable
-update and may end the delayed reservation while preserving rules, model, sync,
-and modifier meanings already held by the source configuration. The following
-nested packet is a separate complete update, commonly hash-identical during
-initial attachment but potentially a second valid transaction at runtime.
-There is no protocol end marker, so delaying an unversioned layout packet with
-an idle callback or timer would race and break legacy/backend clients. These
-compatibility paths remain bound by focused client/server regressions. The live
-gate uses the full-stack X11 client and requires one negotiated versioned
-`keyboard-config` update to install the complete map, including its distinct model.
+An unnegotiated peer or alternate backend uses the same upstream flat packet.
+The helper's actual XKB query and command-line overrides remain authoritative;
+backend/name fields do not select an old sender. An unversioned map retains
+singular/query precedence in the normalizer, may finish delayed ownership and
+is validated exactly like a versioned candidate. A complete packet is
+authoritative for modifier meanings; absent sync retains the current policy.
+There is no invented end-marker, extra idle, or split installer. Focused tests
+cover current delivery without negotiation, alternate backend and explicit
+empty options. The live gate additionally requires versioned exact groups and
+the complete distinct model to be installed through that same current route.
 
 ## Presence-aware RMLVO normalization
 
@@ -311,9 +313,10 @@ default startup or override the hard bootstrap incorrectly.
 
 Parsing the RMLVO, sync flag, and modifier meanings is all-or-nothing. A full
 structured parse preserves an absent sync value but deliberately clears absent
-modifier meanings; the full packet is authoritative for that metadata. Legacy
-`layout-changed` cannot represent either field, so its narrow update preserves
-both. A bad field records a bounded reason plus a hash of a bounded structural
+modifier meanings; the full packet is authoritative for that metadata. The
+internal `KeyboardConfig.set_layout()` normalizer helper preserves both when
+editing a narrow local configuration, but no removed wire handler calls it.
+A bad field records a bounded reason plus a hash of a bounded structural
 prefix, then
 restores the last usable snapshot. That fingerprint has independent byte,
 depth, node, container-item, and scalar limits; it is cycle-safe, keeps unknown
@@ -549,9 +552,9 @@ The main state transitions are:
 | Server setup | Normalize configured fields against hard bootstrap fields and install the result if it compiles exactly; after normalization or compile failure, record the rejection and align metadata and device on the complete hard bootstrap map. Retain the successfully installed result as the startup/default snapshot. |
 | Hello parse | Create source-local normalized state only; do not mutate the seat. |
 | First eligible non-delayed source | Claim by source identity, compile, install, and activate its repeat/modifier/group state. |
-| Eligible delayed source | Validate and reserve a vacant slot while the installed startup/default snapshot remains active. A negotiated exact client completes with one flat packet; an unversioned legacy layout packet is itself an immediate usable update and may complete a backend-only client. Compatible symbols may still be injected through the startup map during the reservation interval, so a failed or withdrawn completion must settle them before ownership recovery. |
+| Eligible delayed source | Validate and reserve a vacant slot while the installed startup/default snapshot remains active. One flat config completes the reservation, including an unversioned dictionary or alternate backend. Compatible symbols may still be injected through the startup map during the reservation interval, so a failed or withdrawn completion must settle them before ownership recovery. |
 | Non-owner, readonly, or recording source | Compile for validation and future policy changes, but never replace the device. |
-| Identical effective owner map | Refresh the source's applied snapshot and ownership metadata without compiling or disturbing held state, even if the legacy packet says `force`. |
+| Identical effective owner map | Refresh the source's applied snapshot and ownership metadata without compiling or disturbing held state, even if the config packet says `force`. |
 | Invalid parse, compile, or native preparation | Record a bounded rejection, retain the active map and any source-local last-known-good snapshot, and leave a first-time invalid source unusable. |
 | Successful runtime replacement | Preserve a valid layout/variant group identity and non-held state, settle old presses/repeats exactly once, then publish the new map. |
 | Non-owner departure | Remove only its holders, translations, repeat, and attributable depressed state; retain the owner's map. |
@@ -729,7 +732,7 @@ in a neighboring case's commit.
 ## Commit scope and non-goals
 
 This case owns a presence-aware, bounded RMLVO representation for every
-keyboard client; compatible nested, flat, and legacy packet parsing; stable
+keyboard client; compatible nested and flat dictionary normalization; stable
 hashing; transactional libxkbcommon compilation and wlroots installation; and
 group-aware keysym translation. It preserves ordered layouts and positionally
 aligned empty variants, distinguishes missing from explicitly empty options,
@@ -761,7 +764,7 @@ It does not:
 ## Regression design
 
 The focused parser and helper tests bind nested/flat equivalence, negotiated
-single-packet exact delivery, unnegotiated legacy/backend packet behavior,
+single-packet exact delivery, unnegotiated and alternate-backend current delivery,
 pre-handshake change coalescing with keyboard-data delay enabled and disabled,
 pending GTK keymap timeout cleanup including an already dispatched callback,
 replaceable detected options versus immutable command-line overrides, legacy
@@ -783,7 +786,7 @@ readonly reversal, failed repeat admission, and signal-before-close ordering.
 A queued-scheduler control proves that a reader-thread `client-exited` and
 `cleanup_protocol()` change neither the native device nor the holder maps
 until the main loop drains them, and then retire only the departed holder.
-Settings/core controls also inject a failed outbound send after the signal.
+Settings/control-subsystem controls also inject a failed outbound send after the signal.
 
 Real compiled-XKB tests cover arbitrary installed layouts, variants and
 options, all four groups, common keys in every global group, the `us,fr` A/Q
@@ -835,7 +838,7 @@ startup-only configuration cannot prove runtime synchronization.
 The driver locks each actual XKB group and sends one complete XTEST
 press/release pair for the unchanged physical key. It does not call
 `xdotool type`, paste, send Unicode, or construct Xpra packets. Every input is
-bound to the Xpra client's exact logged `key-action` press/release pair,
+bound to the Xpra client's exact logged `keyboard-event` press/release pair,
 the client XKB group and symbol, the server's resolved group/keycode and device
 events, and the forwarded fixture window ID.
 

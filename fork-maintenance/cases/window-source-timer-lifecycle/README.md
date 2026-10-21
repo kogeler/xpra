@@ -34,7 +34,7 @@ leaving a direct assignment there would bypass the base lease contract.
 ## Embedded-source context
 
 The case resolves against source commit
-`0a80430b6506e403f6469416d8aaa8463e331296`, embedded in the current `develop`
+`646b712d1bff46b08b8f26ddc7a83229d65ba5bc`, embedded in the current `develop`
 history. Upstream still creates and removes every generic window-source
 timeout with bare `GLib.timeout_add()` / `GLib.source_remove()` and no
 ownership lock, so the pending-publication, stale-callback and
@@ -66,6 +66,20 @@ fixture therefore supplies the constructor-owned `window` slot like upstream's
 own `cancel_damage` tests; without it a cleanup which drops a delayed region
 raises instead of reaching the ordering assertions. They do not own an in-flight GLib attachment or
 wait for an already claimed timer callback before releasing window state.
+
+On this Xpra 8.0 source, `c9e167ee48` additionally moves an acknowledgement
+requested by network-thread cancellation onto the GLib main thread. The queued
+bound window method retains the exact window even if source UI cleanup clears
+`self.window` before dispatch. Preserve that upstream display-owner boundary:
+it is independent of timer publication and does not replace the lease registry.
+The upstream regression now verifies both cancellation with no delayed damage
+and main-thread delivery after the source loses its window reference. Imports
+also follow upstream's `AbstractContextManager` migration; this case adds only
+its own threading primitives around that current type contract.
+
+Upstream's straight-alpha icon encoding and theme-icon resizing changes
+(`911e861caf`, `2f261c81e1`) remain intact. The icon lease controls when an
+encode handoff is owned; it does not reinterpret or convert icon pixels.
 
 The patch changes ownership and terminal ordering, not any of those policies.
 On an upstream refresh, retirement requires equivalent protection for pending
@@ -388,7 +402,7 @@ the child's ordinary auto-refresh producer. WSSO separately owns its
 connection-level composition idle callbacks and per-stage watchdogs, together
 with damage deferral, capture, packet publication, exact client draw-ACK
 routing, client staging, topology, native input, composite-root acknowledgement,
-and child `frame_done()`/flush. The empty-damage case separately owns ordinary
+and child `frame_done()`/flush. Upstream separately owns ordinary
 non-composite toplevel empty-commit pacing. This case owns only the generic
 named timer leases present on each source through base inheritance.
 

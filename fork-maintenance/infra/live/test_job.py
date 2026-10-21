@@ -10455,11 +10455,11 @@ class LiveTransportProfileTest(unittest.TestCase):
     def test_keyboard_client_packet_log_is_exact_and_utf8(self) -> None:
         client_log = (
             "2026-09-02 14:20:01,549 "
-            "do_send_keyboard('key-action', 1, 'Q', True, [], "
-            "16781541, 'ქ', 24, 0)\n"
+            "do_send_keyboard('keyboard-event', 1, 'Q', True, "
+            "{'modifiers': [], 'keyval': 16781541, 'string': 'ქ', 'keycode': 24, 'group': 0})\n"
             "2026-09-02 14:20:01,599 "
-            "do_send_keyboard('key-action', 1, 'Q', False, [], "
-            "16781541, 'ქ', 24, 0)\n"
+            "do_send_keyboard('keyboard-event', 1, 'Q', False, "
+            "{'modifiers': [], 'keyval': 16781541, 'string': 'ქ', 'keycode': 24, 'group': 0})\n"
         )
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "client.stdout"
@@ -10482,15 +10482,31 @@ class LiveTransportProfileTest(unittest.TestCase):
                 ],
             )
             self.assertRegex(trace["sha256"], r"^[0-9a-f]{64}$")
+            for pattern in live_run.keyboard_client_packet_patterns(1, 16781541, 24, 0, "ქ"):
+                self.assertRegex(client_log, pattern)
+                self.assertNotRegex(client_log.replace("'keycode': 24", "'keycode': 25"), pattern)
 
             path.write_bytes(client_log.encode("utf-8") + b"\xff")
             with self.assertRaisesRegex(live_run.LabFailure, "not UTF-8"):
                 live_run.parse_keyboard_client_trace(path, 0, path.stat().st_size)
 
-            wrong_packet = client_log.replace("'key-action'", "'key-repeat'", 1)
+            wrong_packet = client_log.replace("'keyboard-event'", "'key-action'", 1)
             path.write_text(wrong_packet, encoding="utf-8")
             with self.assertRaisesRegex(live_run.LabFailure, "invalid packet values"):
                 live_run.parse_keyboard_client_trace(path, 0, path.stat().st_size)
+
+            for mutation in (
+                client_log.replace("'group': 0", "'group': True", 1),
+                client_log.replace("'keycode': 24", "'keycode': '24'", 1),
+                client_log.replace(", 'group': 0", "", 1),
+                client_log.replace("'group': 0", "'group': 0, 'extra': 1", 1),
+                client_log.replace("True, {", "1, {", 1),
+                "do_send_keyboard('key-action', 1, 'Q', True, [], 16781541, 'ქ', 24, 0)\n",
+            ):
+                with self.subTest(mutation=mutation):
+                    path.write_text(mutation, encoding="utf-8")
+                    with self.assertRaisesRegex(live_run.LabFailure, "invalid packet"):
+                        live_run.parse_keyboard_client_trace(path, 0, path.stat().st_size)
 
     def test_keyboard_authority_artifacts_are_reparsed_fail_closed(self) -> None:
         evidence, scenario, digest = self.passing_keyboard_evidence()
@@ -10533,10 +10549,10 @@ class LiveTransportProfileTest(unittest.TestCase):
                         client_payload.extend(
                             (
                                 "2026-09-02 14:20:01,000 do_send_keyboard("
-                                f"'key-action', {event['window']}, {event['keyname']!r}, "
-                                f"{event['pressed']!r}, {event['modifiers']!r}, "
-                                f"{event['keysym']}, {event['string']!r}, "
-                                f"{event['keycode']}, {event['group']})\n"
+                                f"'keyboard-event', {event['window']}, {event['keyname']!r}, "
+                                f"{event['pressed']!r}, {{'modifiers': {event['modifiers']!r}, "
+                                f"'keyval': {event['keysym']}, 'string': {event['string']!r}, "
+                                f"'keycode': {event['keycode']}, 'group': {event['group']}}})\n"
                             ).encode()
                         )
                     item["client_log_range"] = [client_start, len(client_payload)]
@@ -11767,6 +11783,92 @@ class LiveTransportProfileTest(unittest.TestCase):
         self.assertEqual(live_run.pixel_error_limit("opengl", "h264"), 15.0)
         self.assertEqual(live_run.pixel_error_limit("vkcube", "rgb"), 0.0)
 
+    def test_static_capture_pair_retries_changed_frames_without_relaxing_pixels(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            image = live_run.Image.new("RGB", (32, 32))
+            image.putdata([(x * 7, y * 7, (x + y) * 3) for y in range(32) for x in range(32)])
+            changed = image.copy()
+            changed.putpixel((0, 0), (1, 0, 0))
+            events = []
+            attempts = 0
+
+            def capture(_container, command, **_kwargs):
+                events.append("capture")
+                script = command[3]
+                self.assertLess(script.index("window-direct.xwd"), script.index("window-focused-screen.xwd"))
+                self.assertLess(script.index("window-focused-screen.xwd"), script.index("root-after.xwd"))
+                self.assertEqual(command[4:], ["capture-static-window-pair", live_run.CLIENT_DISPLAY, "123"])
+                return completed(command)
+
+            def pull(_container, _directory, artifacts):
+                nonlocal attempts
+                events.append("pull")
+                attempts += 1
+                self.assertEqual(artifacts, ("window-direct.xwd", "window-focused-screen.xwd", "root-after.xwd"))
+                image.save(directory / "window-direct.rgb.png")
+                (changed if attempts == 1 else image).save(directory / "window-focused-screen.rgb.png")
+                image.save(directory / "root-after.rgb.png")
+
+            def convert(_directory, stem):
+                events.append(stem)
+                with live_run.Image.open(directory / f"{stem}.rgb.png") as observed:
+                    return {
+                        "image": live_run.analyze_image(observed),
+                        "xwd": {"unique_rgb_colors": len(observed.getcolors(10000) or [])},
+                    }
+
+            with (
+                patch.object(live_run, "podman_exec", side_effect=capture),
+                patch.object(live_run, "pull_container_artifacts", side_effect=pull),
+                patch.object(live_run, "convert_xwd", side_effect=convert),
+                patch.object(live_run.time, "sleep"),
+            ):
+                direct, focused, _root = live_run.capture_static_window_pair("client", "123", directory)
+
+            self.assertEqual(attempts, 2)
+            self.assertEqual(direct["image"]["rgb_sha256"], focused["image"]["rgb_sha256"])
+            self.assertEqual(events, ["capture", "pull", "window-direct", "window-focused-screen", "root-after"] * 2)
+            self.assertEqual(live_run.pixel_error_limit("zed", "rgb"), 0.0)
+
+    def test_static_capture_pair_never_returns_mismatched_or_unready_pixels(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            content = live_run.Image.new("RGB", (32, 32))
+            content.putdata([(x * 7, y * 7, (x + y) * 3) for y in range(32) for x in range(32)])
+            changed = content.copy()
+            changed.putpixel((0, 0), (1, 0, 0))
+            uniform = live_run.Image.new("RGB", (32, 32), (20, 30, 40))
+
+            def refuse_pair(_description, predicate):
+                self.assertFalse(predicate())
+                raise live_run.LabFailure("bounded capture pair did not stabilize")
+
+            for label, direct, focused in (
+                ("one wrong channel value", content, changed),
+                ("different geometry", content, content.crop((0, 0, 31, 32))),
+                ("identical empty window", uniform, uniform),
+            ):
+                with self.subTest(label=label):
+                    direct.save(directory / "window-direct.rgb.png")
+                    focused.save(directory / "window-focused-screen.rgb.png")
+
+                    def convert(_directory, stem):
+                        image = focused if stem == "window-focused-screen" else direct
+                        return {
+                            "image": live_run.analyze_image(image),
+                            "xwd": {"unique_rgb_colors": len(image.getcolors(10000) or [])},
+                        }
+
+                    with (
+                        patch.object(live_run, "podman_exec"),
+                        patch.object(live_run, "pull_container_artifacts"),
+                        patch.object(live_run, "convert_xwd", side_effect=convert),
+                        patch.object(live_run, "wait_for", side_effect=refuse_pair),
+                        self.assertRaisesRegex(live_run.LabFailure, "did not stabilize"),
+                    ):
+                        live_run.capture_static_window_pair("client", "123", directory)
+
     def test_clipboard_pixel_tolerance_rejects_structural_stale_region(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
@@ -11793,6 +11895,24 @@ class LiveTransportProfileTest(unittest.TestCase):
             evidence["comparisons"][0]["direct"]["mean_absolute_error"],
             1.0,
         )
+
+    def test_zero_pixel_tolerance_rejects_a_difference_rounded_out_of_mean_error(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            source = live_run.Image.new("RGB", (1536, 1095), (20, 30, 40))
+            observed = source.copy()
+            observed.putpixel((0, 0), (21, 30, 40))
+            source.save(directory / "source.png")
+            observed.save(directory / "direct.png")
+            observed.save(directory / "focused.png")
+            evidence, _source = live_run.pixel_pipeline_evidence(
+                directory, ["source.png"], directory / "direct.png",
+                directory / "focused.png", live_run.pixel_error_limit("zed", "rgb"),
+            )
+        comparison = evidence["comparisons"][0]["direct"]
+        self.assertEqual(comparison["mean_absolute_error"], 0.0)
+        self.assertFalse(comparison["exact"])
+        self.assertFalse(evidence["matching_server_frame"])
 
     def test_moving_content_binds_each_capture_to_an_ordered_server_frame(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -331,7 +331,9 @@ def resolve_base(repo: Path, head: str, base_commit: str | None) -> str:
     return bases[0]
 
 
-def develop_map(repo: Path, base_commit: str | None = None) -> DevelopMap:
+def develop_map(
+    repo: Path, base_commit: str | None = None, *, allow_pending_fixups: bool = False,
+) -> DevelopMap:
     """Classify every fork commit in ``base..HEAD`` and map cases to commits."""
     head = git_text(repo, "rev-parse", "--verify", "HEAD^{commit}").strip()
     base = resolve_base(repo, head, base_commit)
@@ -345,6 +347,11 @@ def develop_map(repo: Path, base_commit: str | None = None) -> DevelopMap:
     for commit in commits:
         subject = git_text(repo, "log", "-1", "--format=%s", commit).rstrip("\n")
         if subject.startswith(FIXUP_PREFIXES):
+            if allow_pending_fixups:
+                # Rebase planning alone may inspect the existing case owners.
+                # Source selection and every acceptance caller retain the
+                # default refusal until these product edits are folded.
+                continue
             fail(f"pending {subject.split()[0]} commit {commit}: run develop-squash")
         trailers = [
             value.strip()
