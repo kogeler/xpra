@@ -8,7 +8,8 @@ import os
 import shlex
 from typing import Any
 from shutil import which
-from subprocess import PIPE, Popen
+from subprocess import PIPE, Popen, TimeoutExpired
+from threading import Event
 from collections.abc import Callable
 
 from xpra.scripts.main import InitException, InitExit
@@ -18,7 +19,7 @@ from xpra.net.bytestreams import ConnectionClosedException
 from xpra.common import noop
 from xpra.util.thread import start_thread
 from xpra.exit_codes import ExitCode
-from xpra.os_util import gi_import, WIN32, OSX, POSIX
+from xpra.os_util import gi_import, WIN32, OSX, POSIX, LINUX
 from xpra.util.env import envbool, restore_script_env, get_saved_env
 from xpra.log import Logger, is_debug_enabled
 
@@ -203,6 +204,36 @@ def connect_to(display_desc: dict, debug_cb: Callable = noop, ssh_fail_cb=connec
         except OSError as term_err:
             log.error(f"Error trying to stop ssh tunnel process: {term_err}", exc_info=True)
 
+    close_cb = stop_tunnel
+    if LINUX and display_desc.get("exit_ssh", False):
+        # Protocol.close may run on the filtered parse thread. Start the
+        # process owner here, while Popen setup is still unfiltered; spawning
+        # it from close would inherit that filter and still block terminate.
+        stop_requested = Event()
+
+        def stop_tunnel_worker() -> None:
+            stop_requested.wait()
+            stop_tunnel()
+            # Termination alone leaves a zombie when the UI loop has stopped:
+            # its child reaper may no longer get a SIGCHLD callback. Complete
+            # this owner's wait through Popen, preserving its status lock.
+            try:
+                try:
+                    child.wait(timeout=1)
+                except TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=1)
+            except (OSError, TimeoutExpired) as wait_err:
+                log.error("Error collecting ssh tunnel process: %s", wait_err)
+
+        closer = start_thread(stop_tunnel_worker, "ssh-tunnel-close", daemon=True)
+
+        def request_stop_tunnel() -> None:
+            stop_requested.set()
+            closer.join()
+
+        close_cb = request_stop_tunnel
+
     host: str = display_desc["host"]
     port: int = display_desc.get("port", 22)
     username: str = display_desc.get("username", "")
@@ -214,7 +245,7 @@ def connect_to(display_desc: dict, debug_cb: Callable = noop, ssh_fail_cb=connec
     from xpra.net.bytestreams import TwoFileConnection
     conn = TwoFileConnection(child.stdin, child.stdout,
                              abort_test, target=(host, port),
-                             socktype="ssh", close_cb=stop_tunnel, info=info)
+                             socktype="ssh", close_cb=close_cb, info=info)
     conn.endpoint = host_target_string("ssh", username, host, port, display)
     conn.timeout = 0            # taken care of by abort_test
     conn.process = (child, "ssh", cmd)
