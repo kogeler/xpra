@@ -527,7 +527,7 @@ class WindowServer(StubSubsystem):
     def _process_unmap(self, proto, packet: Packet) -> None:
         if self.is_readonly(proto):
             return
-        log.info("_process_window_unmaps, %s)", proto, packet)
+        log.info("_process_unmap(%s, %s)", proto, packet)
 
     def _process_configure(self, proto, packet: Packet) -> None:
         if self.is_readonly(proto):
