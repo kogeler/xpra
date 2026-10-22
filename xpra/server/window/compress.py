@@ -1211,8 +1211,8 @@ class WindowSource(WindowIconSource):
             self.do_set_client_properties(properties)
 
     def do_set_client_properties(self, properties: typedict) -> None:
-        self.maximized = properties.boolget("maximized", False)
-        self.client_render_size = properties.intpair("encoding.render-size")
+        self.maximized = properties.boolget("maximized", self.maximized)
+        self.client_render_size = properties.intpair("encoding.render-size", self.client_render_size)
         self.client_bit_depth = properties.intget("bit-depth", self.client_bit_depth)
         self.client_refresh_encodings = properties.strtupleget("encoding.auto_refresh_encodings", self.client_refresh_encodings)
         self.full_frames_only = self.is_tray or properties.boolget("encoding.full_frames_only", self.full_frames_only)
