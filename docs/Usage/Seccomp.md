@@ -138,6 +138,12 @@ is not on its allow-list:
   The client says so when it starts:
   `hardware decoders disabled by seccomp: nvdec, vpl`.
   Use `--seccomp=no` (or a list without `decode`) to use them.
+  `libva` instead retains the VA display and loaded driver initialized during
+  codec preload. New decoder contexts reuse that display without reopening the
+  device after filtering. This does not grant filesystem access or sandbox the
+  GPU driver: compatibility still depends on the driver's remaining syscall
+  requirements. A successful startup probe alone does not prove post-filter
+  decoding works on a particular driver.
 
 * **Codec self-test** must stay enabled (it is, by default). Xpra pre-loads and
   pre-warms every decoder at startup *before* the sandbox is installed; running
@@ -305,9 +311,12 @@ the menu policy.
   `Encodings.ensure_codecs_loaded()`, which *waits* for the decode thread rather than
   loading anything itself; only when there is no decode thread does it load them
   directly. This is safe because the decode thread is started (in the client's `run`)
-  before the main loop builds the hello. Hardware decoders (which would `dlopen`
-  CUDA etc. on the decode thread) are separately disabled under seccomp via
-  `xpra/client/subsystem/encoding.py`.
+  before the main loop builds the hello. The hardware decoders `nvdec`, `nvjpeg`
+  and `vpl` (which would load libraries on the decode thread) are separately
+  disabled under seccomp via `xpra/client/subsystem/encoding.py`. The libva
+  decoder retains its initialized display across preload and context creation;
+  module cleanup retires it, and the last decoder releases it. Context creation
+  never reopens a retired display. Neither path re-allows `open` or `openat`.
 * the **parse** allow-list (`PARSE_SYSCALLS`) is the same tightened `DECODE_SYSCALLS`
   (no file access) plus the socket syscalls the reader needs (`SOCKET_SYSCALLS`:
   `recvfrom`, `getsockname`, `getsockopt`, `sysinfo`). This is possible because

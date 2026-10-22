@@ -48,11 +48,22 @@ static int g_vp8_420_supported = 0;
 static int g_vp9_420_supported = 0;
 static int g_vp9_444_supported = 0;
 
+/* Startup/create/destroy/shutdown are serialized by decoder.pyx's display lock.
+   A module generation owns one reference; each decoder retains another until
+   its VA resources are destroyed. Shutdown retires, rather than invalidates,
+   a display which is still being used by a decoder (possibly on another thread). */
+struct LibVADisplay {
+    int fd;
+    VADisplay display;
+    unsigned int references;
+};
+static struct LibVADisplay *g_display = NULL;
+
 struct H264Params;
 struct VP8State;
 
 struct LibVADecoder {
-    int             fd;
+    struct LibVADisplay *owner;
     VADisplay       display;
     VAConfigID      config;
     VAContextID     context;
@@ -445,10 +456,19 @@ static int try_device(const char *device) {
     if (profile_supported(profiles, nprofiles, VAProfileVP9Profile1))
         vp9_444 = vld_supported(display, VAProfileVP9Profile1, VA_RT_FORMAT_YUV444);
 
-    vaTerminate(display);
-    if (fd >= 0)
-        close(fd);
     if (h264_420 || h264_444 || vp8_420 || vp9_420 || vp9_444) {
+        struct LibVADisplay *owner = calloc(1, sizeof(*owner));
+        if (!owner) {
+            vaTerminate(display);
+            if (fd >= 0)
+                close(fd);
+            snprintf(g_error, sizeof(g_error), "cannot allocate VA display owner");
+            return 0;
+        }
+        owner->fd = fd;
+        owner->display = display;
+        owner->references = 1;
+        g_display = owner;
         snprintf(g_device, sizeof(g_device), "%s", device);
         snprintf(g_vendor, sizeof(g_vendor), "%s", vendor);
         g_major = major;
@@ -462,6 +482,10 @@ static int try_device(const char *device) {
         g_vp9_444_supported = vp9_444;
         libva_log("libva decode: selected %s (%s), h264-420=%d h264-444=%d vp8-420=%d vp9-420=%d vp9-444=%d",
                   g_device, g_vendor, h264_420, h264_444, vp8_420, vp9_420, vp9_444);
+    } else {
+        vaTerminate(display);
+        if (fd >= 0)
+            close(fd);
     }
     return h264_420 || h264_444 || vp8_420 || vp9_420 || vp9_444;
 }
@@ -522,10 +546,26 @@ LibVADecodeStatus libva_decode_startup(void) {
     return g_available ? LIBVA_DEC_OK : LIBVA_DEC_NOT_AVAILABLE;
 }
 
+static void release_display(struct LibVADisplay *owner) {
+    if (!owner || --owner->references)
+        return;
+    vaTerminate(owner->display);
+    if (owner->fd >= 0)
+        close(owner->fd);
+    free(owner);
+}
+
 void libva_decode_shutdown(void) {
     libva_log("libva decode shutdown");
+    struct LibVADisplay *owner = g_display;
+    g_display = NULL;
     g_probed = 0;
     g_available = 0;
+    g_device[0] = g_vendor[0] = g_error[0] = 0;
+    g_major = g_minor = 0;
+    g_h264_420_supported = g_h264_444_supported = 0;
+    g_vp8_420_supported = g_vp9_420_supported = g_vp9_444_supported = 0;
+    release_display(owner);
 }
 
 const char *libva_decode_get_device(void) {
@@ -550,7 +590,9 @@ int libva_decode_get_minor(void) {
 
 int libva_decode_supports(const char *encoding, const char *colorspace) {
     LibVACodec codec;
-    if (libva_decode_startup() != LIBVA_DEC_OK)
+    /* Only init_module may probe/open a device. Capability queries and decoder
+       creation must not resurrect a retired module on a sandboxed thread. */
+    if (!g_available)
         return 0;
     if (!codec_from_name(encoding, &codec))
         return 0;
@@ -593,7 +635,6 @@ LibVADecodeStatus libva_decoder_create(LibVADecoder **out, const char *encoding,
     VAStatus status;
     VAConfigAttrib attr;
     VASurfaceAttrib surface_attrs[2];
-    int major = 0, minor = 0;
 
     if (!out)
         return LIBVA_DEC_ERROR;
@@ -602,7 +643,7 @@ LibVADecodeStatus libva_decoder_create(LibVADecoder **out, const char *encoding,
         return LIBVA_DEC_NOT_AVAILABLE;
     if (width <= 0 || height <= 0)
         return LIBVA_DEC_ERROR;
-    if (libva_decode_startup() != LIBVA_DEC_OK)
+    if (!g_available || !g_display)
         return LIBVA_DEC_NOT_AVAILABLE;
     if (!libva_decode_supports(encoding, colorspace))
         return LIBVA_DEC_NOT_AVAILABLE;
@@ -623,7 +664,9 @@ LibVADecodeStatus libva_decoder_create(LibVADecoder **out, const char *encoding,
         return LIBVA_DEC_ERROR;
     }
     init_vp8_state(dec->vp8_state);
-    dec->fd = -1;
+    dec->owner = g_display;
+    dec->owner->references++;
+    dec->display = dec->owner->display;
     dec->config = VA_INVALID_ID;
     dec->context = VA_INVALID_ID;
     for (int i = 0; i < 4; i++)
@@ -656,13 +699,7 @@ LibVADecodeStatus libva_decoder_create(LibVADecoder **out, const char *encoding,
     }
     dec->last_status = VA_STATUS_SUCCESS;
     snprintf(dec->device, sizeof(dec->device), "%s", g_device);
-
-    if (!libva_open_display(dec->device, &dec->fd, &dec->display, &major, &minor,
-                            dec->vendor, sizeof(dec->vendor),
-                            g_error, sizeof(g_error))) {
-        libva_decoder_destroy(dec);
-        return LIBVA_DEC_NOT_AVAILABLE;
-    }
+    snprintf(dec->vendor, sizeof(dec->vendor), "%s", g_vendor);
 
     attr.type = VAConfigAttribRTFormat;
     attr.value = dec->rt_format;
@@ -734,10 +771,8 @@ void libva_decoder_destroy(LibVADecoder *dec) {
         }
         if (dec->config != VA_INVALID_ID)
             vaDestroyConfig(dec->display, dec->config);
-        vaTerminate(dec->display);
     }
-    if (dec->fd >= 0)
-        close(dec->fd);
+    release_display(dec->owner);
     for (int i = 0; i < 3; i++)
         free(dec->planes[i]);
     free(dec->h264_params);
