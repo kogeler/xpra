@@ -19,7 +19,7 @@ USE_FAKE_BACKING = envbool("XPRA_USE_FAKE_BACKING", False)
 class ClientWidgetBase:
 
     # the client subsystems this class looks up:
-    SUBSYSTEMS: tuple[str, ...] = ("mmap",)
+    SUBSYSTEMS: tuple[str, ...] = ("mmap", "window")
 
     def __init__(self, get_subsystem: Callable, wid: int, has_alpha: bool):
         # look up a client subsystem, by name:
@@ -62,6 +62,8 @@ class ClientWidgetBase:
             log("make_new_backing%s effective backing class=%s, server alpha=%s, window alpha=%s",
                 (backing_class, ww, wh, ww, wh), bc, self._has_alpha, self._window_alpha)
             backing = bc(self.wid, self._window_alpha, self.pixel_depth)
+            if windows := self.get_subsystem("window"):
+                backing.on_video_decoders_changed = windows.video_decoders_changed
             mmap_sub = self.get_subsystem("mmap")
             mmap = mmap_sub.mmap_read_area if mmap_sub else None
             if mmap:

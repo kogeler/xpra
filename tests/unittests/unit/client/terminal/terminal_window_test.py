@@ -68,6 +68,9 @@ class FakeWindowSubsystem:
     def is_focused(self, wid: int) -> bool:
         return self.client._focused == wid
 
+    def video_decoders_changed(self) -> None:
+        """The backing binds this hook; decoder loss has its own regression."""
+
 
 class FakeDisplaySubsystem:
     xscale = yscale = 1
