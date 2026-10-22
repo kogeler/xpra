@@ -829,6 +829,7 @@ rm -rf $RPM_BUILD_ROOT
 %endif
 
 %files -n %{package_prefix}-common
+%{_datadir}/xpra/css
 %if 0%{?fedora}
 %if "%{python3}"!="python3"
 %{_bindir}/%{package_prefix}
@@ -970,7 +971,6 @@ rm -rf $RPM_BUILD_ROOT
 /lib/systemd/system/xpra-encoder.service
 /lib/systemd/system/xpra-encoder.socket
 %{_prefix}/lib/udev/rules.d/71-xpra-virtual-pointer.rules
-%{_datadir}/xpra/css
 %{_datadir}/applications/xpra-shadow.desktop
 %{_libexecdir}/xpra/xdg-open
 %{_libexecdir}/xpra/gnome-open
