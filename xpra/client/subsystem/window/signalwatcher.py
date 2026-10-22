@@ -4,8 +4,6 @@
 # later version. See the file COPYING for details.
 
 import os
-import errno
-import signal
 from subprocess import Popen, PIPE, STDOUT, TimeoutExpired
 from collections.abc import Sequence
 
@@ -36,19 +34,20 @@ SIGNAL_WATCHER_COMMAND = find_signal_watcher_command()
 
 
 def kill_signalwatcher(proc) -> None:
-    clean_signalwatcher(proc)
     exit_code = proc.poll()
     log(f"kill_signalwatcher({proc}) {exit_code=}")
     if exit_code is not None:
+        clean_signalwatcher(proc)
         return
     try:
         stdin = proc.stdin
-        if stdin:
+        if stdin and not stdin.closed:
             stdin.write(b"exit\n")
             stdin.flush()
-            stdin.close()
     except OSError:
         log.warn("Warning: failed to tell the signal watcher to exit", exc_info=True)
+    finally:
+        clean_signalwatcher(proc)
     if proc.poll() is not None:
         return
     stop_proc(proc, "signalwatcher")
@@ -56,10 +55,10 @@ def kill_signalwatcher(proc) -> None:
         proc.wait(0.01)
     except TimeoutExpired:
         try:
-            os.kill(proc.pid, signal.SIGKILL)
-        except OSError as e:
-            if e.errno != errno.ESRCH:
-                log.warn("Warning: failed to tell the signal watcher to exit", exc_info=True)
+            proc.kill()
+            proc.wait(1)
+        except (OSError, TimeoutExpired):
+            log.warn("Warning: failed to stop the signal watcher", exc_info=True)
 
 
 def clean_signalwatcher(proc) -> None:
@@ -74,6 +73,9 @@ def clean_signalwatcher(proc) -> None:
     stderr = proc.stderr
     if stderr:
         noerr(stderr.close)
+    stdin = proc.stdin
+    if stdin:
+        noerr(stdin.close)
 
 
 class WindowSignalWatcher(StubClientSubsystem):
