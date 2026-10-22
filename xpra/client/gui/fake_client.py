@@ -50,6 +50,9 @@ class FakeWindowSubsystem:
     def send_refresh(self, *_args) -> None:
         log("send_refresh ignored")
 
+    def video_decoders_changed(self) -> None:
+        log("video_decoders_changed ignored")
+
     def window_close_event(self, *_args) -> None:
         log("window_close_event ignored")
 

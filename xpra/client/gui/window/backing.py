@@ -35,7 +35,7 @@ from xpra.codecs.video import getVideoHelper, VdictEntry, CodecSpec
 from xpra.codecs.constants import TransientCodecException, CodecStateException, EncodingNotSupported
 from xpra.codecs.protocols import VideoDecoder, ColorspaceConverter
 from xpra.constants import Gravity
-from xpra.common import PaintCallbacks
+from xpra.common import PaintCallbacks, noop
 from xpra.log import Logger
 
 if TYPE_CHECKING:
@@ -291,6 +291,7 @@ class WindowBackingBase:
         self.fps_value: int = 0
         self.fps_refresh_timer: int = 0
         self.alert_state = False
+        self.on_video_decoders_changed = noop
         self.paint_stats: dict[str, int] = {}
         self._subsurface_transaction: SubsurfaceCompositeTransaction | None = None
         self._subsurface_transaction_floor = 0
@@ -875,6 +876,11 @@ class WindowBackingBase:
         if not self._alpha_enabled:
             target_rgb_modes = tuple(x for x in target_rgb_modes if "A" not in x)
         full_csc_modes = getVideoHelper().get_server_full_csc_modes_for_rgb(*target_rgb_modes)
+        # The helper describes installed modules; the backing registry also
+        # records codecs/colorspaces retired after a permanent runtime failure.
+        for encoding, colorspaces in tuple(full_csc_modes.items()):
+            decoders = VIDEO_DECODERS.get(encoding, {})
+            full_csc_modes[encoding] = tuple(cs for cs in colorspaces if decoders.get(cs))
 
         def add_enc_formats(enc: str, *formats: str) -> None:
             full_csc_modes[enc] = tuple(x for x in rgb_modes if x in formats)
@@ -1266,6 +1272,7 @@ class WindowBackingBase:
                             decoder_options.pop(input_colorspace, None)
                             if not decoder_options:
                                 VIDEO_DECODERS.pop(coding, None)
+                            self.on_video_decoders_changed()
                             msg = f"no decoders for {coding!r} and {input_colorspace!r}"
                             fire_paint_callbacks(callbacks, -1, msg)
                             log(f"{msg}: {all_decoders_for_cs}")

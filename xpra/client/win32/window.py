@@ -281,6 +281,8 @@ class ClientWindow(GObject.GObject):
         """
         if backing := self.backing:
             backing.border = self.border
+            if self.client and (windows := self.client.get_subsystem("window")):
+                backing.on_video_decoders_changed = windows.video_decoders_changed
 
     def window_created(self) -> None:
         """
