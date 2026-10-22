@@ -149,6 +149,8 @@ class ClientTray(ClientWidgetBase):
         if self._backing:
             data = self._backing.data
         self._backing = TrayBacking(self.wid, w, h, self._has_alpha, data)
+        if windows := self.get_subsystem("window"):
+            self._backing.on_video_decoders_changed = windows.video_decoders_changed
         if self.mmap:
             self._backing.enable_mmap(self.mmap)
 

@@ -33,6 +33,9 @@ class FakeWindowSubsystem:
     def update_focus(self, wid: int, focused=True) -> None:
         self.focus_events.append((wid, focused))
 
+    def video_decoders_changed(self) -> None:
+        """The backing binds this hook; decoder loss has its own regression."""
+
 
 class FakeClient:
     """ the minimal client surface a terminal `ClientWindow` reaches through """

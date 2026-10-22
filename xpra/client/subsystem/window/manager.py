@@ -794,6 +794,23 @@ class WindowManagerClient(StubClientSubsystem):
         log("unpause_windows%s", args)
         self.send_refresh_all()
 
+    def video_decoders_changed(self) -> None:
+        # Called by the decode thread after retiring a shared decoder mode.
+        self.idle_add(self.update_video_decoder_caps)
+
+    def update_video_decoder_caps(self) -> None:
+        # Query current backings on the UI thread: the reporting window may
+        # have closed or been replaced while this callback was queued.
+        for wid, window in tuple(self._id_to_window.items()):
+            backing = getattr(window, "_backing", None) or getattr(window, "backing", None)
+            if backing is None:
+                continue
+            props = backing.get_encoding_properties()
+            if "encoding.full_csc_modes" in props:
+                self.control_refresh(wid, None, True, client_properties={
+                    "encoding.full_csc_modes": props["encoding.full_csc_modes"],
+                })
+
     def control_refresh(self, wid: int, suspend_resume, refresh, quality=100,
                         options: dict | None=None, client_properties: dict | None=None) -> None:
         packet: Sequence[PacketElement] = [WINDOW_REFRESH, wid, 0, quality]
