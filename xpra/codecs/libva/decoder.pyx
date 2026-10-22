@@ -9,6 +9,7 @@
 #cython: wraparound=False
 
 from time import monotonic
+from threading import RLock
 from typing import Any
 from collections.abc import Sequence
 
@@ -20,6 +21,11 @@ from xpra.util.objects import typedict
 from xpra.log import Logger
 
 log = Logger("decoder", "libva")
+
+# Serialize module generation changes and display reference transfers, including
+# nogil VA setup/destruction. Decoding uses a retained generation and needs no
+# global lock; the window backing separately owns each decoder's operation lock.
+display_lock = RLock()
 
 from libc.stdint cimport uint8_t, uintptr_t
 from xpra.buffers.membuf cimport buffer_context  # pylint: disable=syntax-error
@@ -101,7 +107,9 @@ def init_module(options: dict = None) -> None:
     log("libva.decoder.init_module()")
     config_libva_logging()
     libva_decode_set_log(libva_log_callback)
-    cdef LibVADecodeStatus status = libva_decode_startup()
+    cdef LibVADecodeStatus status
+    with display_lock:
+        status = libva_decode_startup()
     if status != LIBVA_DEC_OK:
         detail = libva_decode_get_last_error().decode("utf-8", "replace")
         msg = "libva decoder startup failed: %s" % libva_decode_status_str(status).decode("latin-1")
@@ -111,7 +119,8 @@ def init_module(options: dict = None) -> None:
 
 
 def cleanup_module() -> None:
-    libva_decode_shutdown()
+    with display_lock:
+        libva_decode_shutdown()
 
 
 def get_version() -> tuple[int, int]:
@@ -152,7 +161,8 @@ def get_min_size(encoding) -> tuple[int, int]:
 cdef bint supports(str encoding, str colorspace):
     cdef bytes enc = encoding.encode("latin-1")
     cdef bytes cs = colorspace.encode("latin-1")
-    return bool(libva_decode_supports(enc, cs))
+    with display_lock:
+        return bool(libva_decode_supports(enc, cs))
 
 
 MAX_WIDTH, MAX_HEIGHT = 8192, 8192
@@ -219,8 +229,9 @@ cdef class Decoder:
         cdef const char *encoding_name = encoding_bytes
         cdef const char *colorspace_name = colorspace_bytes
         cdef LibVADecodeStatus status
-        with nogil:
-            status = libva_decoder_create(&self.context, encoding_name, width, height, colorspace_name)
+        with display_lock:
+            with nogil:
+                status = libva_decoder_create(&self.context, encoding_name, width, height, colorspace_name)
         if status != LIBVA_DEC_OK:
             status_str = libva_decode_status_str(status).decode("latin-1")
             detail = libva_decode_get_last_error().decode("utf-8", "replace")
@@ -245,8 +256,9 @@ cdef class Decoder:
         if context != NULL:
             log("libva decoder close context %#x", <uintptr_t> context)
             self.context = NULL
-            with nogil:
-                libva_decoder_destroy(context)
+            with display_lock:
+                with nogil:
+                    libva_decoder_destroy(context)
         self.frames = 0
         self.width = 0
         self.height = 0
