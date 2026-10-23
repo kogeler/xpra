@@ -13,12 +13,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -m 0700 /work
 
-COPY builder.py container_payload.py selection.py /opt/xpra-deb-builder/
+COPY builder.py container_payload.py selection.py package_version.py /opt/xpra-deb-builder/
 
 RUN chmod 0755 \
         /opt/xpra-deb-builder/builder.py \
         /opt/xpra-deb-builder/container_payload.py \
         /opt/xpra-deb-builder/selection.py
+RUN chmod 0644 /opt/xpra-deb-builder/package_version.py
 
 WORKDIR /work
 

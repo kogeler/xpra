@@ -32,15 +32,22 @@ sys.path.insert(0, str(TOOLS_ROOT))
 
 import clipboard_fixture_common  # noqa: E402 - preserve post-bootstrap import order
 import container_payload  # noqa: E402 - needs the tools-path bootstrap above
+import decoder_recovery  # noqa: E402 - preserve post-bootstrap import order
 import live_config  # noqa: E402 - preserve post-bootstrap import order
+import package_runtime  # noqa: E402 - preserve post-bootstrap import order
+import peer_processes  # noqa: E402 - preserve post-bootstrap import order
 import PIL  # noqa: E402 - preserve post-bootstrap import order
 import podman_policy  # noqa: E402 - needs the tools-path bootstrap above
+import runtime_audit  # noqa: E402 - needs the tools-path bootstrap above
+import ssh_fixture  # noqa: E402 - preserve post-bootstrap import order
+import shutdown_fixture  # noqa: E402 - preserve post-bootstrap import order
 from PIL import Image, ImageChops, ImageStat  # noqa: E402 - preserve post-bootstrap import order
 from profiles import (  # noqa: E402 - preserve post-bootstrap import order
     ALPHA_SCENARIOS,
     APPLICATIONS,
     CLIPBOARD_POLICIES,
     DEFAULT_NETWORK_PROFILE,
+    DETACH_CHURN_CYCLES,
     H264_ACCEPTANCE_POLICIES,
     H264_CLIENT_POLICIES,
     H264_FALLBACK_POLICIES,
@@ -59,6 +66,7 @@ MAINTENANCE_ROOT = INFRA_ROOT.parent.parent
 MAIN_REPOSITORY_ROOT = MAINTENANCE_ROOT.parent
 SOURCE_REPOSITORY = MAIN_REPOSITORY_ROOT
 SELECTION_TOOL = INFRA_ROOT.parent / "upstream-tests" / "selection.py"
+DEB_JOB = INFRA_ROOT.parent / "deb-packages" / "job.py"
 BACKGROUND_SUPERVISOR = MAINTENANCE_ROOT / "tools" / "background_job.py"
 PAYLOAD_HELPER = MAINTENANCE_ROOT / "tools" / "container_payload.py"
 PODMAN_POLICY = MAINTENANCE_ROOT / "tools" / "podman_policy.py"
@@ -423,6 +431,16 @@ HARNESS_INPUTS = (
     INFRA_ROOT / "build_libva_trace.py",
     INFRA_ROOT / "libva_trace.patch",
     INFRA_ROOT / "libva_trace_test.c",
+    INFRA_ROOT / "libva_seccomp_probe.py",
+    INFRA_ROOT / "package_runtime.py",
+    INFRA_ROOT / "peer_processes.py",
+    INFRA_ROOT / "ssh_fixture.py",
+    INFRA_ROOT / "shutdown_fixture.py",
+    INFRA_ROOT / "churn_fixture.py",
+    INFRA_ROOT / "persistent_fixture.py",
+    INFRA_ROOT / "xpra-live-user-manager.service",
+    INFRA_ROOT / "decoder_loss_fixture.py",
+    INFRA_ROOT / "decoder_recovery.py",
     INFRA_ROOT / "clipboard_fixture_common.py",
     INFRA_ROOT / "empty_damage_fixture.c",
     INFRA_ROOT / "interaction_fixture.py",
@@ -446,9 +464,13 @@ HARNESS_INPUTS = (
     INFRA_ROOT / "wlr-virtual-pointer-v1.xml",
     INFRA_ROOT / "xwd_to_png.py",
     SELECTION_TOOL,
+    DEB_JOB,
+    DEB_JOB.parent / "package_version.py",
+    TOOLS_ROOT / "contrib.py",
     BACKGROUND_SUPERVISOR,
     PAYLOAD_HELPER,
     PODMAN_POLICY,
+    TOOLS_ROOT / "runtime_audit.py",
     NETWORK_PROFILES_CONFIG,
     LIVE_CLI_CONFIG,
 )
@@ -458,6 +480,15 @@ BUILD_CONTEXT_INPUTS = (
     INFRA_ROOT / "build_libva_trace.py",
     INFRA_ROOT / "libva_trace.patch",
     INFRA_ROOT / "libva_trace_test.c",
+    INFRA_ROOT / "libva_seccomp_probe.py",
+    INFRA_ROOT / "package_runtime.py",
+    INFRA_ROOT / "peer_processes.py",
+    INFRA_ROOT / "ssh_fixture.py",
+    INFRA_ROOT / "shutdown_fixture.py",
+    INFRA_ROOT / "churn_fixture.py",
+    INFRA_ROOT / "persistent_fixture.py",
+    INFRA_ROOT / "xpra-live-user-manager.service",
+    INFRA_ROOT / "decoder_loss_fixture.py",
     INFRA_ROOT / "clipboard_fixture_common.py",
     INFRA_ROOT / "empty_damage_fixture.c",
     INFRA_ROOT / "interaction_fixture.py",
@@ -476,6 +507,15 @@ BUILD_CONTEXT_INPUTS = (
     PAYLOAD_HELPER,
 )
 CONTAINER_PAYLOAD = "/opt/xpra-fork-maintenance/container_payload.py"
+PEER_PROCESSES_HELPER = "/opt/xpra-fork-maintenance/peer_processes.py"
+SSH_FIXTURE_HELPER = "/opt/xpra-fork-maintenance/ssh_fixture.py"
+SHUTDOWN_FIXTURE_HELPER = "/opt/xpra-fork-maintenance/shutdown_fixture.py"
+CHURN_FIXTURE_HELPER = "/opt/xpra-fork-maintenance/churn_fixture.py"
+PERSISTENT_FIXTURE_HELPER = "/opt/xpra-fork-maintenance/persistent_fixture.py"
+# A systemd-booted container runs init as its root; exec as the lab user there.
+EXEC_USERS: dict[str, str] = {}
+# a second client display: a real window manager without a compositor
+CHURN_DISPLAY = ":1"
 LIVE_CONTAINER_UID = 1001
 LIVE_CONTAINER_GID = 1001
 FRAME_LOG_CHUNK_BYTES = 256 * 1024
@@ -590,6 +630,9 @@ FRAME_LOG_MARKERS = {
         "wlr_seat_keyboard_notify_key(",
     ),
     "client.stdout": (
+        "seccomp installed=True",
+        decoder_recovery.MARKER,
+        "invalid encoding:",
         "register_window",
         "draw_region(",
         "choose_decoder(",
@@ -632,6 +675,7 @@ SERVER_ARTIFACT_PATTERNS = (
 )
 CLIENT_ARTIFACT_PATTERNS = (
     re.compile(r"client(?:\..+|-va.*)"),
+    re.compile(r"client-libva-seccomp-(?:errno|log)\.strace"),
     re.compile(r"transport-proxy\..+"),
     re.compile(r"sway(?:\..+|-child\.env|-pointer\.(?:stdout|stderr))"),
     re.compile(r"xwayland-xdpyinfo\.txt"),
@@ -846,6 +890,78 @@ def live_user_options() -> list[str]:
     ]
 
 
+def persistent_server_options() -> list[str]:
+    """Boot systemd in the server container; its init runs as container root."""
+    return [
+        "--userns",
+        podman_policy.keep_id_userns(LIVE_CONTAINER_UID, LIVE_CONTAINER_GID),
+        "--user",
+        "0:0",
+        "--systemd=always",
+    ]
+
+
+def start_persistent_manager(server: str) -> dict[str, Any]:
+    """Start the real systemd user manager which will own the Xpra service."""
+    def system_state() -> str:
+        return run(["podman", "exec", "--user", "0", server, "systemctl", "is-system-running"],
+                   check=False, announce=False).stdout.strip()
+
+    wait_for("server systemd boot", lambda: system_state() in {"running", "degraded"})
+    # The packaged system-wide Xpra proxy socket is enabled at boot and owns
+    # the same TCP port; it is not the service under test.
+    packaged = ("xpra.socket", "xpra.service")
+    run(["podman", "exec", "--user", "0", server, "systemctl", "mask", "--now", *packaged])
+    states = run(["podman", "exec", "--user", "0", server, "systemctl", "is-active", *packaged],
+                 check=False, announce=False).stdout.split()
+    if states != ["inactive", "inactive"]:
+        raise LabFailure(f"the packaged system Xpra units are still active: {states}")
+    run(["podman", "exec", "--user", "0", server, "systemctl", "start", "xpra-live-user-manager.service"])
+    wait_for("persistent systemd user manager", lambda: podman_exec(
+        server, ["python3", PERSISTENT_FIXTURE_HELPER, "manager-ready"], check=False, announce=False,
+    ).returncode == 0)
+    return {"schema": 1, "system_state": system_state(), "masked_system_units": list(packaged)}
+
+
+def persistent_state(server: str, directory: Path, phase: str) -> dict[str, Any]:
+    record = json.loads(podman_exec(server, ["python3", PERSISTENT_FIXTURE_HELPER, "state"], announce=False).stdout)
+    replace_private_json(directory / f"server.persistent-{phase}.json", record)
+    return record
+
+
+def persistent_service_checks(evidence: Any, server_pid: Any, server_exit_status: Any) -> dict[str, bool]:
+    """Recomputed by the worker and the independent collector."""
+    if not isinstance(evidence, dict) or evidence.get("schema") != 1:
+        return {"persistent_service_receipts": False}
+
+    def owned(record: Any) -> bool:
+        return bool(isinstance(record, dict) and record.get("unit") == "xpra-live.service"
+                    and record.get("ActiveState") == "active" and record.get("MainPID") == server_pid
+                    and record.get("NRestarts") == 0 and record.get("manager_is_user_instance") is True
+                    and isinstance(record.get("main_process"), dict) and isinstance(record.get("manager_process"), dict)
+                    and record["main_process"].get("parent_pid") == record["manager_process"].get("pid")
+                    and isinstance(record.get("ControlGroup"), str)
+                    and record["ControlGroup"].endswith("/app.slice/xpra-live.service"))
+
+    stopped = evidence.get("after_exit")
+    receipt = evidence.get("exit_receipt")
+    return {
+        "persistent_service_receipts": all(key in evidence for key in (
+            "started", "before_detach", "after_detach", "after_exit", "exit_receipt")),
+        "persistent_packaged_proxy_masked": evidence.get("masked_system_units") == ["xpra.socket", "xpra.service"],
+        "persistent_service_started_by_user_manager": owned(evidence.get("started")),
+        "persistent_service_owned_before_detach": owned(evidence.get("before_detach")),
+        "persistent_service_survived_detach": owned(evidence.get("after_detach"))
+        and evidence["after_detach"].get("main_process") == evidence.get("before_detach", {}).get("main_process"),
+        "persistent_service_stopped_cleanly": bool(isinstance(stopped, dict) and stopped.get("ActiveState") == "inactive"
+                                                    and stopped.get("Result") == "success" and stopped.get("MainPID") == 0
+                                                    and stopped.get("NRestarts") == 0),
+        "persistent_service_exit_receipt": bool(isinstance(receipt, dict) and receipt.get("origin") == "exit"
+                                                and type(server_exit_status) is int
+                                                and receipt.get("status") == server_exit_status == 0),
+    }
+
+
 def scenario_acceptance(report: dict[str, Any], cleanup: dict[str, Any]) -> bool:
     collection = report.get("container_artifact_collection")
     lifecycle = report.get("lifecycle")
@@ -977,6 +1093,8 @@ def podman_exec(
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     invocation = ["podman", "exec"]
+    if container in EXEC_USERS:
+        invocation.extend(("--user", EXEC_USERS[container]))
     if detach:
         invocation.append("--detach")
     invocation.extend((container, *command))
@@ -1173,6 +1291,7 @@ def pull_container_artifacts(
     command = [
         "podman",
         "exec",
+        *(("--user", EXEC_USERS[container]) if container in EXEC_USERS else ()),
         container,
         "python3",
         CONTAINER_PAYLOAD,
@@ -2484,6 +2603,19 @@ def wait_for(
     raise LabFailure(f"timed out waiting for {description}")
 
 
+def container_process_running(container: str, pid: int) -> bool:
+    """False once the PID has exited: a zombie can no longer write evidence."""
+    result = podman_exec(container, ["cat", f"/proc/{pid}/stat"], check=False, announce=False)
+    if result.returncode:
+        return False
+    process = result.stdout
+    closing = process.rfind(")")
+    fields = process[closing + 2:].split()
+    if closing < 0 or not process.startswith(f"{pid} (") or not fields:
+        raise LabFailure(f"invalid procfs state for process {pid}")
+    return fields[0] not in {"Z", "X"}
+
+
 def container_process_exists(container: str, pid: int) -> bool:
     return (
         podman_exec(
@@ -2618,10 +2750,9 @@ try:
             raise SystemExit(4)
         argv = [os.fsdecode(value) for value in cmdline.split(b'\0') if value]
         if not cmdline or not argv:
-            if attempt < 4:
-                time.sleep(0.01)
-                continue
-            if poller.poll(0):
+            # an exiting process releases its memory, and so its command line,
+            # before it becomes a zombie: wait for its own exit notification
+            if poller.poll(2000):
                 raise SystemExit(3)
             raise SystemExit(4)
         print(json.dumps({
@@ -2860,7 +2991,7 @@ def quiesce_failed_workloads(
             evidence.append(item)
             continue
         try:
-            alive = container_process_exists(container, pid)
+            alive = container_process_running(container, pid)
         except BaseException as error:  # noqa: BLE001
             item.update({"error": str(error), "status": "probe-failed"})
             evidence.append(item)
@@ -2892,7 +3023,7 @@ def quiesce_failed_workloads(
         remaining = [
             value
             for value in remaining
-            if container_process_exists(value[1], value[2])
+            if container_process_running(value[1], value[2])
         ]
         if remaining:
             time.sleep(0.1)
@@ -3888,6 +4019,7 @@ def prepare_build_context(
     selection: PatchSelection,
     *,
     temporary_root: Path | None = None,
+    package_runs: dict[str, str] | None = None,
 ) -> BuildContext:
     patches = selection.patches
     ensure_patch_selection_current(selection)
@@ -3998,6 +4130,22 @@ def prepare_build_context(
                 "workflow_sha256": snapshot.workflow_sha256,
             },
         }
+        if package_runs is not None:
+            if set(package_runs) != {"server", "client"}:
+                raise LabFailure("live acceptance requires both exact DEB jobs")
+            packages_directory = temporary / "packages"
+            packages_directory.mkdir(mode=0o700)
+            manifest["packages"] = {}
+            for role, distro in (("server", "ubuntu-26.04"), ("client", "debian-13")):
+                result = run([
+                    sys.executable, str(DEB_JOB), "live-input", package_runs[role],
+                    "--distro", distro, "--source", snapshot.commit,
+                    "--selection-sha256", selection.digest,
+                    "--destination", str(packages_directory / role),
+                ])
+                manifest["packages"][role] = json.loads(result.stdout)
+            if manifest["packages"]["server"]["version"] != manifest["packages"]["client"]["version"]:
+                raise LabFailure("live endpoint packages have different versions")
         (temporary / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -4209,6 +4357,7 @@ def snapshot_build_inputs(
             for path in HARNESS_INPUTS
         },
         "harness_sha256": harness_snapshot_sha256(harness),
+        "packages": server_context.manifest.get("packages"),
         "keyboard_scenario": keyboard_scenario_manifest,
         "server_context_archive_sha256": context_archive_sha256["server"],
         "server_context_sha256": server_context.digest,
@@ -4254,6 +4403,7 @@ def freeze_owned_inputs(
     """Freeze every mutable named-run input before its owner is launched."""
     if selection_name is None:
         raise LabFailure("live acceptance requires one non-empty case or stack selection")
+    package_runs = configured_package_runs()
     ensure_private_directory(result_directory)
     if tuple(result_directory.iterdir()):
         raise LabFailure(f"live input staging directory is not empty: {result_directory}")
@@ -4288,6 +4438,7 @@ def freeze_owned_inputs(
             snapshot,
             server_selection,
             temporary_root=freeze_root,
+            package_runs=package_runs,
         )
         client_context = server_context
         validate_endpoint_contexts(application, server_context, client_context)
@@ -4321,6 +4472,16 @@ def freeze_owned_inputs(
         "input_manifest_sha256": input_manifest_sha256,
         "input_tree_sha256": tree_sha256(inputs),
     }
+
+
+def configured_package_runs() -> dict[str, str]:
+    runs = {
+        role: os.environ.get(f"XPRA_FORK_DEB_{role.upper()}_RUN", "")
+        for role in ("server", "client")
+    }
+    if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) for name in runs.values()):
+        raise LabFailure("set DEB_SERVER_RUN and DEB_CLIENT_RUN to successful removed package jobs")
+    return runs
 
 
 def _validated_input_checksums(inputs: Path) -> dict[str, str]:
@@ -4453,6 +4614,17 @@ def _bound_context(inputs: Path, role: str, manifest: dict[str, Any]) -> BuildCo
         raise LabFailure(f"frozen {role} context manifest is invalid JSON") from error
     if not isinstance(context_manifest, dict):
         raise LabFailure(f"frozen {role} context manifest is not an object")
+    packages = context_manifest.get("packages")
+    if not isinstance(packages, dict) or set(packages) != {"server", "client"} or packages != manifest.get("packages"):
+        raise LabFailure("frozen live context does not bind both accepted DEB artifacts")
+    for endpoint, distro in (("server", "ubuntu-26.04"), ("client", "debian-13")):
+        record = packages[endpoint]
+        if (not isinstance(record, dict) or record.get("schema") != 1
+                or record.get("distro") != distro
+                or record.get("source_commit") != manifest.get("source_commit")
+                or record.get("selection_sha256") != manifest.get(f"{endpoint}_selection_sha256")
+                or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("archive_sha256", "")))):
+            raise LabFailure("frozen runtime DEB provenance is inconsistent")
     selection_value = context_manifest.get("selection")
     if not isinstance(selection_value, dict):
         raise LabFailure(f"frozen {role} selection provenance is missing")
@@ -5158,7 +5330,7 @@ def read_os_release(container: str) -> dict[str, str]:
     return values
 
 
-def compositor_probe(container: str) -> dict[str, Any] | None:
+def compositor_probe(container: str, display: str = CLIENT_DISPLAY) -> dict[str, Any] | None:
     probe = (
         "import json\n"
         "import gi\n"
@@ -5171,7 +5343,7 @@ def compositor_probe(container: str) -> dict[str, Any] | None:
     )
     result = podman_exec(
         container,
-        ["env", f"DISPLAY={CLIENT_DISPLAY}", "python3", "-c", probe],
+        ["env", f"DISPLAY={display}", "python3", "-c", probe],
         check=False,
         announce=False,
     )
@@ -5434,6 +5606,246 @@ def wait_for_process_exit(
     )
     pull_container_artifacts(container, directory, (f"{name}.exit",))
     return process_exit_status(directory, name)
+
+
+def capture_peer_descendants(container: str, directory: Path, role: str, pid: int) -> dict:
+    observed = container_process_identity(container, pid)
+    if observed is None:
+        raise LabFailure(f"{role} exited before descendant capture")
+    result = podman_exec(container, ["python3", PEER_PROCESSES_HELPER, "capture",
+                                     str(pid), observed["start_ticks"]])
+    snapshot = json.loads(result.stdout)
+    peer_processes.validate_snapshot(snapshot)
+    if snapshot["root"]["pid"] != pid or snapshot["root"]["start_ticks"] != observed["start_ticks"]:
+        raise LabFailure(f"{role} descendant capture changed its root identity")
+    replace_private_json(directory / f"{role}.processes-before.json", snapshot)
+    return snapshot
+
+
+def wait_for_peer_reaping(container: str, directory: Path, role: str, snapshot: dict, *, reap_direct: bool = True) -> dict:
+    """Require peer-owned waits; only a deliberately aborted peer cannot reap.
+
+    With ``reap_direct`` false every descendant must still have exited, but a
+    child orphaned by its parent's abort may remain an init-owned zombie.
+    """
+    observation = {}
+
+    def all_reaped() -> bool:
+        nonlocal observation
+        result = podman_exec(container, ["python3", PEER_PROCESSES_HELPER, "remaining",
+                                         json.dumps(snapshot, sort_keys=True)], announce=False)
+        remaining = json.loads(result.stdout)
+        if not isinstance(remaining, list) or len(remaining) > 128:
+            raise LabFailure(f"invalid {role} reaping observation")
+        observation = {"remaining": remaining}
+        replace_private_json(directory / f"{role}.processes-after.json", observation)
+        if not reap_direct:
+            return all(value["state"].upper() in {"Z", "X"} for value in remaining)
+        return not peer_processes.blocking_remaining(snapshot, remaining)
+
+    wait_for(f"{role} direct children reaped and descendants exited", all_reaped, timeout=15)
+    return {"before": snapshot, "after": observation}
+
+
+def capture_desktop_processes(client: str, directory: Path, *, hardware: bool) -> dict:
+    snapshots = {}
+    for role in (("sway",) if hardware else ("picom", "openbox", "xvfb")):
+        path = wait_for_container_artifact(client, directory, f"{role}.pid", f"{role} PID publication")
+        snapshots[role] = capture_peer_descendants(client, directory, role, int(path.read_text()))
+    return snapshots
+
+
+def stop_desktop_writers(client: str, directory: Path, snapshots: dict) -> dict:
+    """Stop fixture writers before streaming logs; keep peer waits separate."""
+    proof = {}
+    for role, before in snapshots.items():
+        peer_processes.validate_snapshot(before)
+        observed = {}
+
+        def observe() -> list[dict]:
+            nonlocal observed
+            result = podman_exec(client, ["python3", PEER_PROCESSES_HELPER, "remaining", json.dumps(before)], announce=False)
+            values = json.loads(result.stdout)
+            # Validate birth/ancestry even for a fixture's exited orphan. A
+            # helper's writer exit is not the product's stricter child wait.
+            peer_processes.blocking_remaining(before, values)
+            observed = {"remaining": values}
+            replace_private_json(directory / f"{role}.processes-after.json", observed)
+            return values
+
+        root = before["root"]
+        current = next((value for value in observe() if value["pid"] == root["pid"]), None)
+        if current and current["state"].upper() not in {"Z", "X"}:
+            podman_exec(client, ["python3", PEER_PROCESSES_HELPER, "stop", str(root["pid"]), root["start_ticks"], "TERM"])
+        wait_for(f"{role} fixture log writers exited", lambda: all(value["state"].upper() in {"Z", "X"} for value in observe()),
+                 timeout=15)
+        proof[role] = {"before": before, "after": observed}
+    return proof
+
+
+def launch_ssh_fixture(container: str, directory: Path, role: str, command: list[str]) -> int:
+    script = (
+        "umask 077; " + format_command(command)
+        + f" >/artifacts/{role}.stdout 2>/artifacts/{role}.stderr & "
+        + f"child=$!; printf '%s\\n' \"$child\" >/artifacts/{role}.pid; "
+        + 'status=0; wait "$child" || status=$?; '
+        + f"printf '%s\\n' \"$status\" >/artifacts/{role}.exit; exit \"$status\""
+    )
+    podman_exec(container, ["bash", "-lc", script], detach=True)
+    path = wait_for_container_artifact(container, directory, f"{role}.pid", f"{role} PID publication")
+    return int(path.read_text().strip())
+
+
+def start_ssh_transport(server: str, client: str, directory: Path) -> dict:
+    """Own an external mux; Xpra channels cannot fall back to fresh SSH."""
+    client_key = json.loads(podman_exec(client, ["python3", SSH_FIXTURE_HELPER, "client-init"]).stdout)["public_key"]
+    server_key = json.loads(podman_exec(server, ["python3", SSH_FIXTURE_HELPER, "server-init", client_key]).stdout)["public_key"]
+    podman_exec(client, ["python3", SSH_FIXTURE_HELPER, "trust-server", server_key])
+    daemon_pid = launch_ssh_fixture(server, directory, "server.sshd", ssh_fixture.daemon_command())
+
+    def listener_ready() -> bool:
+        if not container_process_exists(server, daemon_pid):
+            pull_container_artifacts(server, directory, ("server.sshd.stderr",))
+            raise LabFailure("fixture SSH daemon exited: " + (directory / "server.sshd.stderr").read_text()[-4096:])
+        listeners = podman_exec(server, ["ss", "--listening", "--tcp", "--numeric"], announce=False)
+        return f":{ssh_fixture.PORT} " in listeners.stdout
+
+    wait_for("fixture SSH listener", listener_ready)
+    master_pid = launch_ssh_fixture(client, directory, "client.ssh-master", ssh_fixture.master_command())
+    check = None
+
+    def mux_ready() -> bool:
+        nonlocal check
+        if not container_process_exists(client, master_pid):
+            pull_container_artifacts(client, directory, ("client.ssh-master.stderr",))
+            raise LabFailure("fixture SSH master exited: " + (directory / "client.ssh-master.stderr").read_text()[-4096:])
+        check = podman_exec(client, [*ssh_fixture.ssh_command(), "-O", "check", ssh_fixture.HOST],
+                            check=False, announce=False)
+        return check.returncode == 0 and f"Master running (pid={master_pid})" in check.stderr
+
+    wait_for("owned SSH mux readiness", mux_ready)
+    return {
+        "schema": 1, **ssh_endpoint_options(),
+        "client_configuration": ssh_fixture.client_configuration(),
+        "daemon_pid": daemon_pid, "master_pid": master_pid,
+        "master_before": capture_peer_descendants(client, directory, "client.ssh-master", master_pid),
+        "daemon_before": capture_peer_descendants(server, directory, "server.sshd", daemon_pid),
+        "mux_check": {"returncode": check.returncode, "stdout": check.stdout, "stderr": check.stderr},
+    }
+
+
+def ssh_endpoint_options() -> dict:
+    # Socket discovery uses the frozen server namespace, not host credentials.
+    socket_options = [value for value in static_cli_options("server", "base")
+                      if value.startswith(("--socket-dir=", "--socket-dirs="))]
+    display = command_cli_options("server", "info")[0]
+    return {
+        "endpoint": f"ssh://lab@{ssh_fixture.HOST}:{ssh_fixture.PORT}/{display}",
+        "options": ["--ssh=" + format_command(ssh_fixture.ssh_command()), "--exit-ssh=yes", *socket_options],
+    }
+
+
+def stop_ssh_fixture(container: str, snapshot: dict, signame: str) -> None:
+    root = snapshot["root"]
+    podman_exec(container, ["python3", PEER_PROCESSES_HELPER, "stop", str(root["pid"]), root["start_ticks"], signame])
+
+
+def group_server_diagnostic(server: str, directory: Path, phase: str) -> None:
+    """Bounded failure evidence, also when full transfer must be skipped."""
+    diagnostic = podman_exec(server, ["python3", SHUTDOWN_FIXTURE_HELPER, "diagnose"], announce=False)
+    replace_private_json(directory / f"server.shutdown-diagnostic-{phase}.json", json.loads(diagnostic.stdout))
+
+
+def end_group_lease_after_failure(server: str, client: str, directory: Path, lease_pid: int,
+                                  lease_snapshot: dict | None) -> dict:
+    """End the lease which owns the private group and keep its own output."""
+    result: dict[str, Any] = {}
+    try:
+        group_server_diagnostic(server, directory, "before-cleanup")
+    except BaseException as error:  # noqa: BLE001 - preserve the original failure
+        result["diagnostic_error"] = str(error)
+    if not lease_pid:
+        return result
+    try:
+        if container_process_exists(client, lease_pid):
+            if lease_snapshot is None:
+                raise LabFailure("lease identity was not captured; it cannot be stopped safely")
+            stop_ssh_fixture(client, lease_snapshot, "TERM")
+        result["lease_exit_status"] = wait_for_process_exit(client, lease_pid, directory, "client.shutdown-lease",
+                                                            timeout=20)
+        # The lease writer has exited: its output is now immutable.
+        pull_container_artifacts(client, directory, ("client.shutdown-lease.stdout", "client.shutdown-lease.stderr"))
+    except BaseException as error:  # noqa: BLE001
+        result["lease_error"] = str(error)
+    return result
+
+
+def group_server_quiescence(server: str) -> dict:
+    result = podman_exec(server, ["python3", SHUTDOWN_FIXTURE_HELPER, "quiescent"], announce=False)
+    value = json.loads(result.stdout)
+    if not isinstance(value, dict) or type(value.get("quiescent")) is not bool:
+        raise LabFailure("invalid private-group quiescence observation")
+    return value
+
+
+def quiesce_group_server_after_failure(server: str, directory: Path) -> dict:
+    """Wait for the lease-owned supervisor to tear its group down.
+
+    Lease and SSH cleanup end its channel. Only if it does not finish is the
+    exact supervisor identity stopped; afterwards only init and exited zombies
+    may remain before any full artifact transfer is attempted.
+    """
+    evidence: dict[str, Any] = {}
+    try:
+        deadline = time.monotonic() + 30
+        observed = group_server_quiescence(server)
+        while not observed["quiescent"] and time.monotonic() < deadline:
+            time.sleep(0.5)
+            observed = group_server_quiescence(server)
+        if not observed["quiescent"] and container_artifact_exists(server, "server.shutdown-owner.json"):
+            pull_container_artifacts(server, directory, ("server.shutdown-owner.json",))
+            owner = json.loads((directory / "server.shutdown-owner.json").read_text())["supervisor"]
+            if container_process_running(server, owner["pid"]):
+                podman_exec(server, ["python3", PEER_PROCESSES_HELPER, "stop", str(owner["pid"]),
+                                     owner["start_ticks"], "TERM"], check=False)
+                evidence["supervisor_stopped"] = True
+            deadline = time.monotonic() + 30
+            while not observed["quiescent"] and time.monotonic() < deadline:
+                time.sleep(0.5)
+                observed = group_server_quiescence(server)
+        evidence.update(observed)
+        group_server_diagnostic(server, directory, "after-cleanup")
+    except BaseException as error:  # noqa: BLE001 - fail closed: no full transfer
+        evidence.update({"quiescent": False, "error": str(error)})
+    return evidence
+
+
+def finish_ssh_transport(server: str, client: str, directory: Path, transport: dict, lifecycle: str) -> dict:
+    if lifecycle != "transport-loss":
+        command = ssh_fixture.exit_command()
+        stopped = podman_exec(client, command, check=False)
+        transport["mux_exit"] = {"command": command, "returncode": stopped.returncode,
+                                 "stdout": stopped.stdout, "stderr": stopped.stderr}
+        for suffix, content in (("stdout", stopped.stdout), ("stderr", stopped.stderr),
+                                ("exit", f"{stopped.returncode}\n")):
+            (directory / f"client.ssh-master-stop.{suffix}").write_text(content, encoding="utf-8")
+        if stopped.returncode:
+            raise LabFailure(f"owned SSH mux exit controller failed: {stopped.returncode}")
+    transport["master_exit_status"] = wait_for_process_exit(
+        client, transport["master_pid"], directory, "client.ssh-master",
+    )
+    transport["master_processes"] = wait_for_peer_reaping(
+        client, directory, "client.ssh-master", transport.pop("master_before"),
+    )
+    stop_ssh_fixture(server, transport["daemon_before"], "TERM")
+    transport["daemon_exit_status"] = wait_for_process_exit(
+        server, transport["daemon_pid"], directory, "server.sshd",
+    )
+    transport["daemon_processes"] = wait_for_peer_reaping(
+        server, directory, "server.sshd", transport.pop("daemon_before"),
+    )
+    replace_private_json(directory / "ssh-transport.json", transport)
+    return transport
 
 
 def packet_sequence_authority(
@@ -7656,7 +8068,59 @@ def parse_wayland_native_captures(server_log: str) -> list[dict[str, Any]]:
     return records
 
 
+def decode_seccomp_evidence(client_log: str, *, hardware: bool) -> dict[str, Any]:
+    """Require successful default-filter installation, not merely its intent log."""
+    policies = list(re.finditer(r"installing decode thread seccomp policy with action=([^\s]+)", client_log))
+    installed = list(re.finditer(r"seccomp installed=True", client_log))
+    if (len(policies) != 1 or len(installed) != 1
+            or policies[0][1] != "errno" or policies[0].start() >= installed[0].start()):
+        raise LabFailure("client did not prove one installed default errno decode filter")
+    tail = client_log[installed[0].end():]
+    if any(message in client_log for message in (
+        "seccomp module is not available", "Error installing decode thread seccomp filter",
+        "seccomp installed=False",
+    )):
+        raise LabFailure("client decode filter was unavailable or failed")
+    frames = len(re.findall(r"libva decoded h264\s+[1-9][0-9]* bytes into", tail))
+    if hardware:
+        created = re.search(r"paint_with_video_decoder: new libva\('h264'", tail)
+        decoded = re.search(r"libva decoded h264\s+[1-9][0-9]* bytes into", tail)
+        if not created or not decoded or created.start() >= decoded.start():
+            raise LabFailure("libva did not create and decode H.264 after filter installation")
+        if any(message in tail for message in ("invalid encoding:", "failed to create libva", "not_available")):
+            raise LabFailure("filtered client lost a decoder or entered an invalid-encoding loop")
+    return {"action": policies[0][1], "installed": True, "post_filter_libva_frames": frames}
+
+
+def physical_libva_seccomp_probe(client: str, directory: Path, *, driver: str, render_node: Path) -> None:
+    for action in ("errno", "log"):
+        result = write_command_output(
+            client,
+            ["env", f"LIBVA_DRIVER_NAME={driver}", f"XPRA_LIBVA_DEVICE={render_node}",
+             "strace", "-f", "-qq", "-o", f"/artifacts/client-libva-seccomp-{action}.strace",
+             "python3", "/opt/xpra-fork-maintenance/libva_seccomp_probe.py", action],
+            directory / f"client-libva-seccomp-{action}.log",
+        )
+        records = [line.removeprefix("libva-seccomp-probe=")
+                   for line in result.stdout.splitlines() if line.startswith("libva-seccomp-probe=")]
+        if len(records) != 1:
+            raise LabFailure("physical libva/seccomp probe returned no unique result")
+        record = json.loads(records[0])
+        if (record.get("schema") != 1 or record.get("action") != action
+                or record.get("default_action") != "errno"
+                or record.get("open_denied") is not (action == "errno")
+                or record.get("decoded_frames", 0) < 10 or record.get("late_cleanup") is not True):
+            raise LabFailure("physical libva/seccomp probe did not prove filtered decode/cleanup")
+
+
 def inspect_logs(directory: Path) -> dict[str, Any]:
+    for filename in ("server.stdout", "server.stderr", "client.stdout", "client.stderr",
+                     "client.detach.stdout", "client.detach.stderr", "client.ssh-master.stdout",
+                     "client.ssh-master.stderr", "server.sshd.stdout", "server.sshd.stderr"):
+        path = directory / filename
+        if path.is_file() and (problems := shutdown_fixture.unexpected_failures(
+                directory.name, filename, path.read_bytes(), runtime_audit.failures)):
+            raise LabFailure(f"unexpected runtime failure in {filename}: {','.join(problems)}")
     server_log = "\n".join(
         path.read_text(encoding="utf-8", errors="replace")
         for path in (directory / "server.stdout", directory / "server.stderr")
@@ -9338,6 +9802,7 @@ def wait_for_frame_boundary(
     application: str,
     expected_xpra_wid: int,
     sequence_authority: dict[str, Any] | None = None,
+    decoder_loss: bool = False,
 ) -> str:
     if _exact_int(expected_xpra_wid, positive=True) is None:
         raise LabFailure(f"invalid expected Xpra window ID: {expected_xpra_wid!r}")
@@ -9547,6 +10012,23 @@ def wait_for_frame_boundary(
                 else:
                     outcome = "unexpected-h264"
                 return True
+            if decoder_loss:
+                if decoder_recovery.MARKER in client_log and re.search(
+                    rf"record_decode_time\((?:True|1),[^\n]*\) wid=0x{expected_xpra_wid:x}, (?:rgb24|rgb32|webp):", client_log,
+                ):
+                    info = write_command_output(server, ["xpra", "info", *command_cli_options("server", "info")],
+                                                directory / "server-info-recovery.txt")
+                    proof = decoder_recovery.evaluate(
+                        client_log=client_log, server_log=server_log, server_info=info.stdout,
+                        packets=updates["updates"], window_id=expected_xpra_wid, client_pid=client_pid,
+                    )
+                    if all(proof["checks"].values()):
+                        retain_packet_sequence_observation(directory, "readiness", updates)
+                        outcome = "decoder-recovered"
+                        return True
+                if not container_process_exists(server, server_pid) or not container_process_exists(client, client_pid):
+                    raise LabFailure("Xpra peer exited before decoder-loss recovery")
+                return False
             production_marker = (
                 f"register_window(..) window(0x{expected_xpra_wid:x})="
             )
@@ -19245,13 +19727,223 @@ def classify_h264_picture_fallback(
     )
 
 
+def churn_session_bus_address(server: str) -> str:
+    """The session bus Xpra launched for itself (its own session file)."""
+    sessions = [value.split("=", 1)[1] for value in static_cli_options("server", "base")
+                if value.startswith("--sessions-dir=")]
+    if len(sessions) != 1:
+        raise LabFailure("the live server must have exactly one sessions directory")
+    display = command_cli_options("server", "info")[0]
+    content = podman_exec(server, ["cat", f"{sessions[0]}/{display}/dbus.env"], announce=False).stdout
+    addresses = [line.split("=", 1)[1] for line in content.splitlines()
+                 if line.startswith("DBUS_SESSION_BUS_ADDRESS=")]
+    if len(addresses) != 1 or not re.fullmatch(r"unix:[a-z]+=[^\s'\";]+", addresses[0]):
+        raise LabFailure("Xpra did not publish one valid session bus address")
+    return addresses[0]
+
+
+def churn_progress(path: Path, mode: str) -> list[dict[str, Any]]:
+    records = []
+    for line in path.read_text(encoding="utf-8", errors="strict").splitlines()[:4096]:
+        record = json.loads(line)
+        if not isinstance(record, dict) or record.get("mode") != mode:
+            raise LabFailure(f"invalid {mode} churn progress record")
+        records.append(record)
+    return records
+
+
+def exercise_detach_churn(
+    server: str,
+    client: str,
+    directory: Path,
+    ssh_transport: dict,
+    server_identity: dict,
+    client_options: list[str],
+) -> dict[str, Any]:
+    """Repeated attach/detach through the owned mux while the session churns.
+
+    The session keeps creating and destroying translucent windows and sending
+    notifications; the cycle clients use a real window manager without a
+    compositor and the pointer keeps moving while `xpra detach` runs. The
+    detach command and the attached client keep separate statuses and output.
+    Every process started here is stopped by its exact identity, also on failure.
+    """
+    owned: list[tuple[str, str, int, dict]] = []
+    evidence: dict[str, Any] = {"schema": 1, "cycles": []}
+
+    def start(container: str, role: str, command: list[str]) -> tuple[int, dict]:
+        pid = launch_ssh_fixture(container, directory, role, command)
+        snapshot = capture_peer_descendants(container, directory, role, pid)
+        owned.append((container, role, pid, snapshot))
+        return pid, snapshot
+
+    def finish(container: str, role: str, pid: int, snapshot: dict, *, stop: bool,
+               reap_direct: bool = True) -> dict[str, Any]:
+        if stop and container_process_running(container, pid):
+            stop_ssh_fixture(container, snapshot, "TERM")
+        status = wait_for_process_exit(container, pid, directory, role, timeout=20)
+        # Xpra clients must reap their own children (ie: ssh); GTK fixtures and
+        # the desktop only need every descendant gone: image-loader sandboxes
+        # they spawn exit as orphans of the non-reaping container init.
+        reaping = wait_for_peer_reaping(container, directory, role, snapshot, reap_direct=reap_direct)
+        # its writer has exited, so its output is now immutable:
+        pull_container_artifacts(container, directory, (f"{role}.stdout", f"{role}.stderr"))
+        owned[:] = [value for value in owned if value[1] != role]
+        return {"exit_status": status, "processes": reaping}
+
+    try:
+        xvfb_pid, xvfb = start(client, "client.churn-xvfb", [
+            "Xvfb", CHURN_DISPLAY, "-screen", "0", "1600x1200x24", "+extension", "Composite",
+            "-nolisten", "tcp", "-noreset",
+        ])
+        wait_for("churn X11 display", lambda: podman_exec(
+            client, ["xdpyinfo", "-display", CHURN_DISPLAY], check=False, announce=False,
+        ).returncode == 0)
+        openbox_pid, openbox = start(client, "client.churn-openbox",
+                                     ["env", f"DISPLAY={CHURN_DISPLAY}", "openbox", "--sm-disable"])
+        probe = compositor_probe(client, CHURN_DISPLAY)
+        if not probe or probe.get("composited") is not False or probe.get("rgba_visual") is not True:
+            raise LabFailure(f"the churn display must offer RGBA visuals without a compositor: {probe}")
+        evidence["desktop"] = probe
+        bus_address = churn_session_bus_address(server)
+        fixture_pid, fixture = start(server, "server.churn-fixture", [
+            "env", f"DBUS_SESSION_BUS_ADDRESS={bus_address}", "XDG_RUNTIME_DIR=/tmp/server-runtime",
+            f"WAYLAND_DISPLAY={command_cli_options('server', 'info')[0]}", "GDK_BACKEND=wayland",
+            "PYTHONFAULTHANDLER=1", "python3", CHURN_FIXTURE_HELPER, "server",
+        ])
+        wait_for_log(server, fixture_pid, directory / "server.churn-fixture.stdout", '"event": "ready"',
+                     "detach churn fixture readiness")
+        endpoint = ssh_transport["endpoint"]
+        for cycle in range(1, DETACH_CHURN_CYCLES + 1):
+            role = f"client.churn-{cycle:02d}"
+            cycle_pid, cycle_snapshot = start(client, role, [
+                "env", f"DISPLAY={CHURN_DISPLAY}", "PYTHONFAULTHANDLER=1", "PYTHONWARNINGS=always::ResourceWarning",
+                "xpra", "attach", endpoint, *client_options, *static_cli_options("client", "churn"),
+                *ssh_transport["options"],
+            ])
+            wait_for_log(client, cycle_pid, directory / f"{role}.stdout", "Attached to", f"{role} attach")
+            # let window churn and notifications reach the attached client
+            time.sleep(1.5)
+            pointer_pid, pointer_snapshot = start(client, f"{role}.pointer", [
+                "python3", CHURN_FIXTURE_HELPER, "pointer", "--display", CHURN_DISPLAY,
+            ])
+            wait_for_log(client, pointer_pid, directory / f"{role}.pointer.stdout", '"event": "ready"',
+                         f"{role} pointer motion")
+            time.sleep(0.5)
+            detach = podman_exec(client, [
+                "env", "PYTHONFAULTHANDLER=1", "PYTHONWARNINGS=always::ResourceWarning",
+                "xpra", "detach", endpoint, *command_cli_options("client", "detach"), *ssh_transport["options"],
+            ], check=False)
+            for suffix, content in (("stdout", detach.stdout), ("stderr", detach.stderr),
+                                    ("exit", f"{detach.returncode}\n")):
+                (directory / f"{role}.detach.{suffix}").write_text(content, encoding="utf-8")
+            attached = finish(client, role, cycle_pid, cycle_snapshot, stop=False)
+            pointer = finish(client, f"{role}.pointer", pointer_pid, pointer_snapshot, stop=True)
+            client_log = "\n".join((directory / f"{role}.{suffix}").read_text(encoding="utf-8", errors="replace")
+                                   for suffix in ("stdout", "stderr"))
+            record = {
+                "cycle": cycle,
+                "detach_returncode": detach.returncode,
+                "client_exit_status": attached["exit_status"],
+                "client_processes": attached["processes"],
+                "detach_reason_received": "detach request" in client_log,
+                "connection_lost": "Connection lost" in client_log,
+                "pointer_exit_status": pointer["exit_status"],
+                "pointer_processes": pointer["processes"],
+                "pointer_moves": max((value.get("moves", 0) for value in
+                                      churn_progress(directory / f"{role}.pointer.stdout", "pointer")), default=0),
+                "server_survived": bool(require_process_identity(server, server_identity, role="Xpra server")),
+            }
+            evidence["cycles"].append(record)
+            if detach.returncode or attached["exit_status"] or not record["detach_reason_received"]:
+                raise LabFailure(
+                    f"detach churn cycle {cycle}: detach command {detach.returncode}, attached client "
+                    f"{attached['exit_status']}, detach reason received {record['detach_reason_received']}"
+                )
+        evidence["fixture"] = finish(server, "server.churn-fixture", fixture_pid, fixture, stop=True,
+                                     reap_direct=False)
+        evidence["fixture"]["progress"] = churn_progress(directory / "server.churn-fixture.stdout", "server")[-1]
+        evidence["desktop_processes"] = {
+            "client.churn-openbox": finish(client, "client.churn-openbox", openbox_pid, openbox, stop=True,
+                                           reap_direct=False),
+            "client.churn-xvfb": finish(client, "client.churn-xvfb", xvfb_pid, xvfb, stop=True, reap_direct=False),
+        }
+        return evidence
+    finally:
+        # never leave a writer behind for the artifact transfer, whatever failed
+        for container, role, pid, snapshot in reversed(list(owned)):
+            try:
+                if container_process_running(container, pid):
+                    stop_ssh_fixture(container, snapshot, "TERM")
+                wait_for_process_exit(container, pid, directory, role, timeout=20)
+            except BaseException as error:  # noqa: BLE001 - keep the original failure
+                evidence.setdefault("cleanup_errors", []).append({"role": role, "error": str(error)})
+
+
+def detach_churn_checks(evidence: Any) -> dict[str, bool]:
+    """Recomputed by the worker and the independent collector."""
+    if not isinstance(evidence, dict) or evidence.get("schema") != 1:
+        return {"detach_churn_receipts": False}
+    cycles = evidence.get("cycles")
+    desktop = evidence.get("desktop")
+    fixture = evidence.get("fixture")
+    progress = fixture.get("progress") if isinstance(fixture, dict) else None
+    valid_cycles = bool(isinstance(cycles, list) and len(cycles) == DETACH_CHURN_CYCLES and all(
+        isinstance(record, dict) and record.get("cycle") == index for index, record in enumerate(cycles, 1)))
+    return {
+        "detach_churn_receipts": valid_cycles and "cleanup_errors" not in evidence,
+        "detach_churn_non_composited_rgba": isinstance(desktop, dict) and desktop.get("composited") is False
+        and desktop.get("rgba_visual") is True,
+        "detach_churn_command_status_zero": valid_cycles and all(
+            type(record.get("detach_returncode")) is int and record["detach_returncode"] == 0 for record in cycles),
+        "detach_churn_client_status_zero": valid_cycles and all(
+            type(record.get("client_exit_status")) is int and record["client_exit_status"] == 0 for record in cycles),
+        "detach_churn_reason_received": valid_cycles and all(
+            record.get("detach_reason_received") is True and record.get("connection_lost") is False
+            for record in cycles),
+        "detach_churn_pointer_traffic": valid_cycles and all(
+            type(record.get("pointer_moves")) is int and record["pointer_moves"] > 0
+            and record.get("pointer_exit_status") == 0 for record in cycles),
+        "detach_churn_server_survived": valid_cycles and all(record.get("server_survived") is True for record in cycles),
+        "detach_churn_session_churned": isinstance(progress, dict) and all(
+            type(progress.get(key)) is int and progress[key] > 0 for key in ("created", "destroyed", "notified"))
+        and progress.get("notify_errors") == 0 and fixture.get("exit_status") == 0,
+    }
+
+
 def lifecycle_boundary_checks(
     lifecycle_profile: str, lifecycle: dict[str, Any]
 ) -> dict[str, bool]:
     """Classify only observed process and command outcomes for one lifecycle."""
+    server_status = lifecycle.get("server_exit_status")
+    server_checks = {"server_exit_zero": type(server_status) is int and server_status == 0}
+    if "group_shutdown" in lifecycle:
+        evidence = lifecycle["group_shutdown"]
+        application = lifecycle.get("application_identity_at_capture")
+        server = lifecycle.get("server_identity_at_capture")
+        if (lifecycle_profile != "transport-loss" or not isinstance(evidence, dict)
+                or not valid_interaction_fixture_identity(application) or not valid_process_identity(server)):
+            return {"private_group_lifecycle": False}
+        receipt = evidence.get("native_exit")
+        return {
+            # The fixture's own oracle owns the exact expected status (143, or
+            # the abort control's 134); bind the shell-style file to its receipt.
+            "server_exit_status_matches_receipt": bool(type(server_status) is int and isinstance(receipt, dict)
+                                                       and receipt.get("status") == server_status),
+            **shutdown_fixture.evidence_checks(evidence, application=application, server_pid=server["pid"]),
+            "server_identity_published": lifecycle.get("server_pid") == server["pid"],
+            "transport_disconnect_succeeded": type(lifecycle.get("transport_disconnect_returncode")) is int
+            and lifecycle["transport_disconnect_returncode"] == 0,
+            "client_exit_connection_lost": type(lifecycle.get("client_exit_status")) is int
+            and lifecycle["client_exit_status"] == 1,
+            "client_exited_after_transport_loss": lifecycle.get("client_exited_after_transport_loss") is True,
+            "lease_channel_exit_after_mux_loss": type(evidence.get("lease_exit_status")) is int
+            and evidence["lease_exit_status"] == 255,
+        }
     if lifecycle_profile == "application-exit":
         client_exit_status = lifecycle.get("client_exit_status")
         return {
+            **server_checks,
             "client_exit_zero": (
                 type(client_exit_status) is int and client_exit_status == 0
             ),
@@ -19345,6 +20037,7 @@ def lifecycle_boundary_checks(
         detach_returncode = lifecycle.get("detach_returncode")
         client_exit_status = lifecycle.get("client_exit_status")
         return {
+            **server_checks,
             "detach_command_succeeded": (
                 type(detach_returncode) is int and detach_returncode == 0
             ),
@@ -19363,18 +20056,22 @@ def lifecycle_boundary_checks(
                 "server_exited_after_application"
             )
             is True,
+            **(detach_churn_checks(lifecycle["detach_churn"]) if "detach_churn" in lifecycle else {}),
+            **(persistent_service_checks(lifecycle["persistent_service"], lifecycle.get("server_pid"),
+                                         server_status) if "persistent_service" in lifecycle else {}),
         }
     if lifecycle_profile != "transport-loss":
         raise LabFailure(f"unsupported lifecycle profile: {lifecycle_profile}")
     exit_status = lifecycle.get("client_exit_status")
     disconnect_returncode = lifecycle.get("transport_disconnect_returncode")
     return {
+        **server_checks,
         "transport_disconnect_succeeded": (
             type(disconnect_returncode) is int and disconnect_returncode == 0
         ),
-        "client_exit_nonzero": isinstance(exit_status, int)
-        and not isinstance(exit_status, bool)
-        and exit_status != 0,
+        # ExitCode.CONNECTION_LOST in the frozen Xpra source. SIGABRT,
+        # SIGSEGV, timeout and unrelated protocol errors are not this outcome.
+        "client_exit_connection_lost": type(exit_status) is int and exit_status == 1,
         "client_exited_after_transport_loss": lifecycle.get(
             "client_exited_after_transport_loss"
         )
@@ -19531,6 +20228,7 @@ def classify_boundaries(
     pixel_evidence: dict[str, Any],
     lifecycle: dict[str, bool],
     interaction_updates: dict[str, Any] | None = None,
+    recovery: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     application_checks = application_boundary_checks(
         application=args.application,
@@ -19570,6 +20268,28 @@ def classify_boundaries(
         paint_boundary = "cairo_paint"
         presentation_boundary = "gtk_presentation"
         client_presented = log_evidence["cairo_paints"] > 0
+    elif recovery is not None:
+        # Explicitly separate fault recovery from the unchanged positive
+        # H.264/VA/90%-dominance assertions in the ordinary scenario.
+        startup_checks = {
+            "per_window_h264_capabilities_applied": bool(log_evidence["h264_per_window_negotiation_applied"]),
+            "no_server_initial_data_error": not log_evidence["server_initial_data_errors"],
+            "no_server_logging_error": log_evidence["server_logging_errors"] == 0,
+        }
+        encoding_checks = {**recovery["checks"], "positive_saved_payload": positive_payloads}
+        transport_checks = {"client_received_h264": log_evidence["h264_draw_regions"] > 0,
+                            "client_received_picture": recovery["checks"]["picture_decode_acknowledged"]}
+        paint_checks = {"opengl_painted_rgb": log_evidence["opengl_rgb_paints"] > 0,
+                        "paint_acknowledged": log_evidence["client_successful_paints"] > 0,
+                        "no_paint_error": not log_evidence["paint_errors"]}
+        desktop = codec_hardware.get("client_desktop", {})
+        renderer = log_evidence["opengl_renderer"].lower()
+        presentation_checks = {"opengl_presented": log_evidence["opengl_presentations"] > 0,
+                               "hardware_opengl_renderer": bool(renderer) and not any(
+                                   value in renderer for value in ("llvmpipe", "softpipe", "swrast", "software rasterizer")),
+                               "hardware_desktop_renderer": bool(desktop.get("hardware_renderer"))}
+        encoding_boundary, paint_boundary, presentation_boundary = "decoder_recovery", "opengl_rgb_paint", "opengl_presentation"
+        client_presented = log_evidence["opengl_presentations"] > 0
     elif args.h264_client_policy in H264_FALLBACK_POLICIES:
         (
             startup_checks,
@@ -19869,7 +20589,9 @@ def classify_boundaries(
         "boundaries": ordered,
         "first_failed_boundary": first_failed,
     }
-    if args.encoding == "h264" and args.h264_client_policy in H264_ACCEPTANCE_POLICIES:
+    if recovery is not None:
+        result["decoder_recovery_passed"] = all(all(checks.values()) for checks in ordered.values())
+    elif args.encoding == "h264" and args.h264_client_policy in H264_ACCEPTANCE_POLICIES:
         hardware_boundaries = (
             "h264_encoder",
             "transport",
@@ -20007,6 +20729,21 @@ def run_scenario(
     workloads_exited = False
     server_pid = 0
     client_pid = 0
+    using_ssh = scenario.name.startswith("ssh-")
+    group_order = scenario.name.removeprefix("ssh-group-").rsplit("-", 1)[0] if scenario.name.startswith("ssh-group-") else None
+    if group_order is not None and (group_order not in shutdown_fixture.SCENARIO_ORDERS
+                                    or args.lifecycle != "transport-loss"):
+        raise LabFailure("invalid private-group shutdown scenario")
+    detach_churn = scenario.name.startswith("ssh-detach-churn-")
+    persistent = scenario.name.startswith("ssh-detach-persistent-")
+    if (detach_churn or persistent) and args.lifecycle != "detach":
+        raise LabFailure("invalid detach scenario")
+    lease_pid = 0
+    lease_snapshot: dict | None = None
+    decoder_loss = scenario.name == "decoder-loss"
+    ssh_transport: dict | None = None
+    desktop_snapshots: dict = {}
+    desktop_teardown: dict | None = None
     collected_containers: set[str] = set()
     report: dict[str, Any] = {"name": scenario.name, "result": "failed"}
     try:
@@ -20052,23 +20789,25 @@ def run_scenario(
             network,
             "--network-alias",
             "xpra-server",
-            *live_user_options(),
-            "--device",
-            f"{args.render_node}:{args.render_node}",
-            "--group-add",
-            "keep-groups",
+            *(persistent_server_options() if persistent else live_user_options()),
             "--shm-size",
             "1g",
             "--env",
             "XDG_RUNTIME_DIR=/tmp/server-runtime",
         ]
+        if group_order is None:
+            server_run.extend(["--device", f"{args.render_node}:{args.render_node}", "--group-add", "keep-groups"])
         server_run.append(server_image_id)
+        if persistent:
+            server_run.append("/usr/lib/systemd/systemd")
+            EXEC_USERS[server] = f"{LIVE_CONTAINER_UID}:{LIVE_CONTAINER_GID}"
         containers.append(server)
         server_created = run(server_run).stdout.strip()
         server_id = bind_object("server")
         if server_created != server_id:
             raise LabFailure("server container create output does not match its immutable ID")
         verify_container_image(server, server_image_id)
+        persistent_evidence: dict[str, Any] | None = start_persistent_manager(server) if persistent else None
         if args.application == "zed":
             if zed_archive is None or zed_archive_sha256 is None:
                 raise LabFailure("frozen Zed payload is unavailable")
@@ -20140,6 +20879,29 @@ def run_scenario(
             "server": read_os_release(server),
             "client": read_os_release(client),
         }
+        package_evidence = {}
+        for role, container in (("server", server), ("client", client)):
+            integrity = run([
+                "podman", "exec", "--user", "0", container,
+                "python3", "/opt/xpra-fork-maintenance/package_runtime.py", "verify-payload",
+            ])
+            (directory / f"{role}-package-integrity.json").write_text(integrity.stdout)
+            if integrity.stderr:
+                raise LabFailure(f"unexpected diagnostic during {role} package-owner verification")
+            result = write_command_output(
+                container, ["python3", "/opt/xpra-fork-maintenance/package_runtime.py", "verify"],
+                directory / f"{role}-package-capabilities.json",
+            )
+            if result.stderr:
+                raise LabFailure(f"unexpected diagnostic during {role} package verification")
+            record = json.loads(result.stdout)
+            if json.loads(integrity.stdout) != record:
+                raise LabFailure(f"{role} package-owner and runtime-user observations differ")
+            try:
+                package_runtime.validate_evidence(record, args.package_provenance[role], role)
+            except (KeyError, TypeError, ValueError) as error:
+                raise LabFailure(f"{role} runtime package capabilities do not match frozen DEBs") from error
+            package_evidence[role] = record
         if args.application in {"zed", "hardware", "vkcube"}:
             write_command_output(
                 server,
@@ -20174,6 +20936,9 @@ def run_scenario(
                 ],
                 directory / "client-vainfo.txt",
             )
+            physical_libva_seccomp_probe(
+                client, directory, driver=args.libva_driver, render_node=args.render_node,
+            )
 
         compositor = start_client_desktop(
             client,
@@ -20181,6 +20946,7 @@ def run_scenario(
             hardware=args.encoding == "h264",
             render_node=args.render_node,
         )
+        desktop_snapshots = capture_desktop_processes(client, directory, hardware=args.encoding == "h264")
         if args.application == "clipboard":
             start_x11_clipboard_owner(client)
             run_x11_clipboard_consumer(client, "one", "initial")
@@ -20221,7 +20987,12 @@ def run_scenario(
             server_command.extend(
                 clipboard_cli_options("server", scenario.clipboard_policy)
             )
+        if group_order is not None:
+            server_command.extend(static_cli_options("server", "shutdown"))
+        if detach_churn:
+            server_command.extend(static_cli_options("server", "churn"))
         server_environment = [
+            "PYTHONFAULTHANDLER=1", "PYTHONWARNINGS=always::ResourceWarning",
             "XPRA_SCREEN_UPDATES_DIRECTORY=/artifacts/screen-updates",
         ]
         if args.encoding == "h264":
@@ -20235,12 +21006,34 @@ def run_scenario(
         server_script = (
             "umask 077; install -d -m 0700 /tmp/server-runtime/xpra-sockets "
             "/tmp/server-runtime/xpra-sessions /artifacts/screen-updates; "
-            "printf '%s\\n' \"$$\" > /artifacts/server.pid; "
-            f"exec env {' '.join(shlex.quote(value) for value in server_environment)} "
+            f"env {' '.join(shlex.quote(value) for value in server_environment)} "
             f"{format_command(server_command)} "
-            ">/artifacts/server.stdout 2>/artifacts/server.stderr"
+            ">/artifacts/server.stdout 2>/artifacts/server.stderr & "
+            "child=$!; printf '%s\\n' \"$child\" > /artifacts/server.pid; "
+            'status=0; wait "$child" || status=$?; '
+            'printf \'%s\\n\' "$status" > /artifacts/server.exit; exit "$status"'
         )
-        podman_exec(server, ["bash", "-lc", server_script], detach=True)
+        if persistent:
+            assert persistent_evidence is not None
+            started = podman_exec(server, ["python3", PERSISTENT_FIXTURE_HELPER, "start", json.dumps({
+                "environment": [*server_environment, "XDG_RUNTIME_DIR=/tmp/server-runtime"],
+                "command": ["/usr/bin/xpra", *server_command[1:]],
+            })])
+            persistent_evidence["started"] = json.loads(started.stdout)
+            replace_private_json(directory / "server.persistent-started.json", persistent_evidence["started"])
+        elif group_order is None:
+            podman_exec(server, ["bash", "-lc", server_script], detach=True)
+        else:
+            ssh_transport = start_ssh_transport(server, client, directory)
+            podman_exec(server, ["install", "-d", "-m", "0700", "/tmp/server-runtime/xpra-sockets",
+                                "/tmp/server-runtime/xpra-sessions", "/artifacts/screen-updates"])
+            remote_command = ["env", *server_environment, "python3", SHUTDOWN_FIXTURE_HELPER, "supervise",
+                              group_order, "/usr/bin/python3", "/usr/bin/xpra", *server_command[1:]]
+            lease_pid = launch_ssh_fixture(client, directory, "client.shutdown-lease", [
+                "python3", SHUTDOWN_FIXTURE_HELPER, "heartbeat", *ssh_fixture.ssh_command(),
+                ssh_fixture.HOST, format_command(remote_command),
+            ])
+            lease_snapshot = capture_peer_descendants(client, directory, "client.shutdown-lease", lease_pid)
         server_pid_path = wait_for_container_artifact(
             server,
             directory,
@@ -20248,6 +21041,8 @@ def run_scenario(
             "server PID publication",
         )
         server_pid = int(server_pid_path.read_text().strip())
+        if group_order is not None:
+            wait_for_container_artifact(server, directory, "server.shutdown-ready.json", "private group / portal readiness")
         wait_for_log(
             server,
             server_pid,
@@ -20278,7 +21073,9 @@ def run_scenario(
         )
         client_endpoint = f"xpra-server:{SERVER_PORT}"
         transport_proxy_pid: int | None = None
-        if args.lifecycle == "transport-loss":
+        if using_ssh and ssh_transport is None:
+            ssh_transport = start_ssh_transport(server, client, directory)
+        elif args.lifecycle == "transport-loss" and not using_ssh:
             proxy_script = (
                 "umask 077; printf '%s\\n' \"$$\" "
                 "> /artifacts/transport-proxy.pid; "
@@ -20311,19 +21108,24 @@ def run_scenario(
         client_command = [
             "xpra",
             "attach",
-            f"tcp://{client_endpoint}",
+            ssh_transport["endpoint"] if ssh_transport else f"tcp://{client_endpoint}",
             *static_cli_options("client", "base"),
             *client_network_options(args.network_profile),
             *client_encoding_options,
             *static_cli_options("client", "diagnostics"),
         ]
+        if decoder_loss:
+            client_command[:1] = ["python3", "/opt/xpra-fork-maintenance/decoder_loss_fixture.py"]
+        if ssh_transport:
+            client_command.extend(ssh_transport["options"])
         if args.application == "clipboard":
             if scenario.clipboard_policy is None:
                 raise LabFailure("clipboard scenario has no direction policy")
             client_command.extend(
                 clipboard_cli_options("client", scenario.clipboard_policy)
             )
-        client_environment = [f"DISPLAY={CLIENT_DISPLAY}"]
+        client_environment = [f"DISPLAY={CLIENT_DISPLAY}", "PYTHONFAULTHANDLER=1",
+                              "PYTHONWARNINGS=always::ResourceWarning"]
         if scenario.disable_alpha:
             client_environment.append("XPRA_ALPHA=0")
         if args.encoding == "h264":
@@ -20353,6 +21155,10 @@ def run_scenario(
             "client PID publication",
         )
         client_pid = int(client_pid_path.read_text().strip())
+        wait_for_log(
+            client, client_pid, directory / "client.stdout", "seccomp installed=True",
+            "installed default client decode filter",
+        )
 
         found: tuple[str, str] | None = None
 
@@ -20412,6 +21218,7 @@ def run_scenario(
             application=args.application,
             expected_xpra_wid=xpra_wid,
             sequence_authority=sequence_authority,
+            decoder_loss=decoder_loss,
         )
         geometry = window_geometry(client, window_id)
         write_command_output(
@@ -20452,7 +21259,7 @@ def run_scenario(
                 window_id,
                 directory,
                 application=args.application,
-                expect_content=frame_outcome in {"success", "picture-fallback"},
+                expect_content=frame_outcome in {"success", "picture-fallback", "decoder-recovered"},
             )
         background_rgb = tuple(
             compositor["background_capture"]["image"]["dominant_rgb"]
@@ -20585,6 +21392,12 @@ def run_scenario(
             ):
                 raise LabFailure("Zed did not map the RADV Vulkan driver")
 
+        # The subsurface fixture completes and closes the server during its
+        # interaction phase. Its process ownership must be captured beforehand.
+        peer_snapshots = ({
+            "server": capture_peer_descendants(server, directory, "server", server_pid),
+            "client": capture_peer_descendants(client, directory, "client", client_pid),
+        } if args.application == "subsurface" else {})
         interaction: dict[str, Any] = {"attempted": False}
         hardware_h264_interval: dict[str, Any] | None = None
         if args.application == "zed" and frame_outcome in {
@@ -20624,6 +21437,7 @@ def run_scenario(
             if (
                 args.application in MULTIWINDOW_HARDWARE_APPLICATIONS
                 and args.encoding == "h264"
+                and not decoder_loss
             ):
                 hardware_h264_interval = begin_hardware_h264_stimulus(
                     server,
@@ -20669,15 +21483,19 @@ def run_scenario(
                 xpra_wid=interaction_xpra_wid,
                 sway_socket=compositor.get("sway_socket"),
             )
-            if hardware_h264_interval is None:
-                raise LabFailure("hardware H.264 phase baseline is unavailable")
-            interaction["h264_stimulus"] = finish_hardware_h264_stimulus(
-                server,
-                directory,
-                xpra_wid,
-                hardware_h264_interval,
-                sequence_authority=sequence_authority,
-            )
+            if decoder_loss:
+                write_command_output(server, ["xpra", "info", *command_cli_options("server", "info")],
+                                     directory / "server-info-recovery.txt")
+            else:
+                if hardware_h264_interval is None:
+                    raise LabFailure("hardware H.264 phase baseline is unavailable")
+                interaction["h264_stimulus"] = finish_hardware_h264_stimulus(
+                    server,
+                    directory,
+                    xpra_wid,
+                    hardware_h264_interval,
+                    sequence_authority=sequence_authority,
+                )
             podman_exec(
                 client,
                 [
@@ -20751,6 +21569,20 @@ def run_scenario(
                 directory,
             )
 
+        if not peer_snapshots:
+            peer_snapshots = {
+                "server": capture_peer_descendants(server, directory, "server", server_pid),
+                "client": capture_peer_descendants(client, directory, "client", client_pid),
+            }
+        if ssh_transport:
+            ssh_transport["master_before"] = capture_peer_descendants(
+                client, directory, "client.ssh-master", ssh_transport["master_pid"],
+            )
+            ssh_transport["daemon_before"] = capture_peer_descendants(
+                server, directory, "server.sshd", ssh_transport["daemon_pid"],
+            )
+        if group_order is not None:
+            lease_snapshot = capture_peer_descendants(client, directory, "client.shutdown-lease", lease_pid)
         lifecycle: dict[str, Any] = {"mode": args.lifecycle}
         if application_identity is not None:
             assert server_process_identity is not None
@@ -20817,16 +21649,23 @@ def run_scenario(
                 }
             )
         elif args.lifecycle == "detach":
+            if persistent_evidence is not None:
+                persistent_evidence["before_detach"] = persistent_state(server, directory, "before-detach")
             detach = podman_exec(
                 client,
                 [
+                    "env", "PYTHONFAULTHANDLER=1", "PYTHONWARNINGS=always::ResourceWarning",
                     "xpra",
                     "detach",
-                    f"tcp://xpra-server:{SERVER_PORT}",
+                    ssh_transport["endpoint"] if ssh_transport else f"tcp://xpra-server:{SERVER_PORT}",
                     *command_cli_options("client", "detach"),
+                    *(ssh_transport["options"] if ssh_transport else []),
                 ],
                 check=False,
             )
+            for suffix, content in (("stdout", detach.stdout), ("stderr", detach.stderr),
+                                    ("exit", f"{detach.returncode}\n")):
+                (directory / f"client.detach.{suffix}").write_text(content, encoding="utf-8")
             lifecycle.update(
                 {
                     "detach_returncode": detach.returncode,
@@ -20860,6 +21699,16 @@ def run_scenario(
             )
             if not lifecycle["server_survived_detach"]:
                 raise LabFailure("Xpra server did not survive detach")
+            if persistent_evidence is not None:
+                persistent_evidence["after_detach"] = persistent_state(server, directory, "after-detach")
+            if detach_churn:
+                assert ssh_transport is not None and server_process_identity is not None
+                lifecycle["detach_churn"] = exercise_detach_churn(
+                    server, client, directory, ssh_transport, server_process_identity, [
+                        *static_cli_options("client", "base"), *client_network_options(args.network_profile),
+                        *client_encoding_options, *static_cli_options("client", "diagnostics"),
+                    ],
+                )
             before_termination = require_interaction_fixture_identity(
                 server,
                 application_identity,
@@ -20902,14 +21751,39 @@ def run_scenario(
                 timeout=15,
             )
             lifecycle["server_exited_after_application"] = True
+        elif group_order is not None:
+            assert ssh_transport is not None and lease_snapshot is not None
+            root = ssh_transport["master_before"]["root"]
+            disconnected = podman_exec(client, ["python3", PEER_PROCESSES_HELPER, "stop",
+                                               str(root["pid"]), root["start_ticks"], "KILL"])
+            lifecycle.update({
+                "transport_disconnect_returncode": disconnected.returncode,
+                "transport_disconnect_stdout": disconnected.stdout,
+                "transport_disconnect_stderr": disconnected.stderr,
+                "client_exit_status": wait_for_process_exit(client, client_pid, directory, "client"),
+                "client_exited_after_transport_loss": True,
+            })
+            wait_for_container_artifact(server, directory, "server.shutdown-result.json", "lease-owned group shutdown")
+            pull_container_artifacts(server, directory, ("server.native-exit.json",))
+            lease_status = wait_for_process_exit(client, lease_pid, directory, "client.shutdown-lease")
+            lease_processes = wait_for_peer_reaping(client, directory, "client.shutdown-lease", lease_snapshot)
+            lifecycle["group_shutdown"] = {
+                "ready": json.loads((directory / "server.shutdown-ready.json").read_text()),
+                "result": json.loads((directory / "server.shutdown-result.json").read_text()),
+                "native_exit": json.loads((directory / "server.native-exit.json").read_text()),
+                "lease_exit_status": lease_status, "lease_processes": lease_processes,
+            }
         else:
-            if transport_proxy_pid is None:
+            if transport_proxy_pid is None and not ssh_transport:
                 raise LabFailure("transport-loss profile has no owned TCP proxy")
-            disconnected = podman_exec(
-                client,
-                ["kill", "-KILL", str(transport_proxy_pid)],
-                check=False,
-            )
+            if ssh_transport:
+                root = ssh_transport["master_before"]["root"]
+                disconnected = podman_exec(client, ["python3", PEER_PROCESSES_HELPER, "stop",
+                                                     str(root["pid"]), root["start_ticks"], "KILL"])
+            else:
+                disconnected = podman_exec(
+                    client, ["kill", "-KILL", str(transport_proxy_pid)], check=False,
+                )
             lifecycle.update(
                 {
                     "transport_proxy_pid": transport_proxy_pid,
@@ -20989,6 +21863,21 @@ def run_scenario(
             )
             lifecycle["server_exited_after_application"] = True
 
+        lifecycle["server_exit_status"] = wait_for_process_exit(
+            server, server_pid, directory, "server",
+        )
+        if persistent_evidence is not None:
+            persistent_evidence["after_exit"] = persistent_state(server, directory, "after-exit")
+            pull_container_artifacts(server, directory, ("server.systemd-exit.json",))
+            persistent_evidence["exit_receipt"] = json.loads((directory / "server.systemd-exit.json").read_text())
+            lifecycle["persistent_service"] = persistent_evidence
+        if ssh_transport:
+            lifecycle["ssh_transport"] = finish_ssh_transport(server, client, directory, ssh_transport, args.lifecycle)
+        lifecycle["peer_processes"] = {
+            role: wait_for_peer_reaping(container, directory, role, peer_snapshots[role],
+                                        reap_direct=not (role == "server" and group_order == shutdown_fixture.ABORT_CONTROL))
+            for role, container in (("server", server), ("client", client))
+        }
         if args.application == "clipboard":
             # Keep the independent root subscription until the Xpra client has
             # really exited. A delayed forbidden token cannot escape the oracle
@@ -20999,6 +21888,7 @@ def run_scenario(
                 directory / CLIPBOARD_TRANSITIONS_ARTIFACT, interaction["transitions"],
             )
             stop_x11_clipboard_owner(client)
+        desktop_teardown = stop_desktop_writers(client, directory, desktop_snapshots)
         workloads_exited = True
         if args.application == "subsurface":
             source_wids = {
@@ -21088,6 +21978,7 @@ def run_scenario(
         elif (
             args.application in MULTIWINDOW_HARDWARE_APPLICATIONS
             and args.encoding == "h264"
+            and not decoder_loss
         ):
             stimulus = interaction.get("h264_stimulus")
             if not isinstance(stimulus, dict):
@@ -21118,6 +22009,13 @@ def run_scenario(
                 interaction_updates,
             )
         log_evidence = inspect_logs(directory)
+        client_log = "\n".join(
+            (directory / name).read_text(encoding="utf-8", errors="replace")
+            for name in ("client.stdout", "client.stderr")
+        )
+        log_evidence["decode_seccomp"] = decode_seccomp_evidence(
+            client_log, hardware=args.encoding == "h264" and not decoder_loss,
+        )
         direct_evidence = direct
         focused_evidence = focused_screen
         direct_rgb_path = directory / "window-direct.rgb.png"
@@ -21128,6 +22026,10 @@ def run_scenario(
             window_size_value = (
                 stimulus.get("window_size") if isinstance(stimulus, dict) else None
             )
+            if decoder_loss:
+                window_size_value = decoder_recovery.viewport_size(
+                    (directory / "server-info-recovery.txt").read_text(encoding="utf-8"), xpra_wid,
+                )
             if (
                 not isinstance(window_size_value, list)
                 or len(window_size_value) != 2
@@ -21200,12 +22102,21 @@ def run_scenario(
             "application": application_gpu,
             "render_node": str(args.render_node),
         }
+        recovery = None
+        if decoder_loss:
+            recovery = decoder_recovery.evaluate(
+                client_log=client_log,
+                server_log=(directory / "server.stderr").read_text(encoding="utf-8", errors="replace"),
+                server_info=(directory / "server-info-recovery.txt").read_text(encoding="utf-8"),
+                packets=updates["updates"], window_id=xpra_wid, client_pid=client_pid,
+            )
         if args.encoding == "h264":
             hardware["client_desktop"] = compositor
             hardware["client_graphics_process"] = client_graphics
             hardware["server_vaapi_h264"] = bool(
                 server_vainfo and "VAProfileH264" in server_vainfo.stdout
             )
+        if args.encoding == "h264" and not decoder_loss:
             h264_production_updates = updates
             allow_alpha_gaps = False
             allow_lossless_rgb_edges = args.h264_client_policy == "adaptive-alpha"
@@ -21258,6 +22169,7 @@ def run_scenario(
             pixel_evidence=pixel_evidence,
             lifecycle=lifecycle,
             interaction_updates=interaction_updates,
+            recovery=recovery,
         )
         report = {
             "application": args.application,
@@ -21275,8 +22187,10 @@ def run_scenario(
                 "network_options": client_network_options(args.network_profile),
                 "os_release": operating_systems["client"],
                 "version": versions["client"],
+                "packages": package_evidence["client"],
             },
             "clipboard_policy": scenario.clipboard_policy,
+            "desktop_teardown": desktop_teardown,
             "encoding": args.encoding,
             "h264_client_policy": args.h264_client_policy,
             "hardware": hardware,
@@ -21304,6 +22218,7 @@ def run_scenario(
                 ),
                 "os_release": operating_systems["server"],
                 "version": versions["server"],
+                "packages": package_evidence["server"],
             },
             "updates": updates,
             "window": {
@@ -21316,6 +22231,8 @@ def run_scenario(
         }
         if sequence_authority is not None:
             report["packet_sequence_authority"] = sequence_authority
+        if recovery is not None:
+            report["decoder_recovery"] = recovery
         if interaction_window is not None:
             report["interaction_window"] = {
                 "id": interaction_window[0],
@@ -21334,6 +22251,27 @@ def run_scenario(
         return report
     except BaseException as error:
         report["failure"] = str(error)
+        if group_order is not None and not workloads_exited:
+            report["shutdown_fixture_failure"] = end_group_lease_after_failure(
+                server, client, directory, lease_pid, lease_snapshot,
+            )
+        if ssh_transport and not workloads_exited:
+            helper_cleanup = []
+            for container, role, key in ((client, "client.ssh-master", "master"), (server, "server.sshd", "daemon")):
+                try:
+                    pid = ssh_transport[f"{key}_pid"]
+                    if container_process_exists(container, pid):
+                        stop_ssh_fixture(container, ssh_transport[f"{key}_before"], "TERM")
+                    status = wait_for_process_exit(container, pid, directory, role)
+                    helper_cleanup.append({"role": role, "status": status})
+                except BaseException as fixture_error:  # noqa: BLE001
+                    helper_cleanup.append({"role": role, "error": str(fixture_error)})
+            report["ssh_fixture_failure_cleanup"] = helper_cleanup
+        group_quiescent = True
+        if group_order is not None and not workloads_exited:
+            group_quiescence = quiesce_group_server_after_failure(server, directory)
+            report["shutdown_fixture_quiescence"] = group_quiescence
+            group_quiescent = bool(group_quiescence.get("quiescent"))
         if not workloads_exited:
             quiescence = quiesce_failed_workloads(
                 (
@@ -21342,13 +22280,19 @@ def run_scenario(
                 )
             )
             report["failure_quiescence"] = quiescence
-            workloads_exited = bool(quiescence["passed"])
+            workloads_exited = bool(quiescence["passed"]) and group_quiescent
         (directory / "report.json").write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         raise
     finally:
+        if workloads_exited and desktop_snapshots and desktop_teardown is None:
+            try:
+                desktop_teardown = stop_desktop_writers(client, directory, desktop_snapshots)
+                report["desktop_teardown"] = desktop_teardown
+            except BaseException as desktop_error:  # noqa: BLE001 - retain the original scenario failure
+                report["desktop_teardown_error"] = str(desktop_error)
         artifact_collection: list[dict[str, str]] = []
         roles = {server: "server", client: "client"}
         for container in containers:
@@ -21410,6 +22354,7 @@ def run_scenario(
                 cleanup["containers"].append(removal)
                 item["state"] = removal["status"]
                 replace_private_json(ledger_path, ledger)
+                EXEC_USERS.pop(container, None)
             if network_created:
                 network_item = ledger["objects"]["network"]
                 cleanup["network"] = remove_owned_podman_object(
@@ -21670,6 +22615,7 @@ def main() -> int:
             state_root,
             snapshot,
             server_selection,
+            package_runs=configured_package_runs(),
         )
         client_context = server_context
         validate_endpoint_contexts(
@@ -21707,6 +22653,7 @@ def main() -> int:
         raise LabFailure("frozen live input manifest has an unsupported schema")
     args.selected_case_slugs = server_selection.case_slugs
     args.selected_selection_sha256 = server_selection.digest
+    args.package_provenance = input_provenance["packages"]
     commit = snapshot.commit
     server_context_digest = server_context.digest
     client_context_digest = client_context.digest
@@ -21787,6 +22734,7 @@ def main() -> int:
             for name, disable_alpha in scenario_specs(
                 alpha_scenarios=args.alpha_scenarios,
                 lifecycle=args.lifecycle,
+                application=args.application, encoding=args.encoding,
             )
         ]
     aggregate: dict[str, Any] = {

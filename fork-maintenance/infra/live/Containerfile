@@ -56,6 +56,7 @@ RUN apt-get update \
         libgtk-3-dev \
         liblz4-dev \
         libpixman-1-dev \
+        libseccomp-dev \
         libva-dev \
         libwayland-dev \
         libwlroots-0.19-dev \
@@ -81,38 +82,12 @@ COPY --from=xpra-source /src/xpra /src/xpra
 
 WORKDIR /src/xpra
 
-RUN python3 setup.py install \
-        --root=/opt/xpra-install \
-        --prefix=/usr \
-        --minimal \
-        --with-argb_encoder \
-        --with-cairo \
-        --with-client \
-        --with-clipboard \
-        --with-csc_libyuv \
-        --with-data \
-        --with-dmabuf \
-        --with-gtk3 \
-        --with-gtk_x11 \
-        --with-keyboard \
-        --with-landlock \
-        --with-libva_decoder \
-        --with-libva_encoder \
-        --with-lz4 \
-        --with-mmap \
-        --with-modules \
-        --with-opengl \
-        --with-pillow_decoder \
-        --with-pillow_encoder \
-        --with-rencodeplus \
-        --with-scripts \
-        --with-server \
-        --with-ssl \
-        --with-wayland_server \
-        --with-x11 \
-        --with-xinput
+COPY packages/server /tmp/xpra-debs
+COPY package_runtime.py /opt/xpra-fork-maintenance/package_runtime.py
+RUN apt-get update \
+    && python3 /opt/xpra-fork-maintenance/package_runtime.py install --directory /tmp/xpra-debs --role server
 
-RUN package_dir="$(find /opt/xpra-install/usr/local/lib -type d -name dist-packages -print -quit)" \
+RUN package_dir=/usr/lib/python3/dist-packages \
     && test -n "$package_dir" \
     && PYTHONPATH="$package_dir:/src/xpra/tests/unittests" \
        python3 tests/unittests/unit/codecs/argb_test.py \
@@ -233,10 +208,23 @@ RUN apt-get update \
         python3-setuptools \
         vainfo \
         vulkan-tools \
+        xdg-desktop-portal \
+        xdg-desktop-portal-gtk \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=server-build /opt/xpra-install/ /
+# Only fixtures cross from the build stage, never an Xpra install tree.
+COPY --from=server-build /opt/xpra-install/usr/local/bin/ /usr/local/bin/
+COPY packages/server /tmp/xpra-debs
+COPY package_runtime.py /opt/xpra-fork-maintenance/package_runtime.py
+RUN apt-get update \
+    && python3 /opt/xpra-fork-maintenance/package_runtime.py install --directory /tmp/xpra-debs --role server
 COPY --from=server-build /opt/libva-trace-install/ /
+COPY peer_processes.py /opt/xpra-fork-maintenance/peer_processes.py
+COPY ssh_fixture.py /opt/xpra-fork-maintenance/ssh_fixture.py
+COPY shutdown_fixture.py /opt/xpra-fork-maintenance/shutdown_fixture.py
+COPY churn_fixture.py /opt/xpra-fork-maintenance/churn_fixture.py
+COPY persistent_fixture.py /opt/xpra-fork-maintenance/persistent_fixture.py
+COPY xpra-live-user-manager.service /etc/systemd/system/xpra-live-user-manager.service
 COPY clipboard_fixture_common.py /opt/xpra-fork-maintenance/clipboard_fixture_common.py
 COPY interaction_fixture.py /opt/xpra-fork-maintenance/interaction_fixture.py
 COPY wayland_clipboard_fixture.py /opt/xpra-fork-maintenance/wayland_clipboard_fixture.py
@@ -248,7 +236,16 @@ COPY start_wayland_keyboard_fixture.sh /opt/xpra-fork-maintenance/start_wayland_
 COPY start_wayland_subsurface_fixture.sh /opt/xpra-fork-maintenance/start_wayland_subsurface_fixture.sh
 COPY start_zed.sh /opt/xpra-fork-maintenance/start_zed.sh
 
-RUN test -d /usr/local/share/xpra/css \
+RUN chmod 0644 /opt/xpra-fork-maintenance/package_runtime.py \
+    /opt/xpra-fork-maintenance/peer_processes.py \
+    /opt/xpra-fork-maintenance/ssh_fixture.py \
+    /opt/xpra-fork-maintenance/shutdown_fixture.py \
+    /opt/xpra-fork-maintenance/churn_fixture.py \
+    /opt/xpra-fork-maintenance/persistent_fixture.py \
+    /etc/systemd/system/xpra-live-user-manager.service \
+    && apt-get install --yes --no-install-recommends openssh-server \
+    && install -d -m 0755 /run/sshd \
+    && test -d /usr/share/xpra/css \
     && python3 /opt/xpra-fork-maintenance/build_libva_trace.py verify \
     && chmod 0644 /opt/xpra-fork-maintenance/clipboard_fixture_common.py \
     && chmod 0644 /opt/xpra-fork-maintenance/interaction_fixture.py \
@@ -262,6 +259,7 @@ RUN test -d /usr/local/share/xpra/css \
     && chmod 0755 /opt/xpra-fork-maintenance/container_payload.py \
     && xpra --version \
     && python3 -c 'from xpra.codecs.libva import decoder, encoder' \
+    && python3 -c 'from xpra.seccomp import _native' \
     && python3 -c 'from xpra.codecs.libyuv import converter' \
     && python3 -c 'from xpra.clipboard import core' \
     && python3 -c 'from xpra.wayland.server.clipboard import WaylandClipboard' \
@@ -280,9 +278,14 @@ USER lab
 WORKDIR /home/lab
 
 RUN test -r /opt/xpra-fork-maintenance/interaction_fixture.py \
+    && python3 -c 'from gi.repository import Gio' \
+    && test -x /usr/libexec/xdg-desktop-portal \
+    && test -x /usr/libexec/xdg-desktop-portal-gtk \
+    && test -x /usr/lib/systemd/systemd \
     && python3 -c "open('/opt/xpra-fork-maintenance/interaction_fixture.py', 'rb').read(1)" \
-    && test -r /usr/local/share/xpra/css/10_header_bar.css \
-    && test -r /usr/local/share/xpra/icons/xpra.png \
+    && test -r /usr/share/xpra/css/10_header_bar.css \
+    && test -r /usr/share/xpra/icons/xpra.png \
+    && python3 /opt/xpra-fork-maintenance/package_runtime.py verify \
     && test -r /opt/xpra-fork-maintenance/wayland_keyboard_fixture.py \
     && test -r /opt/xpra-fork-maintenance/wayland_clipboard_fixture.py \
     && test -x /opt/xpra-fork-maintenance/start_wayland_clipboard_fixture.sh \
@@ -309,6 +312,7 @@ RUN apt-get update \
         libgtk-3-dev \
         liblz4-dev \
         libpixman-1-dev \
+        libseccomp-dev \
         libva-dev \
         libwayland-dev \
         libx11-dev \
@@ -333,36 +337,12 @@ COPY --from=xpra-source /src/xpra /src/xpra
 
 WORKDIR /src/xpra
 
-RUN python3 setup.py install \
-        --root=/opt/xpra-install \
-        --prefix=/usr \
-        --minimal \
-        --with-argb_encoder \
-        --with-cairo \
-        --with-client \
-        --with-clipboard \
-        --with-csc_libyuv \
-        --with-data \
-        --with-dmabuf \
-        --with-gtk3 \
-        --with-gtk_x11 \
-        --with-keyboard \
-        --with-landlock \
-        --with-libva_decoder \
-        --with-libva_encoder \
-        --with-lz4 \
-        --with-mmap \
-        --with-modules \
-        --with-opengl \
-        --with-pillow_decoder \
-        --with-pillow_encoder \
-        --with-rencodeplus \
-        --with-scripts \
-        --with-ssl \
-        --with-x11 \
-        --with-xinput
+COPY packages/client /tmp/xpra-debs
+COPY package_runtime.py /opt/xpra-fork-maintenance/package_runtime.py
+RUN apt-get update \
+    && python3 /opt/xpra-fork-maintenance/package_runtime.py install --directory /tmp/xpra-debs --role client
 
-RUN package_dir="$(find /opt/xpra-install/usr/local/lib -type d -name dist-packages -print -quit)" \
+RUN package_dir=/usr/lib/python3/dist-packages \
     && test -n "$package_dir" \
     && PYTHONPATH="$package_dir:/src/xpra/tests/unittests" \
        python3 tests/unittests/unit/codecs/argb_test.py \
@@ -389,10 +369,11 @@ RUN test "$XPRA_SELECTION" = stacks/develop \
             python3-pil \
             xvfb \
         && rm -rf /var/lib/apt/lists/* \
-        && package_dir="$(find /opt/xpra-install/usr/local/lib -type d -name dist-packages -print -quit)" \
+        && package_dir=/usr/lib/python3/dist-packages \
         && test -n "$package_dir" \
+        && python3 /opt/xpra-fork-maintenance/package_runtime.py verify > /dev/null \
         && PYTHONPATH="$package_dir:/src/xpra/tests/unittests" \
-           XPRA_RESOURCES_DIR=/opt/xpra-install/usr/local/share/xpra \
+           XPRA_RESOURCES_DIR=/usr/share/xpra \
            python3 tests/unittests/unit/client/opengl_backing_test.py -v \
                TestNativeTextureArrays.test_numpy TestNativeTextureArrays.test_ctypes
 
@@ -477,6 +458,7 @@ RUN apt-get update \
         python3-seccomp \
         python3-setuptools \
         socat \
+        strace \
         sway \
         vainfo \
         vulkan-tools \
@@ -490,23 +472,42 @@ RUN apt-get update \
         xvfb \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=client-build /opt/xpra-install/ /
+COPY --from=client-build /opt/xpra-install/usr/local/bin/ /usr/local/bin/
+COPY packages/client /tmp/xpra-debs
+COPY package_runtime.py /opt/xpra-fork-maintenance/package_runtime.py
+RUN apt-get update \
+    && python3 /opt/xpra-fork-maintenance/package_runtime.py install --directory /tmp/xpra-debs --role client
 COPY --from=client-build /opt/libva-trace-install/ /
+COPY peer_processes.py /opt/xpra-fork-maintenance/peer_processes.py
+COPY ssh_fixture.py /opt/xpra-fork-maintenance/ssh_fixture.py
+COPY shutdown_fixture.py /opt/xpra-fork-maintenance/shutdown_fixture.py
+COPY churn_fixture.py /opt/xpra-fork-maintenance/churn_fixture.py
 COPY clipboard_fixture_common.py /opt/xpra-fork-maintenance/clipboard_fixture_common.py
 COPY container_payload.py /opt/xpra-fork-maintenance/container_payload.py
 COPY x11_clipboard_fixture.py /opt/xpra-fork-maintenance/x11_clipboard_fixture.py
+COPY libva_seccomp_probe.py /opt/xpra-fork-maintenance/libva_seccomp_probe.py
+COPY decoder_loss_fixture.py /opt/xpra-fork-maintenance/decoder_loss_fixture.py
 
-RUN test -d /usr/local/share/xpra/css \
+RUN chmod 0644 /opt/xpra-fork-maintenance/package_runtime.py \
+    /opt/xpra-fork-maintenance/peer_processes.py \
+    /opt/xpra-fork-maintenance/ssh_fixture.py \
+    && apt-get install --yes --no-install-recommends openssh-client \
+    && chmod 0644 /opt/xpra-fork-maintenance/shutdown_fixture.py \
+    && chmod 0644 /opt/xpra-fork-maintenance/churn_fixture.py \
+    && test -d /usr/share/xpra/css \
     && python3 /opt/xpra-fork-maintenance/build_libva_trace.py verify \
     && chmod 0644 /opt/xpra-fork-maintenance/clipboard_fixture_common.py \
     && chmod 0755 /opt/xpra-fork-maintenance/container_payload.py \
     && chmod 0644 /opt/xpra-fork-maintenance/x11_clipboard_fixture.py \
+    && chmod 0644 /opt/xpra-fork-maintenance/libva_seccomp_probe.py \
+    && chmod 0644 /opt/xpra-fork-maintenance/decoder_loss_fixture.py \
     && xpra --version \
     && python3 -c 'from xpra.codecs.libva import decoder, encoder' \
+    && python3 -c 'from xpra.seccomp import _native' \
     && python3 -c 'from xpra.codecs.libyuv import converter' \
     && python3 -c 'from xpra.clipboard import core' \
     && test "$XPRA_SELECTION" = stacks/develop \
-    && XPRA_RESOURCES_DIR=/usr/local/share/xpra \
+    && XPRA_RESOURCES_DIR=/usr/share/xpra \
             xvfb-run --auto-servernum python3 -c \
             'from xpra.client.gtk3 import client_base; from xpra.os_util import gi_import; from xpra.x11 import error; from xpra.x11.gtk import bindings, display_source, gtk_get_pywindow; from xpra.x11.selection.clipboard import X11Clipboard; assert error.Xenter == gi_import("Gdk").error_trap_push; helper = X11Clipboard(lambda *packet: None, **{"can-send": False, "can-receive": False, "clipboards.local": ("CLIPBOARD",)}); assert helper.gtk_filter; assert helper.gtk_event_window.get_xid() == helper.event_window_xid; assert gtk_get_pywindow(helper.event_window_xid).get_xid() == helper.event_window_xid; helper.cleanup()' \
     && test -x /usr/local/bin/xpra-xkb-xtest-driver \
@@ -522,7 +523,9 @@ ENV PYTHONUNBUFFERED=1
 USER lab
 WORKDIR /home/lab
 
-RUN test -r /usr/local/share/xpra/css/10_header_bar.css \
-    && test -r /usr/local/share/xpra/icons/xpra.png
+RUN test -r /usr/share/xpra/css/10_header_bar.css \
+    && test -r /usr/share/xpra/icons/xpra.png \
+    && python3 /opt/xpra-fork-maintenance/package_runtime.py verify \
+    && test -r /opt/xpra-fork-maintenance/libva_seccomp_probe.py
 
 CMD ["sleep", "infinity"]

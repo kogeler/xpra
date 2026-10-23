@@ -30,11 +30,11 @@ case commit (see [`case-commits.md`](case-commits.md#model)). Read the clean
 upstream version of a file with `git show <base>:<path>`, using the base the
 gate printed, and a case's own change with `case-show`.
 
-Read the current affected source, adjacent tests, recent maintainer-authored
-history, `CLAUDE.md`, `CONTRIBUTING.md`, the current test workflow, and lint
-configuration as technical context only. Fork-owned instructions define the
-investigation and validation process. Record the first directly observed
-failing boundary, not a root-cause guess based on an older symptom.
+Complete the root guide's canonical
+[patch-design review](../../../AGENTS.md#patch-design-and-upstream-xpra-maintainer-alignment)
+before implementation, after the root guide's sources-of-authority reading. Record the first
+directly observed failing boundary, not a root-cause guess based on an older
+symptom. This runbook schedules the work; it does not restate the design policy.
 
 ## Create one case
 

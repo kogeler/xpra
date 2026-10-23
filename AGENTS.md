@@ -34,6 +34,11 @@ byte-for-byte against the workflow at the source boundary embedded in current
 `case.toml` and README, and its commit
 (`make -C fork-maintenance case-show CASE=<id>`).
 
+Every product patch also requires the
+[patch-design review](#patch-design-and-upstream-xpra-maintainer-alignment) below before
+implementation and before candidate freeze. That section is the single
+canonical rule; other fork documents link to it rather than restating it.
+
 Reading upstream material supplies technical context about APIs, build/test
 commands, dependencies, lint configuration, and source behavior only. It does
 not make upstream development or CI procedures binding on this fork. For
@@ -268,7 +273,18 @@ The currently retained active cases, in stack order, are:
 - `packet-handler-error-boundary`;
 - `gtk-client-scroll-deduplication`;
 - `server-shutdown-disconnect-flush`;
-- `printing-cli-timer-cleanup`.
+- `printing-cli-timer-cleanup`;
+- `libva-decoder-display-lifetime`;
+- `seccomp-build-switch`;
+- `window-client-properties-deltas`;
+- `video-decoder-capability-loss`;
+- `window-unmap-log-format`;
+- `ssh-tunnel-close-owner`;
+- `protocol-parse-start-lifecycle`;
+- `gtk-css-package-ownership`;
+- `signalwatcher-resource-lifecycle`;
+- `ssh-proxy-final-delivery`;
+- `wayland-popup-opaque-region`.
 
 There is currently no active quarantine duty case, but
 `fork-maintenance/cases/upstream-test-quarantine/` is permanent infrastructure.
@@ -336,12 +352,73 @@ the entire upstream project, suppress a global baseline, or repair unrelated
 upstream typing. Report the actual checked scope; static checks never replace
 native regressions or the mandatory complete live suite.
 
-Search current source, adjacent tests, and recent maintainer-authored history
-before editing. Preserve client/server subsystem boundaries, feature toggles,
-codec discovery, platform gates, and pkg-config authority. Do not add preload
-tricks, import-order dependencies, polling, application-specific workarounds,
-or build-only logic to the installed package. Avoid unrelated refactors and
-formatting churn.
+### Patch design and upstream Xpra maintainer alignment
+
+Here **upstream** means the canonical
+[`Xpra-org/xpra` repository](https://github.com/Xpra-org/xpra), and **the main
+maintainer** means Antoine Martin (`totaam`). This rule concerns alignment with
+that upstream project's architecture and his technical review decisions, not
+the preferences of this fork's owner (`kogeler`) or its agents. Study issues,
+PR discussions and resulting changes in the canonical upstream repository;
+our fork's history alone is not a substitute.
+
+This is the mandatory design rule for every new, changed or reassessed product
+case, including fixes discovered during testing. Apply it before choosing and
+implementing a solution; repeat the affected analysis after a material design
+change and before candidate freeze. Treat Xpra as one project: resolving the
+reported symptom or passing a regression does not establish that the patch is
+architecturally appropriate or maintainable.
+
+1. **Understand the owning design.** Read the current surrounding code and
+   adjacent tests, then trace callers, consumers, state/resource ownership and
+   cleanup beyond the edited function and subsystem. Find existing solutions
+   to the same class of problem elsewhere in Xpra; identify the intended
+   extension point and which layer should own the correction.
+2. **Study the upstream maintainer's decisions.** Examine relevant maintainer-authored
+   commits and their follow-ups, plus related closed issues and PRs, including
+   accepted alternatives, rejected approaches and review comments. Prioritize
+   the main maintainer's explanations and previous feedback on our proposals.
+   Read the actual discussion and resulting code, not just titles, merge status
+   or an old patch. Record specific references and the technical constraints
+   they establish; do not invent a maintainer preference or imply approval.
+3. **Check project-wide consequences.** Follow the proposed change through
+   other callers/backends, client/server and subsystem boundaries, feature and
+   platform gates, codec discovery, configuration/defaults, compatibility,
+   threading, failure paths and shutdown, as applicable. Reconcile old feedback
+   with current code. Explain relevant unaffected paths and test blind spots;
+   do not limit the review to the reproducer or to files in the proposed diff.
+4. **Choose the smallest coherent correction.** Prefer the existing owner,
+   API and lifecycle mechanism. Compare plausible alternatives and justify
+   every production hunk, new state, lock, helper or abstraction by a demonstrated
+   requirement. Minimal means sufficient and correctly placed, not merely fewest
+   lines. Do not bundle independent fixes, speculative hardening, unrelated
+   refactors, formatting churn or new frameworks. Do not add preload tricks,
+   import-order dependencies, polling, application-specific workarounds or
+   build-only logic to the installed package; preserve pkg-config authority.
+   If an existing invariant already handles a path, reuse it instead of adding
+   a second mechanism. Necessary wider repairs require an explicit causal
+   explanation and appropriate atomic case ownership.
+5. **Review the resulting patch, not only the plan.** Re-read the complete
+   case diff in the composed project and ask whether it adds avoidable coupling,
+   duplicates existing machinery, changes unrelated behavior or makes later
+   maintenance harder. Address applicable prior review objections explicitly.
+   Put durable precedents, design choice, rejected alternatives and cross-project
+   effects in the case README's existing context/mechanism/ownership sections,
+   naming which relevant material was reviewed and which could not be; keep
+   searches, transient findings and dated observations in the session ledger.
+   An unresolved design objection does not pass the review merely because tests
+   are green. Upstream acceptance remains the maintainer's decision.
+
+Research uses only existing authority. When network access is permitted, look
+up the relevant public issues/PRs read-only; do not fetch, move the embedded
+base, post comments or change PRs as an implied part of research. If external
+discussion is unavailable or forbidden, use local history and already available
+feedback, record exactly what could not be checked, and request direction if
+that gap prevents a justified design. Never claim to have reviewed unavailable
+material. Maintainer discussions are technical evidence, not authority over
+this fork's workflow, validation, cleanup or publication.
+
+### Change hygiene
 
 Work on one atomic behavior at a time. Preserve unrelated user changes and
 remotes. Never reset, clean, or switch a non-clean checkout automatically.
@@ -386,6 +463,8 @@ remote fork `master` from `Xpra-org/xpra:master` through `gh repo sync` without
 merge, rebase, or publish `develop`. Agent dispatch requires a separate explicit
 operator request; ordinary case work and refresh do not authorize it.
 
+Package version identity follows the single
+[downstream-revision rule](fork-maintenance/docs/runbooks/deb-packages.md#package-version-identity).
 The package-release workflow is manual-only and branch-agnostic. Its six-hour
 job checks out full history for the operator-selected revision without
 persisting credentials and invokes only
@@ -494,6 +573,9 @@ no-replace link; the common helper has no named generic fallback.
 Use the canonical [development and final-acceptance flow](fork-maintenance/docs/runbooks/validation.md)
 for new cases, existing-case review and upstream-rebase adaptation. Required
 gates define final coverage, not a sequence to repeat after every edit.
+Its [runtime acceptance rule](fork-maintenance/docs/runbooks/validation.md#runtime-acceptance-represents-the-shipped-product)
+is the single authority for shipped-package fidelity, active-capability proof,
+failure-transition coverage, asynchronous-error auditing and explicit limits.
 
 An explicit upstream refresh first completes an incremental manual
 review-and-implementation pass after the rebase has replayed the case commits.
@@ -545,8 +627,9 @@ Full upstream unit suites are not a prerequisite
 for live diagnosis or acceptance.
 Stop escalation at the first unexplained failure and investigate its owner.
 
-Do not automatically run the full upstream matrix or both DEB builds after an
-intermediate correction. Freeze a reviewed candidate
+Do not automatically run the full upstream matrix or rebuild unchanged DEB
+artifacts after an intermediate correction. Live uses the matching exact
+packages required by the canonical runtime rule. Freeze a reviewed candidate
 only when source, tests, fixtures/oracles and build inputs are stable; then fill
 missing or invalidated final gates. The full queue/rebase acceptance still
 requires clean controls/quarantine, focused/native and full fork-control checks,

@@ -1,4 +1,4 @@
-# Flush the shutdown disconnect before closing client protocols
+# Flush the disconnect before closing detached client protocols
 
 Code: the `Fork-Case: server-shutdown-disconnect-flush` commit on `develop`
 (`make -C fork-maintenance case-show CASE=server-shutdown-disconnect-flush`).
@@ -55,8 +55,22 @@ Evidence:
 
 Whether the packet gets out depends on thread scheduling and on what the
 client sends while the server shuts down, so most exits deliver it.
-Disconnects outside server shutdown (a kicked or replaced client) can also
-meet the first way; they are not part of this case, see the non-goals.
+
+`xpra detach` meets the first way while the server keeps running. The server
+handles the detach request on the command's connection, calls
+`disconnect_client(p, DETACH_REQUEST)` for the attached client, and
+`disconnect_protocol()` queues its `connection-close` packet and detaches it.
+An attached client is usually still sending (pointer motion, draw
+acknowledgements, window churn), and its next packet reaches
+`handle_invalid_packet()`, which closed the protocol at once because the
+server was not shutting down. The client then exits with status 1 although
+the detach command reports success: the failure form of the detach checks
+reported for 8.0. A server traced with `-d events` showed the
+`connection-close` packet queued but not yet written ("sent=False"), then
+`Protocol.close()` called from the parse thread through
+`dispatch_packet()` -> `handle_invalid_packet()` -> `proto.close()` within the
+same millisecond. Kicked or replaced clients take the same route. The case
+therefore protects every detached protocol, not only shutdown.
 
 ## Embedded-source context
 
@@ -116,8 +130,8 @@ uses `window-focus`, not the removed `focus` wire alias. Missing old forwarders
 must not become a false clean-source failure. An upstream replacement must establish, for every
 server class derived from `ServerCore`/`ServerBase`:
 
-- a packet received during shutdown from a protocol without a source does not
-  close that protocol;
+- a packet received from a detached protocol (disconnected by shutdown, a
+  detach request or a replacement) does not close that protocol;
 - `flush_then_close()` considers the last packet sent only once the write
   thread has finished writing it;
 - there is a flush opportunity between queuing the disconnect packets and the
@@ -131,7 +145,7 @@ server class derived from `ServerCore`/`ServerBase`:
 | `ServerCore.cleanup()` | Shared subsystem cleanup dispatch, network protocol cleanup, `do_cleanup()`, network socket cleanup, asyncio loop stop. |
 | `NetworkServer.disconnect_protocol()` / `ServerCore.cleanup_protocol()` | Log `Disconnecting client`, `protocol.send_disconnect(reasons)`, then detach the protocol: remove it from `network._potential_protocols` and its source from `client-session`. |
 | `ServerCore.process_packet()` / `PacketDispatcher.dispatch_packet()` | Parse thread: route each packet by type and by whether the protocol still has a source; unknown ones go to `handle_invalid_packet()`. |
-| `ServerCore.handle_invalid_packet()` | Logs unexpected packets and closes protocols without a source; with this case not while the server is closing. |
+| `ServerCore.handle_invalid_packet()` | Logs unexpected packets and closes protocols without a source; with this case not once they are detached, whose disconnect owns their close. |
 | `SocketProtocol.do_flush_then_close()` | Best effort: takes the write lock, waits for the write queue, queues the last packet and closes once it is sent (checked at once, then by GLib timers, with a 5 s fallback). With this case "sent" means that the write thread finished that queue item. |
 | Protocol write thread (`_write()`, `write_items()`, `write_buffers()`) | Daemon thread: takes one item off the write queue, writes it and stops writing once the protocol is closed. With this case it marks each item done (`task_done()`) after writing it. |
 | `ServerBase.do_cleanup()` | Emits the `exit` server event; with this case it also keeps `ServerCore`'s flush interval. |
@@ -157,27 +171,32 @@ clean_quit                              _closing = True
 
 ## Mechanism and lifecycle
 
-### Late client packets during shutdown
+### Late client packets after a disconnect
 
-A client keeps sending while the server shuts down: pointer, focus and window
-packets, for example the `focus` and `window-unmap` packets which a client
-sends when the application's window disappears just before
-`--exit-with-children` ends the server. Once `cleanup_protocol()` has detached
-the protocol, such a packet is no longer authenticated, has no unauthenticated
-handler and reaches `handle_invalid_packet()` on the parse thread, which closed
-the protocol immediately. `close()` sets `_closed`, closes the socket and
-replaces the write queue; the disconnect packet is dropped or cut off, and the
-client sees the connection end without it.
+A client keeps sending while the server disconnects it: pointer, focus and
+window packets, for example the `focus` and `window-unmap` packets which a
+client sends when the application's window disappears just before
+`--exit-with-children` ends the server, or the pointer motion and draw
+acknowledgements of a busy client being detached. Once `cleanup_protocol()`
+has detached the protocol, such a packet is no longer authenticated, has no
+unauthenticated handler and reaches `handle_invalid_packet()` on the parse
+thread, which closed the protocol immediately. `close()` sets `_closed`,
+closes the socket and replaces the write queue; the disconnect packet is
+dropped or cut off, and the client sees the connection end without it.
 
-With this case `handle_invalid_packet()` does not close a protocol without a
-source while `self._closing` is set; logging is unchanged (detached protocols
-are only debug-logged, and errors were already suppressed while closing).
-During shutdown every protocol which the server has registered is
-disconnected by `cleanup_all_protocols()` in the same `cleanup()`, and every
-detached protocol has its disconnect in flight: `flush_then_close()` closes it
-once the packet is sent (if the main loop still runs), and otherwise the
-process exit does. Outside shutdown, packets from protocols without a source
-still close them as upstream intends.
+With this case `handle_invalid_packet()` does not close a *detached* protocol:
+one without a source which is not a potential protocol either (upstream's own
+`detached` classification). Every way a protocol becomes detached already has
+an owner which closes it: `disconnect_protocol()` queued its disconnect and
+`flush_then_close()` closes it once the packet is sent (or after its 5 s
+fallback); `force_disconnect()` closes it right after detaching it; a lost
+connection is closed already; an ssl/rfb upgrade has stolen its connection.
+Logging is unchanged (detached protocols are only debug-logged). A protocol
+without a source which is *not* detached, an unauthenticated potential
+protocol, is still closed on an invalid packet as upstream intends, because
+nothing else would close it. `self._closing` is no longer needed in that
+condition: shutdown disconnects every registered protocol through
+`disconnect_protocol()`, so its late packets come from detached protocols.
 
 ### Sent means written
 
@@ -227,9 +246,11 @@ close moves to the next 100 ms re-check, the delay the same code already had
 whenever it found the packet still queued.
 
 A protocol between `accept_connection()` and the registration of its source
-is in neither `_potential_protocols` nor the sources, so shutdown does not
-disconnect it; a packet from it during shutdown no longer closes it either,
-and the process exit closes it instead.
+is in neither `_potential_protocols` nor the sources, so it counts as detached
+for that moment: a packet from it no longer closes it. A client sends nothing
+but its hello before the server's reply, so this only drops a stray packet;
+the connection is then registered normally, or closed by shutdown's process
+exit.
 
 The interval runs once per server exit, with or without connected clients
 (with none it only delays exit by 0.1 s, as `ServerCore` intended). Proxy and
@@ -239,9 +260,11 @@ other servers that do not derive from `ServerBase` keep their own
 ## Case-commit and integration ownership
 
 The case commit changes `xpra/net/protocol/socket_handler.py`,
-`xpra/server/core.py` and `xpra/server/base.py`, and adds
+`xpra/server/core.py` and `xpra/server/base.py`, adds
 `tests/unittests/unit/net/protocol_flush_test.py` and
-`tests/unittests/unit/server/shutdown_flush_test.py`. No other case commit
+`tests/unittests/unit/server/shutdown_flush_test.py`, and changes the close
+assertion of upstream's `test_handle_invalid_packet_from_detached_protocol`
+in `tests/unittests/unit/server/core_test.py`. No other case commit
 touches `SocketProtocol`, `ServerCore.handle_invalid_packet()`,
 `ServerBase.do_cleanup()` or the protocol close path, and it has no
 dependencies: it applies alone on the upstream base and is removable from
@@ -254,11 +277,15 @@ dependencies: it applies alone on the upstream base and is removable from
 `video-pipeline-cleanup-race` and `wayland-subsurface-stream-ownership` own
 per-connection encode and packet lifetimes inside `ClientConnection`; they run
 during `cleanup_protocol()` and are unaffected by when the socket closes.
+`ssh-proxy-final-delivery` owns the next hop over ssh: the remote `xpra _proxy`
+relays the packet this case gets written, even when the client keeps sending
+after the server's close. Neither case depends on the other's code, but the
+detach live boundary needs both.
 
 ## Commit scope and non-goals
 
 The case keeps a disconnecting protocol open until its last packet has been
-written during shutdown, makes `flush_then_close()` wait for the write it
+written (shutdown, detach, replacement), makes `flush_then_close()` wait for the write it
 already meant to wait for, and restores the flush interval. It does not change
 the disconnect reasons, the order of queuing, the write lock, the 100 ms
 re-check, the 5 s fallback, `force_quit`'s 5 s bound, packet routing or client
@@ -266,11 +293,14 @@ packet handling.
 
 Not changed on purpose:
 
-- Packets from protocols without a source still close them outside shutdown.
-  The same race can drop the reason of a single-client disconnect (a kicked or
-  replaced client); protecting every pending disconnect needs protocol state
-  that the server can query, a separate change which no required gate
-  exercises.
+- Packets from source-less protocols which are not detached (still
+  potential) still close them: nothing else would.
+- No new protocol state or "disconnecting" registry: upstream's existing
+  `detached` classification already identifies the protocols whose close has
+  an owner. `617ed23485` silenced the error log for detached protocols and its
+  test asserted the pre-existing close; that close is what drops the in-flight
+  disconnect, so only the close assertion of that test changes, its logging
+  assertions stay.
 - Delivery is not made synchronous (for example by joining write threads or
   blocking the main thread on the queue), which would change shutdown latency
   and ownership for every transport; a longer interval would only slow every
@@ -295,6 +325,17 @@ another.
   `window-focus` packet, in the style of upstream's
   `test_handle_invalid_packet_from_detached_protocol`. It requires no error
   log and no `close()`. On clean source `close()` is called.
+- `test_late_client_packet_after_detach_keeps_the_disconnect` drives a real
+  `SocketProtocol` (the held-write harness of `protocol_flush_test`) through
+  `send_disconnect(["detach request"])` while the server is *not* closing, then
+  passes a late `pointer` packet from the now detached protocol to the real
+  `handle_invalid_packet()` while the write thread is still writing the
+  disconnect. The protocol must stay open, and after the release the
+  connection must see the `connection-close` write before its close. On clean
+  source the late packet closes the protocol, and the held write fails.
+- `test_invalid_packet_from_connection_without_source_still_closes_it` is the
+  control: a potential protocol without a source is still closed, with the
+  error logged.
 - `test_disconnect_packets_get_the_flush_interval_before_sockets_close`
   constructs a real `ServerBase` object without running its initializer and
   calls the real `ServerCore.cleanup()`. It substitutes only the side effects:
@@ -316,10 +357,10 @@ re-check until it closes and requires the connection to see the
 clean source the protocol closes during `send_disconnect()`, so the test fails
 on that assertion.
 
-All three fail on the defect itself, not on an import or fixture. Upstream's
-`unit.server.core_test` (which requires the close for a detached protocol
-while the server is not closing) and `unit.net.protocol_test` cover the
-surrounding behaviour.
+All four defect tests fail on the defect itself, not on an import or fixture.
+Upstream's `unit.server.core_test` (now requiring no close and no error log for
+a detached protocol) and `unit.net.protocol_test` cover the surrounding
+behaviour.
 
 Blind spot: the unit tests prove each part separately, with mocks, a fake
 connection and no main loop. That a real server delivers a real packet on a
@@ -334,14 +375,17 @@ client required to exit successfully. The lifecycle report binds
 additionally binds it to its terminal authority check. The keyboard and
 clipboard profiles are where the lost disconnect was observed: the
 application's window disappears right before the server exits, so the client
-is still sending. These run with the complete stack on both endpoints; all
-nine profiles are required.
+is still sending. The detach profile requires the detach command's status 0
+*and* the attached client's status 0 for every TCP and SSH detach; its churn
+scenarios keep the client sending (pointer motion, window/notification churn on
+a non-composited desktop) while `xpra detach` runs. These run with the complete
+stack on both endpoints; all nine profiles are required.
 
 ## Invariants not to simplify
 
-- Keep the `self._closing` condition on the close in
-  `handle_invalid_packet()`, and keep the close outside shutdown (upstream's
-  test requires it).
+- Keep `not detached` on the close in `handle_invalid_packet()`: a detached
+  protocol's disconnect owns its close. Keep closing source-less protocols
+  which are not detached.
 - Keep `task_done()` in `_write()` after `write_items()` returns, in a
   `finally`, and on the queue the item came from, not on `self._write_queue`
   read again: after a close that is a `SimpleQueue` without `task_done()`.
@@ -358,9 +402,10 @@ nine profiles are required.
 ## Required validation
 
 Follow [development and final acceptance](../../docs/runbooks/validation.md).
-Run the tests-only focused control (all three new tests must fail: the late
-packet closes the protocol, the protocol closes during `send_disconnect()`,
-and the flush entry is missing), the patched focused modules
+Run the tests-only focused control (all four defect tests must fail: the late
+packet closes the protocol during shutdown and after a detach, the protocol
+closes during `send_disconnect()`, and the flush entry is missing; the
+upstream detached-protocol test fails on its changed close assertion), the patched focused modules
 `unit.net.protocol_flush_test`, `unit.server.shutdown_flush_test`,
 `unit.net.protocol_test` and `unit.server.core_test`, the stack
 focused/compiled/no-compat runs, all three full legs and all nine

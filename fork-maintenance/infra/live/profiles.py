@@ -33,6 +33,18 @@ H264_ACCEPTANCE_POLICIES = ("strict", "adaptive-alpha")
 H264_FALLBACK_POLICIES = ("fallback-auto", "fallback-h264")
 H264_CLIENT_POLICIES = H264_ACCEPTANCE_POLICIES + H264_FALLBACK_POLICIES
 ALPHA_SCENARIOS = ("default", "disabled", "both")
+SSH_LIFECYCLE_ITERATIONS = 4
+SHUTDOWN_ORDERS = ("together", "bus-first", "server-first")
+SHUTDOWN_ITERATIONS = 4
+# One deliberate SIGABRT of the real server proves the abort oracle and the
+# fault-handler native stack; it is a control, not a teardown order under test.
+SHUTDOWN_ABORT_CONTROL = "ssh-group-abort-control-01"
+# Detach while a multi-window/notification session churns on a
+# non-composited client desktop and the pointer keeps moving.
+DETACH_CHURN_SCENARIOS = 4
+DETACH_CHURN_CYCLES = 6
+# Detach from a server owned by a real systemd user manager.
+DETACH_PERSISTENT_SCENARIOS = 4
 STACK_LIVE_ACCEPTANCE_PROFILES = frozenset(
     {
         ("zed", "application-exit", "rgb", "strict", "default"),
@@ -200,16 +212,32 @@ def selection_admission(
 
 
 def scenario_specs(
-    *, alpha_scenarios: str, lifecycle: str
+    *, alpha_scenarios: str, lifecycle: str, application: str | None = None, encoding: str | None = None,
 ) -> tuple[tuple[str, bool], ...]:
     """Return stable scenario names and their alpha override."""
     if lifecycle != "application-exit":
-        return ((lifecycle, False),)
-    return {
+        scenarios = ((lifecycle, False), *(
+            (f"ssh-{lifecycle}-{iteration:02d}", False)
+            for iteration in range(1, SSH_LIFECYCLE_ITERATIONS + 1)
+        ))
+        if lifecycle == "detach":
+            scenarios += tuple((f"ssh-detach-churn-{iteration:02d}", False)
+                               for iteration in range(1, DETACH_CHURN_SCENARIOS + 1))
+            scenarios += tuple((f"ssh-detach-persistent-{iteration:02d}", False)
+                               for iteration in range(1, DETACH_PERSISTENT_SCENARIOS + 1))
+        if lifecycle == "transport-loss":
+            scenarios += tuple((f"ssh-group-{order}-{iteration:02d}", False)
+                               for order in SHUTDOWN_ORDERS for iteration in range(1, SHUTDOWN_ITERATIONS + 1))
+            scenarios += ((SHUTDOWN_ABORT_CONTROL, False),)
+        return scenarios
+    scenarios = {
         "default": (("default-alpha", False),),
         "disabled": (("alpha-disabled", True),),
         "both": (("default-alpha", False), ("alpha-disabled", True)),
     }[alpha_scenarios]
+    if application == "hardware" and encoding == "h264":
+        scenarios += (("decoder-loss", False),)
+    return scenarios
 
 
 def main() -> int:

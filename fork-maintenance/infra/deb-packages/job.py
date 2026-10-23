@@ -40,6 +40,7 @@ sys.path.insert(0, str(TOOLS_ROOT))
 import background_job  # noqa: E402 - needs the tools-path bootstrap above
 import container_payload  # noqa: E402 - needs the tools-path bootstrap above
 import contrib  # noqa: E402 - needs the tools-path bootstrap above
+import package_version as package_versions  # noqa: E402 - needs the tools-path bootstrap above
 import podman_policy  # noqa: E402 - needs the tools-path bootstrap above
 
 STATE_ROOT = PROJECT_ROOT / ".artifacts" / "fork-maintenance" / "deb-packages"
@@ -58,6 +59,7 @@ BUILDER_INPUTS = {
     ".containerignore": RUNNER_ROOT / ".containerignore",
     "Containerfile": RUNNER_ROOT / "Containerfile",
     "builder.py": RUNNER_ROOT / "builder.py",
+    "package_version.py": RUNNER_ROOT / "package_version.py",
     "container_payload.py": TOOLS_ROOT / "container_payload.py",
     "selection.py": SELECTION_TOOL,
 }
@@ -145,6 +147,7 @@ class DebInspection:
     files: tuple[PurePosixPath, ...]
     package: str
     version: str
+    native_sha256: tuple[tuple[str, str], ...] = ()
 
 
 class _ArMemberReader(io.RawIOBase):
@@ -1649,7 +1652,7 @@ def deb_archive_member_path(member: tarfile.TarInfo) -> PurePosixPath | None:
     return None
 
 
-def inspect_deb(path: Path) -> DebInspection:
+def inspect_deb(path: Path, *, hash_native: bool = False) -> DebInspection:
     """Parse control metadata and regular payload paths from a Debian archive."""
     control_payload = b""
     debian_binary = b""
@@ -1700,6 +1703,7 @@ def inspect_deb(path: Path) -> DebInspection:
     if debian_binary != b"2.0\n" or not control_payload or data_member is None:
         raise JobError(f"incomplete Debian package structure: {path.name}")
     data_files: set[PurePosixPath] = set()
+    native_sha256: list[tuple[str, str]] = []
     try:
         validate_single_xz_stream(
             control_payload,
@@ -1849,7 +1853,13 @@ def inspect_deb(path: Path) -> DebInspection:
                                 f"Debian data member is unreadable: {path.name}"
                             )
                         consumed = 0
+                        digest = hashlib.sha256() if (
+                            hash_native and name.is_relative_to(PYTHON_SITE_ROOT / "xpra")
+                            and name.suffix == ".so"
+                        ) else None
                         while block := content.read(1024 * 1024):
+                            if digest is not None:
+                                digest.update(block)
                             consumed += len(block)
                             if consumed > member.size:
                                 raise JobError(
@@ -1860,6 +1870,8 @@ def inspect_deb(path: Path) -> DebInspection:
                             raise JobError(
                                 f"Debian data member is truncated: {path.name}:{name}"
                             )
+                        if digest is not None:
+                            native_sha256.append(("/" + name.as_posix(), digest.hexdigest()))
                     elif member.isdir():
                         if member.size:
                             raise JobError(
@@ -1929,6 +1941,7 @@ def inspect_deb(path: Path) -> DebInspection:
         files=tuple(sorted(data_files, key=str)),
         package=fields["package"],
         version=fields["version"],
+        native_sha256=tuple(native_sha256),
     )
 
 
@@ -2174,7 +2187,7 @@ def validate_package_tar(path: Path, expected: argparse.Namespace) -> dict[str, 
             or isinstance(revision_count, bool)
             or revision_count < 1
             or revision != revision_count + 5014
-            or not debian_version.startswith(f"{base_version}-r{revision}-")
+            or debian_version != package_versions.package_version(base_version, revision)
         ):
             raise JobError("package manifest version and revision are inconsistent")
         for key in ("selection_resolution_sha256", "selection_sha256"):
@@ -4484,6 +4497,57 @@ def add_build_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workflow-sha256", required=True)
 
 
+def export_live_packages(args: argparse.Namespace) -> int:
+    """Freeze exact validated, normally removed package bytes for a live build."""
+    validate_name(args.name)
+    destination = args.destination
+    if (not destination.is_absolute() or ".." in destination.parts
+            or not destination.is_relative_to(STATE_ROOT.parent)):
+        raise JobError("live package input must stay below the private artifact root")
+    transaction = load_remove_transaction(args.name)
+    if not transaction["validation_ok"] or run_directory(args.name).exists():
+        raise JobError("live input requires a successful, completely removed DEB job")
+    status = transaction["status"]
+    manifest = status.get("manifest", {})
+    expected = {
+        "distro": args.distro, "source_commit": args.source,
+        "selection": ACTIVE_SELECTION, "selection_sha256": args.selection_sha256,
+    }
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        raise JobError("live packages do not match the frozen source, complete queue or distribution")
+    if manifest.get("debian_version") != package_versions.package_version(
+        manifest.get("base_version"), manifest.get("revision"),
+    ):
+        raise JobError("live packages do not have the configured downstream revision")
+    output = Path(transaction["output"])
+    background_job.ensure_private_regular(output)
+    if sha256_file(output) != transaction["output_sha256"]:
+        raise JobError("validated DEB output changed before live input freeze")
+    background_job.ensure_private_directory(destination.parent)
+    with output.open("rb") as stream:
+        container_payload.extract_archive(stream, destination, max_bytes=MAX_DEB_TAR_BYTES)
+    if json.loads((destination / "manifest.json").read_text()) != manifest:
+        raise JobError("frozen DEB manifest differs from its collected package evidence")
+    native_modules = {}
+    for entry in manifest["packages"]:
+        inspection = inspect_deb(destination / entry["name"], hash_native=True)
+        for path, digest in inspection.native_sha256:
+            if path in native_modules:
+                raise JobError("runtime native module has ambiguous DEB ownership")
+            native_modules[path] = {"owner": inspection.package, "sha256": digest}
+    if sha256_file(output) != transaction["output_sha256"]:
+        raise JobError("DEB output changed during live input freeze")
+    print(json.dumps({
+        "schema": 1, "run": args.name, "archive_sha256": transaction["output_sha256"],
+        "manifest_sha256": sha256_file(destination / "manifest.json"),
+        "source_commit": args.source, "selection_sha256": args.selection_sha256,
+        "distro": args.distro, "version": manifest["debian_version"],
+        "packages": manifest["packages"],
+        "native_modules": native_modules,
+    }, sort_keys=True))
+    return 0
+
+
 def add_public_build_arguments(parser: argparse.ArgumentParser, *, output: bool) -> None:
     if output:
         parser.add_argument("--container-name", required=True)
@@ -4509,6 +4573,13 @@ def parser() -> argparse.ArgumentParser:
     worker = commands.add_parser("worker")
     add_build_arguments(worker)
     worker.set_defaults(handler=package_worker)
+    live = commands.add_parser("live-input")
+    live.add_argument("name")
+    live.add_argument("--distro", choices=sorted(DISTROS), required=True)
+    live.add_argument("--source", required=True)
+    live.add_argument("--selection-sha256", required=True)
+    live.add_argument("--destination", type=Path, required=True)
+    live.set_defaults(handler=export_live_packages)
     start = commands.add_parser("start")
     start.add_argument("name")
     add_public_build_arguments(start, output=True)

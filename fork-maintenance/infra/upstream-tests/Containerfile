@@ -40,6 +40,7 @@ RUN apt-get update \
         libseccomp-dev \
         libsystemd-dev \
         libturbojpeg-dev \
+        libva-dev \
         libvpx-dev \
         libwayland-bin \
         libwayland-dev \
@@ -114,7 +115,7 @@ RUN install -d -o ubuntu -g ubuntu \
     && install -d -m 0700 -o ubuntu -g ubuntu /run/user/1000
 
 COPY --chown=ubuntu:ubuntu \
-    container_payload.py entrypoint.sh selection.py neutral_tests.py \
+    container_payload.py entrypoint.sh selection.py neutral_tests.py runtime_audit.py \
     /opt/xpra-fork-maintenance/upstream-tests/
 
 COPY --chown=ubuntu:ubuntu \

@@ -169,7 +169,7 @@ case directories in the same change.
 
 | Target | Proves |
 | --- | --- |
-| `case-check CASE=<slug>` | Manifest schema 2 is valid; exactly one commit carries the trailer; it touches only product paths (the quarantine commit exactly the files of its `quarantine.modules`); cherry-picked onto the upstream base on its own it merges without a conflict and is neither already present nor ambiguous; reverting it from `HEAD` is conflict-free. It reports the cases that depend on it. |
+| `case-check CASE=<slug>` | Manifest schema 2 is valid; exactly one commit carries the trailer; it touches only product paths (the quarantine commit exactly the files of its `quarantine.modules`); cherry-picked onto the upstream base after its declared dependency closure it merges without a conflict and is neither already present nor ambiguous; reverting it from `HEAD` is conflict-free. It reports the cases that depend on it. |
 | `stack-check STACK=develop` | Every case commit resolves in order on the upstream base, and base plus all case diffs reproduces exactly the product tree of `HEAD`. |
 | `develop-check` | Clean tree (so uncommitted control work, for example a new or removed case directory, must be committed first; until then the handoff reports `develop-check` as outstanding); every fork commit is a valid control or case commit; no merges and no pending fixups; no stored `fix.patch`; case directories and case commits correspond one to one (the inactive `upstream-test-quarantine` directory excepted); dependencies precede their consumers; every `case-check`, `stack-check` and `ci-layout-check`. |
 
@@ -189,17 +189,26 @@ commits):
 
 - `STACK=develop`: each case commit's own diff against its parent, in commit
   order, so applying them in order to the base reproduces `HEAD` exactly;
-- `CASE=<slug>`: the case commit cherry-picked onto the bare upstream base in
-  memory (`git merge-tree`), diffed against the base. A commit's own diff
-  carries context lines from the cases before it, which need not exist on the
-  bare base; the three-way merge applies only the case's change, and a
-  conflict means the case is not independent.
+- `CASE=<slug>`: the requested case plus its explicitly declared, transitive
+  dependencies, in their `develop` order; unrelated cases are excluded. Each
+  commit is cherry-picked in memory (`git merge-tree`) onto that selected
+  prefix and diffed against the preceding prefix, so omitted cases cannot
+  leak into patch context. Missing, cyclic or forward dependencies fail closed.
+  No dependency is assumed to be already present in clean upstream. Without
+  dependencies this is the ordinary case-alone diff against the bare base.
+
+The requested case remains the subject; the frozen patch, focused test and gate
+inventories include its dependency closure. The digest binds dependency bytes
+and selected order, and snapshots retain that exact closure. Declaring a
+dependency does not waive conflict/removability checks or authorize a partial
+live run: every live endpoint still uses `STACK=develop`.
 
 The selection digest binds those bytes, so a changed case diff is a new
 candidate; a SHA which changed only because an unrelated commit was rewritten
 keeps the same bytes.
-`tests-only` applies only the `tests/` part of the case diff to the clean
-upstream base.
+`tests-only` applies only the `tests/` parts of the selected diffs, including
+dependencies, to the clean upstream base; dependency production changes are
+not silently applied in this negative-control mode.
 
 ## Upstream refresh
 

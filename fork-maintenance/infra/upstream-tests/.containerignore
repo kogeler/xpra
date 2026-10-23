@@ -2,6 +2,7 @@
 !Containerfile
 !container_payload.py
 !entrypoint.sh
+!runtime_audit.py
 !selection.py
 !neutral_tests.py
 !neutral/

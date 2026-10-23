@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Wrap both hosted and detached execution. unittest does not make a worker's
+# uncaught exception, an unraisable finalizer or a logging failure fail a module.
+if test "${1:-}" != --runtime-audited; then
+    exec python3 /opt/xpra-fork-maintenance/upstream-tests/runtime_audit.py \
+        bash "$0" --runtime-audited "$@"
+fi
+shift
+
 HOST_RUNNER=/opt/xpra-fork-maintenance/upstream-tests
 PAYLOAD_HELPER="$HOST_RUNNER/container_payload.py"
 INPUTS=/work/payload
@@ -448,9 +456,13 @@ run_focused() {
     printf 'focused_applied_tree=%s\n' "$applied_tree"
     printf 'focused_unit_test=%s\n' "${selected_tests[@]}"
     cd "$WORK"
+    # Packaging/build regressions can legitimately execute no xpra Python.
+    # Keep their real status, not coverage's "No data to report" exit code.
+    # The three full legs retain upstream's ordinary coverage behavior.
     CFLAGS='-O0 -g0' \
     CXXFLAGS='-O0 -g0' \
     env \
+        XPRA_TEST_COVERAGE=0 \
         EXTRA_ARGS="$extra_args" \
         python3 setup.py unittests "${selected_paths[@]}"
     check_focused_native_modules
