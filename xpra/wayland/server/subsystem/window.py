@@ -222,6 +222,7 @@ class WaylandWindowServer(WindowServer):
             "image": None,
             "depth": 32,
             "has-alpha": True,
+            "opaque-region": popup.get_opaque_region(),
             "decorations": False,
         })
         window.setup()
@@ -719,6 +720,7 @@ class WaylandWindowServer(WindowServer):
             if not window:
                 return
         surface = self.get_surface(wid)
+        self.update_opaque_region(window, surface)
         self.update_colourspace(window, surface)
         self.update_content_types(window, surface)
         self.update_geometry(window, position, size)
