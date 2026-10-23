@@ -4,11 +4,13 @@
 # Xpra is released under the terms of the GNU GPL v2, or, at your option, any
 # later version. See the file COPYING for details.
 
+import importlib.util
 import sys
 import unittest
 from types import ModuleType
 from unittest.mock import ANY, Mock, call, patch
 
+from xpra.common import is_covered_by_opaque_region
 from xpra.util.objects import typedict
 # `load_window_server_class` restores `sys.modules` wholesale, which drops every
 # module imported inside it - including `gi.repository.GObject`, which cannot be
@@ -613,6 +615,68 @@ class WaylandWindowServerCommitTest(unittest.TestCase):
             (("title", "New title"),),
             (("app-id", "com.example.Application"),),
         ])
+
+
+class WaylandPopupOpaqueRegionTest(unittest.TestCase):
+    """ a popup publishes its committed opaque region, as a toplevel does """
+
+    @staticmethod
+    def make_popup(opaque_region):
+        popup = Mock(wid=9)
+        popup.get_client_pid.return_value = 1234
+        popup.get_colourspace.return_value = ""
+        popup.get_content_types.return_value = ()
+        popup.get_opaque_region.return_value = opaque_region
+        return popup
+
+    @staticmethod
+    def make_server():
+        server = Mock()
+        server.get_window.return_value = None
+        server.pending_popups = {}
+        server._popup_parent_window_wid.return_value = 7
+        server.update_opaque_region.side_effect = WaylandWindowServer.update_opaque_region
+        return server
+
+    def test_new_popup_publishes_its_opaque_region(self):
+        server = self.make_server()
+        popup = self.make_popup(((0, 0, 120, 90),))
+
+        window = WaylandWindowServer._ensure_popup_window(server, 7, popup, (10, 20), (120, 90))
+
+        self.assertIsInstance(window, window_model.Window)
+        self.assertEqual(window.get("opaque-region", ()), ((0, 0, 120, 90),))
+        server._do_send_new_window_packet.assert_called_once()
+        self.assertEqual(server._do_send_new_window_packet.call_args.args[1:], (window, (10, 20, 120, 90)))
+
+    def test_window_source_can_check_a_new_native_popup(self):
+        if importlib.util.find_spec("xpra.wayland.server.popup") is None:
+            self.skipTest("Wayland server module is not built")
+        from xpra.wayland.server.popup import Popup
+        server = self.make_server()
+
+        window = WaylandWindowServer._ensure_popup_window(server, 7, Popup(), (10, 20), (213, 219))
+
+        # the window source created for the new popup reads the region
+        # before any commit could update it:
+        self.assertEqual(window.get("opaque-region", ()), ())
+        self.assertFalse(is_covered_by_opaque_region(window.get("opaque-region", ()), 213, 219))
+
+    def test_popup_commit_updates_its_opaque_region(self):
+        server = self.make_server()
+        window = WaylandWindowServer._ensure_popup_window(server, 7, self.make_popup(()), (10, 20), (120, 90))
+        server.get_window.return_value = window
+        surface = server.get_surface.return_value
+        surface.get_opaque_region.return_value = ((0, 0, 120, 90),)
+        changes = []
+        window.connect(
+            "notify::opaque-region",
+            lambda model, _pspec: changes.append(model.get_property("opaque-region")))
+
+        WaylandWindowServer.popup_commit(server, 9, True, (10, 20), (120, 90), True)
+
+        server.get_surface.assert_called_once_with(9)
+        self.assertEqual(changes, [((0, 0, 120, 90),)])
 
 
 class WaylandWindowServerConfigureTest(unittest.TestCase):
