@@ -1,0 +1,30 @@
+schema = 2
+slug = "libva-decoder-display-lifetime"
+kind = "production"
+title = "Keep the preloaded VA display alive across sandboxed decoder contexts"
+dependencies = []
+
+[tests]
+list = [
+  "unit.codecs.libva_display_test",
+  "unit.client.subsystem.decode_test",
+  "unit.client.subsystem.seccomp_encoding_test",
+  "unit.seccomp_test",
+  "focused",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = [
+  "live-rgb",
+  "live-h264",
+  "live-xpra-detach",
+  "live-xpra-transport-loss",
+  "live-wayland-keyboard",
+  "live-x11-clipboard",
+  "live-wayland-subsurface",
+  "live-wayland-h264-hardware",
+  "live-wayland-opengl-h264-hardware",
+]

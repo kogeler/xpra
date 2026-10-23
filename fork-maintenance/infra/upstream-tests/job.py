@@ -29,6 +29,7 @@ sys.path.insert(0, str(TOOLS_ROOT))
 import background_job  # noqa: E402 - needs the tools-path bootstrap above
 import container_payload  # noqa: E402 - needs the tools-path bootstrap above
 import podman_policy  # noqa: E402 - needs the tools-path bootstrap above
+import runtime_audit  # noqa: E402 - needs the tools-path bootstrap above
 
 STATE_ROOT = PROJECT_ROOT / ".artifacts" / "fork-maintenance" / "upstream-tests"
 LOG_ROOT = STATE_ROOT / "logs"
@@ -75,6 +76,7 @@ RUNNER_INPUTS = (
     TOOLS_ROOT / "background_job.py",
     TOOLS_ROOT / "container_payload.py",
     TOOLS_ROOT / "podman_policy.py",
+    TOOLS_ROOT / "runtime_audit.py",
     RUNNER_ROOT / "neutral_tests.py",
     RUNNER_ROOT / "neutral" / "pointer_scroll_test.py",
     RUNNER_ROOT / "neutral" / "pointer_scroll_client.c",
@@ -85,6 +87,7 @@ IMAGE_CONTEXT_INPUTS = {
     "Containerfile": RUNNER_ROOT / "Containerfile",
     "container_payload.py": TOOLS_ROOT / "container_payload.py",
     "entrypoint.sh": RUNNER_ROOT / "entrypoint.sh",
+    "runtime_audit.py": TOOLS_ROOT / "runtime_audit.py",
     "selection.py": RUNNER_ROOT / "selection.py",
     "neutral_tests.py": RUNNER_ROOT / "neutral_tests.py",
     "neutral/pointer_scroll_test.py": RUNNER_ROOT / "neutral" / "pointer_scroll_test.py",
@@ -1677,6 +1680,7 @@ def test_collect(args: argparse.Namespace) -> int:
         valid_finished = bool(finished and not finished.startswith("0001-"))
         validation_ok = (
             log_result.returncode == 0
+            and not runtime_audit.failures(log_payload)
             and container_status == "exited"
             and exit_code == 0
             and valid_finished

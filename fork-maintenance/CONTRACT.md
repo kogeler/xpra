@@ -317,7 +317,18 @@ Only these case commits exist, in this stack order:
 7. `packet-handler-error-boundary`;
 8. `gtk-client-scroll-deduplication`;
 9. `server-shutdown-disconnect-flush`;
-10. `printing-cli-timer-cleanup`.
+10. `printing-cli-timer-cleanup`;
+11. `libva-decoder-display-lifetime`;
+12. `seccomp-build-switch`;
+13. `window-client-properties-deltas`;
+14. `video-decoder-capability-loss`;
+15. `window-unmap-log-format`;
+16. `ssh-tunnel-close-owner`;
+17. `protocol-parse-start-lifecycle`;
+18. `gtk-css-package-ownership`;
+19. `signalwatcher-resource-lifecycle`;
+20. `ssh-proxy-final-delivery`;
+21. `wayland-popup-opaque-region`.
 
 ## Stack contract
 
@@ -397,7 +408,7 @@ a new case commit). Runners always test committed `HEAD`.
 
 | Target | Proves |
 | --- | --- |
-| `case-check CASE=<slug>` | Manifest schema 2 is valid; exactly one commit carries the trailer; it touches only product paths; its diff applies to the upstream base on its own (after its declared dependencies) and is neither already present nor ambiguous; reverting it from `HEAD` is conflict-free and no other case depends on it. |
+| `case-check CASE=<slug>` | Manifest schema 2 is valid; exactly one commit carries the trailer; it touches only product paths; its diff applies to the upstream base after its declared dependency closure and is neither already present nor ambiguous; reverting it from `HEAD` is conflict-free. It reports dependent cases; `case-drop` refuses them. |
 | `stack-check STACK=develop` | Every case commit resolves in order on the upstream base, and base plus all case diffs reproduces exactly the product tree of `HEAD`. |
 | `develop-check` | Clean tree; every fork commit is a valid control or case commit; no merges and no pending fixups; case directories and case commits correspond one to one; dependencies precede their consumers; every `case-check`, `stack-check` and `ci-layout-check`. |
 
@@ -412,8 +423,16 @@ plus, for every selected case, the diff of its commit in `HEAD`
 the payload only. The selection digest binds those bytes, so a changed commit
 is a new candidate. The working tree is never a runner input.
 
-`PATCH_MODE=tests-only` applies only the paths below `tests/` from the frozen
-case diff to the clean upstream base. This is the durable non-vacuous
+A case selection includes its transitive declared dependencies in `develop`
+order, excludes unrelated cases, and retains only the requested case as its
+subject. In-memory prefix merges generate applicable per-case diffs without
+unselected context. Dependency bytes and order are frozen and digest-bound;
+the focused inventory includes their tests. Missing, cyclic or forward
+dependencies are invalid. See [runner selection](docs/runbooks/case-commits.md#runners)
+for the canonical mechanism. This does not permit case-selected live endpoints.
+
+`PATCH_MODE=tests-only` applies only the paths below `tests/` from every frozen
+selected diff, including dependencies, to the clean upstream base. This is the durable non-vacuous
 clean-source regression mode: retained tests execute against unmodified
 production code. A tests-only result never accepts a complete case.
 
@@ -711,7 +730,7 @@ remain independently verified and need not match each other.
 
 Every Debian client build runs the installed GTK/X11 clipboard-adapter preflight
 and the mapped NumPy/ctypes OpenGL regressions, irrespective of the fixture.
-Their test-only dependencies stay after Xpra compilation and out of runtime.
+Their test-only dependencies stay after Xpra package installation and out of runtime.
 
 Both live images additionally rebuild their installed distribution libva's exact
 source version with a diagnostic-only change to `va/va_trace.c`: each new display
@@ -1011,6 +1030,19 @@ evidence.
 
 ## Validation contract
 
+Harness design and runtime equivalence follow the single
+[runtime acceptance rule](docs/runbooks/validation.md#runtime-acceptance-represents-the-shipped-product).
+The live context freezes the exact collected package inventories and checksums
+of both endpoints. Its build stages install those DEBs for native tests; final
+runtime stages install the same DEBs in clean distribution images and receive
+only fixtures, not Xpra binaries, from build stages. Runtime/collection bind
+configured package versions, package-owned module paths/digests and active
+decode-policy evidence. A separate minimal Xpra build cannot accept a package.
+
+Product design follows the single canonical
+[patch-design review](../AGENTS.md#patch-design-and-upstream-xpra-maintainer-alignment) in the
+root guide. The validation phases below do not replace or duplicate that rule.
+
 Validation has two phases governed by
 [`docs/runbooks/validation.md`](docs/runbooks/validation.md): development and
 final acceptance, separated by a reviewed candidate freeze. Gate declarations
@@ -1037,7 +1069,7 @@ and build inputs, then fills only missing or invalidated requirements:
 clean/focused/native controls, current clean quarantine reassessment, complete
 fork-control tests, `full`, `full-cython`, `full-no-compat`, and all nine live
 profiles with the complete stack on both endpoints for every case validation.
-Full queue/rebase acceptance additionally includes both real DEB builds. Evidence from development
+Live acceptance uses both exact real DEB artifacts under the runtime rule. Evidence from development
 may satisfy an unchanged final requirement; its phase or age alone is not
 invalidation. Do not alter immutable reports to claim new provenance.
 
@@ -1171,7 +1203,7 @@ otherwise unchanged.
 
 In both live build stages, copy and compile the owned C fixtures only after
 Xpra installation and its existing native build-time checks. Fixture inputs
-must not invalidate an otherwise unchanged Xpra compilation layer. Preserve
+must not invalidate an otherwise unchanged Xpra package-installation layer. Preserve
 the complete fixture/context identity, compiler flags, installed output paths
 and runtime checks: this is ordinary layer dependency ordering, not a separate
 mutable installation cache or permission to reuse a mismatched image. Verify
@@ -1418,7 +1450,11 @@ proxy/internal/wire IDs, offsets, stacking, coding, reset geometry, packet
 sequences, counts, hashes, equality results, and existing endpoint logs. It
 never captures an operator desktop or clipboard.
 
-The detach and transport-loss profiles identify their GTK application only
+The detach and transport-loss profiles require their direct-TCP baseline plus
+the exact repeated owned-SSH-mux inventory specified in
+[`live-tests.md`](docs/runbooks/live-tests.md#owned-ssh-mux-lifecycle-coverage).
+Missing repeats or a fresh-SSH fallback cannot satisfy transport coverage.
+The profiles identify their GTK application only
 from `interaction.identity.json`, atomically published by that fixture from its
 own process. The runner cross-checks its exact PID, procfs start ticks, command
 line digest, and two-element Python/script argv against the still-live process,

@@ -69,7 +69,9 @@ still uses the loop below without imposing a new whole-queue refresh review.
    by `develop-squash`); runners test committed `HEAD`, so commit before each
    named run. See [case commits](case-commits.md#everyday-operations).
 2. Map the changed behavior to its caller, resource owner, downstream consumers,
-   cleanup and policy boundaries. Establish a non-vacuous clean control before
+   cleanup and policy boundaries under the root guide's
+   [patch-design review](../../../AGENTS.md#patch-design-and-upstream-xpra-maintainer-alignment).
+   Establish a non-vacuous clean control before
    claiming a defect. For case-owned tests use `PATCH_MODE=tests-only`; missing
    APIs, a preflight rejection or an unrelated crash are not the expected
    behavioral failure. Cases without owned tests require the documented
@@ -144,6 +146,64 @@ invalidation, installed-module and real-run behavior are implemented and tested.
 
 ## Candidate freeze
 
+### Runtime acceptance represents the shipped product
+
+This is the canonical harness-design rule. A matching source/queue digest is
+necessary but does not prove equivalent installed features or active policies.
+For every affected boundary:
+
+1. Run the positive live suite from the exact validated Ubuntu server and
+   Debian client DEBs, supplied by successful, collected and removed named
+   package jobs through `DEB_SERVER_RUN` and `DEB_CLIENT_RUN`. Freeze their
+   archive/package checksums with the live context. Never substitute a second
+   source build, extracted imports alone, an equal version string or image tag.
+   A source change needs new matching package bytes before its live check;
+   a harness-only change may reuse exact still-valid packages.
+2. Prove required capabilities at the actual unprivileged runtime boundary:
+   configured package versions, package-owned module paths and hashes, native
+   security modules, role-specific backends and codec modules. Required means
+   fail on absence, not skip, silently disable or fall back. Verify active
+   policy and the subsequent exercised operation, not just a requested option.
+   In particular every live client must install the default errno decode
+   filter, and H.264 must create its libva context and decode after installation.
+3. Test transitions and failure propagation, not only successful steady state:
+   initialization before/after policy installation, replacement, permanent
+   capability loss, peer notification/fallback and owned teardown. Establish a
+   behavioral negative control for each oracle; a missing API is not one.
+   Transport-specific claims require that transport, not a TCP substitute.
+4. Audit complete stdout/stderr through workload exit and collection.
+   Uncaught worker exceptions, unraisable finalizers, logging-format failures
+   and Python fatal errors fail even with exit zero. Positive live sessions
+   additionally reject resource-leak warnings and native heap corruption
+   diagnostics. A caught debug traceback alone is not an unhandled failure:
+   codec discovery deliberately probes unsupported encodings. Preserve these
+   probes and diagnostics; do not disable them or maintain driver-specific
+   traceback allowlists. Escaping main-thread failures and signal crashes must
+   fail both peers' independently captured exit-status gates, even after a
+   disconnect was sent. Caught diagnostics never exempt unhandled asynchronous
+   failures or a failure of the profile's codec/pixel/transition oracle. Do not
+   add blanket diagnostic ignores to make a positive gate green.
+   Capture descendant identities before teardown and distinguish exit from
+   reaping: peers must reap their own direct children, and no captured live
+   descendant may survive. Preserve observations of exited orphan grandchildren
+   awaiting container init; Xpra cannot `wait()` for another process's children.
+   Never add a process-name allowlist or an init reaper to hide a peer-owned
+   direct-child leak.
+5. Bind these observations to reports and independently recheck retained raw
+   authorities during collection/suite verification. Reject stale/missing,
+   changed or partial inputs. Compare the executed immutable image IDs across
+   the suite too: equal source context hashes alone do not prove equal resolved
+   runtime dependencies. State actual hardware/driver families, transport,
+   scenario and iteration coverage; an unavailable required family remains a
+   missing gate until tested or explicitly descoped by the operator. Never
+   turn an unknown or an out-of-scope path into an implicit pass.
+
+The implementation belongs to the existing package/live/unit runners, not a
+production-only workaround or a second release framework. Keep specific module
+inventories and oracle tests with their runner, CLI values only in the shared
+YAML, and scheduling/evidence reuse in this runbook. Package import/link tests,
+unit matrix and real-session tests are complementary, not interchangeable.
+
 Complete each affected README's
 [semantic documentation review](case-documentation.md) alongside the candidate.
 A short summary or generated outline is not a finished case explanation;
@@ -152,6 +212,7 @@ before freeze, without waiting for another operator request.
 
 Freeze only after reviewing production source, tests, composed queue, native
 and compiled risks, relevant live fixtures/oracles, and package/build changes.
+The canonical root patch-design review must be complete for this candidate.
 An unresolved runtime oracle or known source defect means development continues.
 Create the current ignored cycle ledger at
 `.artifacts/fork-maintenance/work/<session>/ledger.md`, not a
@@ -213,8 +274,8 @@ Fill the ledger's gaps on the reviewed stable candidate:
    stale results and mixed candidate inputs.
    Developing or accepting case-only, partial-stack or clean-endpoint live tests
    is forbidden. Case ownership describes the regression oracle, never a live
-   selection. Applicable durable package boundaries remain required; full
-   queue/rebase acceptance additionally requires both real DEB builds.
+   selection. The runtime rule requires both matching real DEB artifacts;
+   reuse unchanged validated artifacts rather than rebuilding at phase changes.
 4. Final `stack-check` (and `develop-check` once the tree is clean),
    whitespace/lint, documentation and result review; publication/clean-host
    checks only under their existing authority and preconditions. Do not create

@@ -115,13 +115,13 @@ class DebianTreeTests(unittest.TestCase):
             source = self.source_tree(Path(raw))
             with patch.object(builder, "SOURCE", source):
                 version = builder.prepare_debian_tree("resolute", "6.6", 42479)
-            self.assertEqual(version, "6.6-r42479-1")
+            self.assertEqual(version, builder.package_versions.package_version("6.6", 42479))
             self.assertEqual(os.readlink(source / "debian"), "packaging/debian/xpra")
             control = (source / "debian" / "control").read_text(encoding="utf-8")
             self.assertIn("#resolute:\n              ,extra", control)
             self.assertEqual(
                 (source / "debian" / "changelog").read_text(encoding="utf-8"),
-                "xpra (6.6-r42479-1) UNRELEASED; urgency=low\n\n",
+                f"xpra ({version}) UNRELEASED; urgency=low\n\n",
             )
 
     def test_rejects_a_different_packaging_link(self) -> None:

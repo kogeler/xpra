@@ -55,12 +55,23 @@ LIVE_CONFIG_MODULE = INFRA_ROOT / "live_config.py"
 NETWORK_PROFILES_CONFIG = MAINTENANCE_ROOT / "profiles.yml"
 LIVE_CLI_CONFIG = MAINTENANCE_ROOT / "live-cli.yml"
 SELECTION_TOOL = MAINTENANCE_ROOT / "infra" / "upstream-tests" / "selection.py"
+DEB_JOB = MAINTENANCE_ROOT / "infra" / "deb-packages" / "job.py"
 HARNESS_INPUTS = (
     INFRA_ROOT / ".containerignore",
     INFRA_ROOT / "Containerfile",
     INFRA_ROOT / "build_libva_trace.py",
     INFRA_ROOT / "libva_trace.patch",
     INFRA_ROOT / "libva_trace_test.c",
+    INFRA_ROOT / "libva_seccomp_probe.py",
+    INFRA_ROOT / "package_runtime.py",
+    INFRA_ROOT / "peer_processes.py",
+    INFRA_ROOT / "ssh_fixture.py",
+    INFRA_ROOT / "shutdown_fixture.py",
+    INFRA_ROOT / "churn_fixture.py",
+    INFRA_ROOT / "persistent_fixture.py",
+    INFRA_ROOT / "xpra-live-user-manager.service",
+    INFRA_ROOT / "decoder_loss_fixture.py",
+    INFRA_ROOT / "decoder_recovery.py",
     INFRA_ROOT / "clipboard_fixture_common.py",
     INFRA_ROOT / "empty_damage_fixture.c",
     INFRA_ROOT / "interaction_fixture.py",
@@ -84,9 +95,13 @@ HARNESS_INPUTS = (
     INFRA_ROOT / "wlr-virtual-pointer-v1.xml",
     INFRA_ROOT / "xwd_to_png.py",
     SELECTION_TOOL,
+    DEB_JOB,
+    DEB_JOB.parent / "package_version.py",
+    TOOLS_ROOT / "contrib.py",
     BACKGROUND_SUPERVISOR,
     PAYLOAD_HELPER,
     PODMAN_POLICY,
+    TOOLS_ROOT / "runtime_audit.py",
     NETWORK_PROFILES_CONFIG,
     LIVE_CLI_CONFIG,
 )
@@ -2012,6 +2027,303 @@ def current_image_validation(payload: dict[str, Any]) -> bool:
     return True
 
 
+def peer_exit_artifact_evidence_matches(lifecycle: dict[str, Any], root: Path) -> bool:
+    for role in ("server", "client"):
+        path = root / f"{role}.exit"
+        try:
+            ensure_private_regular(path)
+            if path.stat().st_size > 4:
+                return False
+            raw = path.read_bytes()
+        except (JobError, OSError):
+            return False
+        if not re.fullmatch(rb"[0-9]{1,3}\n", raw):
+            return False
+        value = int(raw)
+        claimed = lifecycle.get(f"{role}_exit_status")
+        if value > 255 or type(claimed) is not int or claimed != value:
+            return False
+    if lifecycle.get("mode") == "detach":
+        try:
+            for suffix in ("exit", "stdout", "stderr"):
+                path = root / f"client.detach.{suffix}"
+                ensure_private_regular(path)
+                if path.stat().st_size > (4 if suffix == "exit" else 64 * 1024 * 1024):
+                    return False
+                content = path.read_bytes()
+                if suffix == "exit":
+                    if content != b"0\n" or lifecycle.get("detach_returncode") != 0:
+                        return False
+                elif content.decode("utf-8", errors="strict") != lifecycle.get(f"detach_{suffix}"):
+                    return False
+        except (JobError, OSError, ValueError):
+            return False
+    return True
+
+
+def peer_process_artifact_evidence_matches(lifecycle: dict[str, Any], root: Path, runner: Any,
+                                           *, aborted_server: bool = False) -> bool:
+    recorded = lifecycle.get("peer_processes")
+    if not isinstance(recorded, dict) or set(recorded) != {"server", "client"}:
+        return False
+    for role in ("server", "client"):
+        # Only the deliberately aborted control server cannot reap its children.
+        if not process_reaping_artifacts_match(recorded[role], root, role, runner,
+                                               reap_direct=not (aborted_server and role == "server")):
+            return False
+    return True
+
+
+def process_reaping_artifacts_match(recorded: dict, root: Path, role: str, runner: Any, *, reap_direct: bool = True) -> bool:
+    try:
+        values = {}
+        for phase in ("before", "after"):
+            path = root / f"{role}.processes-{phase}.json"
+            ensure_private_regular(path)
+            if path.stat().st_size > 128 * 1024:
+                return False
+            values[phase] = json.loads(path.read_bytes())
+        runner.peer_processes.validate_snapshot(values["before"])
+        pid_path = root / f"{role}.pid"
+        ensure_private_regular(pid_path)
+        if pid_path.stat().st_size > 11:
+            return False
+        raw_pid = pid_path.read_bytes()
+        if not re.fullmatch(rb"[1-9][0-9]{0,9}\n", raw_pid):
+            return False
+        if (values["before"]["root"]["pid"] != int(raw_pid) or not isinstance(values["after"], dict)
+                or set(values["after"]) != {"remaining"} or recorded != values):
+            return False
+        observed = values["after"]["remaining"]
+        blocking = runner.peer_processes.blocking_remaining(values["before"], observed)
+        return not blocking if reap_direct else all(value["state"].upper() in {"Z", "X"} for value in observed)
+    except (JobError, OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def ssh_transport_artifact_evidence_matches(lifecycle: dict, root: Path, runner: Any) -> bool:
+    """Bind actual mux use and owned helper exit/reaping, not only a URI claim."""
+    try:
+        path = root / "ssh-transport.json"
+        ensure_private_regular(path)
+        if path.stat().st_size > 256 * 1024:
+            return False
+        transport = json.loads(path.read_bytes())
+        if (not isinstance(transport, dict) or transport != lifecycle.get("ssh_transport")
+                or type(transport.get("schema")) is not int or transport["schema"] != 1
+                or transport.get("client_configuration") != runner.ssh_fixture.client_configuration()
+                or any(transport.get(key) != value for key, value in runner.ssh_endpoint_options().items())):
+            return False
+        check = transport.get("mux_check")
+        if (not isinstance(check, dict) or type(check.get("returncode")) is not int or check["returncode"] != 0
+                or f"Master running (pid={transport['master_pid']})" not in check.get("stderr", "")):
+            return False
+        mode = lifecycle["mode"]
+        if mode == "detach":
+            receipt = transport.get("mux_exit")
+            if (not isinstance(receipt, dict) or receipt.get("command") != runner.ssh_fixture.exit_command()
+                    or type(receipt.get("returncode")) is not int or receipt["returncode"] != 0):
+                return False
+            for suffix in ("exit", "stdout", "stderr"):
+                raw_path = root / f"client.ssh-master-stop.{suffix}"
+                ensure_private_regular(raw_path)
+                if raw_path.stat().st_size > (4 if suffix == "exit" else runner.FRAME_LOG_SCAN_BYTES):
+                    return False
+                raw = raw_path.read_bytes()
+                if suffix == "exit":
+                    if raw != b"0\n":
+                        return False
+                elif (raw.decode("utf-8", errors="strict") != receipt.get(suffix)
+                      or runner.runtime_audit.failures(raw, positive=True)):
+                    return False
+            if "Exit request sent." not in receipt["stderr"].splitlines():
+                return False
+            master_log = root / "client.ssh-master.stderr"
+            ensure_private_regular(master_log)
+            if (master_log.stat().st_size > runner.FRAME_LOG_SCAN_BYTES
+                    or b"debug1: Exit status -1" not in master_log.read_bytes().splitlines()):
+                return False
+        elif mode != "transport-loss" or "mux_exit" in transport:
+            return False
+        # A -M -N master has no command status: -O exit leaves -1 (255),
+        # unlike the separate successful exit controller. SIGKILL is 137.
+        for key, role, expected in (("master", "client.ssh-master", 137 if mode == "transport-loss" else 255),
+                                    ("daemon", "server.sshd", 0)):
+            observed = transport.get(f"{key}_processes")
+            if not process_reaping_artifacts_match(observed, root, role, runner):
+                return False
+            if observed["before"]["root"]["pid"] != transport.get(f"{key}_pid"):
+                return False
+            status = transport.get(f"{key}_exit_status")
+            status_path = root / f"{role}.exit"
+            ensure_private_regular(status_path)
+            if type(status) is not int or status != expected or status_path.stat().st_size > 4:
+                return False
+            if status_path.read_bytes() != f"{expected}\n".encode():
+                return False
+        for filename in ("client.stderr", *(["client.detach.stderr"] if lifecycle["mode"] == "detach" else [])):
+            log = root / filename
+            ensure_private_regular(log)
+            if log.stat().st_size > runner.FRAME_LOG_SCAN_BYTES or b"mux_client_request_session" not in log.read_bytes():
+                return False
+        return True
+    except (JobError, OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def decoder_recovery_artifacts_match(embedded: dict, root: Path, runner: Any) -> bool:
+    try:
+        values = {}
+        for filename in ("client.stdout", "client.stderr", "server.stderr", "server-info-recovery.txt", "client.pid"):
+            path = root / filename
+            ensure_private_regular(path)
+            if path.stat().st_size > runner.FRAME_LOG_SCAN_BYTES:
+                return False
+            values[filename] = path.read_text(encoding="utf-8", errors="strict")
+        if not re.fullmatch(r"[1-9][0-9]{0,9}\n", values["client.pid"]):
+            return False
+        window_id = embedded["window"]["xpra_id"]
+        if type(window_id) is not int or window_id <= 0:
+            return False
+        packets = runner.parse_saved_updates(root, window_id)["updates"]
+        client_log = values["client.stdout"] + "\n" + values["client.stderr"]
+        policy = runner.decode_seccomp_evidence(client_log, hardware=False)
+        proof = runner.decoder_recovery.evaluate(
+            client_log=client_log, server_log=values["server.stderr"], server_info=values["server-info-recovery.txt"],
+            packets=packets, window_id=window_id, client_pid=int(values["client.pid"]),
+        )
+        positive = bool(packets) and all(packet.get("payload_bytes", -1) > 0 for packet in packets)
+        return bool(embedded.get("decoder_recovery") == proof and all(proof["checks"].values())
+                    and embedded["logs"]["decode_seccomp"] == policy
+                    and embedded["classification"]["boundaries"].get("decoder_recovery")
+                    == {**proof["checks"], "positive_saved_payload": positive}
+                    and positive)
+    except (JobError, OSError, ValueError, KeyError, TypeError, runner.LabFailure):
+        return False
+
+
+def group_shutdown_artifacts_match(lifecycle: dict, root: Path, runner: Any, order: str) -> bool:
+    try:
+        evidence = lifecycle["group_shutdown"]
+        for key, filename in (("ready", "server.shutdown-ready.json"),
+                              ("result", "server.shutdown-result.json"), ("native_exit", "server.native-exit.json")):
+            path = root / filename
+            ensure_private_regular(path)
+            if path.stat().st_size > 64 * 1024 or json.loads(path.read_bytes()) != evidence[key]:
+                return False
+        if evidence["ready"]["order"] != order:
+            return False
+        lease = evidence["lease_processes"]
+        if not process_reaping_artifacts_match(lease, root, "client.shutdown-lease", runner):
+            return False
+        status = root / "client.shutdown-lease.exit"
+        ensure_private_regular(status)
+        if status.read_bytes() != b"255\n" or evidence["lease_exit_status"] != 255:
+            return False
+        streams = [f"{role}.{suffix}" for role in ("client.shutdown-lease", "server.private-bus", "server.portal",
+                                                   "server.portal-gtk") for suffix in ("stdout", "stderr")]
+        for filename in (*streams, "server.shutdown-supervisor.stderr"):
+            path = root / filename
+            ensure_private_regular(path)
+            if path.stat().st_size > runner.FRAME_LOG_SCAN_BYTES or runner.runtime_audit.failures(path.read_bytes(), positive=True):
+                return False
+        # Any supervisor diagnostic is a cleanup failure, never background noise.
+        if (root / "server.shutdown-supervisor.stderr").stat().st_size:
+            return False
+        if order == runner.shutdown_fixture.ABORT_CONTROL:
+            server_log = root / "server.stderr"
+            ensure_private_regular(server_log)
+            if (server_log.stat().st_size > runner.FRAME_LOG_SCAN_BYTES
+                    or not runner.shutdown_fixture.abort_diagnostic_valid(server_log.read_bytes())):
+                return False
+        return all(runner.shutdown_fixture.evidence_checks(
+            evidence, application=lifecycle["application_identity_at_capture"], server_pid=lifecycle["server_pid"],
+        ).values())
+    except (JobError, OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def detach_churn_artifacts_match(lifecycle: dict, root: Path, runner: Any) -> bool:
+    """Re-read every churn cycle's raw statuses, output and reaping."""
+    try:
+        evidence = lifecycle["detach_churn"]
+        if not all(runner.detach_churn_checks(evidence).values()):
+            return False
+
+        def raw(name: str, limit: int = runner.FRAME_LOG_SCAN_BYTES) -> bytes:
+            path = root / name
+            ensure_private_regular(path)
+            if path.stat().st_size > limit:
+                raise JobError(f"oversized churn artifact: {name}")
+            return path.read_bytes()
+
+        def audited(name: str) -> str:
+            content = raw(name)
+            if runner.runtime_audit.failures(content, positive=True):
+                raise JobError(f"runtime failure in churn artifact: {name}")
+            return content.decode("utf-8", errors="strict")
+
+        for record in evidence["cycles"]:
+            role = f"client.churn-{record['cycle']:02d}"
+            if (raw(f"{role}.exit", 4) != b"0\n" or raw(f"{role}.detach.exit", 4) != b"0\n"
+                    or raw(f"{role}.pointer.exit", 4) != b"0\n"):
+                return False
+            client_log = audited(f"{role}.stdout") + "\n" + audited(f"{role}.stderr")
+            audited(f"{role}.detach.stdout")
+            audited(f"{role}.detach.stderr")
+            audited(f"{role}.pointer.stderr")
+            if "detach request" not in client_log or "Connection lost" in client_log:
+                return False
+            moves = [json.loads(line).get("moves", 0) for line in audited(f"{role}.pointer.stdout").splitlines()]
+            if max(moves, default=0) != record["pointer_moves"]:
+                return False
+            if not (process_reaping_artifacts_match(record["client_processes"], root, role, runner)
+                    and process_reaping_artifacts_match(record["pointer_processes"], root, f"{role}.pointer", runner)):
+                return False
+        fixture = evidence["fixture"]
+        progress = [json.loads(line) for line in audited("server.churn-fixture.stdout").splitlines()]
+        audited("server.churn-fixture.stderr")
+        if (raw("server.churn-fixture.exit", 4) != b"0\n" or not progress or progress[-1] != fixture["progress"]
+                or not process_reaping_artifacts_match(fixture["processes"], root, "server.churn-fixture", runner,
+                                                       reap_direct=False)):
+            return False
+        for role, recorded in evidence["desktop_processes"].items():
+            # stopped deliberately with SIGTERM: either status is that stop
+            if (role not in {"client.churn-openbox", "client.churn-xvfb"}
+                    or recorded["exit_status"] not in {0, 143}
+                    or raw(f"{role}.exit", 4) != f"{recorded['exit_status']}\n".encode()):
+                return False
+            if not process_reaping_artifacts_match(recorded["processes"], root, role, runner, reap_direct=False):
+                return False
+        return set(evidence["desktop_processes"]) == {"client.churn-openbox", "client.churn-xvfb"}
+    except (JobError, OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def persistent_service_artifacts_match(lifecycle: dict, root: Path, runner: Any) -> bool:
+    """Bind the user-service snapshots and the service's own exit receipt."""
+    try:
+        evidence = lifecycle["persistent_service"]
+        if not all(runner.persistent_service_checks(
+                evidence, lifecycle.get("server_pid"), lifecycle.get("server_exit_status")).values()):
+            return False
+        for key, name in (("started", "started"), ("before_detach", "before-detach"),
+                          ("after_detach", "after-detach"), ("after_exit", "after-exit")):
+            path = root / f"server.persistent-{name}.json"
+            ensure_private_regular(path)
+            if path.stat().st_size > 64 * 1024 or json.loads(path.read_bytes()) != evidence[key]:
+                return False
+        path = root / "server.systemd-exit.json"
+        ensure_private_regular(path)
+        if path.stat().st_size > 64 * 1024 or json.loads(path.read_bytes()) != evidence["exit_receipt"]:
+            return False
+        status = root / "server.exit"
+        ensure_private_regular(status)
+        return status.read_bytes() == f"{evidence['exit_receipt']['status']}\n".encode()
+    except (JobError, OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def gtk_fixture_artifact_evidence_matches(
     embedded: dict[str, Any],
     scenario_root: Path,
@@ -2226,8 +2538,17 @@ def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
         )
         if tuple(names) != expected_names:
             return False
-    if payload.get("application") == "subsurface" and names != ["default-alpha"]:
-        return False
+    if not clipboard_policies:
+        try:
+            expected_names = [name for name, _alpha in runner.scenario_specs(
+                alpha_scenarios=payload["invocation"]["alpha_scenarios"],
+                lifecycle=payload["lifecycle_profile"],
+                application=payload["application"], encoding=payload["encoding"],
+            )]
+        except (KeyError, TypeError, ValueError):
+            return False
+        if names != expected_names:
+            return False
     expected_top_level = {"inputs", "report.json", *names}
     if {path.name for path in root.iterdir()} != expected_top_level:
         return False
@@ -2306,6 +2627,43 @@ def evidence_tree_validation(payload: dict[str, Any], report: Path) -> bool:
                 lifecycle,
             )
         except runner.LabFailure:
+            return False
+        if not peer_exit_artifact_evidence_matches(lifecycle, scenario_root):
+            return False
+        aborted_server = name.startswith(f"ssh-group-{runner.shutdown_fixture.ABORT_CONTROL}-")
+        if not peer_process_artifact_evidence_matches(lifecycle, scenario_root, runner, aborted_server=aborted_server):
+            return False
+        desktop = embedded.get("desktop_teardown")
+        desktop_roles = {"sway"} if payload.get("encoding") == "h264" else {"picom", "openbox", "xvfb"}
+        if (not isinstance(desktop, dict) or set(desktop) != desktop_roles
+                or not all(process_reaping_artifacts_match(desktop[role], scenario_root, role, runner, reap_direct=False)
+                           for role in desktop_roles)):
+            return False
+        if name.startswith("ssh-"):
+            if not ssh_transport_artifact_evidence_matches(lifecycle, scenario_root, runner):
+                return False
+        elif "ssh_transport" in lifecycle:
+            return False
+        if name.startswith("ssh-detach-churn-"):
+            if not detach_churn_artifacts_match(lifecycle, scenario_root, runner):
+                return False
+        elif "detach_churn" in lifecycle:
+            return False
+        if name.startswith("ssh-detach-persistent-"):
+            if not persistent_service_artifacts_match(lifecycle, scenario_root, runner):
+                return False
+        elif "persistent_service" in lifecycle:
+            return False
+        if name.startswith("ssh-group-"):
+            order = name.removeprefix("ssh-group-").rsplit("-", 1)[0]
+            if not group_shutdown_artifacts_match(lifecycle, scenario_root, runner, order):
+                return False
+        elif "group_shutdown" in lifecycle:
+            return False
+        if name == "decoder-loss":
+            if not decoder_recovery_artifacts_match(embedded, scenario_root, runner):
+                return False
+        elif "decoder_recovery" in embedded:
             return False
         if (
             classified_lifecycle != expected_lifecycle
@@ -2411,6 +2769,33 @@ def clipboard_profile_validation(payload: dict[str, Any]) -> bool:
     )
 
 
+def packaged_runtime_validation(payload: dict[str, Any], report: Path) -> bool:
+    runner = live_runner_module()
+    try:
+        packages = payload["source"]["input_provenance"]["packages"]
+        if not isinstance(packages, dict) or set(packages) != {"server", "client"}:
+            return False
+        for scenario in payload["scenarios"]:
+            if not isinstance(scenario["name"], str) or not NAME_RE.fullmatch(scenario["name"]):
+                return False
+            for role in ("server", "client"):
+                path = report.parent / scenario["name"] / f"{role}-package-capabilities.json"
+                ensure_private_regular(path)
+                if path.stat().st_size > 1024 * 1024:
+                    return False
+                record = json.loads(path.read_text())
+                runner.package_runtime.validate_evidence(record, packages[role], role)
+                integrity = report.parent / scenario["name"] / f"{role}-package-integrity.json"
+                ensure_private_regular(integrity)
+                if integrity.stat().st_size > 1024 * 1024 or json.loads(integrity.read_text()) != record:
+                    return False
+                if scenario[role]["packages"] != record:
+                    return False
+        return bool(payload["scenarios"])
+    except (KeyError, TypeError, ValueError, OSError, JobError):
+        return False
+
+
 def report_validation(
     run: str,
     record: dict[str, Any],
@@ -2493,6 +2878,7 @@ def report_validation(
         == provenance["zed_archive_sha256"]
         and source.get("input_provenance") == expected_input_provenance,
         "image_provenance": image_provenance_validation(payload, provenance),
+        "packaged_runtime": packaged_runtime_validation(payload, report),
         "supervisor_sha256": isinstance(source, dict)
         and source.get("supervisor_sha256") == record["supervisor_sha256"],
         "background_supervisor_sha256": isinstance(source, dict)

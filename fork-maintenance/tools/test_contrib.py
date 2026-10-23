@@ -3714,6 +3714,7 @@ class CaseCommitTest(unittest.TestCase):
         with self.assertRaisesRegex(contrib.ContribError, "is a dependency of"):
             contrib.case_drop(self.repo, "one")
         self.assertEqual(contrib.case_check(self.repo, "one")["dependents"], ["two"])
+        self.assertTrue(contrib.case_check(self.repo, "two")["applies_on_base"])
 
     def test_develop_check_binds_case_directories_to_commits(self) -> None:
         self.add_case("one", self.edit("xpra/a.py", "line 5\n", "line five\n"))

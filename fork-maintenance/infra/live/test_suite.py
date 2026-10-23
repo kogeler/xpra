@@ -20,6 +20,7 @@ class LiveSuiteTest(unittest.TestCase):
                 "application", "lifecycle", "encoding", "h264_client_policy", "alpha_scenarios",
             ), profile, strict=True))
             values.update({
+                "runtime_images": ("sha256:" + "7" * 64, "sha256:" + "8" * 64),
                 "render_node": "/dev/dri/renderD128",
                 "network_profile": suite.DEFAULT_NETWORK_PROFILE,
                 "input_provenance": {
@@ -44,6 +45,7 @@ class LiveSuiteTest(unittest.TestCase):
             patch.object(suite, "retained_record", side_effect=record),
             patch.object(suite.job, "verify_collected"),
             patch.object(suite, "check_peer_logs") as peer_logs,
+            patch.object(suite, "runtime_images", side_effect=lambda run, _digest: records[run]["runtime_images"]),
             patch.object(suite.job, "load_private_json", return_value={"result": status}),
             patch.object(suite.job, "report_validation", return_value=(
                 validation if validation is not None else ("passed", "5" * 64, {"evidence": True})
@@ -92,7 +94,7 @@ class LiveSuiteTest(unittest.TestCase):
             records[last]["input_provenance"][field] = "changed"
             with self.subTest(field=field), self.assertRaises(suite.job.JobError):
                 self.check(records)
-        for field in ("render_node", "network_profile", "application"):
+        for field in ("render_node", "network_profile", "application", "runtime_images"):
             records = self.records()
             records[next(reversed(records))][field] = "changed"
             with self.subTest(field=field), self.assertRaises(suite.job.JobError):
@@ -181,6 +183,13 @@ class LiveSuiteTest(unittest.TestCase):
 
 
 class PeerLogTest(unittest.TestCase):
+    def test_detach_helper_diagnostics_are_not_hidden_by_successful_peers(self):
+        self.content["client.detach.stdout"] = b""
+        self.content["client.detach.stderr"] = b"ResourceWarning: subprocess 42 is still running\n"
+        digest = self.publish()
+        with self.assertRaisesRegex(suite.job.JobError, "runtime failure"):
+            suite.check_peer_logs("peer-control", digest)
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -213,6 +222,33 @@ class PeerLogTest(unittest.TestCase):
 
     def test_complete_clean_logs_pass(self):
         suite.check_peer_logs("peer-control", self.publish())
+
+    def test_runtime_image_comparison_uses_complete_hashed_report(self):
+        self.publish()
+        images = ("sha256:" + "1" * 64, "sha256:" + "2" * 64)
+        self.payload["images"] = {role: {"id": value} for role, value in zip(("server", "client"), images)}
+        digest = self.publish_report()
+        self.assertEqual(suite.runtime_images("peer-control", digest), images)
+        for role in ("server", "client"):
+            self.payload["images"][role]["id"] = self.payload["images"][role]["id"].removeprefix("sha256:")
+        self.assertEqual(suite.runtime_images("peer-control", self.publish_report()), images)
+        self.payload["images"]["client"]["id"] = "mutable-tag"
+        with self.assertRaises(suite.job.JobError):
+            suite.runtime_images("peer-control", self.publish_report())
+
+    def test_unhandled_async_logging_and_native_failures_fail_on_every_peer(self):
+        for filename in suite.PEER_LOGS:
+            for diagnostic in (
+                b"Exception in thread worker:\n", b"Exception ignored in: <function finalizer>\n",
+                b"--- Logging error ---\n", b"Fatal Python error: Aborted\n",
+                b"ResourceWarning: subprocess 10 is still running\n", b"corrupted double-linked list\n",
+            ):
+                with self.subTest(file=filename, diagnostic=diagnostic):
+                    self.content = dict.fromkeys(suite.PEER_LOGS, b"normal\n")
+                    self.content[filename] += diagnostic + b"PRIVATE-CONTENT\n"
+                    with self.assertRaisesRegex(suite.job.JobError, "runtime failure") as caught:
+                        suite.check_peer_logs("peer-control", self.publish())
+                    self.assertNotIn("PRIVATE-CONTENT", str(caught.exception))
 
     def test_every_warning_in_every_complete_peer_tail_fails_without_leaking_text(self):
         warnings = (

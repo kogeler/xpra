@@ -21,6 +21,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, patch
 
+from test_package_runtime import evidence as package_fixture
+from test_decoder_recovery import recovery_inputs
+from test_shutdown_fixture import group_evidence
+import profiles
+
 LIVE_DIRECTORY = Path(__file__).resolve().parent
 
 JOB_SPEC = importlib.util.spec_from_file_location(
@@ -62,6 +67,83 @@ def completed(
     stderr: str = "",
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+
+def detach_churn_evidence(root: Path) -> dict[str, object]:
+    """Synthetic file-bound churn evidence, never a claim that a live detach ran."""
+    def write(name: str, body: str) -> None:
+        (root / name).write_text(body)
+        (root / name).chmod(0o600)
+
+    def reaping(role: str, pid: int) -> dict[str, object]:
+        before = {"schema": 1, "root": {"pid": pid, "parent_pid": 1, "start_ticks": "123456", "comm": "python3"},
+                  "descendants": []}
+        after: dict[str, object] = {"remaining": []}
+        write(f"{role}.pid", f"{pid}\n")
+        write(f"{role}.processes-before.json", json.dumps(before))
+        write(f"{role}.processes-after.json", json.dumps(after))
+        return {"before": before, "after": after}
+
+    cycles = []
+    for cycle in range(1, live_run.DETACH_CHURN_CYCLES + 1):
+        role = f"client.churn-{cycle:02d}"
+        for name in (f"{role}.exit", f"{role}.detach.exit", f"{role}.pointer.exit"):
+            write(name, "0\n")
+        write(f"{role}.stdout", "Attached to ssh://xpra-server\nserver requested disconnect:\n detach request\n")
+        for name in (f"{role}.stderr", f"{role}.detach.stdout", f"{role}.detach.stderr", f"{role}.pointer.stderr"):
+            write(name, "")
+        write(f"{role}.pointer.stdout", json.dumps({"mode": "pointer", "event": "ready", "moves": 0}) + "\n"
+              + json.dumps({"mode": "pointer", "moves": 40}) + "\n")
+        cycles.append({
+            "cycle": cycle, "detach_returncode": 0, "client_exit_status": 0,
+            "client_processes": reaping(role, 300 + cycle), "detach_reason_received": True,
+            "connection_lost": False, "pointer_exit_status": 0,
+            "pointer_processes": reaping(f"{role}.pointer", 400 + cycle), "pointer_moves": 40,
+            "server_survived": True,
+        })
+    progress = {"mode": "server", "event": "stopped", "created": 80, "destroyed": 76, "notified": 20,
+                "notify_errors": 0}
+    write("server.churn-fixture.stdout", json.dumps(progress, sort_keys=True) + "\n")
+    write("server.churn-fixture.stderr", "")
+    write("server.churn-fixture.exit", "0\n")
+    desktop = {}
+    for role, pid in (("client.churn-openbox", 600), ("client.churn-xvfb", 601)):
+        write(f"{role}.exit", "143\n")
+        desktop[role] = {"exit_status": 143, "processes": reaping(role, pid)}
+    return {
+        "schema": 1, "cycles": cycles, "desktop": {"composited": False, "rgba_visual": True, "rgba_depth": 32},
+        "fixture": {"exit_status": 0, "processes": reaping("server.churn-fixture", 500), "progress": progress},
+        "desktop_processes": desktop,
+    }
+
+
+def persistent_service_evidence(root: Path, server_pid: int) -> dict[str, object]:
+    """Synthetic file-bound user-service evidence, never a claim that a live detach ran."""
+    def snapshot(state: str) -> dict[str, object]:
+        record: dict[str, object] = {
+            "unit": "xpra-live.service", "ActiveState": state, "SubState": "running" if state == "active" else "dead",
+            "Result": "success", "ControlGroup": "/system.slice/xpra-live-user-manager.service/app.slice/xpra-live.service",
+            "NRestarts": 0, "MainPID": server_pid if state == "active" else 0,
+        }
+        if state == "active":
+            record.update(main_process={"pid": server_pid, "comm": "xpra", "parent_pid": 77, "start_ticks": "123456"},
+                          manager_process={"pid": 77, "comm": "systemd", "parent_pid": 1, "start_ticks": "100"},
+                          manager_is_user_instance=True)
+        return record
+
+    receipt = {"origin": "exit", "status": 0,
+               "systemd": {"EXIT_CODE": "exited", "EXIT_STATUS": "0", "SERVICE_RESULT": "success"}}
+    evidence = {"schema": 1, "system_state": "degraded", "masked_system_units": ["xpra.socket", "xpra.service"],
+                "started": snapshot("active"),
+                "before_detach": snapshot("active"), "after_detach": snapshot("active"),
+                "after_exit": snapshot("inactive"), "exit_receipt": receipt}
+    for key, name in (("started", "started"), ("before_detach", "before-detach"),
+                      ("after_detach", "after-detach"), ("after_exit", "after-exit")):
+        (root / f"server.persistent-{name}.json").write_text(json.dumps(evidence[key]))
+        (root / f"server.persistent-{name}.json").chmod(0o600)
+    (root / "server.systemd-exit.json").write_text(json.dumps(receipt))
+    (root / "server.systemd-exit.json").chmod(0o600)
+    return evidence
 
 
 def interaction_identity(pid: int = 41) -> dict[str, object]:
@@ -219,6 +301,80 @@ def execute_container_log_probe(
     return execute
 
 
+def peer_process_fixture(root: Path) -> dict:
+    evidence = {}
+    for role, default_pid in (("server", server_identity()["pid"]), ("client", 17)):
+        pid_path = root / f"{role}.pid"
+        if not pid_path.exists():
+            pid_path.write_text(str(default_pid) + "\n")
+            pid_path.chmod(0o600)
+        snapshot = {"schema": 1, "root": {"pid": int(pid_path.read_text()), "parent_pid": 1,
+                                            "start_ticks": "123456", "comm": "fixture"}, "descendants": []}
+        evidence[role] = {"before": snapshot, "after": {"remaining": []}}
+        for phase, value in evidence[role].items():
+            path = root / f"{role}.processes-{phase}.json"
+            path.write_text(json.dumps(value))
+            path.chmod(0o600)
+    return evidence
+
+
+def ssh_transport_fixture(root: Path, lifecycle: str) -> dict:
+    """Synthetic collector input, never evidence of a real SSH execution."""
+    evidence = {"schema": 1, **live_run.ssh_endpoint_options(),
+                "client_configuration": live_run.ssh_fixture.client_configuration(),
+                "master_pid": 50, "daemon_pid": 60,
+                "mux_check": {"returncode": 0, "stdout": "", "stderr": "Master running (pid=50)\n"}}
+    for name, role, pid, status in (("master", "client.ssh-master", 50, 137 if lifecycle == "transport-loss" else 255),
+                                    ("daemon", "server.sshd", 60, 0)):
+        before = {"schema": 1, "root": {"pid": pid, "parent_pid": 1, "start_ticks": "123456", "comm": "ssh"},
+                  "descendants": []}
+        phases = {"before": before, "after": {"remaining": []}}
+        evidence[f"{name}_processes"] = phases
+        evidence[f"{name}_exit_status"] = status
+        for suffix, value in (("pid", f"{pid}\n"), ("exit", f"{status}\n")):
+            path = root / f"{role}.{suffix}"
+            path.write_text(value)
+            path.chmod(0o600)
+        for phase, value in phases.items():
+            path = root / f"{role}.processes-{phase}.json"
+            path.write_text(json.dumps(value))
+            path.chmod(0o600)
+    for filename in ("client.stderr", *(["client.detach.stderr"] if lifecycle == "detach" else [])):
+        path = root / filename
+        path.write_text("debug1: mux_client_request_session: master session id: 2\n")
+        path.chmod(0o600)
+    if lifecycle == "detach":
+        evidence["mux_exit"] = {"command": live_run.ssh_fixture.exit_command(), "returncode": 0,
+                                "stdout": "", "stderr": "Exit request sent.\n"}
+        for suffix, value in (("exit", "0\n"), ("stdout", ""), ("stderr", "Exit request sent.\n")):
+            path = root / f"client.ssh-master-stop.{suffix}"
+            path.write_text(value)
+            path.chmod(0o600)
+        path = root / "client.ssh-master.stderr"
+        path.write_text("debug1: Exit status -1\n")
+        path.chmod(0o600)
+    path = root / "ssh-transport.json"
+    path.write_text(json.dumps(evidence))
+    path.chmod(0o600)
+    return evidence
+
+
+def desktop_fixture(root: Path, encoding: str = "rgb") -> dict:
+    evidence = {}
+    roles = ("sway",) if encoding == "h264" else ("picom", "openbox", "xvfb")
+    for pid, role in enumerate(roles, 200):
+        before = {"schema": 1, "root": {"pid": pid, "parent_pid": 1, "start_ticks": "123456", "comm": role}, "descendants": []}
+        evidence[role] = {"before": before, "after": {"remaining": []}}
+        path = root / f"{role}.pid"
+        path.write_text(f"{pid}\n")
+        path.chmod(0o600)
+        for phase, value in evidence[role].items():
+            path = root / f"{role}.processes-{phase}.json"
+            path.write_text(json.dumps(value))
+            path.chmod(0o600)
+    return evidence
+
+
 class LiveJobTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -373,6 +529,7 @@ class LiveJobTest(unittest.TestCase):
         scenario_digests: dict[str, str] = {}
         lifecycle = {
             "client_exit_status": 0,
+            "server_exit_status": 0,
             "client_exited_after_server": True,
             "mode": "application-exit",
             "server_exited_after_application": True,
@@ -386,15 +543,25 @@ class LiveJobTest(unittest.TestCase):
             scenario_root = report.parent / name
             scenario_root.mkdir()
             scenario_root.chmod(0o700)
+            lifecycle = copy.deepcopy(lifecycle)
+            lifecycle["peer_processes"] = peer_process_fixture(scenario_root)
+            desktop = desktop_fixture(scenario_root)
             artifact = scenario_root / "evidence.txt"
             artifact.write_text("digest-only clipboard evidence\n", encoding="utf-8")
             artifact.chmod(0o600)
+            for role in ("client", "server"):
+                status_path = scenario_root / f"{role}.exit"
+                status_path.write_text("0\n")
+                status_path.chmod(0o600)
             interaction = clipboard_interaction(policy)
             scenario: dict[str, object] = {
                 "application": "clipboard",
                 "artifact_collection_passed": True,
                 "artifact_sha256": {
                     "evidence.txt": job.sha256_file(artifact),
+                    "server.exit": job.sha256_file(scenario_root / "server.exit"),
+                    "client.exit": job.sha256_file(scenario_root / "client.exit"),
+                    **{path.name: job.sha256_file(path) for path in scenario_root.iterdir() if path.is_file()},
                 },
                 "classification": {
                     "boundaries": {
@@ -409,6 +576,7 @@ class LiveJobTest(unittest.TestCase):
                     )
                 },
                 "clipboard_policy": policy,
+                "desktop_teardown": desktop,
                 "encoding": "rgb",
                 "h264_client_policy": "strict",
                 "interaction": interaction,
@@ -1846,7 +2014,10 @@ class LiveJobTest(unittest.TestCase):
         provenance = record["input_provenance"]
         provenance["input_manifest_sha256"] = manifest_digest
         provenance["input_tree_sha256"] = live_run.tree_sha256(inputs)
-        scenario_root = report.parent / "default-alpha"
+        scenario_name = live_run.scenario_specs(
+            alpha_scenarios=str(record["alpha_scenarios"]), lifecycle=lifecycle_profile,
+        )[0][0]
+        scenario_root = report.parent / scenario_name
         scenario_root.mkdir()
         scenario_root.chmod(0o700)
         artifact = scenario_root / "evidence.txt"
@@ -1930,12 +2101,40 @@ class LiveJobTest(unittest.TestCase):
                 "mode": "application-exit",
                 "server_exited_after_application": True,
             }
+        lifecycle["server_exit_status"] = 0
         interaction: dict[str, object] = {}
         if application in {"gtk", "hardware", "opengl"}:
             from test_scroll import artifacts as scroll_artifacts
             driver = "x11-discrete" if application == "gtk" else "sway-axis"
             scroll_record = scroll_artifacts(scenario_root, driver)
             interaction["scroll"] = live_run.interaction_scroll_evidence(scenario_root, scroll_record)
+        packaged = {}
+        provenance["packages"] = {}
+        for role, distro in (("server", "ubuntu-26.04"), ("client", "debian-13")):
+            expected, observed = package_fixture(role)
+            expected.update({"distro": distro, "source_commit": provenance["source_commit"],
+                             "selection_sha256": provenance[f"{role}_selection_sha256"]})
+            observed.update({key: expected[key] for key in ("distro", "source_commit", "selection_sha256")})
+            provenance["packages"][role] = expected
+            packaged[role] = observed
+            artifact = scenario_root / f"{role}-package-capabilities.json"
+            artifact.write_text(json.dumps(observed))
+            artifact.chmod(0o600)
+            integrity = scenario_root / f"{role}-package-integrity.json"
+            integrity.write_text(json.dumps(observed))
+            integrity.chmod(0o600)
+        for role in ("client", "server"):
+            status_path = scenario_root / f"{role}.exit"
+            status_path.write_text(str(lifecycle[f"{role}_exit_status"]) + "\n")
+            status_path.chmod(0o600)
+        lifecycle["peer_processes"] = peer_process_fixture(scenario_root)
+        desktop = desktop_fixture(scenario_root)
+        if lifecycle_profile == "detach":
+            lifecycle.update(detach_stdout="", detach_stderr="")
+            for suffix, value in (("exit", "0\n"), ("stdout", ""), ("stderr", "")):
+                path = scenario_root / f"client.detach.{suffix}"
+                path.write_text(value)
+                path.chmod(0o600)
         artifact_sha256 = {
             path.relative_to(scenario_root).as_posix(): job.sha256_file(path)
             for path in scenario_root.iterdir()
@@ -1965,16 +2164,19 @@ class LiveJobTest(unittest.TestCase):
             },
             "cleanup": {"passed": True},
             "encoding": "rgb",
+            "desktop_teardown": desktop,
             "hardware": hardware,
             "interaction": interaction,
             "h264_client_policy": "strict",
             "lifecycle": lifecycle,
             "lifecycle_profile": lifecycle_profile,
-            "name": "default-alpha",
+            "name": scenario_name,
             "network_profile": record["network_profile"],
             "result": "passed",
         }
         scenario_report = scenario_root / "report.json"
+        for role in ("server", "client"):
+            scenario.setdefault(role, {})["packages"] = packaged[role]
         scenario_report.write_text(
             json.dumps(scenario, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -2035,7 +2237,7 @@ class LiveJobTest(unittest.TestCase):
                     },
                     "result": "passed",
                     "scenario_report_sha256": {
-                        "default-alpha": job.sha256_file(scenario_report)
+                        scenario_name: job.sha256_file(scenario_report)
                     },
                     "scenarios": [scenario],
                     "source": {
@@ -2078,6 +2280,51 @@ class LiveJobTest(unittest.TestCase):
             encoding="utf-8",
         )
         report.chmod(0o600)
+
+        # Collector baselines include the complete authoritative scenario
+        # inventory. Copies are synthetic; transport guard tests mutate them.
+        payload = json.loads(report.read_text())
+        for name, _alpha in live_run.scenario_specs(
+            alpha_scenarios=str(record["alpha_scenarios"]), lifecycle=lifecycle_profile,
+        )[1:]:
+            target = report.parent / name
+            shutil.copytree(scenario_root, target)
+            additional = copy.deepcopy(scenario)
+            additional["name"] = name
+            if name.startswith("ssh-"):
+                additional["lifecycle"]["ssh_transport"] = ssh_transport_fixture(target, lifecycle_profile)
+                if lifecycle_profile == "detach":
+                    additional["lifecycle"]["detach_stderr"] = (target / "client.detach.stderr").read_text()
+            if name.startswith("ssh-detach-persistent-"):
+                lifecycle = additional["lifecycle"]
+                lifecycle["persistent_service"] = persistent_service_evidence(target, lifecycle["server_pid"])
+                additional["classification"]["boundaries"]["lifecycle"] = live_run.lifecycle_boundary_checks(
+                    lifecycle_profile, lifecycle,
+                )
+            if name.startswith("ssh-detach-churn-"):
+                lifecycle = additional["lifecycle"]
+                lifecycle["detach_churn"] = detach_churn_evidence(target)
+                additional["classification"]["boundaries"]["lifecycle"] = live_run.lifecycle_boundary_checks(
+                    lifecycle_profile, lifecycle,
+                )
+            if name.startswith("ssh-group-"):
+                lifecycle = additional["lifecycle"]
+                order = name.removeprefix("ssh-group-").rsplit("-", 1)[0]
+                lifecycle["group_shutdown"] = group_evidence(lifecycle["application_identity_at_capture"],
+                                                            lifecycle["server_pid"], order, target)
+                lifecycle["server_exit_status"] = lifecycle["group_shutdown"]["native_exit"]["status"]
+                additional["classification"]["boundaries"]["lifecycle"] = live_run.lifecycle_boundary_checks(
+                    lifecycle_profile, lifecycle,
+                )
+            additional["artifact_sha256"] = {
+                path.relative_to(target).as_posix(): job.sha256_file(path)
+                for path in target.iterdir() if path.is_file() and path.name != "report.json"
+            }
+            scenario_path = target / "report.json"
+            scenario_path.write_text(json.dumps(additional))
+            payload["scenarios"].append(additional)
+            payload["scenario_report_sha256"][name] = job.sha256_file(scenario_path)
+        report.write_text(json.dumps(payload))
 
     def test_start_binds_profile_to_owned_process(self) -> None:
         args = Namespace(
@@ -2805,6 +3052,25 @@ class LiveJobTest(unittest.TestCase):
         self.assertEqual(status["exit_code"], 0)
         self.assertTrue(status["report_checks"]["background_supervisor_sha256"])
 
+    def test_collector_binds_modules_to_frozen_deb_bytes_not_report_claims(self):
+        run = "packaged-runtime-binding"
+        record = self.record(run)
+        job.prepare_private_state()
+        self.make_report(run, record)
+        report = job.result_path(run)
+        payload = json.loads(report.read_text())
+        self.assertTrue(job.packaged_runtime_validation(payload, report))
+        scenario = payload["scenarios"][0]
+        path = report.parent / scenario["name"] / "client-package-capabilities.json"
+        observed = json.loads(path.read_text())
+        module = next(iter(observed["modules"].values()))
+        module["sha256"] = "d" * 64
+        # Even refreshing the report's own observation cannot change the
+        # authority obtained independently from the accepted DEB payload.
+        path.write_text(json.dumps(observed))
+        scenario["client"]["packages"] = observed
+        self.assertFalse(job.packaged_runtime_validation(payload, report))
+
     def test_evidence_tree_binds_each_embedded_scenario_profile_identity(self) -> None:
         mutations = {
             "application": "gtk",
@@ -2835,6 +3101,77 @@ class LiveJobTest(unittest.TestCase):
                 )
                 _result, _digest, checks = job.report_validation(run, record)
                 self.assertFalse(checks["evidence_tree"])
+
+    def test_collector_binds_both_peer_exit_claims_to_raw_statuses(self):
+        for role in ("server", "client"):
+            with self.subTest(role=role):
+                run = "peer-exit-binding-" + role
+                record = self.record(run)
+                job.prepare_private_state()
+                self.make_report(run, record)
+                report = job.result_path(run)
+                payload = json.loads(report.read_text())
+                self.assertTrue(job.evidence_tree_validation(payload, report))
+                scenario = payload["scenarios"][0]
+                root = report.parent / scenario["name"]
+                path = root / f"{role}.exit"
+                path.write_text("139\n")
+                scenario["artifact_sha256"][path.name] = job.sha256_file(path)
+                scenario_report = root / "report.json"
+                scenario_report.write_text(json.dumps(scenario))
+                payload["scenario_report_sha256"][scenario["name"]] = job.sha256_file(scenario_report)
+                # Refreshing all ordinary hashes must not allow a successful
+                # lifecycle claim to disagree with the real wait status.
+                self.assertFalse(job.evidence_tree_validation(payload, report))
+
+    def test_collector_requires_the_planned_scenario_not_a_self_named_subset(self):
+        run = "scenario-inventory-binding"
+        record = self.record(run)
+        job.prepare_private_state()
+        self.make_report(run, record)
+        report = job.result_path(run)
+        payload = json.loads(report.read_text())
+        self.assertTrue(job.evidence_tree_validation(payload, report))
+        scenario = payload["scenarios"][0]
+        old_name = scenario["name"]
+        scenario["name"] = "not-the-planned-scenario"
+        root = report.parent / scenario["name"]
+        (report.parent / old_name).rename(root)
+        scenario_report = root / "report.json"
+        scenario_report.write_text(json.dumps(scenario))
+        payload["scenario_report_sha256"] = {scenario["name"]: job.sha256_file(scenario_report)}
+        self.assertFalse(job.evidence_tree_validation(payload, report))
+
+    def test_collector_requires_correct_peer_owner_and_real_reaping(self):
+        for role in ("server", "client"):
+            for mutation in ("wrong-owner", "zombie"):
+                with self.subTest(role=role, mutation=mutation):
+                    run = f"peer-reaping-{role}-{mutation}"
+                    record = self.record(run)
+                    job.prepare_private_state()
+                    self.make_report(run, record)
+                    report = job.result_path(run)
+                    payload = json.loads(report.read_text())
+                    self.assertTrue(job.evidence_tree_validation(payload, report))
+                    scenario = payload["scenarios"][0]
+                    root = report.parent / scenario["name"]
+                    evidence = scenario["lifecycle"]["peer_processes"][role]
+                    if mutation == "wrong-owner":
+                        evidence["before"]["root"]["pid"] += 1000
+                    else:
+                        evidence["after"]["remaining"] = [{**evidence["before"]["root"], "state": "Z"}]
+                    for phase, value in evidence.items():
+                        path = root / f"{role}.processes-{phase}.json"
+                        path.write_text(json.dumps(value))
+                        scenario["artifact_sha256"][path.name] = job.sha256_file(path)
+                    scenario_report = root / "report.json"
+                    scenario_report.write_text(json.dumps(scenario))
+                    payload["scenario_report_sha256"][scenario["name"]] = job.sha256_file(scenario_report)
+                    # Model the old collector, which had no process ownership
+                    # or reaping gate, without bypassing any other boundary.
+                    with patch.object(job, "peer_process_artifact_evidence_matches", return_value=True):
+                        self.assertTrue(job.evidence_tree_validation(payload, report))
+                    self.assertFalse(job.evidence_tree_validation(payload, report))
 
     def test_subsurface_evidence_binds_default_alpha_client_mode(self) -> None:
         run = "subsurface-default-alpha"
@@ -2985,6 +3322,333 @@ class LiveJobTest(unittest.TestCase):
         evidence.chmod(0o644)
         _result, _digest, checks = job.report_validation(run, record)
         self.assertFalse(checks["evidence_tree"])
+
+    def test_ssh_mux_evidence_and_iteration_inventory_fail_closed(self):
+        for mode in ("detach", "transport-loss"):
+            with self.subTest(mode=mode):
+                run = "ssh-inventory-" + mode
+                record = self.record(run)
+                record.update(application="gtk", lifecycle=mode)
+                job.prepare_private_state()
+                self.make_report(run, record)
+                report = job.result_path(run)
+                payload = json.loads(report.read_text())
+                self.assertTrue(job.evidence_tree_validation(payload, report))
+                self.assertEqual(len(payload["scenarios"]), 13 if mode == "detach" else 18)
+                scenario = payload["scenarios"][1]
+                root = report.parent / scenario["name"]
+                lifecycle = scenario["lifecycle"]
+                self.assertTrue(job.ssh_transport_artifact_evidence_matches(lifecycle, root, live_run))
+                transport = lifecycle["ssh_transport"]
+                for field, replacement in (("master_pid", 5000), ("master_exit_status", 139),
+                                           ("client_configuration", "ControlMaster auto\n")):
+                    changed = copy.deepcopy(transport)
+                    changed[field] = replacement
+                    (root / "ssh-transport.json").write_text(json.dumps(changed))
+                    forged = {**lifecycle, "ssh_transport": changed}
+                    self.assertFalse(job.ssh_transport_artifact_evidence_matches(forged, root, live_run), field)
+                (root / "ssh-transport.json").write_text(json.dumps(transport))
+                (root / "client.stderr").write_text("ordinary non-mux connection\n")
+                self.assertFalse(job.ssh_transport_artifact_evidence_matches(lifecycle, root, live_run))
+                # Removing all transport repeats cannot turn TCP-only coverage
+                # back into acceptance, even with self-consistent report hashes.
+                for extra in payload["scenarios"][1:]:
+                    shutil.rmtree(report.parent / extra["name"])
+                payload["scenarios"] = payload["scenarios"][:1]
+                payload["scenario_report_sha256"] = {payload["scenarios"][0]["name"]:
+                                                      payload["scenario_report_sha256"][payload["scenarios"][0]["name"]]}
+                self.assertFalse(job.evidence_tree_validation(payload, report))
+
+    def test_group_shutdown_collector_rejects_false_topology_native_success_and_helper_leaks(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            application = interaction_identity()
+            evidence = group_evidence(application, 8, "bus-first", root)
+            lifecycle = {"application_identity_at_capture": application, "server_pid": 8, "group_shutdown": evidence}
+
+            def accepted():
+                return job.group_shutdown_artifacts_match(lifecycle, root, live_run, "bus-first")
+
+            self.assertTrue(accepted())
+            path = root / "server.native-exit.json"
+            original = path.read_bytes()
+            aborted = {"origin": "signal", "signal": 6, "status": 134}
+            path.write_text(json.dumps(aborted))
+            self.assertFalse(accepted(), "unbound native receipt")
+            evidence["native_exit"] = aborted
+            self.assertFalse(accepted(), "the parent's wait status cannot turn SIGABRT into an exit")
+            evidence["native_exit"] = json.loads(original)
+            path.write_bytes(original)
+            self.assertTrue(accepted())
+            path = root / "server.shutdown-ready.json"
+            original = path.read_bytes()
+            evidence["ready"]["members"][4]["pgid"] = 800
+            path.write_text(json.dumps(evidence["ready"]))
+            # Both receipts and claims forged consistently, still not a group.
+            (root / "server.shutdown-result.json").write_text(json.dumps(evidence["result"]))
+            self.assertFalse(accepted(), "application outside private group")
+            evidence = group_evidence(application, 8, "bus-first", root)
+            lifecycle["group_shutdown"] = evidence
+            self.assertTrue(accepted())
+            path = root / "server.portal.stderr"
+            path.write_text("ResourceWarning: unclosed file\n")
+            self.assertFalse(accepted(), "helper warnings remain acceptance failures")
+            path.write_text("")
+            self.assertTrue(accepted())
+            path = root / "server.shutdown-supervisor.stderr"
+            path.write_text("private group cleanup: fixture group member identity changed\n")
+            self.assertFalse(accepted(), "a supervisor cleanup diagnostic is a failure")
+            path.write_text("")
+            self.assertTrue(accepted())
+            (root / "server.shutdown-result.json").unlink()
+            self.assertFalse(accepted(), "required independent receipt missing")
+
+    def test_detach_churn_collector_binds_every_cycle_to_raw_statuses_and_reason(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            evidence = detach_churn_evidence(root)
+            lifecycle = {"detach_churn": evidence}
+
+            def accepted() -> bool:
+                return job.detach_churn_artifacts_match(lifecycle, root, live_run)
+
+            self.assertTrue(accepted())
+            self.assertTrue(all(live_run.detach_churn_checks(evidence).values()))
+
+            def counterfactual(label: str, mutate, restore) -> None:
+                mutate()
+                with self.subTest(label):
+                    self.assertFalse(accepted(), label)
+                restore()
+                self.assertTrue(accepted(), label)
+
+            cycle = evidence["cycles"][2]
+            client_exit = root / "client.churn-03.exit"
+            # the incident: the detach command succeeded, the attached client lost its connection
+            counterfactual("attached client status 1 in raw and record",
+                           lambda: (client_exit.write_text("1\n"), cycle.update(client_exit_status=1)),
+                           lambda: (client_exit.write_text("0\n"), cycle.update(client_exit_status=0)))
+            counterfactual("raw client status alone", lambda: client_exit.write_text("1\n"),
+                           lambda: client_exit.write_text("0\n"))
+            detach_exit = root / "client.churn-03.detach.exit"
+            counterfactual("detach command status", lambda: detach_exit.write_text("1\n"),
+                           lambda: detach_exit.write_text("0\n"))
+            log = root / "client.churn-03.stdout"
+            original = log.read_text()
+            counterfactual("reason missing", lambda: log.write_text("Attached to ssh://xpra-server\nConnection lost\n"),
+                           lambda: log.write_text(original))
+            counterfactual("connection lost after reason", lambda: log.write_text(original + "Connection lost\n"),
+                           lambda: log.write_text(original))
+            counterfactual("client thread exception", lambda: log.write_text(original + "Exception in thread x:\n"),
+                           lambda: log.write_text(original))
+            counterfactual("no pointer traffic", lambda: cycle.update(pointer_moves=0),
+                           lambda: cycle.update(pointer_moves=40))
+            desktop = evidence["desktop"]
+            counterfactual("composited churn desktop", lambda: desktop.update(composited=True),
+                           lambda: desktop.update(composited=False))
+            progress = evidence["fixture"]["progress"]
+            counterfactual("no notifications", lambda: progress.update(notified=0),
+                           lambda: progress.update(notified=20))
+            xvfb = root / "client.churn-xvfb.exit"
+            counterfactual("desktop status not bound to raw", lambda: xvfb.write_text("0\n"),
+                           lambda: xvfb.write_text("143\n"))
+            removed: list[object] = []
+            counterfactual("missing cycle", lambda: removed.append(evidence["cycles"].pop()),
+                           lambda: evidence["cycles"].append(removed.pop()))
+            # the GTK fixture's exited image-loader sandboxes are init's zombies,
+            # but a live descendant, or an Xpra client's unreaped child, still fails
+            fixture_after = root / "server.churn-fixture.processes-after.json"
+            sandbox = {"comm": "bwrap", "parent_pid": 1, "pid": 510, "start_ticks": "123457", "state": "Z"}
+            fixture_before = json.loads((root / "server.churn-fixture.processes-before.json").read_text())
+            fixture_before["descendants"] = [{key: sandbox[key] for key in ("comm", "pid", "start_ticks")}
+                                             | {"parent_pid": 500}]
+
+            def set_fixture(state: str) -> None:
+                after = {"remaining": [dict(sandbox, state=state)]}
+                evidence["fixture"]["processes"] = {"before": fixture_before, "after": after}
+                (root / "server.churn-fixture.processes-before.json").write_text(json.dumps(fixture_before))
+                fixture_after.write_text(json.dumps(after))
+
+            set_fixture("Z")
+            self.assertTrue(accepted(), "exited sandbox orphan of the fixture")
+            set_fixture("S")
+            self.assertFalse(accepted(), "live fixture descendant")
+            set_fixture("Z")
+            client_after = root / "client.churn-02.processes-after.json"
+            client_before = json.loads((root / "client.churn-02.processes-before.json").read_text())
+            client_before["descendants"] = [{"comm": "ssh", "pid": 610, "parent_pid": 302, "start_ticks": "123458"}]
+            (root / "client.churn-02.processes-before.json").write_text(json.dumps(client_before))
+            after = {"remaining": [{"comm": "ssh", "parent_pid": 1, "pid": 610, "start_ticks": "123458", "state": "Z"}]}
+            client_after.write_text(json.dumps(after))
+            evidence["cycles"][1]["client_processes"] = {"before": client_before, "after": after}
+            self.assertFalse(accepted(), "an Xpra client's unreaped ssh child")
+
+    def test_persistent_service_collector_binds_user_manager_ownership_and_exit(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            evidence = persistent_service_evidence(root, 8)
+            (root / "server.exit").write_text("0\n")
+            (root / "server.exit").chmod(0o600)
+            lifecycle = {"server_pid": 8, "server_exit_status": 0, "persistent_service": evidence}
+
+            def accepted() -> bool:
+                return job.persistent_service_artifacts_match(lifecycle, root, live_run)
+
+            self.assertTrue(accepted())
+            for label, key, change in (
+                    ("restarted service", "after_detach", {"NRestarts": 1}),
+                    ("not owned by a user manager", "before_detach", {"manager_is_user_instance": False}),
+                    ("a different main process after detach", "after_detach", {"MainPID": 9}),
+                    ("inactive during detach", "after_detach", {"ActiveState": "inactive"}),
+                    ("outside the user manager's app slice", "started", {"ControlGroup": "/system.slice/sshd.service"}),
+                    ("failed stop", "after_exit", {"Result": "exit-code"})):
+                original = copy.deepcopy(evidence[key])
+                evidence[key].update(change)
+                (root / f"server.persistent-{key.replace('_', '-')}.json").write_text(json.dumps(evidence[key]))
+                with self.subTest(label):
+                    self.assertFalse(accepted(), label)
+                evidence[key] = original
+                (root / f"server.persistent-{key.replace('_', '-')}.json").write_text(json.dumps(original))
+                self.assertTrue(accepted(), label)
+            # the service's own receipt, not the harness's view, owns the status
+            aborted = {"origin": "signal", "signal": 6, "status": 134,
+                       "systemd": {"EXIT_CODE": "dumped", "EXIT_STATUS": "ABRT", "SERVICE_RESULT": "core-dump"}}
+            (root / "server.systemd-exit.json").write_text(json.dumps(aborted))
+            self.assertFalse(accepted(), "unbound exit receipt")
+            evidence["exit_receipt"] = aborted
+            self.assertFalse(accepted(), "an aborted service")
+            evidence["exit_receipt"] = json.loads(json.dumps({"origin": "exit", "status": 0, "systemd": {
+                "EXIT_CODE": "exited", "EXIT_STATUS": "0", "SERVICE_RESULT": "success"}}))
+            (root / "server.systemd-exit.json").write_text(json.dumps(evidence["exit_receipt"]))
+            self.assertTrue(accepted())
+            (root / "server.exit").write_text("1\n")
+            self.assertFalse(accepted(), "raw status not bound to the receipt")
+
+    def test_abort_control_collector_requires_the_real_servers_native_report(self):
+        control = live_run.shutdown_fixture.ABORT_CONTROL
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            application = interaction_identity()
+            evidence = group_evidence(application, 8, control, root)
+            lifecycle = {"application_identity_at_capture": application, "server_pid": 8, "group_shutdown": evidence}
+
+            def accepted():
+                return job.group_shutdown_artifacts_match(lifecycle, root, live_run, control)
+
+            self.assertTrue(accepted())
+            path = root / "server.stderr"
+            report = path.read_text()
+            path.write_text(report.replace("Current thread's C stack trace", "Current thread"))
+            self.assertFalse(accepted(), "an abort without its native stack is not inspectable evidence")
+            path.write_text(report)
+            self.assertTrue(accepted())
+            # A normal teardown order never accepts the control's abort.
+            self.assertFalse(job.group_shutdown_artifacts_match(lifecycle, root, live_run, "together"))
+            for order in live_run.shutdown_fixture.ORDERS:
+                normal = group_evidence(application, 8, order, root)
+                normal["native_exit"] = normal["result"]["server_exit"] = evidence["native_exit"]
+                for name, key in (("server.native-exit.json", "native_exit"), ("server.shutdown-result.json", "result")):
+                    (root / name).write_text(json.dumps(normal[key]))
+                lifecycle["group_shutdown"] = normal
+                with self.subTest(order=order):
+                    self.assertFalse(job.group_shutdown_artifacts_match(lifecycle, root, live_run, order))
+
+    def test_mux_exit_requires_controller_receipt_and_exact_master_status(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            transport = ssh_transport_fixture(root, "detach")
+            transport["master_exit_status"] = 255
+            (root / "client.ssh-master.exit").write_text("255\n")
+            (root / "client.ssh-master.stderr").write_text("debug1: Exit status -1\n")
+            receipt = {"command": [*live_run.ssh_fixture.ssh_command(), "-O", "exit", live_run.ssh_fixture.HOST],
+                       "returncode": 0, "stdout": "", "stderr": "Exit request sent.\n"}
+
+            def publish():
+                transport["mux_exit"] = copy.deepcopy(receipt)
+                for suffix, value in (("exit", f"{receipt['returncode']}\n"),
+                                      ("stdout", receipt["stdout"]), ("stderr", receipt["stderr"])):
+                    path = root / f"client.ssh-master-stop.{suffix}"
+                    path.write_text(value)
+                    path.chmod(0o600)
+                (root / "ssh-transport.json").write_text(json.dumps(transport))
+
+            def accepted():
+                return job.ssh_transport_artifact_evidence_matches(
+                    {"mode": "detach", "ssh_transport": transport}, root, live_run,
+                )
+
+            publish()
+            self.assertTrue(accepted(), "-M -N master has no command exit status after -O exit")
+            for status in (0, 1, 134, 137, 139):
+                transport["master_exit_status"] = status
+                (root / "client.ssh-master.exit").write_text(f"{status}\n")
+                publish()
+                self.assertFalse(accepted(), status)
+            transport["master_exit_status"] = 255
+            (root / "client.ssh-master.exit").write_text("255\n")
+            receipt["returncode"] = 1
+            publish()
+            self.assertFalse(accepted(), "a failed exit controller is not normal master termination")
+            receipt["returncode"] = 0
+            receipt["stderr"] = "master not found\n"
+            publish()
+            self.assertFalse(accepted(), "missing successful mux exit acknowledgement")
+            receipt["stderr"] = "Exit request sent.\nResourceWarning: leaked pipe\n"
+            publish()
+            self.assertFalse(accepted(), "an exit-zero helper must still pass the runtime audit")
+            receipt["stderr"] = "Exit request sent.\n"
+            publish()
+            (root / "client.ssh-master.stderr").write_text("ssh failed before a mux exit\n")
+            self.assertFalse(accepted(), "255 alone is not accepted")
+
+    def test_decoder_recovery_collector_reparses_real_authorities(self):
+        values = recovery_inputs()
+        values["server_log"] = values["server_log"].replace("'h264': []", "'h264': [], 'vp9': ('YUV420P',)")
+        values["client_log"] = "installing decode thread seccomp policy with action=errno\n" + values["client_log"]
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for name, content in (("client.stdout", values["client_log"]), ("client.stderr", ""),
+                                  ("server.stderr", values["server_log"]), ("server-info-recovery.txt", values["server_info"]),
+                                  ("client.pid", "42\n")):
+                path = root / name
+                path.write_text(content)
+                path.chmod(0o600)
+            packet_paths = []
+            for packet in values["packets"]:
+                directory = root / "screen-updates" / "1" / str(packet["sequence"])
+                directory.mkdir(parents=True)
+                payload = directory / ("0." + packet["encoding"])
+                payload.write_bytes(b"fixed fixture payload")
+                path = directory / "0.info"
+                path.write_text(json.dumps({**packet, "file": payload.name}))
+                packet_paths.append(path)
+            policy = live_run.decode_seccomp_evidence(values["client_log"], hardware=False)
+            proof = live_run.decoder_recovery.evaluate(**values)
+            embedded = {"window": {"xpra_id": 1}, "decoder_recovery": proof, "logs": {"decode_seccomp": policy},
+                        "classification": {"boundaries": {"decoder_recovery": {**proof["checks"], "positive_saved_payload": True}}}}
+            embedded = json.loads(json.dumps(embedded))
+            self.assertTrue(job.decoder_recovery_artifacts_match(embedded, root, live_run))
+            mutations = ((root / "client.stdout", values["client_log"].replace("installed=True", "installed=False")),
+                         (root / "server-info-recovery.txt", values["server_info"].replace("csc_modes.h264=()", "csc_modes.h264=('YUV420P',)")),
+                         (packet_paths[-1], json.dumps({**values["packets"][-1], "file": "0.rgb24", "encoding": "h264"})))
+            for path, replacement in mutations:
+                previous = path.read_text()
+                path.write_text(replacement)
+                self.assertFalse(job.decoder_recovery_artifacts_match(embedded, root, live_run), path.name)
+                path.write_text(previous)
+
+    def test_fixture_writer_exit_does_not_waive_peer_reaping_or_accept_live_writers(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            record = desktop_fixture(root)["picom"]
+            after = root / "picom.processes-after.json"
+            for state, quiet in (("Z", True), ("S", False)):
+                record["after"] = {"remaining": [{**record["before"]["root"], "state": state}]}
+                after.write_text(json.dumps(record["after"]))
+                self.assertEqual(job.process_reaping_artifacts_match(record, root, "picom", live_run, reap_direct=False), quiet)
+                # Product/SSH peer owners still require the actual wait,
+                # even though an exited fixture cannot write more log data.
+                self.assertFalse(job.process_reaping_artifacts_match(record, root, "picom", live_run))
 
     def test_report_validation_recomputes_lifecycle_evidence(self) -> None:
         run = "mutated-lifecycle"
@@ -6332,6 +6996,64 @@ int main(int argc, char **argv) {
             job.podman_labels("network", "network-id")
 
 class LiveRunnerCleanupTest(unittest.TestCase):
+    def test_desktop_writers_are_stopped_before_their_final_snapshot(self):
+        running = True
+        before = {"schema": 1, "root": {"pid": 42, "parent_pid": 1, "start_ticks": "123456", "comm": "sway"}, "descendants": []}
+        calls = []
+
+        def execute(_client, command, **_kwargs):
+            nonlocal running
+            calls.append(command)
+            if command[2] == "stop":
+                self.assertEqual(command[3:], ["42", "123456", "TERM"])
+                running = False
+                return completed(command, "null\n")
+            self.assertEqual(command[2], "remaining")
+            return completed(command, json.dumps([{**before["root"], "state": "S"}] if running else []))
+
+        with (tempfile.TemporaryDirectory() as raw, patch.object(live_run, "podman_exec", side_effect=execute)):
+            proof = live_run.stop_desktop_writers("client", Path(raw), {"sway": before})
+            self.assertEqual([command[2] for command in calls], ["remaining", "stop", "remaining"])
+            self.assertEqual(proof["sway"]["after"], {"remaining": []})
+            self.assertEqual(json.loads((Path(raw) / "sway.processes-after.json").read_text()), {"remaining": []})
+
+    def test_recovery_readiness_retains_the_common_packet_authority(self):
+        values = recovery_inputs()
+        updates = {"count": len(values["packets"]), "encodings": ["h264", "rgb24"],
+                   "updates": values["packets"], "window_id": 1}
+
+        def deltas(_container, offsets):
+            return {name: (1, values["server_log"] if name == "server.stderr" else
+                          values["client_log"] if name == "client.stdout" else "")
+                    for name in offsets}
+
+        def wait_once(_description, predicate, **_kwargs):
+            self.assertTrue(predicate())
+
+        with (tempfile.TemporaryDirectory() as raw,
+              patch.object(live_run, "read_container_log_deltas", side_effect=deltas),
+              patch.object(live_run, "container_artifact_files", return_value=()),
+              patch.object(live_run, "parse_saved_updates", return_value=updates),
+              patch.object(live_run, "saved_window_initial_pixel_format", return_value="RGBX"),
+              patch.object(live_run, "synchronize_packet_sequence_projection", side_effect=lambda *_args, primary: primary),
+              patch.object(live_run, "write_command_output", return_value=completed([], values["server_info"])),
+              patch.object(live_run, "retain_packet_sequence_observation") as retain,
+              patch.object(live_run, "wait_for", side_effect=wait_once)):
+            directory = Path(raw)
+            outcome = live_run.wait_for_frame_boundary("server", 101, "client", 42, directory, "h264", "adaptive-alpha",
+                                                       application="hardware", expected_xpra_wid=1, decoder_loss=True)
+            self.assertEqual(outcome, "decoder-recovered")
+            retain.assert_called_once_with(directory, "readiness", updates)
+
+    def test_recovery_frame_poll_keeps_the_policy_and_fault_markers(self):
+        content = "seccomp installed=True\n" + live_run.decoder_recovery.MARKER + "{}\ninvalid encoding: 'h264'\n"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "client.stdout").write_text(content)
+            with patch.object(live_run, "podman_exec", side_effect=execute_container_log_probe(root)):
+                observed = live_run.read_container_log_deltas("client", {"client.stdout": 0})
+            self.assertEqual(observed["client.stdout"], (len(content.encode()), content))
+
     @staticmethod
     def primary_native_capture_rows(*, legacy: bool = False) -> list[str]:
         prefix = "2026-09-05 11:27:47,912 Surface(1 : empty project)"
@@ -7046,7 +7768,7 @@ class LiveRunnerCleanupTest(unittest.TestCase):
             return completed(command)
 
         with (
-            patch.object(live_run, "container_process_exists", side_effect=process_exists),
+            patch.object(live_run, "container_process_running", side_effect=process_exists),
             patch.object(live_run, "podman_exec", side_effect=execute),
         ):
             result = live_run.quiesce_failed_workloads(
@@ -7066,7 +7788,7 @@ class LiveRunnerCleanupTest(unittest.TestCase):
 
     def test_failure_quiescence_refuses_collection_while_a_pid_remains(self) -> None:
         with (
-            patch.object(live_run, "container_process_exists", return_value=True),
+            patch.object(live_run, "container_process_running", return_value=True),
             patch.object(
                 live_run,
                 "podman_exec",
@@ -7080,6 +7802,35 @@ class LiveRunnerCleanupTest(unittest.TestCase):
 
         self.assertFalse(result["passed"])
         self.assertEqual(result["processes"][0]["status"], "still-running")
+
+    def test_failure_quiescence_treats_an_unreaped_zombie_as_exited(self) -> None:
+        # A dead Xpra orphaned to the non-reaping container init stays a
+        # zombie; kill -0 still succeeds, which once blocked every transfer.
+        stat = {101: "101 (python3) Z 1 70 70 0 -1 4194572 " + "0 " * 12 + "21131585 0\n",
+                102: "102 (python3) S 1 70 70 0 -1 4194304 " + "0 " * 12 + "21131590 0\n"}
+        signalled: list[list[str]] = []
+
+        def execute(container: str, command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            if command[0] == "kill":
+                signalled.append(command)
+                return completed(command, returncode=0)
+            pid = int(command[1].split("/")[2])
+            if pid not in stat:
+                return completed(command, returncode=1, stderr="No such file or directory")
+            return completed(command, stat[pid])
+
+        with patch.object(live_run, "podman_exec", side_effect=execute):
+            self.assertTrue(live_run.container_process_exists("server", 101), "kill -0 counterfactual")
+            self.assertFalse(live_run.container_process_running("server", 101))
+            self.assertTrue(live_run.container_process_running("server", 102))
+            self.assertFalse(live_run.container_process_running("server", 103))
+            result = live_run.quiesce_failed_workloads((("server", "server", 101),), timeout=0)
+            self.assertTrue(result["passed"])
+            self.assertEqual(result["processes"][0]["status"], "already-exited")
+            result = live_run.quiesce_failed_workloads((("server", "server", 102),), timeout=0)
+            self.assertFalse(result["passed"])
+        self.assertEqual(signalled[-1], ["kill", "-TERM", "102"])
+        self.assertNotIn(["kill", "-TERM", "101"], signalled)
 
     def test_hardware_fixture_readiness_retries_until_both_children_are_ready(self) -> None:
         probes = [
@@ -7940,6 +8691,11 @@ class LiveSourceTest(unittest.TestCase):
             contexts: list[live_run.BuildContext] = []
             resolution = {"resolution_sha256": "2" * 64}
             context_manifest = {
+                "packages": {
+                    role: {"schema": 1, "distro": distro, "source_commit": "3" * 40,
+                           "selection_sha256": selection.digest, "archive_sha256": "a" * 64}
+                    for role, distro in (("server", "ubuntu-26.04"), ("client", "debian-13"))
+                },
                 "selection": {
                     "case_slugs": [],
                     "digest": selection.digest,
@@ -9227,15 +9983,27 @@ class LiveTransportProfileTest(unittest.TestCase):
     def test_lifecycle_scenarios_do_not_inherit_alpha_matrix(self) -> None:
         self.assertEqual(
             live_run.scenario_specs(alpha_scenarios="default", lifecycle="detach"),
-            (("detach", False),),
+            (("detach", False), *((f"ssh-detach-{iteration:02d}", False) for iteration in range(1, 5)),
+             *((f"ssh-detach-churn-{iteration:02d}", False) for iteration in range(1, 5)),
+             *((f"ssh-detach-persistent-{iteration:02d}", False) for iteration in range(1, 5))),
         )
         self.assertEqual(
-            live_run.scenario_specs(
-                alpha_scenarios="default", lifecycle="transport-loss"
-            ),
-            (("transport-loss", False),),
+            live_run.scenario_specs(alpha_scenarios="default", lifecycle="transport-loss"),
+            (("transport-loss", False), *((f"ssh-transport-loss-{iteration:02d}", False) for iteration in range(1, 5)),
+             *((f"ssh-group-{order}-{iteration:02d}", False) for order in ("together", "bus-first", "server-first")
+               for iteration in range(1, 5)), ("ssh-group-abort-control-01", False)),
         )
+        # The runner and the in-container fixture name the same orders.
+        self.assertEqual(profiles.SHUTDOWN_ORDERS, live_run.shutdown_fixture.ORDERS)
+        self.assertEqual(profiles.SHUTDOWN_ABORT_CONTROL, f"ssh-group-{live_run.shutdown_fixture.ABORT_CONTROL}-01")
 
+    def test_hardware_recovery_is_additional_not_h264_positive_replacement(self):
+        self.assertEqual(live_run.scenario_specs(alpha_scenarios="default", lifecycle="application-exit",
+                                               application="hardware", encoding="h264"),
+                         (("default-alpha", False), ("decoder-loss", False)))
+        for application, encoding in (("opengl", "h264"), ("hardware", "rgb"), ("zed", "h264")):
+            self.assertEqual(live_run.scenario_specs(alpha_scenarios="default", lifecycle="application-exit",
+                                                   application=application, encoding=encoding), (("default-alpha", False),))
     def test_lifecycle_boundaries_fail_closed(self) -> None:
         identity = interaction_identity()
         server = server_identity()
@@ -9264,6 +10032,7 @@ class LiveTransportProfileTest(unittest.TestCase):
             "server_pid": server["pid"],
             "server_survived_detach": True,
         }
+        detach["server_exit_status"] = 0
         self.assertTrue(
             all(live_run.lifecycle_boundary_checks("detach", detach).values())
         )
@@ -9299,6 +10068,7 @@ class LiveTransportProfileTest(unittest.TestCase):
             "server_survived_transport_loss": True,
             "transport_disconnect_returncode": 0,
         }
+        transport["server_exit_status"] = 0
         self.assertTrue(
             all(
                 live_run.lifecycle_boundary_checks("transport-loss", transport).values()
@@ -9324,7 +10094,7 @@ class LiveTransportProfileTest(unittest.TestCase):
         transport["client_exit_status"] = 0
         self.assertFalse(
             live_run.lifecycle_boundary_checks("transport-loss", transport)[
-                "client_exit_nonzero"
+                "client_exit_connection_lost"
             ]
         )
         transport["client_exit_status"] = 1
@@ -9339,6 +10109,7 @@ class LiveTransportProfileTest(unittest.TestCase):
                 "application-exit",
                 {
                     "client_exit_status": False,
+                    "server_exit_status": 0,
                     "client_exited_after_server": True,
                     "server_exited_after_application": True,
                 },
@@ -9410,6 +10181,7 @@ class LiveTransportProfileTest(unittest.TestCase):
             "server_pid": server["pid"],
             "server_survived_detach": True,
         }
+        lifecycle["server_exit_status"] = 0
         self.assertTrue(all(live_run.lifecycle_boundary_checks("detach", lifecycle).values()))
         required = (
             "application_exited_after_termination",
@@ -9479,7 +10251,7 @@ class LiveTransportProfileTest(unittest.TestCase):
                     ]
                 )
 
-        for field in ("client_exit_status", "detach_returncode"):
+        for field in ("client_exit_status", "server_exit_status", "detach_returncode"):
             with self.subTest(boolean_integer_field=field):
                 candidate = copy.deepcopy(lifecycle)
                 candidate[field] = False
@@ -9721,6 +10493,35 @@ class LiveTransportProfileTest(unittest.TestCase):
                 "signal": "SIGTERM",
             },
         )
+
+    def test_identity_probe_waits_for_an_exiting_process_without_command_line(self) -> None:
+        # An exiting process releases its memory, and so its command line,
+        # before it becomes a zombie. Emulate that window with a real process
+        # which empties its own argument area shortly before it exits.
+        captured: list[str] = []
+
+        def capture(_container: str, command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            captured.append(command[2])
+            return completed(command, returncode=3)
+
+        with patch.object(live_run, "podman_exec", side_effect=capture):
+            live_run.container_process_identity("server", 41)
+        child_script = (
+            "import ctypes, time\n"
+            "fields = open('/proc/self/stat').read().rsplit(')', 1)[1].split()\n"
+            "start, end = int(fields[45]), int(fields[46])\n"
+            "ctypes.memset(start, 0, end - start)\n"
+            "print('cleared', flush=True)\n"
+            "time.sleep(0.3)\n"
+        )
+        child = subprocess.Popen([sys.executable, "-c", child_script], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.wait, 5)
+        self.assertEqual(child.stdout.readline(), "cleared\n")
+        child.stdout.close()
+        self.assertEqual(Path(f"/proc/{child.pid}/cmdline").read_bytes().strip(b"\0"), b"")
+        probe = subprocess.run([sys.executable, "-c", captured[0], str(child.pid)], check=False,
+                               capture_output=True, timeout=10)
+        self.assertEqual(probe.returncode, 3, probe.stderr)
 
     def test_zombie_fixture_identity_is_treated_as_exited(self) -> None:
         probe_result = completed(["python3", "-c", "probe"], returncode=3)
@@ -13992,7 +14793,7 @@ class LiveFixtureBuildOrderTest(unittest.TestCase):
             assert stage is not None
             user_boundary = stage[1].index("USER lab\n")
             for resource in ("css/10_header_bar.css", "icons/xpra.png"):
-                guard = f"test -r /usr/local/share/xpra/{resource}"
+                guard = f"test -r /usr/share/xpra/{resource}"
                 self.assertGreater(stage[1].index(guard), user_boundary)
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "source"
@@ -14053,7 +14854,7 @@ class LiveFixtureBuildOrderTest(unittest.TestCase):
             return matches[0]
 
         source = position("COPY --from=xpra-source /src/xpra /src/xpra")
-        install = position("RUN python3 setup.py install ")
+        install = position("COPY packages/")
         native_tests = position("RUN package_dir=")
         self.assertLess(source, install)
         self.assertLess(install, native_tests)
@@ -14137,6 +14938,10 @@ alias apt-get=apt_get
 rm() { :; }
 find() { printf '%s\\n' "$TEST_PACKAGE_DIR"; }
 python3() {
+    if test "$1" = /opt/xpra-fork-maintenance/package_runtime.py; then
+        test -n "$TEST_PACKAGE_DIR"
+        return
+    fi
     printf 'python3 %s\\nPYTHONPATH=%s\\nXPRA_RESOURCES_DIR=%s\\n' \\
         "$*" "$PYTHONPATH" "$XPRA_RESOURCES_DIR"
     return "$TEST_GL_STATUS"
@@ -14193,8 +14998,8 @@ python3() {
                     "python3", "tests/unittests/unit/client/opengl_backing_test.py", "-v",
                     "TestNativeTextureArrays.test_numpy", "TestNativeTextureArrays.test_ctypes",
                 ])
-                self.assertIn("PYTHONPATH=/installed/dist-packages:/src/xpra/tests/unittests\n", result.stdout)
-                self.assertIn("XPRA_RESOURCES_DIR=/opt/xpra-install/usr/local/share/xpra\n", result.stdout)
+                self.assertIn("PYTHONPATH=/usr/lib/python3/dist-packages:/src/xpra/tests/unittests\n", result.stdout)
+                self.assertIn("XPRA_RESOURCES_DIR=/usr/share/xpra\n", result.stdout)
 
     def test_client_gl_regressions_reject_clean_or_case_clients(self) -> None:
         for selection in (
@@ -14234,7 +15039,7 @@ python3() {
                         install = next(
                             index
                             for index, instruction in enumerate(instructions)
-                            if instruction.startswith("RUN python3 setup.py install ")
+                            if instruction.startswith("COPY packages/")
                         )
                         instructions.insert(install, moved)
                         with self.assertRaises(AssertionError):
@@ -14664,6 +15469,120 @@ class PacketSequenceLedgerTest(unittest.TestCase):
                     packet["relative_info"] = f"screen-updates/1/{path}.info"
                 with self.assertRaises(live_run.LabFailure):
                     live_run._complete_packet_sequence_prefix(malformed, 1)
+
+
+class DecodeSeccompAcceptanceTest(unittest.TestCase):
+    POLICY = "installing decode thread seccomp policy with action=errno\n"
+    INSTALLED = "seccomp installed=True\n"
+    CREATE = "paint_with_video_decoder: new libva('h264', 128, 128, 'YUV420P')\n"
+    FRAME = "libva decoded h264 100 bytes into 128x128 NV12\n"
+
+    def test_default_filter_and_hardware_frames_are_ordered(self):
+        log = self.FRAME + self.POLICY + self.INSTALLED + self.CREATE + self.FRAME
+        result = live_run.decode_seccomp_evidence(log, hardware=True)
+        self.assertTrue(result["installed"])
+        self.assertEqual(result["post_filter_libva_frames"], 1)
+
+    def test_rgb_still_requires_native_default_filter(self):
+        result = live_run.decode_seccomp_evidence(self.POLICY + self.INSTALLED, hardware=False)
+        self.assertEqual(result["post_filter_libva_frames"], 0)
+
+    def test_readiness_uses_the_xpra_stdout_log(self):
+        # Xpra's CLI enables its stdout handler; stderr also contains libva's
+        # own messages but is not where the Python filter logger is installed.
+        source = (LIVE_DIRECTORY / "run.py").read_text(encoding="utf-8")
+        self.assertIn('client_pid, directory / "client.stdout", "seccomp installed=True"', source)
+        with (
+            patch.object(live_run, "container_artifact_contains", side_effect=lambda _client, name, marker:
+                         name == "client.stdout" and marker == self.INSTALLED.strip()),
+            patch.object(live_run, "pull_container_artifacts") as pull,
+        ):
+            live_run.wait_for_log("client", 101, Path("client.stdout"), self.INSTALLED.strip(), "decode filter")
+        pull.assert_not_called()
+
+    def test_missing_disabled_failed_reordered_or_nondefault_filter_cannot_pass(self):
+        valid = self.POLICY + self.INSTALLED + self.CREATE + self.FRAME
+        for log in (
+            "", self.POLICY, self.INSTALLED,
+            valid.replace("errno", "log"), valid.replace("errno", "allow"),
+            valid.replace("True", "False"), self.INSTALLED + self.POLICY + self.CREATE + self.FRAME,
+            self.POLICY + valid, self.INSTALLED + valid,
+            valid + "seccomp module is not available\n",
+            valid + "Error installing decode thread seccomp filter\n",
+        ):
+            with self.subTest(log=log), self.assertRaises(live_run.LabFailure):
+                live_run.decode_seccomp_evidence(log, hardware=True)
+
+    def test_prefilter_selftest_or_failed_decoder_is_not_hardware_acceptance(self):
+        for log in (
+            self.CREATE + self.FRAME + self.POLICY + self.INSTALLED,
+            self.POLICY + self.INSTALLED + self.FRAME,
+            self.POLICY + self.INSTALLED + self.FRAME + self.CREATE,
+            self.POLICY + self.INSTALLED + self.CREATE + self.FRAME + "invalid encoding: 'h264'\n",
+            self.POLICY + self.INSTALLED + self.CREATE + self.FRAME + "not_available\n",
+        ):
+            with self.subTest(log=log), self.assertRaises(live_run.LabFailure):
+                live_run.decode_seccomp_evidence(log, hardware=True)
+
+    def test_both_images_build_and_import_xpra_native_filter(self):
+        recipe = (LIVE_DIRECTORY / "Containerfile").read_text(encoding="utf-8")
+        for role in ("client", "server"):
+            with self.subTest(role=role):
+                build = re.search(rf"(?ms)^FROM [^\n]+ AS {role}-build\n(.*?)(?=^FROM |\Z)", recipe)[1]
+                runtime = re.search(rf"(?ms)^FROM [^\n]+ AS {role}\n(.*?)(?=^FROM |\Z)", recipe)[1]
+                self.assertIn("libseccomp-dev", build)
+                self.assertIn(f"COPY packages/{role} /tmp/xpra-debs", build)
+                self.assertNotIn("setup.py install", build)
+                self.assertIn("from xpra.seccomp import _native", runtime)
+
+    def test_client_runtime_user_can_read_the_physical_probe(self):
+        recipe = (LIVE_DIRECTORY / "Containerfile").read_text(encoding="utf-8")
+        runtime = re.search(r"(?ms)^FROM [^\n]+ AS client\n(.*?)(?=^FROM |\Z)", recipe)[1]
+        mode = "chmod 0644 /opt/xpra-fork-maintenance/libva_seccomp_probe.py"
+        readable = "test -r /opt/xpra-fork-maintenance/libva_seccomp_probe.py"
+        self.assertIn(mode, runtime)
+        self.assertIn(readable, runtime)
+        self.assertLess(runtime.index(mode), runtime.index("USER lab"))
+        self.assertGreater(runtime.index(readable), runtime.index("USER lab"))
+
+    def test_probe_trace_collection_accepts_only_the_two_action_names(self):
+        names = ("client-libva-seccomp-errno.strace", "client-libva-seccomp-log.strace")
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            with (
+                patch.object(live_run, "podman_exec", return_value=completed([], "\0".join(names) + "\0")),
+                patch.object(live_run, "pull_container_artifacts") as pull,
+            ):
+                live_run.pull_all_container_artifacts("client", directory, "client")
+                pull.assert_called_once_with("client", directory, names)
+            for name in (names[0] + ".extra", "client-libva-seccomp-allow.strace", "client-libva-seccomp-log.core"):
+                with (
+                    self.subTest(name=name),
+                    patch.object(live_run, "podman_exec", return_value=completed([], name + "\0")),
+                    self.assertRaises(live_run.LabFailure),
+                ):
+                    live_run.pull_all_container_artifacts("client", directory, "client")
+        for name in names:
+            self.assertFalse(any(pattern.fullmatch(name) for pattern in live_run.SERVER_ARTIFACT_PATTERNS))
+
+    def test_physical_probe_is_bound_and_both_actions_are_required(self):
+        path = LIVE_DIRECTORY / "libva_seccomp_probe.py"
+        for inventory in (live_run.BUILD_CONTEXT_INPUTS, live_run.HARNESS_INPUTS, job.HARNESS_INPUTS):
+            self.assertIn(path, inventory)
+        record = {"schema": 1, "default_action": "errno", "decoded_frames": 10, "late_cleanup": True}
+
+        def command(_client, argv, destination):
+            action = argv[-1]
+            output = dict(record, action=action, open_denied=action == "errno")
+            return completed(argv, "libva-seccomp-probe=" + json.dumps(output))
+
+        with tempfile.TemporaryDirectory() as raw, patch.object(live_run, "write_command_output", side_effect=command) as call:
+            live_run.physical_libva_seccomp_probe("client", Path(raw), driver="physical-driver", render_node=Path("/dev/dri/renderD128"))
+            self.assertEqual([item.args[1][-1] for item in call.call_args_list], ["errno", "log"])
+            for bad in ({"decoded_frames": 0}, {"default_action": "allow"}, {"late_cleanup": False}):
+                with self.subTest(bad=bad), self.assertRaises(live_run.LabFailure):
+                    with patch.dict(record, bad):
+                        live_run.physical_libva_seccomp_probe("client", Path(raw), driver="physical-driver", render_node=Path("/dev/dri/renderD128"))
 
 
 if __name__ == "__main__":

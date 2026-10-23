@@ -1189,8 +1189,9 @@ def case_check(repo: Path, slug: str) -> dict[str, Any]:
     state = embedded_develop_state(repo, "case check")
     found = case_commit(repo, slug)
     resolution = selection_resolution(repo, state.source_commit, f"cases/{slug}")
-    statuses = [entry.get("status") for entry in resolution.get("patches", [])]
-    if statuses != ["apply"]:
+    patches = resolution.get("patches", [])
+    statuses = {entry.get("case"): entry.get("status") for entry in patches}
+    if statuses.get(slug) != "apply" or any(status != "apply" for status in statuses.values()):
         fail(f"case {slug} does not apply on the upstream base {state.source_commit}: {statuses}")
     if not removable_from_head(repo, found.commit):
         fail(f"case {slug} cannot be removed from {INTEGRATION_BRANCH} without a conflict")

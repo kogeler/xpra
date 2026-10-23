@@ -1,0 +1,29 @@
+schema = 2
+slug = "window-unmap-log-format"
+kind = "production"
+title = "Format the base window-unmap diagnostic without a logging exception"
+dependencies = []
+
+[tests]
+list = [
+  "unit.server.subsystem.window_logging_test",
+  "unit.server.subsystem.window_test",
+  "unit.log_test",
+  "focused",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = [
+  "live-rgb",
+  "live-h264",
+  "live-xpra-detach",
+  "live-xpra-transport-loss",
+  "live-wayland-keyboard",
+  "live-x11-clipboard",
+  "live-wayland-subsurface",
+  "live-wayland-h264-hardware",
+  "live-wayland-opengl-h264-hardware",
+]

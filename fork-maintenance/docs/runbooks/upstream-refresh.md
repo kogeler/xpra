@@ -156,7 +156,8 @@ authority:
 5. `CLAUDE.md`, `CONTRIBUTING.md`, `.github/upstream-workflows/test.yml`, and
    `pyproject.toml`;
 6. the current source, adjacent tests, and recent maintainer-authored history
-   for every active production path and quarantine-owned test module;
+   for every active production path and quarantine-owned test module, read for
+   the root [patch-design review](../../../AGENTS.md#patch-design-and-upstream-xpra-maintainer-alignment);
 7. [`bootstrap.md`](bootstrap.md),
    [`case-commits.md`](case-commits.md),
    [`test-quarantine.md`](test-quarantine.md),

@@ -38,6 +38,8 @@ NETWORK_PROFILE ?= $(shell $(LIVE_CONFIG) default-profile)
 RENDER_NODE ?=
 ZED_DIRECTORY ?=
 FROM ?=
+DEB_SERVER_RUN ?=
+DEB_CLIENT_RUN ?=
 
 SELECTOR = $(if $(strip $(CASE)),cases/$(strip $(CASE)),$(if $(strip $(STACK)),stacks/$(strip $(STACK))))
 export XPRA_FORK_CASE := $(CASE)
@@ -55,6 +57,8 @@ export XPRA_FORK_NETWORK_PROFILE := $(NETWORK_PROFILE)
 export XPRA_FORK_RENDER_NODE := $(RENDER_NODE)
 export XPRA_FORK_ZED_DIRECTORY := $(ZED_DIRECTORY)
 export XPRA_FORK_LIVE_FROM := $(FROM)
+export XPRA_FORK_DEB_SERVER_RUN := $(DEB_SERVER_RUN)
+export XPRA_FORK_DEB_CLIENT_RUN := $(DEB_CLIENT_RUN)
 export XPRA_FORK_SELECTOR := $(SELECTOR)
 export XPRA_ARTIFACT_CONFIRM := $(CONFIRM)
 export XPRA_KNOWLEDGE_SESSION := $(SESSION)
@@ -191,6 +195,7 @@ check: artifact-boundary ci-layout-check
 	@$(PYTHON) tools/test_artifacts.py
 	@$(PYTHON) tools/test_knowledge.py
 	@$(PYTHON) tools/test_background_job.py
+	@$(PYTHON) tools/test_runtime_audit.py
 	@PYTHONPATH="$(AUTOMATION_ROOT)/tools" $(PYTHON) tools/test_container_payload.py
 	@PYTHONPATH="$(AUTOMATION_ROOT)/tools" $(PYTHON) tools/test_podman_policy.py
 	@$(MAKE) --no-print-directory -C "$(DEB_PACKAGES)" check

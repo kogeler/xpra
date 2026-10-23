@@ -9,6 +9,36 @@ candidate, filling missing or invalidated evidence only. Cached images are not
 accepted packages, and unchanged tags do not prove unchanged resolved build
 dependencies. The hosted publication transaction below remains separate.
 
+## Package version identity
+
+`infra/deb-packages/package_version.py` is the single owner of the explicit
+downstream `DEBIAN_REVISION`. The package version is
+`<upstream-version>-r<actual-upstream-revision>-<downstream-revision>`.
+Builder changelog generation, independent host output validation and live DEB
+selection use this same formatter; the module is bound to builder and live
+inputs. Do not alter the upstream revision to represent fork changes.
+
+The upstream version comes from `xpra/__init__.py`; its sequential revision is
+the first-parent commit count at the clean source boundary plus `5014`. The
+builder rewrites the first Debian changelog header from `<base>-1` to the shared
+package version. Its container-local `xpra/src_info.py` records `BRANCH = 'HEAD'`,
+the clean commit marker, one local modification layer and that real upstream
+revision. No extra tracked product change represents this build metadata.
+
+Before freezing a release candidate with changed package payloads on an already
+published upstream base, advance this downstream revision beyond the published
+one. Unpublished development rebuilds of that candidate share its next
+revision; do not increment it for each build/test. A same-version rebuild is
+not an upgrade: apt may not replace it and versioned ownership transitions do
+not cover the previously installed equal version: a file moving between
+packages must supersede the old owner's version.
+
+Live freeze rejects artifacts from a different configured revision even when
+source and case-queue digests match. Existing removed receipts remain historical
+evidence, not current package acceptance. Release publication still requires
+the operator's separate authorization; changing this local version does not
+publish or install anything on the operator's machines.
+
 ## Source boundary
 
 The package automation is branch-agnostic. It uses the checked-out `HEAD`
@@ -118,6 +148,14 @@ bounded; each xz decoder uses a 256 MiB memory limit.
 
 ## Complete package validation
 
+These checks are not a real-session substitute. The canonical
+[runtime acceptance rule](validation.md#runtime-acceptance-represents-the-shipped-product)
+requires the live suite to install the exact successful, collected/removed
+package artifacts using `DEB_SERVER_RUN` and `DEB_CLIENT_RUN`. The internal
+`live-input` exporter revalidates result ownership, source/queue/distribution
+and archive checksum before freezing those bytes. No new package build, APT
+Xpra package or version-only equivalence may stand in for that named artifact.
+
 The Debian package rules run `dh_missing --fail-missing`. This turns the
 whole `debian/tmp` install tree into a packaging boundary: every result must be
 owned by one binary package or listed in the exact reviewed
@@ -171,16 +209,8 @@ of installed capability. The host does not execute native modules or parse ELF
 dynamic sections: actual imports, lossless RGB execution and ELF dependency
 resolution remain the builder container's checks on extracted package bytes.
 
-## Versioning
+## Build execution
 
-The package source version comes from `xpra/__init__.py`. The sequential
-revision remains compatible with upstream packaging: first-parent commit count
-at the clean source boundary plus `5014`. The first Debian changelog entry is
-therefore rewritten from `<base>-1` to `<base>-r<revision>-1`, where `<base>` is
-the current source version. The generated `xpra/src_info.py` records
-`BRANCH = 'HEAD'`, the clean commit marker, one local modification layer, and
-that revision. This generated build metadata is container-local; no extra
-downstream source change is required.
 The build also installs the two dependency shims supplied by upstream under
 `packaging/debian/` before resolving `Build-Depends`, matching upstream's
 `build.sh` sequence on amd64. It deliberately invokes

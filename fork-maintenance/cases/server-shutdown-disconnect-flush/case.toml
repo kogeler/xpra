@@ -1,7 +1,7 @@
 schema = 2
 slug = "server-shutdown-disconnect-flush"
 kind = "production"
-title = "Flush the shutdown disconnect before closing client protocols"
+title = "Flush the disconnect before closing detached client protocols"
 dependencies = []
 
 [tests]

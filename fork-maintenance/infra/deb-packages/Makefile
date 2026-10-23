@@ -24,7 +24,7 @@ help:
 
 check:
 	@python3 -m py_compile builder.py job.py
-	@PYTHONPATH="$(MAINTENANCE_ROOT)/tools" python3 -m unittest -v test_builder.py test_job.py
+	@PYTHONPATH="$(MAINTENANCE_ROOT)/tools" python3 -m unittest -v test_builder.py test_job.py test_package_version.py
 
 source-snapshot:
 	@python3 "$(JOB)" source-snapshot

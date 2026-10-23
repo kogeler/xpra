@@ -1,0 +1,14 @@
+# Copyright (C) 2026 kogeler
+# The real systemd user manager for the live fixture user. A login session
+# (user@.service through PAM and logind) cannot be opened in the
+# user-namespaced container; the manager and its user units are unchanged.
+[Unit]
+Description=Live fixture systemd user manager for lab
+
+[Service]
+User=lab
+Type=notify
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+ExecStartPre=+/usr/bin/install -d -o lab -g lab -m 0700 /run/user/1001
+ExecStart=/usr/lib/systemd/systemd --user
+Delegate=yes
