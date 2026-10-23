@@ -9,6 +9,7 @@ import threading
 
 from xpra.exit_codes import ExitValue
 from xpra.net.bytestreams import untilConcludes
+from xpra.net.common import ConnectionClosedException
 from xpra.util.str_fn import repr_ellipsized, hexstr
 from xpra.util.env import envint, envbool
 from xpra.os_util import force_quit, POSIX
@@ -43,6 +44,8 @@ class XpraProxy:
         self._to_client = threading.Thread(target=self._to_client_loop, daemon=True)
         self._to_server = threading.Thread(target=self._to_server_loop, daemon=True)
         self.exit_code: ExitValue | None = None
+        # set when the server has closed its end while we were still forwarding to it:
+        self.draining = False
         signal.signal(signal.SIGINT, self.signal_quit)
         signal.signal(signal.SIGTERM, self.signal_quit)
         if POSIX:
@@ -66,10 +69,18 @@ class XpraProxy:
         self._copy_loop(f"<-server {self._name}", self._server_conn, self._client_conn)
 
     def _to_server_loop(self) -> None:
-        self._copy_loop(f"->server {self._name}", self._client_conn, self._server_conn)
+        # the server closes its socket as soon as its last packet has been sent (ie: a disconnection),
+        # so forwarding what the client sends after that fails,
+        # but the other direction must still deliver that last packet before it ends the proxy:
+        if POSIX:
+            # writing to the closed server socket must not end the proxy from the SIGPIPE handler,
+            # this thread gets the error instead (the other direction still gets SIGPIPE from the client pipe):
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGPIPE})
+        self._copy_loop(f"->server {self._name}", self._client_conn, self._server_conn, drain=True)
 
-    def _copy_loop(self, log_name: str, from_conn, to_conn) -> None:
+    def _copy_loop(self, log_name: str, from_conn, to_conn, drain=False) -> None:
         # log("XpraProxy._copy_loop(%s, %s, %s)", log_name, from_conn, to_conn)
+        writing = False
         try:
             while self.exit_code is None:
                 log("%s: waiting for data", log_name)
@@ -80,22 +91,30 @@ class XpraProxy:
                 if SHOW_DATA:
                     log("%s: %s bytes: %s", log_name, len(buf), repr_ellipsized(buf))
                     log("%s:           %s", log_name, repr_ellipsized(hexstr(buf)))
+                writing = True
                 while buf and self.exit_code is None:
                     log("%s: writing %s bytes", log_name, len(buf))
                     written = untilConcludes(self.is_active, noretry, to_conn.write, buf)
                     buf = buf[written:]
                     log("%s: written %s bytes", log_name, written)
+                writing = False
             log("%s copy loop ended", log_name)
-        except OSError as e:
+        except (OSError, ConnectionClosedException) as e:
+            if drain and writing and isinstance(e, ConnectionClosedException):
+                # the peer has closed its end, the other direction will see the end of its stream:
+                self.draining = True
+                log("%s: %s", log_name, e)
             # an error during shutdown is expected (the pipes get closed), so only make noise
             # if we were still active - and log a single line rather than flooding with tracebacks
             # (this goes to stderr, which is a separate pipe from the protocol stream on stdout):
-            if self.exit_code is None:
+            elif self.exit_code is None and not self.draining:
                 log.warn("Warning: %s connection failed: %s", log_name, e)
             log("%s copy loop error", log_name, exc_info=True)
         finally:
-            # make sure the other direction is torn down too, whichever way this loop ended:
-            self.quit(0)
+            # make sure the other direction is torn down too, whichever way this loop ended,
+            # unless it still has to deliver what the server sent before closing:
+            if not (drain and self.draining):
+                self.quit(0)
 
     def is_active(self) -> bool:
         return self.exit_code is None
