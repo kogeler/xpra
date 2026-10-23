@@ -24,6 +24,17 @@ server:
   diagnostics:
     - "-d"
     - "wayland,damage,encoding,encoder,argb,keyboard,-clipboard"
+  # Detach churn: the server's own session bus forwards notifications.
+  churn:
+    - "--notifications=yes"
+    - "--dbus=yes"
+    - "--dbus-control=no"
+  # Private-bus lifecycle coverage; no inherited bus or Xpra-owned dbus-launch.
+  shutdown:
+    - "--notifications=yes"
+    - "--dbus=wait"
+    - "--dbus-control=no"
+    - "--dbus-launch="
   clipboard:
     both:
       - "--clipboard=yes"
@@ -65,6 +76,7 @@ server:
 client:
   base:
     - "--minimal"
+    - "--seccomp=default"
     - "--modal-windows=yes"
     - "--mousewheel=on"
     - "--compressors=none"
@@ -72,7 +84,10 @@ client:
     - "--bandwidth-detection=no"
   diagnostics:
     - "-d"
-    - "draw,paint,cairo,window,gtk,alpha,libva,keyboard,pointer"
+    - "draw,paint,cairo,window,gtk,alpha,libva,keyboard,pointer,seccomp"
+  # Detach churn cycles also display the forwarded notifications.
+  churn:
+    - "--notifications=yes"
   # Keep unrelated XSettings and XI2 filter leases out of the clipboard gate.
   clipboard:
     both:

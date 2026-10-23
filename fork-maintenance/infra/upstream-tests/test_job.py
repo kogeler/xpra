@@ -214,7 +214,7 @@ class CiImageTest(unittest.TestCase):
         self.assertIn("xterm", shlex.split(install, comments=True))
         # upstream's unit-test job installs these for its Wayland clipboard/input
         # and asyncssh transport / CUPS printing tests:
-        for package in ("python3-asyncssh", "python3-cups", "weston", "wl-clipboard", "wtype"):
+        for package in ("python3-asyncssh", "python3-cups", "weston", "wl-clipboard", "wtype", "libva-dev"):
             self.assertIn(package, shlex.split(install, comments=True))
         compiler = next(command for command in commands if "-m pip install" in command)
         self.assertEqual(
@@ -1926,6 +1926,7 @@ class FocusedEntrypointTest(unittest.TestCase):
                 "    'arguments': sys.argv[1:],\n"
                 "    'cythonize': os.environ.get('CYTHONIZE_MORE'),\n"
                 "    'compat': os.environ.get('XPRA_BACKWARDS_COMPATIBLE'),\n"
+                "    'coverage': os.environ.get('XPRA_TEST_COVERAGE'),\n"
                 "    'cflags': os.environ.get('CFLAGS'),\n"
                 "    'cxxflags': os.environ.get('CXXFLAGS'),\n"
                 "    'extra_args': os.environ.get('EXTRA_ARGS'),\n"
@@ -1939,7 +1940,7 @@ class FocusedEntrypointTest(unittest.TestCase):
                 f"PATCH_MODE={shlex.quote(patch_mode)}\n"
                 "SELECTION=cases/focused-subject\n"
                 # Ambient values must never choose the named mode.
-                "export CYTHONIZE_MORE=ambient XPRA_BACKWARDS_COMPATIBLE=ambient\n"
+                "export CYTHONIZE_MORE=ambient XPRA_BACKWARDS_COMPATIBLE=ambient XPRA_TEST_COVERAGE=1\n"
                 "prepare_source() { printf 'prepared_source\\n'; }\n"
                 "git() {\n"
                 "    test \"$*\" = \"-C $WORK write-tree\" || return 91\n"
@@ -1989,6 +1990,7 @@ class FocusedEntrypointTest(unittest.TestCase):
                         ],
                         "cythonize": cythonize,
                         "compat": compat,
+                        "coverage": "0",
                         "cflags": "-O0 -g0",
                         "cxxflags": "-O0 -g0",
                         "extra_args": "--with-terminal_client",

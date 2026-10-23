@@ -14,7 +14,9 @@ import sys
 from pathlib import Path
 
 import job
-from profiles import DEFAULT_NETWORK_PROFILE, LIVE_PROFILE_REQUIRED_GATES, LIVE_SELECTION
+import runtime_audit
+import shutdown_fixture
+from profiles import DEFAULT_NETWORK_PROFILE, DETACH_CHURN_CYCLES, LIVE_PROFILE_REQUIRED_GATES, LIVE_SELECTION
 
 
 PEER_LOGS = ("server.stdout", "server.stderr", "client.stdout", "client.stderr")
@@ -60,13 +62,25 @@ def check_peer_logs(run: str, report_digest: str) -> None:
         digests = scenario.get("artifact_sha256")
         if not isinstance(digests, dict):
             raise job.JobError(f"live suite peer logs have no artifact digests: {run}/{name}")
-        for filename in PEER_LOGS:
+        detach_logs = ("client.detach.stdout", "client.detach.stderr")
+        filenames = PEER_LOGS
+        if payload.get("lifecycle_profile") == "detach" or any(name in digests for name in detach_logs):
+            filenames += detach_logs
+        if name.startswith("ssh-"):
+            filenames += ("client.ssh-master.stdout", "client.ssh-master.stderr", "server.sshd.stdout", "server.sshd.stderr")
+        if name.startswith("ssh-detach-churn-"):
+            filenames += ("server.churn-fixture.stderr", *(
+                f"client.churn-{cycle:02d}.{suffix}" for cycle in range(1, DETACH_CHURN_CYCLES + 1)
+                for suffix in ("stdout", "stderr", "detach.stdout", "detach.stderr", "pointer.stderr")))
+        for filename in filenames:
             path = directory / filename
             job.ensure_private_regular(path)
             with path.open("rb") as stream:
                 content = stream.read(limit + 1)
             if len(content) > limit or hashlib.sha256(content).hexdigest() != digests.get(filename):
                 raise job.JobError(f"live suite peer log is oversized or changed: {run}/{name}/{filename}")
+            if problems := shutdown_fixture.unexpected_failures(name, filename, content, runtime_audit.failures):
+                raise job.JobError(f"live suite runtime failure {','.join(problems)}: {run}/{name}/{filename}")
             for label, pattern in PEER_WARNING_PATTERNS.items():
                 if pattern.search(content):
                     # Never include a clipboard-bearing log line in diagnostics.
@@ -93,6 +107,23 @@ def members(prefix: str) -> list[tuple[str, tuple[str, str, str, str, str]]]:
         key=lambda profile: (profile[0] not in {"clipboard", "subsurface"}, profile),
     )
     return [(f"{prefix}-{LIVE_PROFILE_REQUIRED_GATES[profile]}", profile) for profile in profiles]
+
+
+def runtime_images(run: str, digest: str) -> tuple[str, str]:
+    """Equal source contexts cannot substitute for equal executed image IDs."""
+    path = job.result_path(run)
+    job.ensure_private_regular(path)
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != digest:
+        raise job.JobError("live suite report changed before runtime-image comparison")
+    try:
+        payload = json.loads(raw)
+        images = tuple(payload["images"][role]["id"] for role in ("server", "client"))
+        if not all(isinstance(value, str) and re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", value) for value in images):
+            raise ValueError("invalid image ID")
+        return tuple("sha256:" + value.removeprefix("sha256:") for value in images)
+    except (KeyError, TypeError, ValueError) as error:
+        raise job.JobError("live suite lacks exact runtime-image identities") from error
 
 
 def current_inputs() -> tuple[str, str, str]:
@@ -144,7 +175,7 @@ def check(prefix: str) -> dict[str, object]:
             "source_archive_sha256", "source_workflow_sha256",
             "server_context_sha256", "server_context_archive_sha256",
             "server_selection_resolution_sha256",
-        )) + (record["render_node"], record["network_profile"])
+        )) + (record["render_node"], record["network_profile"], *runtime_images(run, digest))
         if common is not None and shared != common:
             raise job.JobError(f"live suite members have different frozen inputs: {run}")
         common = shared

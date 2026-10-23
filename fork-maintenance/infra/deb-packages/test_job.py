@@ -291,7 +291,17 @@ def write_package_tar(
     )
 
 
+@patch.object(job.package_versions, "DEBIAN_REVISION", 1)  # fixed historical fixture bytes below
 class DebianArchiveTests(unittest.TestCase):
+    def test_host_requires_the_configured_downstream_revision(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            args = build_args(root)
+            archive = write_package_tar(root, args)
+            with (patch.object(job.package_versions, "DEBIAN_REVISION", 2),
+                  self.assertRaisesRegex(job.JobError, "version and revision")):
+                job.validate_package_tar(archive, args)
+
     def test_validates_schema_two_manifest_and_real_xz_deb(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -4634,6 +4644,96 @@ class ReleaseTests(unittest.TestCase):
             self.assertRaisesRegex(job.JobError, "only in GitHub Actions"),
         ):
             job.ci_release(args)
+
+
+class LivePackageExportTest(unittest.TestCase):
+    def test_native_digests_are_read_from_deb_payload_not_manifest_claims(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "module.deb"
+            module = f"usr/lib/python3/dist-packages/xpra/seccomp/_native.{TEST_ABI}.so"
+            path.write_bytes(synthetic_deb(
+                control=b"Package: xpra-common\nVersion: 1\nArchitecture: amd64\n",
+                data=xz_tar({"./" + module: b"exact native bytes", "./usr/share/note": b"not native"}),
+            ))
+            inspected = job.inspect_deb(path, hash_native=True)
+            self.assertEqual(inspected.native_sha256, (("/" + module,
+                             job.hashlib.sha256(b"exact native bytes").hexdigest()),))
+            self.assertEqual(job.inspect_deb(path).native_sha256, ())
+
+    def fixture(self, root, *, version=None):
+        manifest = {
+            "schema": 2, "distro": "debian-13", "source_commit": "a" * 40,
+            "selection": job.ACTIVE_SELECTION, "selection_sha256": "b" * 64,
+            "base_version": "6.6", "revision": 42479,
+            "debian_version": version or job.package_versions.package_version("6.6", 42479), "packages": [],
+        }
+        source = root / "source"
+        source.mkdir(mode=0o700)
+        (source / "manifest.json").write_text(json.dumps(manifest))
+        (source / "SHA256SUMS").write_bytes(b"")
+        output = root / "packages.tar"
+        with output.open("wb") as stream:
+            container_payload.write_archive(stream, tuple(
+                container_payload.PayloadEntry(path, PurePosixPath(path.name)) for path in source.iterdir()
+            ))
+        output.chmod(0o600)
+        transaction = {"validation_ok": True, "status": {"manifest": manifest},
+                       "output": str(output), "output_sha256": job.sha256_file(output)}
+        args = argparse.Namespace(name="packages", distro="debian-13", source="a" * 40,
+                                  selection_sha256="b" * 64, destination=root / "frozen")
+        return args, transaction
+
+    def test_freezes_the_exact_collected_archive(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            root.chmod(0o700)
+            args, transaction = self.fixture(root)
+            with (patch.object(job, "load_remove_transaction", return_value=transaction),
+                  patch.object(job, "STATE_ROOT", root / "deb-packages"),
+                  patch.object(job, "run_directory", return_value=root / "removed")):
+                self.assertEqual(job.export_live_packages(args), 0)
+                self.assertEqual(json.loads((args.destination / "manifest.json").read_text()),
+                                 transaction["status"]["manifest"])
+                with self.assertRaises(container_payload.PayloadError):
+                    job.export_live_packages(args)
+
+    def test_failed_active_stale_or_changed_packages_cannot_be_live_inputs(self):
+        for fault in ("failed", "active", "source", "queue", "distro", "bytes"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                root.chmod(0o700)
+                args, transaction = self.fixture(root)
+                run = root / "removed"
+                if fault == "failed":
+                    transaction["validation_ok"] = False
+                elif fault == "active":
+                    run.mkdir()
+                elif fault == "source":
+                    args.source = "c" * 40
+                elif fault == "queue":
+                    args.selection_sha256 = "c" * 64
+                elif fault == "distro":
+                    args.distro = "ubuntu-26.04"
+                else:
+                    Path(transaction["output"]).write_bytes(b"changed")
+                with (patch.object(job, "load_remove_transaction", return_value=transaction),
+                      patch.object(job, "STATE_ROOT", root / "deb-packages"),
+                      patch.object(job, "run_directory", return_value=run), self.assertRaises(job.JobError)):
+                    job.export_live_packages(args)
+                self.assertFalse(args.destination.exists())
+
+    def test_old_downstream_revision_is_not_the_current_live_package(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            root.chmod(0o700)
+            args, transaction = self.fixture(root, version="6.6-r42479-1")
+            with (patch.object(job, "load_remove_transaction", return_value=transaction),
+                  patch.object(job, "STATE_ROOT", root / "deb-packages"),
+                  patch.object(job, "run_directory", return_value=root / "removed"),
+                  patch.object(job.package_versions, "DEBIAN_REVISION", 2),
+                  self.assertRaisesRegex(job.JobError, "revision")):
+                job.export_live_packages(args)
+            self.assertFalse(args.destination.exists())
 
 
 if __name__ == "__main__":

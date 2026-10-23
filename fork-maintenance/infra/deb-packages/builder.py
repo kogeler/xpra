@@ -19,6 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import container_payload
+import package_version as package_versions
 
 RUNNER_ROOT = Path(__file__).resolve().parent
 PAYLOAD = Path("/work/payload")
@@ -681,9 +682,10 @@ def prepare_debian_tree(codename: str, base_version: str, revision: int) -> str:
     )
     if header is None:
         raise BuildFailure("unexpected Debian changelog header")
-    lines[0] = f"xpra ({base_version}-r{revision}-1){header.group(1)}"
+    version = package_versions.package_version(base_version, revision)
+    lines[0] = f"xpra ({version}){header.group(1)}"
     changelog.write_text("".join(lines), encoding="utf-8")
-    return f"{base_version}-r{revision}-1"
+    return version
 
 
 def install_packaging_shims() -> None:

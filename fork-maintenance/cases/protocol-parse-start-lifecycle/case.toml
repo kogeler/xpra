@@ -1,0 +1,30 @@
+schema = 2
+slug = "protocol-parse-start-lifecycle"
+kind = "production"
+title = "Skip parse-worker entry after its connection has been retired"
+dependencies = []
+
+[tests]
+list = [
+  "unit.net.protocol_startup_test",
+  "unit.net.protocol_test",
+  "unit.net.bytestreams_test",
+  "unit.seccomp_test",
+  "focused",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = [
+  "live-rgb",
+  "live-h264",
+  "live-xpra-detach",
+  "live-xpra-transport-loss",
+  "live-wayland-keyboard",
+  "live-x11-clipboard",
+  "live-wayland-subsurface",
+  "live-wayland-h264-hardware",
+  "live-wayland-opengl-h264-hardware",
+]

@@ -1,0 +1,28 @@
+schema = 2
+slug = "seccomp-build-switch"
+kind = "production"
+title = "Expose the existing seccomp build feature through the standard switches"
+dependencies = []
+
+[tests]
+list = [
+  "unit.seccomp_build_test",
+  "unit.seccomp_test",
+  "focused",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = [
+  "live-rgb",
+  "live-h264",
+  "live-xpra-detach",
+  "live-xpra-transport-loss",
+  "live-wayland-keyboard",
+  "live-x11-clipboard",
+  "live-wayland-subsurface",
+  "live-wayland-h264-hardware",
+  "live-wayland-opengl-h264-hardware",
+]

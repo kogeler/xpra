@@ -120,6 +120,25 @@ class CaseSnapshotSelectionTest(unittest.TestCase):
         with self.assertRaises(selection.SelectionError):
             load(self.lab, "cases/probe")
 
+    def test_case_dependencies_reject_missing_forward_and_cyclic_entries(self) -> None:
+        manifest = self.directory / "case.toml"
+        manifest.write_text(case_manifest("probe", dependencies='["dependency"]'), encoding="utf-8")
+        with self.assertRaises(selection.SelectionError):
+            load(self.lab, "cases/probe")
+        dependency = self.lab / "cases" / "dependency"
+        dependency.mkdir()
+        (dependency / "fix.patch").write_bytes(TEST_PATCH)
+        (dependency / "case.toml").write_text(case_manifest("dependency"), encoding="utf-8")
+        write_marker(self.lab, ("probe", "dependency"))
+        with self.assertRaisesRegex(selection.SelectionError, "must come after"):
+            load(self.lab, "cases/probe")
+        write_marker(self.lab, ("dependency", "probe"))
+        (dependency / "case.toml").write_text(
+            case_manifest("dependency", dependencies='["probe"]'), encoding="utf-8",
+        )
+        with self.assertRaisesRegex(selection.SelectionError, "must come after"):
+            load(self.lab, "cases/probe")
+
     def test_required_gate_projection_excludes_tests_list_gates(self) -> None:
         self.write_manifest('"live-rgb"')
         selected = load(self.lab, "cases/probe")
@@ -252,6 +271,41 @@ class GitModeSelectionTest(unittest.TestCase):
             (tree / "xpra").mkdir()
             (tree / "xpra/a.py").write_text(LINES, encoding="utf-8")
             subprocess.run(("git", "apply", "--check", "-"), cwd=tree, input=alone, check=True)
+
+    def test_case_dependency_closure_applies_without_unrelated_context_and_freezes(self) -> None:
+        self.write({"fork-maintenance/cases/two/case.toml": case_manifest("two", dependencies='["one"]')})
+        self.commit("declare dependency")
+        self.add_case("unrelated", "line 6\n", "line six\n")
+        self.add_case("four", "line 8\n", "line eight\n")
+        self.write({"fork-maintenance/cases/four/case.toml": case_manifest("four", dependencies='["two"]')})
+        self.commit("declare transitive dependency")
+        before = git(self.repo, "rev-parse", "HEAD")
+        source = selection.open_source(self.lab)
+        selected = selection.load_selection(source, "cases/four")
+        self.assertEqual(selected.subjects, ("four",))
+        self.assertEqual([case.slug for case in selected.cases], ["one", "two", "four"])
+        with tempfile.TemporaryDirectory() as raw:
+            tree = Path(raw) / "source"
+            (tree / "xpra").mkdir(parents=True)
+            (tree / "xpra/a.py").write_text(LINES, encoding="utf-8")
+            resolution = selection.resolve_selection(selected, source, tree, self.base)
+            self.assertEqual(resolution["applied_cases"], ["one", "two", "four"])
+            self.assertEqual(resolution["base_dependencies"], [])
+            for case in selected.cases:
+                subprocess.run(("git", "apply", "-"), cwd=tree, input=case.patch_bytes, check=True)
+            expected = LINES.replace("line 5\n", "line five\n").replace("line 7\n", "line seven\n").replace("line 8\n", "line eight\n")
+            self.assertEqual((tree / "xpra/a.py").read_text(encoding="utf-8"), expected)
+            destination = Path(raw) / "snapshot"
+            selection.snapshot(selected, source, destination)
+            frozen = load(destination, "cases/four")
+            digest = selection.selection_digest(selected, self.lab)
+            self.assertEqual(selection.selection_digest(frozen, destination), digest)
+            self.assertEqual([case.slug for case in frozen.cases], ["one", "two", "four"])
+            patch_path = destination / "cases/one/fix.patch"
+            patch_path.write_bytes(patch_path.read_bytes() + b"\n")
+            self.assertNotEqual(selection.selection_digest(load(destination, "cases/four"), destination), digest)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), before)
+        self.assertEqual(git(self.repo, "status", "--porcelain"), "")
 
     def test_snapshot_round_trip_keeps_the_digest(self) -> None:
         for name in ("stacks/develop", "cases/two"):

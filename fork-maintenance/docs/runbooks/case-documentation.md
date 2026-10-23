@@ -58,6 +58,14 @@ upstream replacement must establish before retirement. Applicability and old
 commit messages are not proof. Documentation work never implies fetch, remote
 edits or rebase; existing Git authority rules remain unchanged.
 
+Document the precedents and design decision required by the root guide's
+[patch-design review](../../../AGENTS.md#patch-design-and-upstream-xpra-maintainer-alignment)
+here and in the mechanism/ownership sections below. Link the actual relevant
+maintainer feedback, explain how it affected the solution and alternatives,
+and distinguish reviewed material from relevant material that could not be
+reviewed; the search record itself stays in the ledger.
+Do not copy the design procedure into each README.
+
 ### Surrounding code and ownership map
 
 Map entry points, callers, state/resource owners and consumers to actual files
@@ -185,6 +193,9 @@ agent must:
 5. Confirm case-specific analysis in all required sections, no skeleton
    placeholders, unsupported guarantees, copied results or stale assumptions.
    Record unresolved questions honestly; they do not pass the affected review.
+6. Confirm the canonical root patch-design review is complete for this candidate
+   and its applicable prior maintainer objections are answered in the existing
+   sections, not in a second competing checklist.
 
 This is mandatory semantic review, not a heading-count or length test.
 `case-new` emits a README skeleton and a link to this standard; the skeleton,

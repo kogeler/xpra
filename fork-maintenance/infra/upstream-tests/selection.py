@@ -19,7 +19,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import NoReturn
 
@@ -293,6 +293,11 @@ def case_diff_alone(repo: Path, base: str, commit: str, slug: str) -> bytes:
     Its own diff carries context from the cases before it; a three-way merge
     applies only its change, and a conflict proves it is not independent.
     """
+    return tree_diff(repo, base, case_tree_alone(repo, base, commit, slug))
+
+
+def case_tree_alone(repo: Path, base: str, commit: str, slug: str) -> str:
+    """Apply only this commit to a base/prefix tree, without an index or ref."""
     result = subprocess.run(
         ("git", "-C", str(repo), "merge-tree", "--write-tree", f"--merge-base={commit}^", base, commit),
         capture_output=True,
@@ -306,7 +311,7 @@ def case_diff_alone(repo: Path, base: str, commit: str, slug: str) -> bytes:
     tree = result.stdout.decode().splitlines()[0].strip()
     if not GIT_SHA_RE.fullmatch(tree):
         fail(f"git merge-tree returned no tree for case {slug}")
-    return tree_diff(repo, base, tree)
+    return tree
 
 
 def resolve_base(repo: Path, head: str, base_commit: str | None) -> str:
@@ -595,6 +600,15 @@ def read_stack_manifest(lab_root: Path, slug: str) -> tuple[Path, bytes, dict[st
     return manifest_path, manifest_bytes, manifest
 
 
+def validate_case_order(cases: tuple[Case, ...]) -> None:
+    preceding: set[str] = set()
+    for case in cases:
+        missing = tuple(dep for dep in case.dependencies if dep not in preceding)
+        if missing:
+            fail(f"case {case.slug} must come after its dependencies: {', '.join(missing)}")
+        preceding.add(case.slug)
+
+
 def load_selection(source: Source, name: str) -> Selection:
     lab_root = source.lab_root
     match = re.fullmatch(r"(cases|stacks)/([a-z0-9]+(?:-[a-z0-9]+)*)", name)
@@ -602,13 +616,34 @@ def load_selection(source: Source, name: str) -> Selection:
         fail(f"invalid selection: {name}")
     kind, slug = match.groups()
     if kind == "cases":
-        case = read_case(source, slug, alone=True)
+        case = read_case(source, slug, alone=False)
+        required = {slug: case}
+        pending = [case]
+        while pending:
+            for dependency in pending.pop().dependencies:
+                if dependency not in required:
+                    prerequisite = read_case(source, dependency, alone=False)
+                    required[dependency] = prerequisite
+                    pending.append(prerequisite)
+        cases = tuple(required[entry] for entry in source.series if entry in required)
+        validate_case_order(cases)
+        if source.develop is not None:
+            # Rebase each diff's context onto only the selected dependency
+            # prefix. Both the whole stack and bare-base diffs can include
+            # context that is absent after a different case was omitted.
+            prefix = source.develop.base
+            rebased = []
+            for entry in cases:
+                tree = case_tree_alone(source.lab_root.parent, prefix, entry.commit, entry.slug)
+                rebased.append(replace(entry, patch_bytes=tree_diff(source.lab_root.parent, prefix, tree)))
+                prefix = tree
+            cases = tuple(rebased)
         return Selection(
             name=name,
             kind="case",
             manifest_path=case.manifest_path,
             manifest_bytes=case.manifest_bytes,
-            cases=(case,),
+            cases=cases,
             subjects=(case.slug,),
             tests=case.tests,
         )
@@ -617,12 +652,7 @@ def load_selection(source: Source, name: str) -> Selection:
     if not case_slugs:
         fail(f"stack {slug} has no case commits")
     cases = tuple(read_case(source, case_slug, alone=False) for case_slug in case_slugs)
-    preceding: set[str] = set()
-    for case in cases:
-        missing = tuple(dep for dep in case.dependencies if dep not in preceding)
-        if missing:
-            fail(f"case {case.slug} must come after its dependencies: {', '.join(missing)}")
-        preceding.add(case.slug)
+    validate_case_order(cases)
     return Selection(
         name=name,
         kind="stack",
@@ -719,6 +749,9 @@ def selection_digest(selection: Selection, lab_root: Path) -> str:
     ]
     if selection.kind == "stack":
         entries.append(series_entry(selection))
+    elif len(selection.cases) > 1:
+        entries.append((f"{selection.name}/dependencies.series",
+                        "".join(f"{case.slug}\n" for case in selection.cases).encode()))
     for case in selection.cases:
         entries.extend(
             (

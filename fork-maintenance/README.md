@@ -35,7 +35,18 @@ The active case commits, in stack order, are:
 7. `packet-handler-error-boundary`;
 8. `gtk-client-scroll-deduplication`;
 9. `server-shutdown-disconnect-flush`;
-10. `printing-cli-timer-cleanup`.
+10. `printing-cli-timer-cleanup`;
+11. `libva-decoder-display-lifetime`;
+12. `seccomp-build-switch`;
+13. `window-client-properties-deltas`;
+14. `video-decoder-capability-loss`;
+15. `window-unmap-log-format`;
+16. `ssh-tunnel-close-owner`;
+17. `protocol-parse-start-lifecycle`;
+18. `gtk-css-package-ownership`;
+19. `signalwatcher-resource-lifecycle`;
+20. `ssh-proxy-final-delivery`;
+21. `wayland-popup-opaque-region`.
 
 No quarantine duty case is currently active. The permanent
 [`upstream-test-quarantine` scaffold](cases/upstream-test-quarantine/README.md)
@@ -98,11 +109,20 @@ canonical workflows are byte-identical disabled renames below
 
 ## Case workflow
 
+Start product design with the root guide's mandatory
+[patch-design review](../AGENTS.md#patch-design-and-upstream-xpra-maintainer-alignment), the
+single source for maintainer-aligned, project-wide patch analysis.
+
 Use [development and final acceptance](docs/runbooks/validation.md). After each
 atomic edit, run its nearest real regression, affected upstream/case/dependency
 modules, and relevant native, compiled, compatibility, or live checks. Review
 and freeze code, tests, stack and oracle before filling final evidence gaps;
-do not repeat the full upstream matrix or both DEB builds after each edit.
+do not repeat the full upstream matrix or rebuild unchanged DEB artifacts
+after each edit. The canonical
+[runtime acceptance rule](docs/runbooks/validation.md#runtime-acceptance-represents-the-shipped-product)
+requires exact packaged live endpoints, active capability proof, transition
+coverage and asynchronous-error auditing; source-only live builds cannot
+accept the shipped packages.
 Every live validation uses the entire nine-profile suite. A valid named
 development result can satisfy an unchanged final requirement, with original
 provenance retained.
@@ -445,8 +465,9 @@ The close refuses while runtime, recovery state, an invalid record or foreign
 ## DEB packages
 
 Use these real builds early when diagnosing their actual package boundary, or
-to fill final package requirements after candidate freeze. Unrelated source
-or live-harness iterations do not automatically require two DEB builds.
+to fill final package requirements after candidate freeze. A product source
+change needs new matching DEBs before its next live check; live-harness-only
+iterations reuse the unchanged validated DEB artifacts.
 
 Package builds are branch-agnostic. They locate the clean source boundary
 between `HEAD` and refs whose final component is `master`, reject downstream

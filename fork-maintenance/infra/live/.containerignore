@@ -3,6 +3,16 @@
 !build_libva_trace.py
 !libva_trace.patch
 !libva_trace_test.c
+!libva_seccomp_probe.py
+!package_runtime.py
+!peer_processes.py
+!ssh_fixture.py
+!shutdown_fixture.py
+!churn_fixture.py
+!persistent_fixture.py
+!xpra-live-user-manager.service
+!decoder_loss_fixture.py
+!decoder_recovery.py
 !clipboard_fixture_common.py
 !container_payload.py
 !empty_damage_fixture.c
@@ -10,6 +20,8 @@
 !manifest.json
 !patches
 !patches/**
+!packages
+!packages/**
 !source
 !source/**
 !start_hardware_fixture.sh

@@ -1,0 +1,27 @@
+schema = 2
+slug = "wayland-popup-opaque-region"
+kind = "production"
+title = "Publish the opaque region of Wayland popups"
+dependencies = []
+
+[tests]
+list = [
+  "unit.wayland.window_test",
+  "wayland",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = [
+  "live-rgb",
+  "live-h264",
+  "live-xpra-detach",
+  "live-xpra-transport-loss",
+  "live-wayland-keyboard",
+  "live-x11-clipboard",
+  "live-wayland-subsurface",
+  "live-wayland-h264-hardware",
+  "live-wayland-opengl-h264-hardware",
+]

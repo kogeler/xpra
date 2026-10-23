@@ -43,6 +43,10 @@ whenever creating, changing or reassessing a case. Its semantic completeness
 check is part of the same pass as the case commit, before handoff; do not
 leave a summary-only README for the operator to request expanding.
 
+For product design, follow the single canonical
+[patch-design review](../AGENTS.md#patch-design-and-upstream-xpra-maintainer-alignment) in
+the root guide; this directory does not define a second design policy.
+
 ## Layout
 
 - `cases/`: one documentation directory (schema-2 `case.toml`, `README.md`,
@@ -263,6 +267,9 @@ review and adapt cases with the nearest real regression after each atomic edit,
 affected existing upstream and downstream modules, risk-directed native,
 compiled and no-compat checks, and early relevant live acceptance. Do not put
 the full upstream matrix before the live boundary under development.
+Apply its single [runtime acceptance rule](docs/runbooks/validation.md#runtime-acceptance-represents-the-shipped-product)
+for package/runtime fidelity and fail-closed diagnostic/transition oracles;
+this guide does not define a second harness-design policy.
 
 Keep full-suite, package and complete-profile obligations separate from that
 iteration loop. Review and freeze source, tests, fixtures/oracles and build
@@ -496,10 +503,10 @@ or `artifacts-close-check` to report no leftovers. Report every protected
 exception explicitly; never silently discard protected state to obtain an
 empty directory.
 
-Keep direct Xpra behavior separate from SSH or parent-product orchestration.
-The live runner owns direct-TCP detach, abrupt transport loss, RGB, adaptive
-Wayland H.264, multi-window hardware, and the full-stack X11-to-native-Wayland
-clipboard gate. Do not replace these with foreground one-off commands when
+Keep direct Xpra behavior separate from parent-product (Elsewindow)
+orchestration. The live runner owns its own direct-TCP and OpenSSH-mux detach
+and transport loss, RGB, adaptive Wayland H.264, multi-window hardware, and the
+full-stack X11-to-native-Wayland clipboard gate. Do not replace these with foreground one-off commands when
 deciding whether a case is ready.
 
 Invoke job lifecycle operations only through the root Makefile targets. Never

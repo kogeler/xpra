@@ -1,0 +1,31 @@
+schema = 2
+slug = "video-decoder-capability-loss"
+kind = "production"
+title = "Notify the server when runtime video decoder modes are retired"
+dependencies = ["window-client-properties-deltas"]
+
+[tests]
+list = [
+  "unit.client.video_decoder_loss_test",
+  "unit.client.terminal.terminal_window_test",
+  "unit.client.subsystem.window_draw_test",
+  "unit.client.subsystem.window_test",
+  "unit.server.subsystem.window_test",
+  "focused",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = [
+  "live-rgb",
+  "live-h264",
+  "live-xpra-detach",
+  "live-xpra-transport-loss",
+  "live-wayland-keyboard",
+  "live-x11-clipboard",
+  "live-wayland-subsurface",
+  "live-wayland-h264-hardware",
+  "live-wayland-opengl-h264-hardware",
+]

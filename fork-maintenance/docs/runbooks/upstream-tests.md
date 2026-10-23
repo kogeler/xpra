@@ -65,6 +65,13 @@ Review the selected modules and their actual result output, not just the
 container exit status. Missing expected diagnostics invalidate that evidence
 even when the runner's summary is green; preserve it and repeat the affected
 run after correcting the logging boundary.
+Both hosted and detached entrypoints stream all output through the common
+`tools/runtime_audit.py`: unhandled worker exceptions, unraisable finalizers,
+logging-format failures and Python fatal errors make even an exit-zero command
+fail. Collection independently checks the retained log. Deliberately caught
+tracebacks in negative unit tests are not globally forbidden; asynchronous
+failures are never silently accepted as those expected controls. See the
+[canonical runtime rule](validation.md#runtime-acceptance-represents-the-shipped-product).
 Detached and hosted test containers use
 `--userns=keep-id:uid=1000,gid=1000,size=2048` with runtime UID/GID 1000. The
 explicit bound is verified on the Ubuntu 26.04 test image and leaves the rest
@@ -245,7 +252,11 @@ selection, source and image provenance; they do not replace it.
 
 Every mode still creates fresh source and performs the Xpra install/build
 required by `setup.py unittests`. Reusing the dependency image and ccache does
-not make these build-free or incremental installed-Xpra tests. The focused
+not make these build-free or incremental installed-Xpra tests. Focused modes
+pin `XPRA_TEST_COVERAGE=0`: a packaging or build-contract regression may execute
+no Xpra Python and must not fail solely because coverage has no data to report.
+This does not suppress test failures or the asynchronous output audit. The
+three full legs keep upstream's ordinary coverage behavior. The focused
 modes select narrow modules, not the complete final upstream matrix.
 
 The frozen workflow at source `646b712d1bff` also installs `python3-cups` for
@@ -278,6 +289,11 @@ boundary against the complete resulting stack before deciding that upstream
 replaced it.
 
 Run one atomic case while developing it:
+
+`CASE` includes only that subject and its transitive declared dependencies;
+their diffs/tests are frozen in stack order, without unrelated cases. The
+[case selection contract](case-commits.md#runners) also applies to tests-only
+controls: only selected test paths, not dependency production code, are applied.
 
 ```bash
 make -C fork-maintenance test-start \

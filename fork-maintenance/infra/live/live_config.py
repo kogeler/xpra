@@ -36,12 +36,14 @@ ROLE_FIELDS = {
             "clipboard",
             "commands",
             "diagnostics",
+            "churn",
             "lifecycle",
+            "shutdown",
             "transports",
         }
     ),
     "client": frozenset(
-        {"base", "clipboard", "commands", "diagnostics", "transports"}
+        {"base", "churn", "clipboard", "commands", "diagnostics", "transports"}
     ),
 }
 ROLE_COMMANDS = {

@@ -9,6 +9,43 @@ candidate freeze. Never rerun the whole set just to test a fix: follow
 
 ## Preconditions
 
+Follow the canonical
+[runtime acceptance rule](validation.md#runtime-acceptance-represents-the-shipped-product).
+Before starting live work, build/collect/remove the matching complete-stack
+Ubuntu 26.04 and Debian 13 packages through the [DEB lifecycle](deb-packages.md#local-lifecycle),
+then select those exact retained results (shell exports apply to every example
+below):
+
+```bash
+export DEB_SERVER_RUN=<successful-removed-ubuntu-job>
+export DEB_CLIENT_RUN=<successful-removed-debian-job>
+```
+
+Live input freeze rejects missing, failed, still-owned, wrong-distribution,
+wrong-source/queue or changed package output. Both full package inventories and
+archive checksums are frozen into the shared context and input manifest.
+Build-time native tests and live endpoints install these exact package bytes;
+there is no second `setup.py install --minimal`. The final clean runtime
+installs only the role's required DEBs and normal distribution dependencies.
+The container package owner verifies the complete installed payload; the actual
+non-root runtime user independently imports required codec/security/backend
+modules and verifies their configured versions, paths, owners and hashes.
+Root-only CUPS files remain private, not a reason to ignore package changes or
+run Xpra itself as root. Each scenario records both observations; collection
+reparses them and binds native hashes independently to the accepted DEB bytes.
+After peer exit and the independent product-child reaping checks, the harness
+stops its own desktop log writers before final artifact transfer. Fixture PIDs
+and birth times are captured at desktop startup and signalled through verified
+pidfds; all captured writers must exit. An exited helper zombie cannot write,
+but this fixture quiescence never waives Xpra's stricter direct-child wait.
+Complete final logs remain subject to the unchanged streaming integrity check;
+do not retry a changing log or relax that boundary to conceal an active writer.
+H.264 additionally requires actual default errno decode-filter installation,
+context creation and frames after installation, plus physical filtered decode
+and cleanup probes. A prefilter self-test cannot satisfy those assertions.
+The separately named [injected-recovery scenario](#permanent-decoder-loss-recovery) is not a positive
+H.264 decoder result and cannot replace its uninjected sibling.
+
 Create and verify the hash-locked analysis environment:
 
 ```bash
@@ -119,10 +156,10 @@ tag names. The final report and status bind the source, both selections and
 resolution digests, context archives/trees, Zed and harness/input digests, and
 the actual image IDs with their complete ownership labels.
 
-The server and client build stages install Xpra and run their existing native
+The server and client build stages install the selected DEBs and run their existing native
 checks before copying/compiling independent C fixtures. A fixture-only edit
 still changes the complete context/image identity, but need not invalidate the
-unchanged Xpra build layer. Do not move fixture inputs ahead of that layer or
+unchanged package-install layer. Do not move fixture inputs ahead of that layer or
 drop them from context hashes. Native flags, output paths and runtime checks
 remain mandatory; record an actual cache hit before claiming a measured saving.
 
@@ -224,6 +261,8 @@ The exact set is `live-rgb`, `live-h264`, `live-xpra-detach`,
 member-level lifecycle interfaces, not independent case acceptance.
 `live-suite-check` recomputes all nine retained reports, checks the current
 complete queue and harness, and rejects missing, failed, stale or mixed inputs.
+The executed immutable server/client image IDs must also match across members;
+equal source context digests alone do not prove equal runtime dependencies.
 After each collected/removed member, and again during suite verification, the
 controller scans the four complete report-bound peer stdout/stderr files in
 every scenario. Missing, changed, symlinked or oversized logs fail closed.
@@ -232,6 +271,12 @@ warnings and CLIPBOARD/PRIMARY/SECONDARY selection timeouts stop the suite befor
 another profile starts. Diagnostics identify the file and warning category,
 never reproduce a possibly clipboard-bearing log line. These checks complement
 the application and per-profile oracles; they do not replace them.
+Uncaught worker/finalizer exceptions, logging-format failures, fatal Python
+errors, resource-leak warnings and native heap-corruption diagnostics in positive peer streams
+also fail. Caught debug tracebacks from codec capability probes are not
+automatically failures; both peers' exit statuses and the required profile
+oracles must independently pass. Exit zero or
+an earlier successful frame/paste is not an exception allowance.
 The same Zed payload is required in RGB and H.264. Review/save the summary in the
 session ledger (`work/<session>/`) before cleanup removes its underlying
 evidence; only its distilled conclusion survives the session close.
@@ -322,7 +367,7 @@ make -C fork-maintenance live-status \
 ```
 
 The wrapper fixes RGB, application-exit, strict H.264 policy, and the default
-alpha scenario. Like every live profile, it builds the complete queue for both
+alpha scenario. Like every live profile, it installs the exact complete-queue DEB packages on both
 the Debian 13 X11 client and Ubuntu 26.04 native-Wayland server. Input freeze and final
 collection require identical selection, resolution, and source context at both
 endpoints. The Ubuntu and Debian images have independently bound immutable
@@ -443,8 +488,8 @@ and its required native texture-array handler, checking ordinary RGB pixels
 and callbacks, transaction invalidation/reconfiguration, and resource deletion.
 A missing dependency, test, context or handler fails rather than skips.
 The test-only NumPy, PyOpenGL, GTK and Mesa dependencies are installed after
-Xpra compilation/native checks and are not copied into the runtime client.
-This mandatory build-time GL proof supplements the runtime Cairo oracle; it
+the Xpra package installation/native checks and are not copied into the runtime client.
+This mandatory package-runtime GL proof supplements the runtime Cairo oracle; it
 is not inferred from Cairo rendering; every live client build runs these GL checks. The remaining case-owned mapped OpenGL tests
 also stay in the focused/native upstream-test coverage.
 
@@ -899,8 +944,169 @@ epochs, raw premultiplied payloads, and exact source ACKs.
 
 ## Xpra-only lifecycle profiles
 
-These profiles use direct TCP and deliberately exclude SSH ControlMaster or
-parent-product orchestration.
+These profiles own their direct TCP and OpenSSH transports independently of
+Elsewindow or other parent-product orchestration.
+
+### Owned SSH-mux lifecycle coverage
+
+Each lifecycle wrapper keeps its original direct-TCP scenario and additionally
+runs four fresh-container external OpenSSH-mux scenarios. The fixture generates
+ephemeral keys inside the containers, pins the server host key, and uses neither
+host credentials nor agent forwarding. Xpra's real SSH `_proxy` carries attach
+and detach; TCP forwarding is disabled, and channels have `ProxyCommand=false`
+so a missing mux cannot silently fall back to a new connection. Readiness binds
+the mux check to the owned master PID; complete channel logs must prove mux use.
+The collector requires the exact ordered inventory, transport configuration,
+raw helper statuses, and owned process reaping. Detacher stdout/stderr/exit are
+retained separately and audited even when its exit status is zero.
+
+Normal fixture shutdown retains the separate `ssh -O exit` controller's
+stdout/stderr/status and requires its status 0 acknowledgement. The no-session
+`ssh -M -N` master itself returns 255 (`Exit status -1`), because no remote
+command supplied a status. Collection requires both raw authorities and exact
+owned-process reaping; 255 alone cannot pass. This follows OpenSSH's
+[`client_loop`](https://github.com/openssh/openssh-portable/blob/V_10_0_P2/clientloop.c)
+and [mux termination](https://github.com/openssh/openssh-portable/blob/V_10_0_P2/mux.c).
+It does not relax the separate Xpra detach-command/client/server status 0 checks.
+
+The SSH transport-loss iterations kill only the exact owned master through a
+start-time-verified pidfd. Its intentional status 137 is a fixture result, not
+an allowed Xpra peer crash. Both peers retain their normal lifecycle assertions.
+These original scenarios cover transport shutdown, not remote group teardown.
+The additional private-group scenarios below cover that distinct boundary.
+Four repeats are a fixed detection floor, not a statistical claim that an
+unreproduced intermittent bug has been fixed.
+
+#### Detach churn and persistent user services
+
+The detach profile adds two SSH-mux scenario families; the ordinary
+`detach` and `ssh-detach-NN` scenarios keep their composited single-window
+oracles unchanged.
+
+`ssh-detach-churn-NN` (four scenarios) runs the ordinary SSH detach first.
+The server is started with the `server.churn` block (`--notifications=yes`,
+its own `--dbus=yes` session bus, no D-Bus control). After the main detach
+the runner starts owned fixtures and runs six cycles:
+
+- a second client desktop, `Xvfb :1` with `openbox` and no compositor; the
+  probe must report RGBA visuals and `composited=False`, the reported
+  non-composited transparency boundary;
+- `churn_fixture.py server`, a native-Wayland GTK client of the session which
+  keeps four translucent RGBA windows, replaces one every 50 ms and sends a
+  notification through Xpra's session bus (read from its `dbus.env`) every
+  250 ms;
+- per cycle, a real client attaches through the same mux with the
+  `client.churn` block (notifications shown), `churn_fixture.py pointer`
+  keeps warping the pointer over the churn display, and `xpra detach` runs
+  while the client is still sending.
+
+Each cycle keeps the detach command's stdout/stderr/status and the attached
+client's stdout/stderr/status separately (`client.churn-NN.*`); both must be
+0, the client must log the `detach request` reason and must not log
+`Connection lost`, the server must survive and the pointer generator must have
+moved. Cycle clients and the pointer generator must reap their own children;
+the GTK churn fixture and the churn desktop only need every descendant gone,
+because image-loader sandboxes they spawn exit as orphans of the non-reaping
+container init. The fixture and the
+churn desktop are stopped by exact identity before artifact transfer, also on
+failure. The collector re-reads every raw status and log, and the suite audits
+the cycle logs like peer logs.
+
+`ssh-detach-persistent-NN` (four scenarios) boots systemd in the server
+container (`--systemd=always`, init as container root, every runner exec as
+`lab`). `xpra-live-user-manager.service` runs the real `systemd --user`
+manager for `lab`; a login session through PAM and logind cannot be opened in
+the user-namespaced container, so only that layer differs from a host. The
+Xpra server is the user unit `xpra-live.service` (`persistent_fixture.py`):
+no SSH session or exec shell owns it. The runner records the service state
+when started, before and after the detach (active, same main process, parent
+is the user manager, `app.slice/xpra-live.service` cgroup, no restart) and
+after the server's exit; `ExecStopPost` writes the service's own exit receipt
+(`server.systemd-exit.json`, bound to `server.exit`).
+
+The scenario counts are detection floors chosen from the measured ad hoc
+baseline recorded in the session ledger, not a statistical guarantee.
+
+#### Private-bus group shutdown and native failure evidence
+
+The RGB transport-loss profile also runs four fresh-container repetitions of
+each explicit shutdown order: `together`, `bus-first`, and `server-first`,
+plus one `ssh-group-abort-control-01` positive control.
+The server container receives no render node in these scenarios. An owned
+heartbeat channel uses the same mandatory SSH mux as the actual Xpra client.
+Killing that exact master ends the lease; the remote supervisor sends SIGTERM
+to its private group, waits a bounded grace period, and sends SIGKILL only if
+needed. Neither the supervisor nor the SSH daemon belongs to that group.
+
+The group contains Xpra, its real native-Wayland GTK child, a foreground private
+`dbus-daemon`, `xdg-desktop-portal` and its GTK backend. Explicit bus configuration
+has no service-activation directories and uses no inherited user bus. Readiness
+requires actual notification/portal bus names and independently queried Unix
+owner PIDs matching the exact process identities, through the fixture's own
+short-lived Gio connection (the image has no `gdbus` tool). All five peers'
+group IDs must agree. The `server.shutdown` YAML block alone enables notification
+forwarding and disables Xpra D-Bus control / dbus-launch for this topology.
+Consumers which mirror `live-cli.yml` must add this block together with the
+`server.churn`/`client.churn` blocks, the client base `--seccomp=default` and
+the `seccomp` client debug category; `profiles.yml` is unchanged. Only the portal helpers receive the Wayland display
+and portal configuration; Xpra keeps the ordinary server environment plus the
+private bus address.
+
+The shipped server runs uninstrumented: it is the supervisor's own child, so
+the supervisor's wait status is the exact native outcome (`exit` with a status,
+or `signal` with its number), published as `server.native-exit.json` and the
+shell-style `server.exit`. A debugger is not used: Xpra marks its server
+non-dumpable at startup, so even a tracing parent loses procfs and library
+access, and weakening that hardening or host core/sysctl settings is not an
+acceptable diagnostic. The supported native evidence is CPython's fault handler
+(`PYTHONFAULTHANDLER=1`, already part of the live server environment): on the
+Ubuntu 26.04 server's CPython 3.14 a fatal signal also prints the aborting
+thread's native C stack with library and symbol offsets
+([faulthandler](https://docs.python.org/3.14/library/faulthandler.html)).
+`ServerCore.signal_quit` exits with `128 + SIGTERM`, so a healthy teardown is
+exactly `exit 143`; with the bus stopped first the application may end the
+session first through `--exit-with-children`, so `bus-first` also admits
+`exit 0`. Any signal outcome fails these orders.
+
+The abort control sends SIGABRT to the exact, still unreaped Xpra child at
+lease end. It must record `signal 6` / status 134, leave the session directory
+and socket in place, and produce one fault-handler report containing the real
+server's Python stacks and native libc frames. This proves on the actual
+hardened packaged server that an abort is detected and inspectable. Only that
+scenario's `server.stderr` may contain that exact report; any other fatal
+error, memory-corruption message or helper diagnostic still fails, and its
+aborted server is the only peer exempt from reaping its own direct children
+(they must still have exited).
+
+Normal orders require the session directory and socket observed at readiness
+to be gone after exit; the fixture only observes them and never removes a
+leftover. Helpers may end themselves only after their own dependency was
+deliberately stopped first (bus, or the GTK backend's Wayland display); a
+fatal signal or the forced SIGKILL fails. No recorded group member may remain
+running. The supervisor writes its own diagnostics to
+`server.shutdown-supervisor.stderr`, which must stay empty in a passing result.
+
+On any failure the runner first keeps a bounded `server.shutdown-diagnostic-*`
+record (helper stdout/stderr suffixes, receipts and the container process
+table), ends the lease and keeps its own stdout/stderr once that writer has
+exited, then waits for the server container to contain only init and exited
+zombies, stopping only the exact supervisor identity if it does not finish.
+Full immutable artifact transfer is attempted only after that quiescence;
+an exited zombie is not a writer, while any live process keeps the transfer
+skipped.
+
+The collector reparses readiness, group identities, bus ownership, lease reason,
+ordered signal/wait events, the exit receipt, session files and separate helper
+statuses; forged report booleans cannot hide an inferior abort. Positive
+acceptance requires the exact per-order server receipt bound to `server.exit`,
+exact Xpra connection-lost client status 1, reaped lease/peer processes, and no
+forced group kill. Both peer streams and all helper/supervisor streams remain
+subject to the diagnostic audit. An unexpected abort in a teardown order is a
+failed result with retained native evidence. Record the actual observed
+baseline and iteration count in the ignored session ledger; adding these
+scenarios alone does not identify or fix the reported heap corruption.
+
+### Running and inspecting the lifecycle profiles
 
 Real detach:
 
@@ -910,6 +1116,12 @@ make -C fork-maintenance live-xpra-detach \
 make -C fork-maintenance live-wait RUN=xpra-detach-01
 make -C fork-maintenance live-remove RUN=xpra-detach-01
 ```
+
+The transport-loss client must exit with Xpra's `CONNECTION_LOST` status (1),
+not merely a nonzero value. Signal aborts/segfaults, timeout, internal errors
+and other unrelated failures cannot satisfy this expected-failure boundary. The
+detach profile independently requires command status 0 and attached-client
+status 0.
 
 Abrupt established transport loss through a run-owned single-connection TCP
 proxy:
@@ -973,6 +1185,8 @@ fixture counters and unchanged pixels fail. Collection independently rebuilds
 the evidence from the raw artifacts; report booleans are not an authority.
 This is part of the same mandatory nine-profile complete-stack suite, not an
 isolated scroll product or a tenth gate.
+
+### Multi-window hardware profiles
 
 Run both fixed multi-window hardware acceptance profiles with adaptive alpha:
 
@@ -1096,6 +1310,32 @@ and exact owned-object cleanup.
 Do not weaken either per-window contract, substitute a picture-fallback
 diagnostic, or encode a known failure as expected success. Every retry uses a
 new run identity.
+
+#### Permanent decoder-loss recovery
+
+The physical `hardware` H.264 profile runs its unchanged positive scenario,
+then an additional `decoder-loss` scenario on the same exact complete-stack
+package images. Only that second client's test launcher replaces the backing's
+H.264 factory specifications with a permanent initialization refusal. Real
+libva module discovery and startup self-tests remain intact: H.264 must first
+be advertised and sent, and the refusal must execute on the real decode thread
+after its default errno filter is installed. No package file is rewritten.
+
+The recovery oracle requires the real peer's minimal CSC-only property delta,
+retained `xpra info` for the exact source window showing H.264 excluded, at
+least three subsequent full-size negotiated picture frames (RGB edges do not
+count), native picture decode acknowledgement, pixels, input and clean peer
+exit/reaping. H.264 must not resume after full-picture recovery; an old in-flight
+error before picture acknowledgement is not an endless fallback loop.
+Collection independently reparses fault logs, native filter policy, server
+info and saved packet metadata, rather than trusting report booleans.
+
+This is the permanent first-live-context failure boundary, not a claim to
+simulate a physical GPU reset after a long-running stream. The uninjected
+scenario still requires post-filter libva context creation/decode, complete VA
+packet/presentation evidence and its unchanged H.264 dominance thresholds.
+Neither a normal successful H.264 run nor a pre-negotiated picture-only session
+satisfies the injected transition.
 
 ## Evidence boundary
 

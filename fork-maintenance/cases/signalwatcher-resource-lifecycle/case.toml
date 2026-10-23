@@ -1,0 +1,31 @@
+schema = 2
+slug = "signalwatcher-resource-lifecycle"
+kind = "production"
+title = "Complete signal watcher pipe closure and owned child collection"
+dependencies = []
+
+[tests]
+list = [
+  "unit.client.signalwatcher_cleanup_test",
+  "unit.client.subsystem.window_test",
+  "unit.client.subsystem.window_draw_test",
+  "unit.child_reaper_test",
+  "unit.client.command_test",
+  "focused",
+  "full",
+  "full-cython",
+  "full-no-compat",
+]
+
+[evidence]
+required_gates = [
+  "live-rgb",
+  "live-h264",
+  "live-xpra-detach",
+  "live-xpra-transport-loss",
+  "live-wayland-keyboard",
+  "live-x11-clipboard",
+  "live-wayland-subsurface",
+  "live-wayland-h264-hardware",
+  "live-wayland-opengl-h264-hardware",
+]
