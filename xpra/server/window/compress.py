@@ -3271,10 +3271,22 @@ class WindowSource(WindowIconSource):
             GLib.idle_add(self.save_screenshot)
 
     def save_screenshot(self) -> None:
-        ww, wh = self.window_dimensions
-        image = self.window.get_image(0, 0, ww, wh)
+        window = self.window
+        if window is None:
+            return
+        ww, wh = window.get_dimensions()
+        if ww <= 0 or wh <= 0:
+            return
+        try:
+            image = window.get_image(0, 0, ww, wh)
+        except ValueError as exc:
+            # Geometry and the retained buffer can differ during a resize.
+            log("debug screenshot is not available for %s: %s", window, exc)
+            return
+        if image is None:
+            return
         rgb_format = image.get_pixel_format()
-        if image and rgb_format in ("RGB", "RGBX", "RGBA", "BGRX", "BGRA"):
+        if rgb_format in ("RGB", "RGBX", "RGBA", "BGRX", "BGRA"):
             from xpra.codecs.image import to_pil_encoding
             data = to_pil_encoding(image, "png")
             screenshort_file = os.path.join(self.screen_updates_directory, "screenshot.png")
