@@ -203,9 +203,12 @@ and selected order, and snapshots retain that exact closure. Declaring a
 dependency does not waive conflict/removability checks or authorize a partial
 live run: every live endpoint still uses `STACK=develop`.
 
-The selection digest binds those bytes, so a changed case diff is a new
-candidate; a SHA which changed only because an unrelated commit was rewritten
-keeps the same bytes.
+The selection digest binds those bytes, so a changed case diff has new raw
+selection provenance; a SHA which changed only because an unrelated commit was
+rewritten keeps the same bytes. Raw inequality alone does not invalidate a
+completed result. Apply the [exact-input equivalence rule](validation.md#evidence-invalidation-and-reuse)
+before scheduling new builds or tests, including when hunk ownership changes
+but the complete applied source and tests remain identical.
 `tests-only` applies only the `tests/` parts of the selected diffs, including
 dependencies, to the clean upstream base; dependency production changes are
 not silently applied in this negative-control mode.

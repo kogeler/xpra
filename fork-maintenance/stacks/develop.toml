@@ -4,6 +4,8 @@ description = "Stack-level tests of the develop case commits (the series is thei
 
 [tests]
 list = [
+  "unit.scripts.public_capabilities_test",
+  "unit.client.wayland_client_test",
   "unit.wayland.pointer_scroll_test",
   "unit.server.subsystem.pointer_test",
   "unit.client.subsystem.pointer_test",

@@ -283,6 +283,13 @@ collected. After removal, `deb-status` reports the validated transaction's
 make -C fork-maintenance deb-abort RUN=packages-ubuntu-01
 ```
 
+If interrupted auto-removal leaves a Podman `removing` entry whose storage
+metadata is no longer inspectable, this same target may recover it only from
+retained immutable provenance and the exact filtered container inventory.
+ID, image ID, name and every ownership label must still match before removal;
+missing provenance or any mismatch fails closed. Never remove the transaction
+or invoke destructive Podman commands by hand to bypass recovery.
+
 After review, the normal digest-confirmed `cycle-clean-plan` / `cycle-clean`
 flow removes the finalized status, log, and removal transaction, plus the tar
 only for a validated success. Source bundles, immutable selection snapshots,

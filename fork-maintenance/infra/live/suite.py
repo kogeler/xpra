@@ -21,6 +21,15 @@ from profiles import DEFAULT_NETWORK_PROFILE, DETACH_CHURN_CYCLES, LIVE_PROFILE_
 
 PEER_LOGS = ("server.stdout", "server.stderr", "client.stdout", "client.stderr")
 PEER_WARNING_PATTERNS = {
+    "ui-callback-error": re.compile(
+        rb'(?m)^  File "(?:[^"\r\n]*/)?xpra/'
+        rb'(?:server/window/compress\.py", line [0-9]+, in save_screenshot'
+        rb'|client/subsystem/notification\.py", line [0-9]+, in _show_notification)\r?$',
+    ),
+    "packet-handler-error": re.compile(
+        rb"(?m)^(?:[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:,.]+ )?Error processing [^\r\n]+ packet",
+        re.IGNORECASE,
+    ),
     "wayland-display-name": re.compile(
         rb"['\"]?display-name['\"]? is not a declared signal of WaylandManager", re.IGNORECASE,
     ),

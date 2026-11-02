@@ -19,6 +19,40 @@ class Spec:
 
 
 class DecoderLossFixtureTest(unittest.TestCase):
+    def test_fault_record_stays_on_its_own_line_when_paint_logging_interleaves(self):
+        class Helper:
+            def get_decoder_specs(self, _encoding):
+                return {"YUV420P": [Spec()]}
+
+        class InterleavingLog(StringIO):
+            def write(self, value):
+                count = super().write(value)
+                if value.startswith(fixture.MARKER):
+                    super().write("2026-11-02 15:40:36,128 GLDrawingArea.do_paint_rgb()\n")
+                return count
+
+        fixture.inject(Helper, RuntimeError)
+        decoder = Helper().get_decoder_specs("h264")["YUV420P"][0].codec_class()
+        events, failures = InterleavingLog(), []
+
+        def decode():
+            with redirect_stdout(events):
+                try:
+                    decoder.init_context("h264", 640, 480, "YUV420P", {})
+                except RuntimeError as error:
+                    failures.append(error)
+
+        worker = Thread(target=decode, name="decode")
+        worker.start()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(failures), 1)
+        records = [line.removeprefix(fixture.MARKER) for line in events.getvalue().splitlines()
+                   if line.startswith(fixture.MARKER)]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(json.loads(records[0])["thread"], "decode")
+        self.assertIn("GLDrawingArea.do_paint_rgb()", events.getvalue())
+
     def test_only_live_factory_changes_not_startup_discovery(self):
         specs = {"h264": {"YUV420P": [Spec()]}, "vp9": {"YUV420P": [Spec()]}}
 

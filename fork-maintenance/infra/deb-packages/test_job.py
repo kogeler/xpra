@@ -1245,6 +1245,57 @@ class ContainerBoundaryTests(unittest.TestCase):
                 )
             command_mock.assert_not_called()
 
+    def test_removing_container_inventory_retains_every_ownership_check(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            args = build_args(Path(raw))
+            recorded = {
+                "base_image_id": "a" * 64, "builder_image_input_sha256": "c" * 64,
+                "container_id": "e" * 64, "image_id": "b" * 64,
+            }
+            entry = {
+                "Id": recorded["container_id"], "ImageID": recorded["image_id"],
+                "Names": [args.container_name], "State": "removing",
+                "Labels": job.container_labels(args.container_name, args),
+            }
+            variants = {"valid": entry}
+            for field, value in (
+                ("Id", "f" * 64), ("ImageID", "f" * 64), ("Names", ["foreign"]),
+                ("State", "running"), ("Labels", {}), ("Names", []),
+            ):
+                variants[f"{field}-{value}"] = {**entry, field: value}
+            for name, inventory in variants.items():
+                with self.subTest(name=name):
+                    calls = []
+
+                    def invoke(argv, **kwargs):
+                        calls.append(argv)
+                        if argv[:3] == ["podman", "container", "inspect"]:
+                            failure = completed(argv, 125, stderr="container not known")
+                            if kwargs.get("check", True):
+                                raise job.JobError("container not known")
+                            return failure
+                        if argv[:2] == ["podman", "ps"]:
+                            self.assertEqual(argv[2:], [
+                                "--all", "--no-trunc", "--filter",
+                                f"id={recorded['container_id']}", "--format", "json",
+                            ])
+                            return completed(argv, stdout=json.dumps([inventory]))
+                        return completed(argv)
+
+                    with (
+                        patch.object(job, "load_container_record", return_value=recorded),
+                        patch.object(job, "command", side_effect=invoke),
+                    ):
+                        if name == "valid":
+                            job.remove_owned_container(args)
+                            self.assertEqual(calls[-1], [
+                                "podman", "rm", "--force", recorded["container_id"],
+                            ])
+                        else:
+                            with self.assertRaises(job.JobError):
+                                job.remove_owned_container(args)
+                            self.assertFalse(any(call[:2] == ["podman", "rm"] for call in calls))
+
     def test_image_context_is_streamed(self) -> None:
         production_lock_root = job.LOCK_ROOT
         production_before = (

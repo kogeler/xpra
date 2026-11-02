@@ -1570,9 +1570,32 @@ def remove_owned_container(
         return
     if exists.returncode != 0:
         raise JobError(f"cannot inspect package container: {identifier}")
-    payload = json.loads(
-        command(["podman", "container", "inspect", identifier]).stdout
-    )
+    inspection = command(["podman", "container", "inspect", identifier], check=False)
+    if inspection.returncode:
+        # An interrupted auto-remove can leave a libpod `removing` entry after
+        # its storage metadata is gone. The ps inventory still carries the
+        # immutable ID, image and labels needed by the same ownership checks.
+        if recorded is None:
+            raise JobError("cannot recover removing container without immutable provenance")
+        inventory = json.loads(command([
+            "podman", "ps", "--all", "--no-trunc", "--filter", f"id={identifier}",
+            "--format", "json",
+        ]).stdout)
+        if (
+            not isinstance(inventory, list) or len(inventory) != 1
+            or not isinstance(inventory[0], dict)
+            or inventory[0].get("State") != "removing"
+            or not isinstance(inventory[0].get("Names"), list)
+            or len(inventory[0]["Names"]) != 1
+        ):
+            raise JobError("cannot verify removing package container inventory")
+        entry = inventory[0]
+        payload = [{
+            "Id": entry.get("Id"), "Name": entry["Names"][0],
+            "Image": entry.get("ImageID"), "Config": {"Labels": entry.get("Labels")},
+        }]
+    else:
+        payload = json.loads(inspection.stdout)
     if not isinstance(payload, list) or len(payload) != 1:
         raise JobError(f"invalid package container inspection: {identifier}")
     item = payload[0]

@@ -1010,6 +1010,13 @@ a leaked non-daemon worker triggers an explicit terminal request and remains
 a test failure even if that request releases it. This keeps an assertion
 failure from silently stranding the module process.
 
+The synthetic `VideoPipelineLifecycleTest.make_source()` deliberately bypasses
+the window-source constructor. This case owns its explicit field initialization,
+including the registry lock consumed when `window-encoder-registry-rebuild`
+is composed. The extra lock is unused when that case is absent. Keeping this
+fixture field here lets both case diffs remain independently removable; the
+registry case must not modify this case's tests.
+
 The clean tests-only control must reach these production methods on the frozen
 source and fail non-vacuously at the lifecycle assertions, while the retained
 upstream context behavior remains meaningful. The entire atomic patched module
