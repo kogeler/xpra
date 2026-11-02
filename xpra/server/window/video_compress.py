@@ -2604,7 +2604,8 @@ class WindowVideoSource(WindowSource):
                 encoding = self.get_best_nonvideo_encoding(w, sh, sel_options)
                 if not encoding:
                     raise RuntimeError(f"no nonvideo encoding found for {w}x{sh} screen update")
-                encode_fn = self._encoders[encoding]
+                with self._encoder_lock:
+                    encode_fn = self._encoders[encoding]
                 ret = encode_fn(encoding, sub, options)
                 free_image_wrapper(sub)
                 if not ret:

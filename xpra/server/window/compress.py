@@ -706,7 +706,10 @@ class WindowSource(WindowIconSource):
             self._encoders[encoding] = encode_fn
 
     def init_encoders(self) -> None:
-        self.do_init_encoders()
+        # Registry reconfiguration can overlap queued frames on the encode worker.
+        # Include subclass additions, but never execute an encoder under this lock.
+        with self._encoder_lock:
+            self.do_init_encoders()
         self.parse_csc_modes(self.encoding_options.dictget("full_csc_modes", default=None))
         self.update_encoding_selection(self.encoding, init=True)
 
@@ -803,6 +806,9 @@ class WindowSource(WindowIconSource):
         self._fixed_speed = -1
         self._fixed_min_speed = 0
         self._fixed_max_speed = MAX_SPEED
+        # init_vars also runs during cleanup; retain the lock owned by workers.
+        if not hasattr(self, "_encoder_lock"):
+            self._encoder_lock = Lock()
         #
         self._damage_delayed: DelayedRegions | None = None
         self._sequence: int = 1
@@ -864,7 +870,8 @@ class WindowSource(WindowIconSource):
 
     def encode_ended(self) -> None:
         log("encode_ended()")
-        self._encoders = {}
+        with self._encoder_lock:
+            self._encoders = {}
         GLib.idle_add(self.ui_cleanup)
 
     def ui_cleanup(self) -> None:
@@ -3506,7 +3513,8 @@ class WindowSource(WindowIconSource):
         if self.cuda_device_context:
             options["cuda-device-context"] = self.cuda_device_context
         # by default, don't set rowstride (the container format will take care of providing it):
-        encoder = self._encoders.get(coding)
+        with self._encoder_lock:
+            encoder = self._encoders.get(coding)
         if encoder is None:
             if self.is_cancelled(sequence):
                 return nodata("cancelled")
