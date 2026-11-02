@@ -26,11 +26,13 @@ def inject(helper_type, unsupported_error) -> None:
         def init_context(self, encoding, width, height, colorspace, _options):
             if encoding != "h264" or current_thread().name != "decode":
                 raise AssertionError("fault injection escaped the live H.264 decode boundary")
-            print(MARKER + json.dumps({
+            # GL paint logging shares stdout: keep the newline in this write.
+            sys.stdout.write(MARKER + json.dumps({
                 "schema": 1, "event": "injected-init-failure", "encoding": encoding,
                 "width": width, "height": height, "colorspace": colorspace,
                 "thread": current_thread().name, "pid": os.getpid(), "monotonic_ns": monotonic_ns(),
-            }, sort_keys=True), flush=True)
+            }, sort_keys=True) + "\n")
+            sys.stdout.flush()
             raise unsupported_error("live fixture permanently lost H.264 decoder")
 
         def clean(self):

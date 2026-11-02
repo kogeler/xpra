@@ -300,9 +300,16 @@ class ShutdownFixtureTest(unittest.TestCase):
                                    capture_output=True, check=False)
         self.assertEqual(child.returncode, -signal.SIGABRT)
         # CPython 3.14 adds the aborting thread's native stack to its report.
-        self.assertTrue(fixture.abort_diagnostic_valid(child.stderr), child.stderr.decode(errors="replace"))
+        # Supported maintenance hosts may run Python 3.11-3.13. Their real
+        # Python-only report must remain rejected by the runtime oracle; the
+        # Ubuntu server's positive live control still requires its C stack.
+        native_stack_expected = sys.version_info >= (3, 14)
+        self.assertEqual(fixture.abort_diagnostic_valid(child.stderr), native_stack_expected,
+                         child.stderr.decode(errors="replace"))
         control = f"ssh-group-{fixture.ABORT_CONTROL}-01"
-        self.assertEqual(fixture.unexpected_failures(control, "server.stderr", child.stderr, runtime_audit.failures), ())
+        expected_failures = () if native_stack_expected else ("fatal-python-error",)
+        self.assertEqual(fixture.unexpected_failures(control, "server.stderr", child.stderr, runtime_audit.failures),
+                         expected_failures)
         for scenario, filename in ((control, "client.stderr"), ("ssh-group-together-01", "server.stderr"),
                                    ("transport-loss", "server.stderr")):
             with self.subTest(scenario=scenario, filename=filename):

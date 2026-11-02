@@ -1,13 +1,39 @@
 # Runner-owned neutral regressions
 
 These are current runner-owned tests, not a production patch, quarantine or
-historical verification archive. Each one keeps a durable boundary after
-upstream absorbed the production fix of a retired case:
+historical verification archive. They cover public startup contracts and keep
+durable boundaries after upstream absorbs a production fix:
 
 | Input | Installed at | Former case |
 | --- | --- | --- |
 | `pointer_scroll_test.py`, `pointer_scroll_client.c` | `tests/unittests/unit/wayland/` | native Wayland wheel conversion |
 | `codec_startup_test.py` | `tests/unittests/unit/client/subsystem/` | `client-codec-startup-order` |
+| `public_capabilities_test.py` | `tests/unittests/unit/scripts/` | public CLI and OpenGL startup probes; no former case |
+
+## Public startup capability checks
+
+`public_capabilities_test.py` checks the public commands used before starting a
+client/server connection. It runs `attach --help` and `seamless --help`, requires
+normal exit and verifies the core SSH, renderer, decoder, clipboard and child
+lifecycle option names. It carries no application-specific profile values or
+dependency on another checkout. Existing upstream tests already check a usable
+version command, so this module does not duplicate that probe.
+
+The OpenGL check runs the actual `xpra opengl` command on an owned Xvfb using
+software OpenGL and `--opengl=force:native`. Force bypasses the software-driver
+safety policy; the actual context creation, production `FakeClient`, window and
+backing construction and test-image presentation remain real. The test requires
+normal exit, an OpenGL version, `success=True` and `safe=True`. An exit of zero
+alone is insufficient: the public command also exits zero when its result
+dictionary reports a caught construction or rendering error. Missing software
+GL or a broken fake subsystem fails the test rather than skipping it.
+
+This small boundary is informed by Elsewindow's public capability checks. Its
+Python-environment and installer tests belong to that application and are not
+copied. Package-owned native imports and shared CSS remain covered by the
+existing DEB and installed-package live checks. The new probe does not establish
+hardware acceleration, remote rendering, input or measured performance; the
+complete-stack live suite remains required for those claims.
 
 ## Native Wayland pointer protocol regression
 

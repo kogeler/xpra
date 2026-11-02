@@ -239,7 +239,12 @@ appears, and the walk continues from that gate:
    gate (`live-rgb`) has passed. Record each failure, its classification, fix
    and continuation prefix in the session ledger.
 2. **Complete pass.** Once the walk has reached the end, every problem found so
-   far is fixed. Start a complete `live-all` from the first gate under a fresh
+   far is fixed. First satisfy the
+   [required order and entry gate](validation.md#required-order-and-entry-gate):
+   finish all known code, fixture ownership, oracle, package and documentation
+   repairs; every active `case-check` and the complete `stack-check` must pass.
+   Do not defer these structural checks or a planned case rewrite until after
+   acceptance. Start a complete `live-all` from the first gate under a fresh
    prefix. If it passes all nine without any change in between, it is the
    acceptance pass: run `live-suite-check` on its prefix.
 3. **Around again.** If a gate of the complete pass fails, fix it and continue
@@ -247,8 +252,20 @@ appears, and the walk continues from that gate:
    back to step 2 with a new complete pass. Repeat until one complete pass
    succeeds without a fix.
 
-Only that uninterrupted pass is acceptance: every fix changes the candidate or
-the harness, which makes all earlier members stale, and `live-suite-check`
+One successful uninterrupted complete pass is sufficient for the same
+functional candidate. After suite-check passes, move to missing final upstream
+legs and handoff; do not schedule another full pass as a precaution or phase
+transition. A further pass requires a recorded change to exercised inputs or
+newly missing coverage. A different HEAD/case SHA, completed documentation or
+redistribution of an existing test hunk between owners is not such a change.
+Use the [exact equivalence rule](validation.md#evidence-invalidation-and-reuse)
+to retain completed live/package results when the applied source/tests,
+profiles/assertions, harness, images/dependencies, hardware/configuration and
+exact endpoint packages are unchanged. Keep original reports and identities;
+never weaken assertions, rewrite provenance or bypass a new run's input guards.
+
+Only that uninterrupted pass is acceptance: a fix which changes exercised
+product or harness inputs makes all earlier members stale, and `live-suite-check`
 rejects stale, mixed and missing members. Continuations are the diagnostic
 walk; they keep their own prefixes so no name is ever reused. Do not replace a
 continuation with repeated reruns of a gate that already passes, and do not
@@ -264,9 +281,12 @@ complete queue and harness, and rejects missing, failed, stale or mixed inputs.
 The executed immutable server/client image IDs must also match across members;
 equal source context digests alone do not prove equal runtime dependencies.
 After each collected/removed member, and again during suite verification, the
-controller scans the four complete report-bound peer stdout/stderr files in
-every scenario. Missing, changed, symlinked or oversized logs fail closed.
-Undeclared Wayland `display-name`, decode-codec startup timeouts, clipboard rate
+controller scans complete report-bound server/client stdout/stderr and required
+detach, SSH and churn helper streams in every scenario. Missing, changed,
+symlinked or oversized logs fail closed.
+Explicit packet-handler reports, tracebacks from `save_screenshot` or `_show_notification`,
+undeclared Wayland `display-name`,
+decode-codec startup timeouts, clipboard rate
 warnings and CLIPBOARD/PRIMARY/SECONDARY selection timeouts stop the suite before
 another profile starts. Diagnostics identify the file and warning category,
 never reproduce a possibly clipboard-bearing log line. These checks complement
@@ -1320,6 +1340,9 @@ H.264 factory specifications with a permanent initialization refusal. Real
 libva module discovery and startup self-tests remain intact: H.264 must first
 be advertised and sent, and the refusal must execute on the real decode thread
 after its default errno filter is installed. No package file is rewritten.
+The fault marker is one newline-terminated JSON record emitted in one stream
+write, so concurrent GL painting logs cannot split it. Mixed or malformed
+records still fail strict parsing; accepting only their JSON prefix is forbidden.
 
 The recovery oracle requires the real peer's minimal CSC-only property delta,
 retained `xpra info` for the exact source window showing H.264 excluded, at

@@ -19,12 +19,11 @@ behavior must be reviewed too.
 The workflow is:
 
 ```text
-frozen base → atomic edit → affected regression/native/live → review and freeze
-                  ↑                     │                         │
-                  └──── observed defect ┘                         ↓
-                                           fill final evidence gaps → handoff
-                                                        │
-                                  new defect → affected development loop
+frozen base → atomic edit → nearest controls → live walk (failure → fix → FROM)
+                  ↑                                    │
+                  └──────── observed defect ────────────┘
+live walk reaches end → all-case/stack/ownership freeze → one full live + check
+  → missing final upstream matrix legs → result review → runtime/artifact close
 ```
 
 ## Upstream-refresh manual-review prerequisite
@@ -108,7 +107,9 @@ succeeds without a fix. The same principle holds for upstream tests: prove a
 fix with the failing module (a focused run) before a complete leg. Full builds
 are useful early only when their actual build/package boundary is the subject,
 or when a narrower control cannot reproduce a demonstrated failure. Record that
-reason before launching one. Independent diagnosis and code review can continue
+reason before launching one. This permits the necessary package/build diagnostic,
+not the final upstream matrix before the required live entry gate.
+Independent diagnosis and code review can continue
 while a gate is unresolved, without presenting the candidate as accepted.
 
 The three clean quarantine gates depend on the embedded source, environment,
@@ -145,6 +146,46 @@ when comparing failures. Do not promise a cache optimization before its
 invalidation, installed-module and real-run behavior are implemented and tested.
 
 ## Candidate freeze
+
+### Required order and entry gate
+
+The local acceptance order is binding:
+
+1. Finish review and atomic implementation; prove changes with the nearest
+   clean/focused/native controls. Check every changed case immediately, including
+   the owner of any edited fixture and affected dependencies/dependents.
+2. Walk the complete-stack live gates. At failure, stop escalation, diagnose,
+   fix and prove the fix narrowly, then continue from that same gate with
+   `FROM=<gate>` and a fresh prefix. Build matching DEBs only when actual
+   package inputs changed; reuse unchanged validated packages.
+3. After the walk reaches `live-rgb`, close the implementation and structural
+   review below. Only then start one complete nine-profile pass and its
+   `live-suite-check`.
+4. After that pass succeeds and functional work is closed, fill missing final
+   `full`, `full-cython`, and `full-no-compat` evidence. Do not run this matrix
+   before own live acceptance or between live corrections. Necessary clean or
+   quarantine controls remain development controls, with the narrowest supported
+   scope and a recorded reason; they do not authorize an early final matrix.
+5. Review results, finish owned runtime cleanup, distill knowledge and close
+   artifacts. Do not repeat accepted gates to mark a phase transition.
+
+Before step 3, record a freeze checkpoint proving ALL of the following:
+
+- no known production, test, fixture/oracle, package or case-ownership repair
+  remains; no planned case split, hunk relocation or squash is deferred;
+- every active `case-check` and the complete `stack-check` pass, including
+  independent removability of fixture owners, not just the newest case;
+- case documentation, CI layout, whitespace and applicable offline/static checks
+  are complete; `develop-check` alone may await an authorized control commit;
+- the live walk reached its end, all failed owners were repaired and their
+  narrow controls passed; source, selection, harness and exact package inputs
+  are recorded and frozen.
+
+A green focused/native run or `stack-check` alone cannot establish this gate.
+Never call a pass "final" while one of these items is still pending. A new
+failure reopens its owning boundary, not the whole queue by default. A genuinely
+changed exercised input may invalidate affected evidence; a new commit ID alone
+does not. Apply the reuse rules below before scheduling anything expensive.
 
 ### Runtime acceptance represents the shipped product
 
@@ -235,6 +276,12 @@ digests and errors. Do not relabel old evidence with new candidate identities.
 Before launching expensive final work, list the missing or invalidated gates.
 Reuse a valid development-stage named result when it already proves the exact
 final requirement. A change of phase or a later date is not invalidation.
+For each proposed full leg, DEB build or complete live pass, record the
+requirement, last valid named result, exact changed exercised inputs (or missing
+coverage), why reuse cannot satisfy it, and the narrower check already completed.
+For a live continuation also record the failed gate and `FROM` value. If that
+justification is absent, do not launch the job. A different HEAD, case SHA,
+selection serialization, or cache key is not by itself such a justification.
 
 Freeze shared runner, fixture, selector, manifest and other bound inputs while
 their named job is running **and until collection/removal completes**. Parallel
@@ -263,10 +310,9 @@ live gates.
 Fill the ledger's gaps on the reviewed stable candidate:
 
 1. Required non-vacuous clean controls, case/dependency and composed focused
-   checks, affected native/subsystem gates, and current clean quarantine proof.
-2. Complete offline fork-control checks and all three full Ubuntu upstream
-   legs: `full`, `full-cython`, `full-no-compat`.
-3. All nine positive live profiles with the complete `stacks/develop` stack on
+   checks, affected native/subsystem gates, current clean quarantine proof and
+   complete offline fork-control checks.
+2. All nine positive live profiles with the complete `stacks/develop` stack on
    both endpoints, for every case validation, including an unchanged-base fix.
    Reach it through the live loop; the acceptance is one complete
    `live-all STACK=develop RUN=<fresh-prefix>` pass without a fix in between,
@@ -276,12 +322,17 @@ Fill the ledger's gaps on the reviewed stable candidate:
    is forbidden. Case ownership describes the regression oracle, never a live
    selection. The runtime rule requires both matching real DEB artifacts;
    reuse unchanged validated artifacts rather than rebuilding at phase changes.
+3. After own live acceptance and functional closure, all three missing full
+   Ubuntu upstream legs: `full`, `full-cython`, `full-no-compat`. Retain any
+   already valid result with equivalent inputs; this is not an instruction to
+   repeat the matrix after history-only changes.
 4. Final `stack-check` (and `develop-check` once the tree is clean),
    whitespace/lint, documentation and result review; publication/clean-host
    checks only under their existing authority and preconditions. Do not create
    an unrequested control commit to obtain a clean checkout.
 
-This list is a coverage checklist, not a mandatory serial execution order.
+This list specifies coverage; the binding local order is the
+[entry gate above](#required-order-and-entry-gate), not the numbering here.
 Relevant live may already be complete from development. Compatible independent
 final jobs may run concurrently after the shared-input freeze. The three hosted
 CI legs and fixed local live profiles are not weakened or replaced by focused
@@ -313,12 +364,13 @@ or an assumption that a small diff is harmless.
 | Change | Required decision |
 | --- | --- |
 | Embedded source changes | Old-base results cannot accept the new base; complete the new-base final set. |
-| Production case changes | Recheck its regression and affected native consumers and composed stack. All nine live results bind the entire stack: a changed case commit invalidates the live suite, not merely its topical profile. |
+| Exercised production behavior changes | Recheck its regression and affected native consumers and composed stack. All nine live results bind the entire applied product: a semantic product change invalidates the complete live suite, not merely its topical profile. Resume the development walk before another full pass. |
+| Case history/ownership changes, applied product and tests unchanged | Check affected case owners/dependencies and the whole stack. Prove old/new applied-tree equality and unchanged test inventories, assertions, harness, build/runtime inputs. Retain completed full, package and live results under the exact equivalence rule below; do not rebuild merely to obtain new provenance IDs. |
 | Regression or oracle changes | Recheck that assertion against its subject; redo the clean control if its trigger/assertion changes. Do not reuse the old weaker assertion as proof of the new one. |
 | Production-only edit with identical clean control | Retain the clean result only with exact tests-only applied-tree, commands, mode, image and relevant environment equivalence; equality of the case diff alone is not the criterion. |
 | Runner preflight guard only | Narrow runner regression and direct preflight reproduction; no full Xpra run when the downstream source, selection, entrypoint, image inputs and commands are unchanged. |
 | Live harness only | Test the affected control behavior (replay an oracle change on the retained evidence), continue the live loop from the affected gate, then finish with one complete pass. Do not rerun upstream suites or DEBs when their inputs are unchanged. Rebuild an image only when its actual input key changes. |
-| Non-semantic source/documentation refresh | Resolve, check whitespace and fork controls. Unchanged focused/native/full checks may be reused under the strict contract. Case validation still requires the complete nine-profile live suite. |
+| Non-semantic source/documentation refresh | Resolve, check whitespace and affected fork controls. Reuse unchanged focused/native/full/package/live evidence under the strict rule. Complete nine-profile coverage remains mandatory, but an equivalent already accepted pass satisfies it. |
 | Build/ABI/toolchain/installed-module composition | Exercise the actual affected build/import boundary; image tag equality alone cannot justify reuse. |
 
 Raw provenance and semantic equivalence are distinct. If a raw digest changes,
@@ -332,14 +384,35 @@ cannot reclassify a negative run using a newly weakened assertion.
 Do not forge reports or bypass runner admission/collection guards. Uncertainty
 requires the affected check, not an unsupported equivalence assertion.
 
+In particular, moving an existing hunk into its proper case commit is not a
+functional change when the resulting applied product AND tests are identical.
+Record both trees and raw identities, the exact patch redistribution and the
+consumer map. Tree equality alone is insufficient if fixtures, test inventories,
+assertions, build inputs, runtime policy, image/dependency resolution or hardware
+configuration changed. Verify those separately. Case-only scopes whose applied
+inputs did change receive their own narrow controls; that does not invalidate
+an unchanged complete-stack result.
+
+One successful uninterrupted full live pass accepts one functional candidate.
+After it and `live-suite-check` pass, retain that evidence and move on. Another
+complete pass requires a demonstrated change to exercised inputs or newly missing
+coverage, recorded before launch. Rewording, squash, moving a test hunk between
+owners, finishing documentation or saying "final" again cannot trigger it.
+Do not attribute avoidance of redundant work to an operator cancellation: the
+agent must apply this contract itself and record its own scheduling mistakes.
+
 The selection digest covers `case.toml` and `tests/**`, including
 `tests/README.md`, plus each selected case commit's diff frozen at run start
 (the payload's generated `fix.patch`); the main case README is excluded. A
-changed commit is therefore a new candidate. Some image
+changed commit therefore has new raw selection provenance. Some image
 contexts contain full selection provenance. A documentation-only edit can
 therefore change an actual cache key. Do not silently remove files from hashes
-or reuse mismatched images. Separating provenance from build identity requires
-its own reviewed tooling change and tests for every consumer.
+or execute new jobs with mismatched images. A new cache key governs a NEW run;
+it does not invalidate a completed result whose exercised inputs are proved
+equivalent. Do not start a new run solely to make its raw IDs match a rewritten
+history, and do not relabel the retained result. Separating provenance from
+build identity requires its own reviewed tooling change and tests for every
+consumer.
 
 ## Improve the flow during case work
 

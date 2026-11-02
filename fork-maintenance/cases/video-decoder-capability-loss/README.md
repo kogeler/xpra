@@ -62,6 +62,18 @@ creation is separate and must bind the callback too. Win32 GDI and WGL share
 introducing a new cross-backend window interface. Qt, Tk and pyglet's separate
 picture renderers do not consume `WindowBackingBase`'s video registry.
 
+Standalone clients also construct these backings. The public OpenGL probe
+and GTK OpenGL configuration dialog use `FakeClient`; GTK replay reuses its
+`FakeWindowSubsystem`. That production fake must provide the required
+`video_decoders_changed` method before any window can finish construction.
+It intentionally does nothing because those clients have no peer whose
+capabilities need updating. Omitting the method raises `AttributeError` at
+callback binding, before a GL context can complete the rendering test. Adding
+the explicit fake hook follows upstream `18ec2d63717a`'s interface-completion
+pattern and `e1450dbe26`'s direct required-attribute access. Removing the real
+callback binding or hiding it behind `getattr` would weaken the manager
+contract instead of fixing the standalone implementation.
+
 ## Mechanism and lifecycle
 
 After the existing candidate loop removes its last decoder for a colorspace,
@@ -99,7 +111,7 @@ embedded client's reconnect.
 The product commit owns the backing intersection/notification, three existing
 backing-creation hooks, the manager's UI update and
 `unit.client.video_decoder_loss_test`, plus the terminal-window fixture's new
-callback surface. It depends on
+callback surface and the production standalone fake's no-op callback. It depends on
 `window-client-properties-deltas`: sending a CSC-only update must not reset
 unrelated server render size, maximized state or subregion policy. That parser
 repair has its own independent commit and regression.
@@ -161,6 +173,18 @@ hook does not claim to exercise decoder loss. The retained terminal-window
 module checks that adding the callback does not break this shared factory's
 non-GTK consumers. No optional `getattr` fallback is added to production to
 conceal an incomplete test double.
+
+The runner-owned `unit.scripts.public_capabilities_test` complements that
+retirement fixture by running the actual public OpenGL command on an owned
+Xvfb with software rendering. Only the software-driver policy is explicitly
+forced; the production fake client, factory, context and test-image draw are
+not substituted. The command must report both `success=True` and `safe=True`,
+as well as normal exit and an OpenGL version. Its zero exit status alone
+cannot establish success. This preservation check passes on the clean base
+and rejects a callback extension which forgets its standalone consumers; it
+does not replace the decoder-retirement behavioral negative control or real
+hardware live acceptance. Its independent runner ownership also preserves
+public-command coverage if this production case is absorbed upstream.
 
 ## Durable live or package boundary
 

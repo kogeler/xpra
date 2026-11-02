@@ -1531,6 +1531,11 @@ only missing or invalidated checks; do not repeat a valid development result
 merely because final acceptance has begun.
 The evidence-reuse rules in [`validation.md`](validation.md) retain original
 run identities and require exact input proof.
+Its [required order and entry gate](validation.md#required-order-and-entry-gate)
+also apply here: all structural/fixture-ownership repairs precede the complete
+live acceptance pass; the final full upstream matrix follows successful own
+live acceptance. Do not treat the coverage sections below as permission to
+launch full legs before that gate or to repeat an accepted pass for new IDs.
 
 There is no old-base or unchanged-case waiver after rebase: every requirement
 must be proved on the new embedded source and final candidate. Stop escalation

@@ -223,6 +223,39 @@ class PeerLogTest(unittest.TestCase):
     def test_complete_clean_logs_pass(self):
         suite.check_peer_logs("peer-control", self.publish())
 
+    def test_caught_codec_debug_traceback_is_allowed(self):
+        self.content["client.stderr"] = (
+            b"DEBUG: caught codec capability probe\nTraceback (most recent call last):\n"
+            b'  File "xpra/codecs/loader.py", line 123, in load_codec\n'
+            b"    raise RuntimeError(\"Error processing 'codec' packet\")\n"
+            b"RuntimeError: Error processing 'codec' packet\n"
+        )
+        suite.check_peer_logs("peer-control", self.publish())
+
+    def test_callback_error_in_a_churn_client_is_not_hidden_by_clean_main_peers(self):
+        self.scenario = self.scenario.rename(self.root / "ssh-detach-churn-01")
+        names = (
+            *suite.PEER_LOGS, "client.detach.stdout", "client.detach.stderr",
+            "client.ssh-master.stdout", "client.ssh-master.stderr",
+            "server.sshd.stdout", "server.sshd.stderr", "server.churn-fixture.stderr",
+            *(f"client.churn-{cycle:02d}.{suffix}"
+              for cycle in range(1, suite.DETACH_CHURN_CYCLES + 1)
+              for suffix in ("stdout", "stderr", "detach.stdout", "detach.stderr", "pointer.stderr")),
+        )
+        self.content = dict.fromkeys(names, b"normal peer lifecycle\n")
+        filename = f"client.churn-{suite.DETACH_CHURN_CYCLES:02d}.stderr"
+        self.content[filename] = (
+            b"Traceback (most recent call last):\n2026-11-02 12:00:00,000 unrelated log\n"
+            b'  File "xpra/client/subsystem/notification.py", line 294, in _show_notification\n'
+            b"AttributeError: PRIVATE-CONTENT\n"
+        )
+        self.publish()
+        self.payload["scenarios"][0]["name"] = self.scenario.name
+        with self.assertRaisesRegex(suite.job.JobError, "ui-callback-error") as caught:
+            suite.check_peer_logs("peer-control", self.publish_report())
+        self.assertIn(filename, str(caught.exception))
+        self.assertNotIn("PRIVATE-CONTENT", str(caught.exception))
+
     def test_runtime_image_comparison_uses_complete_hashed_report(self):
         self.publish()
         images = ("sha256:" + "1" * 64, "sha256:" + "2" * 64)
@@ -252,6 +285,10 @@ class PeerLogTest(unittest.TestCase):
 
     def test_every_warning_in_every_complete_peer_tail_fails_without_leaking_text(self):
         warnings = (
+            b'Traceback (most recent call last):\n  File "/usr/lib/python3/dist-packages/xpra/server/window/compress.py", line 3276, in save_screenshot\nAttributeError:',
+            b'Traceback (most recent call last):\n  File "xpra/client/subsystem/notification.py", line 294, in _show_notification\nAttributeError:',
+            b"Error processing 'notification-close' packet (0 error reports suppressed)",
+            b"2026-11-02 10:22:05,774 Error processing 'notification-close' packet (0 error reports suppressed)",
             b"Warning: 'display-name' is not a declared signal of WaylandManager",
             b"Warning: timed out waiting for the decode thread to load the codecs",
             b"Warning: more than 30 clipboard requests per second!",

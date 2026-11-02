@@ -120,6 +120,7 @@ COPY --chown=ubuntu:ubuntu \
 
 COPY --chown=ubuntu:ubuntu \
     neutral/pointer_scroll_test.py neutral/pointer_scroll_client.c neutral/codec_startup_test.py \
+    neutral/public_capabilities_test.py \
     /opt/xpra-fork-maintenance/upstream-tests/neutral/
 
 RUN mkfifo /opt/xpra-fork-maintenance/upstream-tests/payload-ready.fifo \

@@ -6,7 +6,7 @@ import re
 
 # Advance for a new release of changed packages on the same upstream base.
 # Unpublished development rebuilds can share this next revision.
-DEBIAN_REVISION = 2
+DEBIAN_REVISION = 3
 
 
 def package_version(base_version: str, upstream_revision: int) -> str:

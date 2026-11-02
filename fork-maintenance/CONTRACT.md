@@ -328,7 +328,12 @@ Only these case commits exist, in this stack order:
 18. `gtk-css-package-ownership`;
 19. `signalwatcher-resource-lifecycle`;
 20. `ssh-proxy-final-delivery`;
-21. `wayland-popup-opaque-region`.
+21. `wayland-popup-opaque-region`;
+22. `window-encoder-registry-rebuild`;
+23. `notification-client-detach`;
+24. `wayland-map-window-lifetime`;
+25. `notification-without-system-tray`;
+26. `window-debug-snapshot-lifetime`.
 
 ## Stack contract
 
@@ -421,7 +426,9 @@ dirty) and freeze the selection into their private payload: the manifests
 plus, for every selected case, the diff of its commit in `HEAD`
 (`git diff --binary --full-index`), written as that case's `fix.patch` inside
 the payload only. The selection digest binds those bytes, so a changed commit
-is a new candidate. The working tree is never a runner input.
+has new raw selection provenance. Whether completed evidence is invalidated
+depends on its exercised inputs under the validation equivalence rule; a new
+SHA alone does not authorize reruns. The working tree is never a runner input.
 
 A case selection includes its transitive declared dependencies in `develop`
 order, excludes unrelated cases, and retains only the requested case as its
@@ -1048,6 +1055,18 @@ Validation has two phases governed by
 final acceptance, separated by a reviewed candidate freeze. Gate declarations
 are final coverage obligations, not commands to repeat after every edit.
 
+The canonical [required order and entry gate](docs/runbooks/validation.md#required-order-and-entry-gate)
+are mandatory. Finish the directed development/live walk and all known case,
+fixture ownership, test/oracle, package and documentation repairs. Every active
+case must pass `case-check` and the complete stack must pass `stack-check`
+BEFORE the complete acceptance live pass, not afterwards. Check affected fixture
+owners and dependencies as soon as they are edited. After one successful
+uninterrupted nine-profile pass and `live-suite-check`, fill only missing final
+upstream matrix legs. Never run that matrix between live fixes or before own
+live acceptance. A new full run/build needs a recorded missing requirement or
+exact changed exercised input and an explanation why existing proof cannot be
+reused. Phase changes and raw commit/selection/cache IDs are insufficient.
+
 An explicit upstream refresh has the mandatory whole-queue manual-review
 phase described above before this development testing loop. Complete its
 code-supported decisions, initial repairs/removals, regression migrations and
@@ -1092,6 +1111,13 @@ confined to another profile; it does not permit using a newly weakened oracle
 to reinterpret a failed run as success. Actual cache-key changes still require
 an exact newly verified cache/image for future runs. No admission, ownership,
 current-runner collection or cleanup guard may be bypassed for reuse.
+This includes history-only redistribution of an existing fixture hunk between
+case commits when applied product/tests and all other exercised inputs are
+unchanged. Retain the successful full/package/live results with both identities
+and the proof; do not rebuild DEBs or repeat a successful suite just to replace
+their raw provenance. A cache-key mismatch governs new execution, not automatic
+invalidation of already collected equivalent evidence. Do not describe correcting
+the agent's unnecessary rerun plan as an operator cancellation.
 
 For changes confined to fork tooling, validation follows the affected automation
 and exercised downstream boundary. Scheduling/documentation-only changes do
@@ -1103,15 +1129,18 @@ candidate. Changed Xpra source or full-suite execution still requires its
 corresponding final gates.
 
 A proven non-semantic case rewrite does not restart this ladder. It requires
-the same embedded source commit plus an exact old/new applied-tree diff limited
-to comments, copyright notices, or documentation. Paths, modes, executable
+the same embedded source commit plus an exact old/new applied-tree diff which
+is empty (including history-only hunk ownership repair), or limited to comments,
+copyright notices, or documentation. Paths, modes, executable
 data, configuration, test assertions, source selection/application, build
 commands, runner behavior, and live assertions must remain unchanged. Run
 `case-check` and `stack-check` for the rewritten commit, whitespace checks and
 the affected fork-control tests, and describe the proof at handoff. Do not
 repeat unchanged focused, native, or full-matrix checks on that rewrite. The
-complete nine-profile live suite remains mandatory whenever accepting a case
-change, including such a rewrite. If any condition is
+complete nine-profile live coverage remains mandatory; an already accepted
+pass with proved equivalent exercised inputs satisfies it, including after
+such a rewrite. Do not rebuild packages or repeat that pass to replace raw
+provenance IDs. If any condition is
 uncertain, the exception does not apply: use the affected development checks
 and corresponding final gates. A
 `develop-rebase` necessarily changes the embedded source and therefore never
@@ -1159,8 +1188,12 @@ completed runtime before the next, and stops at the first failure. A fix is
 never tested by rerunning the whole set: the failed gate is fixed and the walk
 continues from it (`FROM=<gate>`, next fresh prefix) to the last gate, then a
 new complete pass starts, following the live loop of
-[`live-tests.md`](docs/runbooks/live-tests.md#the-live-loop-fix-and-continue-then-one-complete-pass). Retained reports and exact removal transactions remain available
-to `live-suite-check`, which revalidates all nine profiles against the current
+[`live-tests.md`](docs/runbooks/live-tests.md#the-live-loop-fix-and-continue-then-one-complete-pass).
+Once a complete pass and suite-check succeed, do not repeat them for the same
+exercised inputs. The equivalence rule above also applies to history-only case
+repairs; successful coverage is reused, not waived. Retained reports and exact
+removal transactions remain available under their original identities to
+`live-suite-check`, which revalidates all nine profiles against the current
 source, complete queue and harness, common context/hardware/network inputs, and
 unchanged Zed payload for the two Zed profiles. Missing, failed, stale, mixed
 or tampered members fail closed. Foreground control-shell interruption leaves
@@ -1169,8 +1202,10 @@ unowned workload.
 
 After each collected/removed member and again during `live-suite-check`, the
 controller checks complete report-bound stdout/stderr for both peers in every
-scenario. Missing, changed, symlinked or oversized logs fail closed. Undeclared
-Wayland `display-name`, decode-codec startup timeouts, clipboard rate warnings
+scenario. Missing, changed, symlinked or oversized logs fail closed. Explicit
+packet-handler reports, tracebacks from `save_screenshot` or `_show_notification`,
+undeclared Wayland `display-name`, decode-codec
+startup timeouts, clipboard rate warnings
 and CLIPBOARD/PRIMARY/SECONDARY selection timeouts stop the suite. Only the file
 and warning category appear in failure diagnostics, never clipboard-bearing
 log contents. This check supplements all existing application, pixel, input,

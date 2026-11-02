@@ -65,6 +65,14 @@ releases the recorded press) composes; the regression still requires an empty
 them, and keeps upstream's process-level suppression setting, rather than
 inventing another configuration or modifying common packet serialization.
 
+The standalone OpenGL probe/configuration windows use the production
+`FakePointerSubsystem`, rather than `PointerClient`. Its empty `wheel_map`
+expresses the same no-output policy as its existing no-op wheel methods and
+satisfies the adapter's admission contract. Omitting that field makes a real
+scroll event raise `AttributeError` before admission can consume it. Extending
+the fake interface follows upstream `18ec2d63717a` rather than weakening the
+real pointer subsystem's required interface with an optional attribute lookup.
+
 Current upstream `f538ec11ac` removed pre-7 senders and legacy aliases; ordinary
 and no-compat runs now use the same modern pointer packets. The optional
 client-side wheel-to-button fallback remains a device/emulation capability
@@ -276,7 +284,8 @@ on behalf of their owners.
 
 ## Case-commit and integration ownership
 
-The case commit changes only `xpra/client/gtk3/window/pointer.py` and adds
+The case commit changes `xpra/client/gtk3/window/pointer.py`, supplies the
+disabled wheel policy in `xpra/client/gui/fake_client.py`, and adds
 `tests/unittests/unit/wayland/gtk_scroll_test.py`. The manifest has no case
 dependencies: the commit applies alone on the upstream base and is removable
 from `HEAD` independently of the other case commits (`case-check`). The
@@ -338,6 +347,13 @@ flag run synchronously while its callback still owns the event. The test
 does not fake the getter, write private flags or use a boxed copy. Publicly
 constructed smooth and genuine discrete events provide explicit unmarked
 controls; the subsequently received native smooth event must also be unmarked.
+
+The same consumer also passes a real GDK smooth event through the real
+`PointerWindow` adapter with the production `FakeClient`. It requires normal
+consumption under the fake pointer's disabled policy. This preservation check
+exposes an incomplete fake interface independently of the configured-client
+mapping/serialization controls; it does not claim a network or rendering test
+for the standalone window.
 
 `Harness` subclasses the real `PointerWindow` and attaches its real scroll
 handler to GTK widgets. `Gtk.main_do_event()` delivers each controlled event

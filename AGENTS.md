@@ -284,7 +284,12 @@ The currently retained active cases, in stack order, are:
 - `gtk-css-package-ownership`;
 - `signalwatcher-resource-lifecycle`;
 - `ssh-proxy-final-delivery`;
-- `wayland-popup-opaque-region`.
+- `wayland-popup-opaque-region`;
+- `window-encoder-registry-rebuild`;
+- `notification-client-detach`;
+- `wayland-map-window-lifetime`;
+- `notification-without-system-tray`;
+- `window-debug-snapshot-lifetime`.
 
 There is currently no active quarantine duty case, but
 `fork-maintenance/cases/upstream-test-quarantine/` is permanent infrastructure.
@@ -573,6 +578,15 @@ no-replace link; the common helper has no named generic fallback.
 Use the canonical [development and final-acceptance flow](fork-maintenance/docs/runbooks/validation.md)
 for new cases, existing-case review and upstream-rebase adaptation. Required
 gates define final coverage, not a sequence to repeat after every edit.
+Its [required order and entry gate](fork-maintenance/docs/runbooks/validation.md#required-order-and-entry-gate)
+are binding: nearest controls and live failure/`FROM` loop; close all known
+implementation, fixture ownership and documentation work; pass every active
+`case-check` and the complete `stack-check`; obtain one uninterrupted nine-profile
+pass plus `live-suite-check`; only then fill missing final upstream matrix legs.
+Do not put `full`, `full-cython`, or `full-no-compat` between live corrections.
+Never announce a final pass while structural checks or known repairs remain.
+After a successful complete pass, another requires a recorded change to actual
+exercised inputs or missing coverage. A new case/HEAD SHA alone is insufficient.
 Its [runtime acceptance rule](fork-maintenance/docs/runbooks/validation.md#runtime-acceptance-represents-the-shipped-product)
 is the single authority for shipped-package fidelity, active-capability proof,
 failure-transition coverage, asynchronous-error auditing and explicit limits.
@@ -607,10 +621,17 @@ passes. Then run one complete pass from the first gate; if a gate fails, fix
 it, continue from it the same way, and finish with another complete pass,
 until one complete pass succeeds without a fix.
 A single-profile pass or a continuation cannot accept a case change.
+An already accepted complete pass may satisfy the current requirement under the
+canonical exact-input/equivalence rule. History-only hunk redistribution with
+identical applied source/tests and unchanged exercised inputs does not require
+new DEBs or another full live pass. Preserve original reports and raw identities;
+record the proof instead of relabeling results or bypassing runner guards.
 `live-suite-check` verifies complete coverage and matching current source, queue, harness and endpoint provenance.
 It also checks the complete report-bound stdout/stderr of both peers in every
-scenario for undeclared Wayland display-name signals, codec startup waits,
-clipboard rate warnings and selection timeouts, including PRIMARY/SECONDARY.
+scenario for packet-handler reports, tracebacks from `save_screenshot` or
+`_show_notification`, undeclared Wayland display-name
+signals, codec startup waits, clipboard rate warnings and selection timeouts,
+including PRIMARY/SECONDARY.
 The suite checks each collected member before starting the next profile; a
 successful paste or rendering result cannot hide one of these warnings.
 This requirement also applies to unchanged-base repairs; no case manifest can
@@ -759,7 +780,9 @@ Upstream-test, DEB, and live runners keep their selectors and modes:
 manifests plus, for every selected case, the diff of its commit in `HEAD`
 (`git diff --binary --full-index`), written as that case's generated
 `fix.patch` inside the payload only. The selection digest binds those bytes,
-so a changed commit is a new candidate; `tests-only` applies only the `tests/`
+so a changed commit has new raw selection provenance; semantic invalidation
+follows the canonical per-requirement equivalence rule, not SHA inequality.
+`tests-only` applies only the `tests/`
 part of that diff to the clean upstream base. Product paths must be clean at
 start; control paths may be dirty. See
 [runners](fork-maintenance/docs/runbooks/case-commits.md#runners).
@@ -784,12 +807,15 @@ named local acceptance evidence.
 
 Do not restart the functional ladder for a proven non-semantic refresh. This
 exception is limited to an unchanged embedded source and an exact old/new applied diff
-containing only comments, copyright notices, or documentation, with no path,
+which is empty (including history-only case ownership repair), or contains only
+comments, copyright notices, or documentation, with no path,
 mode, executable data, configuration, test assertion, or runner behavior
 change. Run `case-check` and `stack-check`, whitespace and fork-control checks,
 and state the proof in the handoff; do not launch unchanged focused, native or
-full jobs. Case validation still requires the complete live suite described
-above. This exception never applies after `develop-rebase`: every explicit
+full jobs. Complete live coverage remains required; an already accepted pass
+with equivalent exercised inputs satisfies it. Do not rebuild matching packages
+or repeat that pass to replace provenance IDs. This exception never applies
+after `develop-rebase`: every explicit
 upstream rebase requires the clean quarantine reassessment, all fork-control,
 tests-only clean controls or documented no-test semantic substitutes, patched
 focused/native gates, every durable package boundary on the resulting stack,

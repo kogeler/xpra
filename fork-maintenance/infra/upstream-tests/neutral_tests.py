@@ -18,6 +18,7 @@ ASSET_TARGETS = {
     "pointer_scroll_test.py": Path("tests/unittests/unit/wayland"),
     "pointer_scroll_client.c": Path("tests/unittests/unit/wayland"),
     "codec_startup_test.py": Path("tests/unittests/unit/client/subsystem"),
+    "public_capabilities_test.py": Path("tests/unittests/unit/scripts"),
 }
 ASSETS = tuple(ASSET_TARGETS)
 

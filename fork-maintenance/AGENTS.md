@@ -267,6 +267,15 @@ review and adapt cases with the nearest real regression after each atomic edit,
 affected existing upstream and downstream modules, risk-directed native,
 compiled and no-compat checks, and early relevant live acceptance. Do not put
 the full upstream matrix before the live boundary under development.
+The [required order and entry gate](docs/runbooks/validation.md#required-order-and-entry-gate)
+are mandatory: finish the failure/`FROM` walk and known implementation work,
+pass every active case's independence/removability checks and the stack check,
+then one complete live pass plus suite-check, then missing final upstream legs.
+Do not leave case/fixture ownership or structural checks until after that pass.
+After a successful complete pass, rerun only for demonstrated changes to actual
+exercised inputs or missing coverage. Do not rebuild or repeat acceptance merely
+because history, selection serialization or cache identities changed; apply the
+canonical equivalence proof and retain the original evidence.
 Apply its single [runtime acceptance rule](docs/runbooks/validation.md#runtime-acceptance-represents-the-shipped-product)
 for package/runtime fidelity and fail-closed diagnostic/transition oracles;
 this guide does not define a second harness-design policy.
@@ -298,7 +307,8 @@ fetches, syncs, switches, merges, or rebases. Selectors and modes stay
 case, the diff of its commit in committed `HEAD`
 (`git diff --binary --full-index`) into its private payload, where it is
 written as that case's generated `fix.patch`; the selection digest binds those
-bytes, so a changed commit is a new candidate. `tests-only` applies only the
+bytes, so a changed commit has new raw provenance, whose effect on retained
+evidence follows the canonical equivalence rule. `tests-only` applies only the
 `tests/` part of that diff to the clean base. Product paths must be clean at
 start; control paths may be dirty. Runners apply the selection in an isolated context and never
 package the develop working tree, `.git`, credentials, ignored files, or Git
@@ -347,6 +357,8 @@ is forbidden. For every case validation follow the live loop of
 `live-all STACK=develop RUN=<prefix>` pass, repeated the same way until a
 complete pass succeeds without a fix; never rerun the whole set to test a fix.
 `live-suite-check` must verify that complete current nine-profile pass.
+An already accepted pass with proved equivalent exercised inputs satisfies
+this requirement; metadata-only history repair does not demand another pass.
 Topical fixtures and case `required_gates` metadata do not waive this policy.
 
 The clipboard profile retains its private-command-armed, real-F8 reverse
@@ -638,9 +650,10 @@ or safety behavior changes. Run the narrow unit tests after each atomic change;
 run the full offline `make -C fork-maintenance check` on the stable control-plane
 candidate before final acceptance, not after each documentation or two-line edit.
 
-A refresh proven by exact applied-tree comparison to change only comments,
-copyright notices, or documentation does not rerun unchanged Xpra focused,
-native, or full jobs. Case validation still requires the complete live suite.
+A refresh proven by exact applied-tree comparison to have an empty diff, or
+change only comments, copyright notices, or documentation does not rerun
+unchanged Xpra focused, native, full, package or live jobs. Complete live coverage
+is still required; an already accepted equivalent pass satisfies it.
 The embedded source, paths, modes, executable data, configuration, test
 assertions, and runner behavior must all be unchanged. Run `case-check`,
 `stack-check`, whitespace, and fork-control checks and report the

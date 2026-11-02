@@ -27,6 +27,14 @@ def recovery_inputs():
 class DecoderRecoveryTest(unittest.TestCase):
     baseline = staticmethod(recovery_inputs)
 
+    def test_trailing_log_data_in_a_fault_record_is_rejected(self):
+        value = self.baseline()
+        lines = value["client_log"].splitlines()
+        lines[1] += "2026-11-02 15:40:36,128 GLDrawingArea.do_paint_rgb()"
+        value["client_log"] = "\n".join(lines) + "\n"
+        with self.assertRaises(json.JSONDecodeError):
+            decoder_recovery.evaluate(**value)
+
     def test_proof_is_json_canonical_with_unchanged_tuple_csc_modes(self):
         value = self.baseline()
         value["server_log"] = value["server_log"].replace("'h264': []", "'h264': [], 'vp9': ('YUV420P',)")
