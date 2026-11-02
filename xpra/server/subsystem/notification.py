@@ -162,11 +162,12 @@ class NotificationForwarder(StubSubsystem):
 
     def _process_close(self, proto, packet: Packet) -> None:
         assert self.enabled
+        # A queued UI reply may outlive its client connection.
+        if not (ss := self.get_server_source(proto)):
+            return
         nid = packet.get_u64(1)
         reason = packet.get_str(2)
         text = packet.get_str(3)
-        ss = self.get_server_source(proto)
-        assert ss
         log("closing notification %s: %s, %s", nid, reason, text)
         try:
             # remove client callback if we have one:
@@ -182,13 +183,13 @@ class NotificationForwarder(StubSubsystem):
 
     def _process_action(self, proto, packet: Packet) -> None:
         assert self.enabled
+        if not (ss := self.get_server_source(proto)):
+            return
         nid = packet.get_u64(1)
         action_key = packet.get_str(2)
         if len(action_key) > MAX_ACTION_KEY or not action_key.isprintable():
             log.warn("Warning: invalid notification action key %r", Ellipsizer(action_key))
             return
-        ss = self.get_server_source(proto)
-        assert ss
         ss.user_event("notification-action")
         try:
             # special client callback notification:

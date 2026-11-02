@@ -8,6 +8,8 @@ import os
 import sys
 import time
 import unittest
+from functools import partial
+from unittest.mock import Mock
 
 from xpra.util.objects import AdHocStruct
 from xpra.os_util import WIN32, OSX
@@ -57,6 +59,49 @@ class NotificationForwarderMixinTest(ServerMixinTest):
         ss.send_pending_notifications = lambda: sent.append(True)
         NotificationForwarder.send_initial_data(None, ss)
         self.assertEqual(sent, [True])
+
+    def test_queued_replies_after_client_detach(self):
+        from xpra.net.common import Packet
+        from xpra.server.subsystem.notification import NotificationForwarder
+
+        callback = Mock()
+        source = AdHocStruct()
+        source.notification_callbacks = {7: callback}
+        source.user_event = Mock()
+        current = [source]
+        server = AdHocStruct()
+        server.get_server_source = lambda _proto: current[0]
+        nf = NotificationForwarder(server)
+        nf.enabled = True
+        nf.forwarder = Mock()
+        nf.init_packet_handlers()
+        proto = object()
+        close = Packet("notification-close", 7, "2", "closed")
+        action = Packet("notification-action", 7, "reply")
+
+        for subtype, packet in (("close", close), ("action", action)):
+            with self.subTest(subtype=subtype):
+                current[0] = source
+                handler, main_thread = nf.get_packet_handler(subtype)
+                self.assertTrue(main_thread)
+                # Admission precedes detach; the registered UI callback runs later.
+                pending = partial(handler, proto, packet)
+                current[0] = None
+                pending()
+                self.assertEqual(nf.forwarder.mock_calls, [])
+                self.assertEqual(source.notification_callbacks, {7: callback})
+                source.user_event.assert_not_called()
+                callback.assert_not_called()
+
+        # Replies from a still-connected client retain their normal callbacks.
+        current[0] = source
+        nf._process_close(proto, close)
+        self.assertEqual(source.notification_callbacks, {})
+        source.notification_callbacks[7] = callback
+        nf._process_action(proto, action)
+        callback.assert_called_once_with(7, "reply")
+        source.user_event.assert_called_once_with("notification-action")
+        self.assertEqual(nf.forwarder.mock_calls, [])
 
     def test_action_key(self):
         from xpra.net.common import Packet
