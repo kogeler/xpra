@@ -93,6 +93,157 @@ from xpra.wayland.server.pointer_protocols cimport (
 )
 
 
+cdef extern from *:
+    """
+    #include <errno.h>
+    #include <limits.h>
+    #include <stdint.h>
+    #include <stdlib.h>
+    #include <sys/mman.h>
+    #include <unistd.h>
+    #include <drm_fourcc.h>
+    #include <wlr/interfaces/wlr_buffer.h>
+    #include <wlr/render/allocator.h>
+    #include <wlr/render/drm_format_set.h>
+    #include <wlr/render/pixman.h>
+
+    /*
+     * Shared memory buffers for the software renderer.
+     * Same buffers as the wlroots 0.19 shm allocator, whose destroy callback
+     * frees them without wlr_buffer_finish(): their destroy signal never
+     * fires, so the pixman renderer keeps a stale render buffer for every
+     * output buffer replaced by a mode change and writes into the freed
+     * memory when it is destroyed.
+     */
+    struct xpra_shm_buffer {
+        struct wlr_buffer base;
+        struct wlr_shm_attributes shm;
+        void *data;
+        size_t size;
+    };
+
+    static void xpra_shm_buffer_destroy(struct wlr_buffer *wlr_buffer) {
+        struct xpra_shm_buffer *buffer = wl_container_of(wlr_buffer, buffer, base);
+        wlr_buffer_finish(wlr_buffer);
+        munmap(buffer->data, buffer->size);
+        close(buffer->shm.fd);
+        free(buffer);
+    }
+
+    static bool xpra_shm_buffer_get_shm(struct wlr_buffer *wlr_buffer, struct wlr_shm_attributes *shm) {
+        struct xpra_shm_buffer *buffer = wl_container_of(wlr_buffer, buffer, base);
+        *shm = buffer->shm;
+        return true;
+    }
+
+    static bool xpra_shm_buffer_begin_data_ptr_access(struct wlr_buffer *wlr_buffer, uint32_t flags,
+            void **data, uint32_t *format, size_t *stride) {
+        struct xpra_shm_buffer *buffer = wl_container_of(wlr_buffer, buffer, base);
+        (void) flags;
+        *data = buffer->data;
+        *format = buffer->shm.format;
+        *stride = buffer->shm.stride;
+        return true;
+    }
+
+    static void xpra_shm_buffer_end_data_ptr_access(struct wlr_buffer *wlr_buffer) {
+        (void) wlr_buffer;
+    }
+
+    static const struct wlr_buffer_impl xpra_shm_buffer_impl = {
+        .destroy = xpra_shm_buffer_destroy,
+        .get_shm = xpra_shm_buffer_get_shm,
+        .begin_data_ptr_access = xpra_shm_buffer_begin_data_ptr_access,
+        .end_data_ptr_access = xpra_shm_buffer_end_data_ptr_access,
+    };
+
+    static int xpra_shm_bytes_per_pixel(uint32_t format) {
+        switch (format) {
+        case DRM_FORMAT_XRGB8888: case DRM_FORMAT_ARGB8888:
+        case DRM_FORMAT_XBGR8888: case DRM_FORMAT_ABGR8888:
+        case DRM_FORMAT_RGBX8888: case DRM_FORMAT_RGBA8888:
+        case DRM_FORMAT_BGRX8888: case DRM_FORMAT_BGRA8888:
+        case DRM_FORMAT_XRGB2101010: case DRM_FORMAT_ARGB2101010:
+        case DRM_FORMAT_XBGR2101010: case DRM_FORMAT_ABGR2101010:
+            return 4;
+        case DRM_FORMAT_RGB565: case DRM_FORMAT_BGR565:
+            return 2;
+        case DRM_FORMAT_XBGR16161616: case DRM_FORMAT_ABGR16161616:
+        case DRM_FORMAT_XBGR16161616F: case DRM_FORMAT_ABGR16161616F:
+            return 8;
+        default:
+            return 0;
+        }
+    }
+
+    static struct wlr_buffer *xpra_shm_allocator_create_buffer(struct wlr_allocator *allocator,
+            int width, int height, const struct wlr_drm_format *format) {
+        (void) allocator;
+        int bpp = xpra_shm_bytes_per_pixel(format->format);
+        if (bpp <= 0 || width <= 0 || height <= 0 || width > INT_MAX / bpp) {
+            return NULL;
+        }
+        int stride = width * bpp;
+        if ((size_t) height > SIZE_MAX / (size_t) stride) {
+            return NULL;
+        }
+        struct xpra_shm_buffer *buffer = calloc(1, sizeof(*buffer));
+        if (buffer == NULL) {
+            return NULL;
+        }
+        wlr_buffer_init(&buffer->base, &xpra_shm_buffer_impl, width, height);
+        buffer->size = (size_t) stride * (size_t) height;
+        buffer->shm.fd = memfd_create("xpra-wayland-shm", MFD_CLOEXEC);
+        if (buffer->shm.fd < 0) {
+            free(buffer);
+            return NULL;
+        }
+        int ret;
+        do {
+            ret = ftruncate(buffer->shm.fd, (off_t) buffer->size);
+        } while (ret < 0 && errno == EINTR);
+        if (ret < 0) {
+            close(buffer->shm.fd);
+            free(buffer);
+            return NULL;
+        }
+        buffer->shm.format = format->format;
+        buffer->shm.width = width;
+        buffer->shm.height = height;
+        buffer->shm.stride = stride;
+        buffer->shm.offset = 0;
+        buffer->data = mmap(NULL, buffer->size, PROT_READ | PROT_WRITE, MAP_SHARED, buffer->shm.fd, 0);
+        if (buffer->data == MAP_FAILED) {
+            close(buffer->shm.fd);
+            free(buffer);
+            return NULL;
+        }
+        return &buffer->base;
+    }
+
+    static void xpra_shm_allocator_destroy(struct wlr_allocator *allocator) {
+        free(allocator);
+    }
+
+    static const struct wlr_allocator_interface xpra_shm_allocator_impl = {
+        .create_buffer = xpra_shm_allocator_create_buffer,
+        .destroy = xpra_shm_allocator_destroy,
+    };
+
+    static struct wlr_allocator *xpra_shm_allocator_create(void) {
+        struct wlr_allocator *allocator = calloc(1, sizeof(*allocator));
+        if (allocator == NULL) {
+            return NULL;
+        }
+        wlr_allocator_init(allocator, &xpra_shm_allocator_impl,
+            WLR_BUFFER_CAP_DATA_PTR | WLR_BUFFER_CAP_SHM);
+        return allocator;
+    }
+    """
+    wlr_allocator *xpra_shm_allocator_create()
+    bint wlr_renderer_is_pixman(wlr_renderer *renderer)
+
+
 log = Logger("wayland")
 
 IMAGE_CAPTURE = envbool("XPRA_WAYLAND_IMAGE_CAPTURE", True)
@@ -247,7 +398,13 @@ cdef class WaylandCompositor(ListenerObject):
         if not wlr_renderer_init_wl_display(self.renderer, self.display_ptr):
             raise RuntimeError("Failed to initialize wayland renderer display")
 
-        self.allocator = wlr_allocator_autocreate(self.backend, self.renderer)
+        if wlr_renderer_is_pixman(self.renderer):
+            # wlroots would pick its shm allocator for the software renderer,
+            # use the equivalent allocator whose buffers emit their destroy signal:
+            self.allocator = xpra_shm_allocator_create()
+            log("using the xpra shm allocator for the pixman renderer")
+        else:
+            self.allocator = wlr_allocator_autocreate(self.backend, self.renderer)
         if not self.allocator:
             raise RuntimeError("Failed to create allocator")
 
