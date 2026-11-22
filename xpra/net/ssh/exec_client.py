@@ -8,7 +8,7 @@ import os
 import shlex
 from typing import Any
 from shutil import which
-from subprocess import DEVNULL, PIPE, Popen
+from subprocess import DEVNULL, PIPE, Popen, TimeoutExpired
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
@@ -221,6 +221,13 @@ def connect_to(display_desc: dict, debug_cb: Callable = noop, ssh_fail_cb=connec
         try:
             if child.poll() is None:
                 child.terminate()
+                # collect it here, the child reaper may not get to it
+                # once the main loop has stopped, leaving a zombie behind;
+                # a tunnel which takes longer is left to the child reaper:
+                try:
+                    child.wait(timeout=1)
+                except TimeoutExpired:
+                    log("ssh tunnel process %s is still running, leaving it to the child reaper", child.pid)
         except OSError as term_err:
             log.error(f"Error trying to stop ssh tunnel process: {term_err}", exc_info=True)
 
