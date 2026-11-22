@@ -204,7 +204,9 @@ class ServerCore(GLibServer):
     ######################################################################
     # run / stop:
     def signal_quit(self, signum, _frame=None) -> None:
-        self.closing()
+        # This runs in the Python signal handler, which may have interrupted a
+        # write to the stream we log to: `clean_quit` logs the closing message
+        # from the main loop instead.
         self.install_signal_handlers(deadly_signal)
         GLib.idle_add(self.clean_quit)
         GLib.idle_add(sys.exit, 128 + signum)
