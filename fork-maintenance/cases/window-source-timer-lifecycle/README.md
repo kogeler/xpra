@@ -34,11 +34,27 @@ leaving a direct assignment there would bypass the base lease contract.
 ## Embedded-source context
 
 The case resolves against source commit
-`646b712d1bff46b08b8f26ddc7a83229d65ba5bc`, embedded in the current `develop`
+`d2940c7ddc6edd65aadb00f55ac559045d0c94ed`, embedded in the current `develop`
 history. Upstream still creates and removes every generic window-source
 timeout with bare `GLib.timeout_add()` / `GLib.source_remove()` and no
 ownership lock, so the pending-publication, stale-callback and
-callback-versus-cleanup races below remain reachable. The resulting implementation keeps each public numeric timer slot for
+callback-versus-cleanup races below remain reachable.
+
+Since `c00fb81351` (#2356, "extract refresh state and timer scheduling into a
+controller") upstream keeps the auto-refresh regions, target time and timer ID
+in `xpra/server/window/refresh.py` `RefreshController`, which receives its
+scheduler as a constructor argument (`GLib` in `WindowSource.init_vars()`).
+That injection point is the owner this case uses: the source passes a small
+`_LeasedTimerScheduler(self, "refresh_timer")` whose `timeout_add()` and
+`source_remove()` are the lease registry's `_schedule_timer()` and
+`_cancel_timer()` for the one `refresh_timer` slot. The controller keeps its
+own policy, postponement and region bookkeeping unchanged; only the
+attachment, stale-callback and terminal-cleanup ownership of its single timer
+moves into the registry. `cancel_refresh_timer()` calls the controller's
+`cancel()` and then cancels the slot itself, because a lease can be pending
+before its source ID has been returned to the controller. Upstream's
+`refresh_timer_function()` disappeared with that extraction; the controller's
+`_timeout()` re-arms through the same scheduler when it fires early. The resulting implementation keeps each public numeric timer slot for
 compatibility with adjacent scheduling and diagnostic code, while its named
 lease, retained source object, epoch, and terminal state are the ownership
 authority. The surrounding
@@ -245,7 +261,7 @@ The lease registry covers the timer slots whose state is owned by
 | `soft_timer` | Gives an ACK-constrained delayed region another bounded chance before hard expiry. | One-shot; later damage processing may create another lease. |
 | `timeout_timer` | Forces resolution of an excessively delayed batch. | One-shot. |
 | `may_send_timer` | Rechecks bandwidth/batch readiness for delayed regions. | The callback may calculate a new delay and re-arm the same slot. |
-| `refresh_timer` | Schedules automatic lossless refresh work and may defer itself until its target time. | The callback re-arms through the lease API when it is still early. |
+| `refresh_timer` | Owned by upstream's `RefreshController` through the leased scheduler adapter; schedules automatic lossless refresh work and may defer itself until its target time. | The controller's `_timeout()` re-arms through the adapter, i.e. the lease API, when it is still early. |
 | `decode_error_refresh_timer` | Requests a bounded full-quality refresh after a client decode error. | One-shot and independently cancellable. |
 | `av_sync_timer` | Moves the current A/V delay toward its target in bounded steps. | The callback may schedule the next step through the same slot. |
 | `send_window_icon_timer` | Batches icon compression before transferring it to the encode queue. | The GLib lease ends before the encode work is queued; a separate queued flag prevents duplicate handoffs. |
@@ -522,7 +538,11 @@ entry points before exercising new internal helpers. The module's ordered
 suite first calls the real `queue_damage_packet()` producer across cleanup,
 with the ready-source `_damage_cancelled` state established by the real
 constructor after `init_vars()`. It uses fail-fast identically in clean and
-patched modes: clean must fail on the dead refresh timer, while a passing
+patched modes: clean must fail on the dead refresh timer ID which the
+blocked attachment publishes into the controller captured before cleanup
+(`controller.timer` is `1` instead of `0`; the source is built inside the
+fake-GLib patch because the controller retains its constructor scheduler),
+while a passing
 patched run must execute the entire suite, including every private lease
 control. Missing new fields or failure to reach the blocked attachment are
 not accepted clean observations. The dynamic connection/A-V publication

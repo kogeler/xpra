@@ -1,17 +1,16 @@
 schema = 2
 slug = "ssh-tunnel-close-owner"
 kind = "production"
-title = "Keep owned SSH process termination off the filtered parse thread"
+title = "Collect the owned SSH tunnel process when its transport closes"
 dependencies = []
 
 [tests]
 list = [
-  "unit.net.ssh_tunnel_seccomp_test",
+  "unit.net.ssh_tunnel_close_test",
+  "unit.net.ssh_exec_client_test",
   "unit.net.ssh_test",
-  "unit.net.ssh_server_test",
   "unit.net.bytestreams_test",
   "unit.net.protocol_test",
-  "unit.seccomp_test",
   "focused",
   "full",
   "full-cython",

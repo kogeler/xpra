@@ -21,6 +21,18 @@ new resource and retain their existing behavior.
 
 ## Embedded-source context
 
+Source: `d2940c7ddc6edd65aadb00f55ac559045d0c94ed`. Our upstream PR #5161
+(`3aac0c3542`, "Close the signal watcher stdin when the exit request fails")
+now closes stdin in a `finally:` after the exit request. The case keeps only
+what that narrowed fix did not cover, both observed as leaks in our live runs
+but not proposed upstream: an already-exited watcher (and the reaper's
+`watcher_terminated()` path, which calls `clean_signalwatcher()` directly)
+still returned with stdin open, and the forced stop sent `SIGKILL` without
+collecting the child. `clean_signalwatcher()` therefore closes stdin too and
+runs after the exit request (in the same `finally:`), the write is skipped for
+an already closed stdin (which would raise `ValueError`, not `OSError`), and
+`proc.kill()` is followed by a bounded `proc.wait(1)`.
+
 The source embedded in `develop` already has the maintainer's `81096f3320`
 unconditional watcher-pipe cleanup and `fd6177b0ba` forced stop rather than a
 future UI timer. The later subsystem split retains the same helper routes.
@@ -90,12 +102,10 @@ helpers and callers exist on the embedded base, and its diff is independent.
 The window manager's decoder-capability notification in
 `video-decoder-capability-loss` is a separate behavior in an unchanged caller.
 
-`ssh-tunnel-close-owner` handles an exec-SSH child which may be closed by a
-filtered protocol worker; this watcher already has an unfiltered UI owner.
-Reusing its worker/event mechanism here would add unnecessary threading.
-`protocol-parse-start-lifecycle` and `server-shutdown-disconnect-flush` retain
-their distinct startup and packet-flush ownership. None establishes these
-watcher pipe/wait postconditions. Shared live/raw-output/process fixtures
+`ssh-tunnel-close-owner` collects a different child (the exec-SSH tunnel);
+this watcher already has an unfiltered UI owner, so no thread is added.
+`server-shutdown-disconnect-flush` owns an unrelated packet path. None
+establishes these watcher pipe/wait postconditions. Shared live/raw-output/process fixtures
 remain fork control code, not part of this installed product commit.
 
 ## Commit scope and non-goals

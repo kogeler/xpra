@@ -88,6 +88,7 @@ RUN apt-get update \
         python3-setuptools \
         python3-wheel \
         python3-xdg \
+        python3-yaml \
         rsync \
         sshpass \
         tigervnc-standalone-server \

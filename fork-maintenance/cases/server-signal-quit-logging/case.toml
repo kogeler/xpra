@@ -1,16 +1,14 @@
 schema = 2
-slug = "wayland-map-window-lifetime"
+slug = "server-signal-quit-logging"
 kind = "production"
-title = "Revalidate the mapped Wayland window after compositor dispatch"
+title = "Log the server closing message outside the signal handler"
 dependencies = []
 
 [tests]
 list = [
-  "unit.wayland.map_lifetime_test",
-  "unit.wayland.window_test",
-  "unit.server.subsystem.window_test",
+  "unit.server.signal_quit_test",
+  "unit.server.core_test",
   "focused",
-  "wayland",
   "full",
   "full-cython",
   "full-no-compat",

@@ -1,14 +1,11 @@
 schema = 2
 slug = "server-shutdown-disconnect-flush"
 kind = "production"
-title = "Flush the disconnect before closing detached client protocols"
+title = "Don't close detached protocols on late client packets"
 dependencies = []
 
 [tests]
 list = [
-  "unit.net.protocol_flush_test",
-  "unit.server.shutdown_flush_test",
-  "unit.net.protocol_test",
   "unit.server.core_test",
   "full",
   "full-cython",

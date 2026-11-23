@@ -132,7 +132,8 @@ tests use fakes: `decode_test` runs `Decode.run()` twice and `main_test`
 records the start/load order. The decode worker is a non-daemon thread, and
 starting it before `app.run()` creates new lifecycle obligations. The retained
 module covers those obligations through the real `get_client_gui_app()`
-bootstrap, real `Encodings`/`Decode` subsystems and a real GLib scheduler:
+bootstrap (in `xpra/scripts/clients.py` since upstream `642637e1f6` moved the
+client code out of `main.py`; the module patches that namespace), real `Encodings`/`Decode` subsystems and a real GLib scheduler:
 
 - an explicit encoding loads the codecs once, on the worker, after `load()`,
   followed by every `preload_decode` hook and then the seccomp filter;

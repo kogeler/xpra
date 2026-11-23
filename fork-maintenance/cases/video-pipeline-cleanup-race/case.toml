@@ -1,13 +1,18 @@
 schema = 2
 slug = "video-pipeline-cleanup-race"
 title = "Own video pipeline resources through terminal cleanup"
-dependencies = []
+dependencies = ["window-source-timer-lifecycle"]
 
 [tests]
 list = [
-  "unit.server.window.video_compress_test",
-  "unit.server.source.encoding_lifecycle_test",
   "unit.server.encoder_server_test",
+  "unit.server.source.encoding_lifecycle_test",
+  "unit.server.source.source_mixins_test",
+  "unit.server.source.window_test",
+  "unit.server.window.refresh_source_test",
+  "unit.server.window.video_compress_test",
+  "unit.server.window.video_encoder_timeout_test",
+  "unit.server.window.video_pipeline_source_test",
   "full",
   "full-cython",
   "full-no-compat",

@@ -22,7 +22,13 @@ promotion, and release/repeat identity therefore form one atomic behavior.
 
 ## Current upstream boundary and retained necessity
 
-At source `646b712d1bff46b08b8f26ddc7a83229d65ba5bc`, upstream
+At source `d2940c7ddc6edd65aadb00f55ac559045d0c94ed` (refreshed from
+`646b712d1b`; the upstream changes to these paths since then are refactors:
+packet handler decorators and constants `a07d12eb1b`/`c0ca32d409`, the client
+`is_readonly()` decision `1334162f8f`/`2c63ca39f1`, shared `ShortcutTarget`
+`d9e306e2c3`, recorder sources without keyboard input `def5d6f643`, and
+explicit keymap-property assertions `74b4e397e5`, which the case's
+`keyboard_helper_test` now keeps alongside its RMLVO checks), upstream
 `ac732233d68` installs client keymaps and `6b79cb2db5a` combines the layouts
 of connected clients, limits that union to four groups, and returns
 `(keycode, group)` from native lookup. That is a partial replacement, not this
@@ -911,6 +917,14 @@ accepted until the migrated complete-stack boundary passes.
   optional linkage-test skip in place of the native `wayland` gate.
 - Do not trust a clean `case-check` alone when adjacent case commits touch the
   same window subsystem and test module.
+
+### Packet handler naming
+
+Upstream's `unit.net.packet_handler_test.test_all_decorated` treats every
+`_process_*` method as a packet handler that must carry `@packet_handler`.
+The structured keymap helper called by the decorated `keyboard-config`
+handler is therefore named `_apply_structured_keymap()`, not
+`_process_structured_keymap()`.
 
 ## Required validation
 

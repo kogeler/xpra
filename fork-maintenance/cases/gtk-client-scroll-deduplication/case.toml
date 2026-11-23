@@ -1,19 +1,17 @@
 schema = 2
 slug = "gtk-client-scroll-deduplication"
 kind = "production"
-title = "Forward GTK scrolling without duplicate emulated wheel events"
+title = "Don't lose the first X11 wheel step after entering a window"
 dependencies = []
 
 [tests]
 list = [
-  "unit.wayland.gtk_scroll_test",
-  "unit.client.subsystem.pointer_test",
-  "unit.pointer_loopback_test",
-  "wayland",
+  "unit.client.gtk3.client_window_test",
+  "unit.client.opengl_backing_test",
   "full",
   "full-cython",
   "full-no-compat",
 ]
 
 [evidence]
-required_gates = ["live-rgb", "live-h264"]
+required_gates = ["live-wayland-h264-hardware", "live-wayland-opengl-h264-hardware", "live-xpra-detach", "live-xpra-transport-loss"]

@@ -7,6 +7,8 @@ dependencies = []
 [tests]
 list = [
   "unit.server.window.compress_test",
+  "unit.server.window.refresh_source_test",
+  "unit.server.window.refresh_test",
   "full",
   "full-cython",
   "full-no-compat",

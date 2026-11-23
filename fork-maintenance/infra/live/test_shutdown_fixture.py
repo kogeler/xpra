@@ -31,12 +31,14 @@ Current thread's C stack trace (most recent call first):
 def group_evidence(application, server_pid, order="together", root=None):
     """Synthetic collector input, never a claim that live teardown ran."""
     pgid = 70
-    members = [dict(pid=pid, parent_pid=server_pid if index == 4 else 67,
-                    start_ticks=application["start_ticks"] if index == 4 else "123456",
-                    comm="fixture", pgid=pgid)
-               for index, pid in enumerate((pgid, server_pid, 71, 72, application["pid"]))]
+    members = [dict(pid=pid, parent_pid=67, start_ticks="123456", comm="fixture", pgid=pgid)
+               for pid in (pgid, server_pid, 71, 72)]
+    # Xpra starts the application as the leader of its own session (upstream #5128).
+    application_member = dict(pid=application["pid"], parent_pid=server_pid,
+                              start_ticks=application["start_ticks"], comm="fixture", pgid=application["pid"])
     files = {"sessions": ["wayland-0"], "sockets": ["host-wayland-0"]}
     ready = {"schema": 2, "pgid": pgid, "order": order, "members": members,
+             "application_member": application_member,
              "names": sorted(fixture.REQUIRED_NAMES), "application": application,
              "bus_owners": {"org.freedesktop.Notifications": server_pid,
                             "org.freedesktop.impl.portal.desktop.gtk": 71,
@@ -46,11 +48,11 @@ def group_evidence(application, server_pid, order="together", root=None):
     aborted = order == fixture.ABORT_CONTROL
     native = ({"origin": "signal", "signal": 6, "status": 134} if aborted else {"origin": "exit", "status": 143})
     result = {"schema": 2, "pgid": pgid, "order": order, "members": members,
-              "reason": "heartbeat-eof", "events": [{"event": name, "time_ns": index * 100}
+              "application_member": application_member, "reason": "heartbeat-eof", "events": [{"event": name, "time_ns": index * 100}
                                                        for index, name in enumerate(events, 1)],
               "statuses": {"private-bus": 0, "portal": -15, "portal-gtk": -15},
               "server_exit": native,
-              "remaining_members": [dict(members[4], state="Z", parent_pid=1)] if aborted else [],
+              "remaining_members": [dict(application_member, state="Z", parent_pid=1)] if aborted else [],
               "session_files": {"ready": files, "after": files if aborted else {"sessions": [], "sockets": []}}}
     lease = {"before": {"schema": 1, "root": dict(pid=80, parent_pid=1, start_ticks="123456", comm="python3"),
                         "descendants": []}, "after": {"remaining": []}}
@@ -125,6 +127,19 @@ class ShutdownFixtureTest(unittest.TestCase):
         self.assertNotEqual(member["pgid"], os.getpgrp())
         fixture.verified_group_signal(child.pid, [member], signal.SIGTERM)
         self.assertEqual(child.wait(5), -signal.SIGTERM)
+
+    def test_application_session_is_signalled_only_as_its_own_group(self):
+        child = self.group_child()
+        member = fixture.identity(child.pid)
+        self.assertTrue(fixture.application_session_live(member))
+        with patch.object(fixture.os, "killpg") as kill:
+            for broken in ({**member, "pgid": os.getpgrp()}, {**member, "start_ticks": "1"}):
+                with self.subTest(broken=broken), self.assertRaises(ValueError):
+                    fixture.verified_application_signal(broken, signal.SIGTERM)
+            kill.assert_not_called()
+        fixture.verified_application_signal(member, signal.SIGTERM)
+        self.assertEqual(child.wait(5), -signal.SIGTERM)
+        self.assertFalse(fixture.application_session_live(member))
 
     def test_changed_birth_or_group_and_parent_group_are_never_signalled(self):
         child = self.group_child()
@@ -283,9 +298,24 @@ class ShutdownFixtureTest(unittest.TestCase):
                 self.assertFalse(fixture.evidence_checks(broken, application=application,
                                                          server_pid=8)["shutdown_order_exact"])
                 broken = group_evidence(application, 8, order)
-                broken["ready"]["members"][4]["pgid"] = 800
+                broken["ready"]["members"][3]["pgid"] = 800
                 self.assertFalse(fixture.evidence_checks(broken, application=application,
                                                          server_pid=8)["owned_private_group_topology"])
+                # The pre-#5128 topology: the application inside the private group.
+                broken = group_evidence(application, 8, order)
+                broken["ready"]["application_member"]["pgid"] = broken["ready"]["pgid"]
+                broken["result"]["application_member"] = broken["ready"]["application_member"]
+                self.assertFalse(fixture.evidence_checks(broken, application=application,
+                                                         server_pid=8)["owned_private_group_topology"])
+                broken = group_evidence(application, 8, order)
+                broken["ready"]["application_member"]["parent_pid"] = 67
+                broken["result"]["application_member"] = broken["ready"]["application_member"]
+                self.assertFalse(fixture.evidence_checks(broken, application=application,
+                                                         server_pid=8)["owned_private_group_topology"])
+                broken = group_evidence(application, 8, order)
+                broken["result"]["remaining_members"] = [dict(broken["ready"]["application_member"], state="S")]
+                self.assertFalse(fixture.evidence_checks(broken, application=application,
+                                                         server_pid=8)["private_group_members_gone"])
                 broken = group_evidence(application, 8, order)
                 broken["ready"]["schema"] = 1
                 self.assertFalse(fixture.evidence_checks(broken, application=application,

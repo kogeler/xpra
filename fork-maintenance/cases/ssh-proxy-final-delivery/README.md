@@ -31,8 +31,10 @@ motion, draw acknowledgements, window events) at the moment the server closes:
 Before the write fails the relay is healthy; afterwards nothing it does can
 reach the server, but everything the server sent before closing must still
 reach the client. The defect is in the relay process, independent of the
-server's own disconnect ordering (owned by `server-shutdown-disconnect-flush`)
-and of the client's ssh child management (`ssh-tunnel-close-owner`).
+server's own disconnect ordering (`server-shutdown-disconnect-flush` keeps a
+late client packet from closing a detached protocol) and of the client's ssh
+child management (`ssh-tunnel-close-owner` collects it; upstream `defd56fa8c`
+keeps its termination off filtered threads).
 
 A second, user-visible symptom on the same path: the closed-socket error is a
 `ConnectionClosedException`, which the copy loop's `except OSError` does not
@@ -48,6 +50,10 @@ the actual relay; the detach incidents also had a server-side cause (see
 does not prove either case.
 
 ## Embedded-source context
+
+The embedded source is `d2940c7ddc6edd65aadb00f55ac559045d0c94ed`; upstream
+did not change `xpra/scripts/fdproxy.py` since `646b712d1b`, and the diff
+replays unchanged.
 
 The relay's teardown was changed by the main maintainer in `d4b64ee15b`
 ("better error handling in fdproxy"): an error in either copy loop now tears
@@ -143,14 +149,12 @@ The commit changes only `xpra/scripts/fdproxy.py` and adds
 `tests/unittests/unit/scripts/fdproxy_test.py`. It has no dependency. Related
 cases own different steps of the same disconnect:
 
-- `server-shutdown-disconnect-flush`: the server writes the disconnect packet
-  before its protocol is closed (including late client packets after a
-  detach). Without it the relay has nothing to deliver; without this case the
-  written packet can still be lost in the relay.
-- `ssh-tunnel-close-owner`: the *client* side terminates and collects its own
-  ssh child after the transport closes; unrelated to the remote relay.
-- `protocol-parse-start-lifecycle`: client/server protocol worker startup;
-  no shared code.
+- `server-shutdown-disconnect-flush`: a late client packet no longer closes
+  a detached protocol before its disconnect packet is written. Without it the
+  relay may have nothing to deliver; without this case the written packet can
+  still be lost in the relay.
+- `ssh-tunnel-close-owner`: the *client* side collects its own ssh child
+  after the transport closes; unrelated to the remote relay.
 
 `case-check` proves textual independence; the composed live detach scenarios
 exercise the server, the relay and the client together.

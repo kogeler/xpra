@@ -54,8 +54,33 @@ that instruction.
 ## Embedded-source context
 
 The case resolves against source commit
-`646b712d1bff46b08b8f26ddc7a83229d65ba5bc`, embedded in the current `develop`
-history. The earlier upstream codec-selection fixes remain: `094692ebf3` limits
+`d2940c7ddc6edd65aadb00f55ac559045d0c94ed`, embedded in the current `develop`
+history. Three upstream changes since `646b712d1b` meet this case directly.
+`0a5ca065e9` (#5110) and its predecessors turned the inactivity watchdog into a
+per-frame idle timeout: `schedule_video_encoder_timer(ve, csce)` runs on the
+encode thread after each produced frame, uses `video_encoder_timeout_delay`
+(`VIDEO_GPU_TIMEOUT` for a pipeline with any GPU cost, doubled while a B-frame
+flush is pending), and its UI callback only queues `do_video_encoder_timeout()`,
+which closes just the timed-out pair on the encode thread and reschedules while
+a flush is still owed. The case keeps that policy verbatim and replaces only
+its ownership: a retained `GLib.Source` (`attach_source()`), the
+`_video_encoder_timer_generation` under `_video_state_lock` instead of the
+module-wide `video_encoder_timer_sequence`, and closed-source checks. The UI
+callback claims its generation, so a dispatch which overtakes publication
+leaves the producer nothing to publish, and a frame, cancellation or
+replacement invalidates the queued encode-thread work. `ad529e2094` added the
+`auto_refresh` flag to the B-frame flush tuple, which therefore has seven
+fields. Upstream's new tests construct sources with `__new__()` and
+`init_vars()` only (`video_encoder_timeout_test`, `refresh_source_test`,
+`video_pipeline_test_util`); `_init_video_lifecycle()` is therefore idempotent
+and called first by `init_vars()`, and `init_vars()` creates the
+`VideoSubregion` like upstream, but only while the source is open, so the
+teardown-time `init_vars()` cannot replace a closed subregion. Those upstream
+tests fake GLib with `refresh_test_util.FakeScheduler`; its retained-source
+emulation (`timeout_source_new()`) belongs to `window-source-timer-lifecycle`,
+which this case therefore declares as a dependency. Two upstream assertions
+moved to this representation: the timer identity is the source's numeric ID,
+and the removed module sequence is not asserted. The earlier upstream codec-selection fixes remain: `094692ebf3` limits
 `non_video_encodings` to encoders actually registered in `_encoders`, and
 `4c74513c10` reuses a cached scaling only within the candidate encoder's
 limits. Neither touches pipeline publication, timers or teardown; their
@@ -483,7 +508,7 @@ cleanup list owns it. Neither path may release an image belonging to the other.
 ## B-frame flush and inactivity watchdog
 
 The delayed B-frame path owns a tuple
-`(encoder, csc, frame, x, y, scaled_size)`, a retained GLib source, and
+`(encoder, csc, frame, x, y, scaled_size, auto_refresh)`, a retained GLib source, and
 `_b_frame_flush_generation`. Scheduling replaces the previous generation,
 records the tuple under `_video_state_lock`, registers the timeout outside the
 lock, and publishes its object only after a live/generation recheck.
@@ -530,11 +555,14 @@ body, while `_video_state_lock` protects only the short identity claim. Thus
 terminal cleanup waits for a claimed refresh without holding the video-state
 lock across generic damage and timer scheduling.
 
-The watchdog has its own `_video_encoder_timer_generation`. Its producer and
-callback use the same reserve/register/revalidate pattern. A stale or closed
-callback is inert; a current callback clears its identity and retires the
-pipeline. The lock is re-entrant because timeout retirement reuses the normal
-video-context transaction.
+The idle watchdog has its own `_video_encoder_timer_generation`. Its
+encode-thread producer (one per produced frame) and its UI callback use the
+same reserve/register/revalidate pattern. A stale or closed callback is inert;
+a current callback claims a new generation, clears its identity and queues
+`do_video_encoder_timeout(claimed, ve, csce)`. The worker rechecks the claimed
+generation and the exact pair, reschedules while a flush for that encoder is
+pending, and otherwise detaches the pair under the lock and cleans it on the
+encode thread outside it, never touching a replacement pair.
 
 ## VideoSubregion lifetime
 
@@ -1206,6 +1234,25 @@ does not regress unrelated live ownership.
 - Do not replace exact ownership with polling, arbitrary timeouts, a second
   worker, or a caller-thread join.
 - Do not weaken hardware evidence or relabel it as an atomic VPC gate.
+
+### Adapted upstream fixtures (refresh onto `d2940c7ddc`)
+
+Three upstream tests construct objects outside the case's ownership contract
+and are adapted in this case, without weakening what they check:
+
+- `unit.server.source.source_mixins_test.test_cuda_adapter_hint` builds
+  `EncodingsConnection()` and now calls `init_state()`, which every real
+  connection runs, because the CUDA hint is read under `_encoding_state_lock`.
+- `unit.server.window.video_pipeline_test_util.make_source()` builds a
+  `WindowVideoSource` with `__new__` and now calls the idempotent
+  `_init_video_lifecycle()`, which owns the pipeline publication locks.
+- `unit.server.source.window_test` (upstream `979a619bd2`): `may_recalculate()`
+  enqueues a work item that owns its admission token and schedules a delayed
+  recalculation as an owned `GLib.timeout_source_new()` source. The tests run
+  the queued item (as the encode thread does) instead of calling
+  `recalculate_delays()` directly, and fire the owned timer's callback instead
+  of patching `GLib.timeout_add`. Their coverage and stacking assertions are
+  unchanged.
 
 ## Required validation
 

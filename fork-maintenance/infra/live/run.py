@@ -5355,6 +5355,26 @@ def compositor_probe(container: str, display: str = CLIENT_DISPLAY) -> dict[str,
         return None
 
 
+def client_gpu_checks(log_evidence: dict[str, Any], render_node: Path | str) -> dict[str, bool]:
+    """GPU use reported by the hardened Xpra client process itself.
+
+    Since upstream #4962 the Linux client disables ptrace (PR_SET_DUMPABLE=0),
+    so a peer can no longer read its fd table or mappings.  Its own libva
+    device selection and live OpenGL context identify the render node and the
+    AMD driver instead.
+    """
+    devices = log_evidence.get("client_libva_devices") or []
+    vendors = log_evidence.get("client_libva_vendors") or []
+    renderer = str(log_evidence.get("opengl_renderer") or "")
+    return {
+        "client_render_node_selected": devices == [str(render_node)],
+        # The GL context names the AMD device; the libva vendor names the
+        # Mesa Gallium radeonsi driver loaded into the same process.
+        "client_gpu_driver_active": "AMD" in renderer and bool(vendors)
+        and all("radeonsi" in vendor for vendor in vendors),
+    }
+
+
 def process_gpu_evidence(container: str, pid: int) -> dict[str, Any]:
     script = r"""
 set -u
@@ -8186,6 +8206,9 @@ def inspect_logs(directory: Path) -> dict[str, Any]:
     h264_error_lines = h264_errors(h264_steady_log)
     h264_pre_negotiation_error_lines = h264_errors(h264_pre_negotiation_log)
     renderer_match = re.search(r"OpenGL [^\n]+ enabled on '([^']+)'", client_log)
+    # The hardened client (upstream #4962, PR_SET_DUMPABLE=0) hides its fd
+    # table and mappings from peers: bind its GPU use to its own libva log.
+    libva_selections = re.findall(r"libva decode: selected (/dev/dri/\S+) \(([^\n]*)\)", client_log)
     property_lines = [
         line
         for line in server_log.splitlines()
@@ -8226,6 +8249,8 @@ def inspect_logs(directory: Path) -> dict[str, Any]:
         "h264_pipeline_errors": h264_error_lines[-20:],
         "h264_pre_negotiation_errors": h264_pre_negotiation_error_lines[-20:],
         "opengl_renderer": renderer_match.group(1) if renderer_match else "",
+        "client_libva_devices": sorted({device for device, _vendor in libva_selections}),
+        "client_libva_vendors": sorted({vendor for _device, vendor in libva_selections}),
         "opengl_presentations": client_log.count("do_present_fbo("),
         "opengl_rgb_paints": len(
             re.findall(r"\.do_paint_rgb\(rgb,\s*(?:RGB|BGR)", client_log)
@@ -19668,7 +19693,6 @@ def classify_h264_picture_fallback(
     dict[str, bool],
 ]:
     """Classify the maintainer-suggested picture-fallback diagnostic profile."""
-    client_graphics = codec_hardware.get("client_graphics_process", {})
     client_desktop = codec_hardware.get("client_desktop", {})
     renderer = log_evidence["opengl_renderer"]
     software_renderer = any(
@@ -19711,12 +19735,7 @@ def classify_h264_picture_fallback(
         "opengl_presented": log_evidence["opengl_presentations"] > 0,
         "hardware_opengl_renderer": bool(renderer) and not software_renderer,
         "hardware_desktop_renderer": bool(client_desktop.get("hardware_renderer")),
-        "client_render_node_open": str(render_node)
-        in client_graphics.get("render_nodes", []),
-        "client_gpu_driver_mapped": any(
-            "radeonsi_dri" in mapping or "libgallium" in mapping
-            for mapping in client_graphics.get("gpu_mappings", [])
-        ),
+        **client_gpu_checks(log_evidence, render_node),
     }
     return (
         startup_checks,
@@ -20313,7 +20332,6 @@ def classify_boundaries(
         decode = codec_hardware.get("h264_decode", {})
         packet_chain = codec_hardware.get("h264_packet_chain", {})
         production = codec_hardware.get("h264_production", {})
-        client_graphics = codec_hardware.get("client_graphics_process", {})
         client_desktop = codec_hardware.get("client_desktop", {})
         renderer = log_evidence["opengl_renderer"]
         software_renderer = any(
@@ -20414,12 +20432,7 @@ def classify_boundaries(
             "opengl_presented": bool(packet_chain.get("presented_before_overwrite")),
             "hardware_opengl_renderer": bool(renderer) and not software_renderer,
             "hardware_desktop_renderer": bool(client_desktop.get("hardware_renderer")),
-            "client_render_node_open": str(args.render_node)
-            in client_graphics.get("render_nodes", []),
-            "client_gpu_driver_mapped": any(
-                "radeonsi_dri" in mapping or "libgallium" in mapping
-                for mapping in client_graphics.get("gpu_mappings", [])
-            ),
+            **client_gpu_checks(log_evidence, args.render_node),
         }
         encoding_boundary = "h264_encoder"
         paint_boundary = "h264_decoder"

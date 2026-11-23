@@ -1,13 +1,13 @@
 schema = 2
-slug = "printing-cli-timer-cleanup"
+slug = "wayland-software-buffer-lifetime"
 kind = "production"
-title = "Keep printer-change watchers out of one-shot printing commands"
+title = "Notify destruction of Wayland software output buffers"
 dependencies = []
 
 [tests]
 list = [
-  "unit.platformtests.printing_cli_test",
-  "unit.scripts.main_test",
+  "unit.wayland.software_allocator_test",
+  "wayland",
   "full",
   "full-cython",
   "full-no-compat",

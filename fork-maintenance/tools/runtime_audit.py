@@ -11,7 +11,11 @@ import sys
 
 FAILURES = {
     "thread-exception": rb"(?m)^Exception in thread [^\r\n]*:",
-    "unraisable-exception": rb"(?m)^Exception ignored (?:in|while calling)[^\r\n]*:",
+    # coverage.py's own atexit save is measurement infrastructure, not the code
+    # under test: it cannot write its data file from a Landlock/seccomp-confined
+    # child (upstream propagates coverage into subprocesses).
+    "unraisable-exception": rb"(?m)^Exception ignored (?:in|while calling)"
+                            rb"(?! atexit callback <bound method Coverage\._atexit of <Coverage )[^\r\n]*:",
     "logging-error": rb"(?m)^--- Logging error ---",
     "fatal-python-error": rb"(?m)^Fatal Python error:",
 }

@@ -314,26 +314,18 @@ Only these case commits exist, in this stack order:
 4. `wayland-initial-window-state`;
 5. `wayland-client-keymap-sync`;
 6. `x11-client-clipboard-events`;
-7. `packet-handler-error-boundary`;
-8. `gtk-client-scroll-deduplication`;
-9. `server-shutdown-disconnect-flush`;
-10. `printing-cli-timer-cleanup`;
-11. `libva-decoder-display-lifetime`;
-12. `seccomp-build-switch`;
-13. `window-client-properties-deltas`;
-14. `video-decoder-capability-loss`;
-15. `window-unmap-log-format`;
-16. `ssh-tunnel-close-owner`;
-17. `protocol-parse-start-lifecycle`;
-18. `gtk-css-package-ownership`;
-19. `signalwatcher-resource-lifecycle`;
-20. `ssh-proxy-final-delivery`;
-21. `wayland-popup-opaque-region`;
-22. `window-encoder-registry-rebuild`;
-23. `notification-client-detach`;
-24. `wayland-map-window-lifetime`;
-25. `notification-without-system-tray`;
-26. `window-debug-snapshot-lifetime`.
+7. `gtk-client-scroll-deduplication`;
+8. `server-shutdown-disconnect-flush`;
+9. `libva-decoder-display-lifetime`;
+10. `video-decoder-capability-loss`;
+11. `signalwatcher-resource-lifecycle`;
+12. `ssh-proxy-final-delivery`;
+13. `window-encoder-registry-rebuild`;
+14. `window-debug-snapshot-lifetime`;
+15. `ssh-tunnel-close-owner`;
+16. `wayland-software-buffer-lifetime`;
+17. `server-signal-quit-logging`;
+18. `cython-window-factory-metadata`.
 
 ## Stack contract
 

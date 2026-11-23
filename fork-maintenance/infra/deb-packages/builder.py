@@ -326,7 +326,7 @@ pixels = bytes(
     (x * 37 + y * 17 + channel * 71) % 256
     for y in range(height) for x in range(width) for channel in range(3)
 )
-image = ImageWrapper(0, 0, width, height, pixels, "RGB", 24, width * 3,
+image = ImageWrapper(0, 0, width, height, (pixels, ), "RGB", 24, width * 3,
                      bytesperpixel=3, planes=ImageWrapper.PACKED)
 decoded = None
 try:

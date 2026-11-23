@@ -47,7 +47,18 @@ backings, poll their pixels, or create a new stateful child codec stream.
 ## Frozen source and refresh boundary
 
 The case resolves against embedded source commit
-`646b712d1bff46b08b8f26ddc7a83229d65ba5bc`. Upstream answers Wayland frame callbacks through a shared
+`d2940c7ddc6edd65aadb00f55ac559045d0c94ed`. Since the previous base
+`646b712d1b`, upstream rewrote the client draw ingress (`fa5cdfb366`,
+`0048520824`, `f39bb69b03`/`9d795d188c`/`89a9788dd3` #5122): `window-draw` is
+parsed and validated into a `DrawRequest` on the UI thread, video frames may be
+sent as `window-draw-fragment` datagrams which a per-window `FrameAssembler`
+reassembles, and every path reaches the decode queue through
+`WindowDraw.queue_draw()`. Windows now receive `get_subsystem()` rather than
+the client object (`96698a428e`), the server records 4-tuple `mapped_at`
+geometry and recalculates window coverage on map, unmap and removal
+(`22471db0ec`, `979a619bd2`), and `ACK` packets may carry fragment-loss
+`extra` data. The case's adaptations to those owners are described in the
+client ingress and server publication sections below. Upstream answers Wayland frame callbacks through a shared
 `models.frame.FrameCallbackModel` used by both `Window` and the
 `SubsurfaceWindow` facade (`8e6590188a`, `42c163be03`, `32f423fe6c`,
 `d77c6729dc`): real damage arms a 1 s pending-damage safety timer before
@@ -948,8 +959,15 @@ reset. A post-capture content commit alone is not such a structural invalidation
 
 `client_backing_resized()` advances the backing epoch before the resize control
 packet enters the queue. Map, unmap, allow-after-refusal, and backing
-detach/recreation also advance it. Renderer-only render-size changes do not
-change the wire-canvas epoch.
+detach/recreation also advance it. Since upstream `979a619bd2` the
+per-client visibility path (a window hidden from or shown to one sharing
+client) goes through `map_window()` / `unmap_window()` too, so it advances the
+epoch, fans the (full 4-tuple) geometry out to every pixel source of the wire
+window and requests a fresh composite when the window is shown again; the
+refresh which follows a show repaints it anyway. `map_window()`,
+`unmap_window()` and `remove_window()` keep upstream's window-coverage
+recalculation. Renderer-only render-size changes do not change the
+wire-canvas epoch.
 
 At publication, all current transaction fences are strict. At dequeue, a stage
 from a transaction already committed to the ordered pixel queue may remain
@@ -1192,16 +1210,25 @@ therefore supplies authoritative metadata in every tested compatibility mode.
 
 ## Client ingress and backing identity
 
-`WindowDraw._process_draw()` runs on the network/main packet boundary. Before
-queueing decode work it captures:
+`WindowDraw.queue_draw()` runs on the UI thread for every draw request: a
+direct `window-draw` (`_process_draw()`, after the frames still being
+reassembled for that window have been flushed) and a frame reassembled from
+`window-draw-fragment` packets (`draw_assembled_frame()`). Before queueing
+decode work it captures:
 
 - the exact client window object;
 - the exact backing object;
 - the window's monotonic backing generation; and
 - the backing's local reconfiguration epoch.
 
-`_do_draw()` revalidates them before decode or paint. Stale identity produces a
-failed draw ACK and no paint. For a composite stage, it overwrites the private
+`_do_draw(request, delivery_state)` revalidates them before decode or paint.
+Stale identity produces a failed draw ACK and no paint. Upstream's
+`check_draw_request()` validation failure of a composite stage is routed like
+the case's other composite failures (`inject_composite_failure()`), because the
+backing owns the transaction; other packets keep upstream's `draw_abort()`.
+On the server, composite stages are never split into datagram fragments: a
+lost or partial stage could not fail its transaction through the backing, so
+`queue_damage_packet()` drops the encoder's `nals` hint and sends them whole. For a composite stage, it overwrites the private
 `_client-subsurface-backing-state` option with the captured
 `(backing, generation, local_epoch)` tuple. A server-supplied value at that key
 has no authority.
@@ -2396,6 +2423,19 @@ Future work must preserve all of these invariants.
 - Diagnostics bind identities without logging raw pixel data.
 - The schema-6 live oracle remains independent of implementation summaries.
 - WIS, generic timer, VPC, and upstream frame-pacing ownership remain separate.
+
+### Adapted upstream fixtures (refresh onto `d2940c7ddc`)
+
+- `unit.server.windowshot_test.test_wayland_model_keeps_its_image` (upstream
+  #5115) asserted that `Window.get_image()` returns the stored wrapper itself.
+  The model hands out borrowed wrappers over its retained pixels, so the test
+  now requires the returned plane to be the retained plane and that neither
+  the retained image nor the original is freed by repeated captures, which is
+  the invariant the upstream test protects.
+- `unit.server.source.window_test.encoding_connection()` stubs carry their
+  `wid` and are registered with `configure_pixel_source()`, as
+  `_activate_pixel_source()` registers real sources:
+  `pixel_source_operation()` lends only registered sources.
 
 ## Required validation
 

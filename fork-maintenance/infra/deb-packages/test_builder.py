@@ -402,6 +402,9 @@ class InstalledCodecCapabilityTests(unittest.TestCase):
 
             def __init__(self, _x, _y, width, height, pixels, pixel_format, depth, stride,
                          bytesperpixel=4, planes=0):
+                # like `xpra.codecs.image.ImageWrapper`: a sequence of buffers
+                if not isinstance(pixels, (tuple, list)):
+                    raise TypeError("pixels must be a sequence of buffers")
                 self.width, self.height, self.pixels = width, height, pixels
                 self.pixel_format, self.depth, self.stride = pixel_format, depth, stride
                 self.bytesperpixel, self.planes = bytesperpixel, planes
@@ -413,7 +416,7 @@ class InstalledCodecCapabilityTests(unittest.TestCase):
                 return self.height
 
             def get_pixels(self):
-                return self.pixels
+                return self.pixels[0]
 
             def get_pixel_format(self):
                 return self.pixel_format
@@ -434,7 +437,7 @@ class InstalledCodecCapabilityTests(unittest.TestCase):
             self.assertEqual(coding, "jph")
             self.assertEqual((image.width, image.height, image.pixel_format), (32, 32, "RGB"))
             self.assertEqual(options["quality"], 100)
-            self.assertGreater(len(set(image.pixels)), 32)
+            self.assertGreater(len(set(image.get_pixels())), 32)
             recorded["encoded"] += 1
             recorded["source"] = image
             if mode == "encoder error":
@@ -450,13 +453,13 @@ class InstalledCodecCapabilityTests(unittest.TestCase):
             for y in range(source.height):
                 for x in range(source.width):
                     offset = (y * source.width + x) * 3
-                    pixels.extend(reversed(source.pixels[offset:offset + 3]))
+                    pixels.extend(reversed(source.get_pixels()[offset:offset + 3]))
                     pixels.append(0xA5)
                 pixels.extend(b"padding!")
             if mode == "changed pixel":
                 pixels[0] ^= 1
             return Image(0, 0, source.width - (mode == "wrong size"), source.height,
-                         bytes(pixels), "RGB" if mode == "wrong format" else "BGRX",
+                         (bytes(pixels), ), "RGB" if mode == "wrong format" else "BGRX",
                          24, source.width * 4 + 8)
 
         fixture = PackageSetValidationTests()

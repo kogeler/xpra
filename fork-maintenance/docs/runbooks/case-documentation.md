@@ -169,8 +169,7 @@ cycle ledger under `work/<session>/`; lasting lessons go into the distilled
 old results are not current acceptance evidence.
 
 Calibrate analytical depth against
-[packet dispatch](../../cases/packet-handler-error-boundary/README.md),
-[GTK scrolling](../../cases/gtk-client-scroll-deduplication/README.md),
+[window-source timers](../../cases/window-source-timer-lifecycle/README.md),
 [video pipeline cleanup](../../cases/video-pipeline-cleanup-race/README.md), and
 [Wayland keymap synchronization](../../cases/wayland-client-keymap-sync/README.md).
 These are examples of explanation quality, not workflow authority or sources

@@ -24,7 +24,9 @@ A later ordinary capture may succeed when a matching buffer arrives.
 
 ## Embedded-source context
 
-The source remains `646b712d1bff46b08b8f26ddc7a83229d65ba5bc`.
+The source is `d2940c7ddc6edd65aadb00f55ac559045d0c94ed` (refreshed from
+`646b712d1b`; `save_screenshot()` is unchanged upstream and the diff replays
+as is).
 Antoine Martin's `15605ed2bc` extracted the callback and changed recording to
 queue it with GLib. The old image-format lookup precedes its null check in the
 current upstream base. The actual commit and current recording/capture owners

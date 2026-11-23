@@ -72,7 +72,9 @@ def probe(action: str) -> dict:
                     try:
                         if (image.get_width(), image.get_height(), image.get_pixel_format()) != (128, 128, "NV12"):
                             raise RuntimeError("libva produced invalid frame metadata")
-                        if not all(image.get_pixels()):
+                        # NV12 is planar: pixels are a sequence of planes (upstream 5656216080).
+                        planes = [image.get_plane(index) for index in range(max(1, int(image.get_planes())))]
+                        if len(planes) != 2 or not all(planes):
                             raise RuntimeError("libva returned an empty frame plane")
                     finally:
                         image.free()

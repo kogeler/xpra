@@ -21,6 +21,12 @@ case does not make a failed GPU infallible or prevent unrelated invalid streams.
 
 ## Embedded-source context
 
+The embedded source is `d2940c7ddc6edd65aadb00f55ac559045d0c94ed`. Since
+`646b712d1b` upstream changed these paths only through documentation
+(`a7d06ed0c3`, which also touched `docs/Usage/Seccomp.md`), moving
+`parse_seccomp_option` next to the landlock parser (`1b4b5dd843`) and skipping
+unbuilt seccomp/uinput/pipewire tests from the runner (`625d478285`); the
+diff replays unchanged and the decoder/display code below is upstream's.
 The embedded Xpra source has a dedicated `Decode` subsystem and preloads all
 codecs on its worker before installing `xpra.seccomp.draw`. Maintainer changes
 `ec39a2eb2d` cache adapter probing, while `0280b399df` skips NVIDIA's VA wrapper;
@@ -173,7 +179,7 @@ needed by the tests-only clean control.
 The fake VA driver asserts every call uses a live display/descriptor and that
 termination sees zero resources. It does not submit compressed video, prove
 driver thread/syscall requirements, or exercise the Cython lock. Adjacent
-`decode_test`, `seccomp_encoding_test` and `seccomp_test` preserve worker
+`decode_test`, `seccomp.encoding_test` and `seccomp.seccomp_test` (moved to `unit/seccomp/` by upstream `625d478285`) preserve worker
 ordering and the security policy. Native wrapper/build and physical live
 execution close the linkage and actual decode blind spots; compiled/no-compat
 focused and final legs retain their normal obligations.

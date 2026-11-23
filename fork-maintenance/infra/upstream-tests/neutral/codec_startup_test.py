@@ -23,7 +23,7 @@ from xpra.client.base import features
 from xpra.client.base.stub import StubClientSubsystem
 from xpra.client.subsystem import encoding
 from xpra.client.subsystem.decode import Decode
-from xpra.scripts import main as scripts
+from xpra.scripts import clients as scripts
 from xpra.scripts.config import InitInfo
 from xpra.util.glib_scheduler import GLibScheduler
 
@@ -142,7 +142,7 @@ def options(value):
     return SimpleNamespace(
         encoding=value, encodings=("rgb", "webp"), video_scaling="auto",
         quality=-1, min_quality=0, speed=-1, min_speed=0,
-        csc_modules=("none",), video_decoders=("none",),
+        csc_modules=("none",), video_decoders=("none",), auto_refresh_delay=0.15,
     )
 
 

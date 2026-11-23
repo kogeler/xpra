@@ -1058,13 +1058,20 @@ Killing that exact master ends the lease; the remote supervisor sends SIGTERM
 to its private group, waits a bounded grace period, and sends SIGKILL only if
 needed. Neither the supervisor nor the SSH daemon belongs to that group.
 
-The group contains Xpra, its real native-Wayland GTK child, a foreground private
-`dbus-daemon`, `xdg-desktop-portal` and its GTK backend. Explicit bus configuration
+The group contains Xpra, a foreground private `dbus-daemon`,
+`xdg-desktop-portal` and its GTK backend. Explicit bus configuration
 has no service-activation directories and uses no inherited user bus. Readiness
 requires actual notification/portal bus names and independently queried Unix
 owner PIDs matching the exact process identities, through the fixture's own
-short-lived Gio connection (the image has no `gdbus` tool). All five peers'
-group IDs must agree. The `server.shutdown` YAML block alone enables notification
+short-lived Gio connection (the image has no `gdbus` tool). All four peers'
+group IDs must agree. Xpra's real native-Wayland GTK child is outside that
+group: since upstream #5128 (`XPRA_KILL_CHILD_PROCESS_GROUP`, on by default)
+the server starts every command as the leader of its own session and
+terminates that process group itself. Readiness therefore requires the
+application to be Xpra's direct child leading its own session, and every
+teardown order except the abort control must end it through Xpra; the
+aborted server cannot, so the control's supervisor terminates that exact
+group after the group signal (`application-SIGTERM`). The `server.shutdown` YAML block alone enables notification
 forwarding and disables Xpra D-Bus control / dbus-launch for this topology.
 Consumers which mirror `live-cli.yml` must add this block together with the
 `server.churn`/`client.churn` blocks, the client base `--seccomp=default` and
@@ -1307,7 +1314,12 @@ Mesa/Radeon driver, reject `llvmpipe`, `softpipe`, `swrast`, and other software
 renderers, and produce changing nonuniform forwarded frames. This is
 server-application rendering evidence. Both profiles independently prove the
 client's hardware OpenGL presentation of libva-decoded H.264, so neither
-server-side graphics API substitutes for that client boundary.
+server-side graphics API substitutes for that client boundary. Since upstream
+#4962 the Linux client disables ptrace (`PR_SET_DUMPABLE=0`), so its fd table
+and mappings are no longer readable by a peer: the client's own libva log must
+select exactly the chosen render node with the Mesa `radeonsi` vendor, and its
+live GL context must name the AMD device (`client_render_node_selected`,
+`client_gpu_driver_active`). Procfs evidence remains recorded for diagnosis.
 
 The auxiliary fixture runs through native Wayland, requires an RGBA visual,
 and paints a deterministic transparent border around its opaque interactive

@@ -1,486 +1,136 @@
-# GTK client scroll event ownership
+# GTK client: first X11 wheel step after entering a window
 
 Code: the `Fork-Case: gtk-client-scroll-deduplication` commit on `develop`
 (`make -C fork-maintenance case-show CASE=gtk-client-scroll-deduplication`).
 
 ## Boundary
 
-The GTK pointer handler accepts both discrete and smooth scroll events. GDK
-can represent one physical action as a smooth delta plus an emulated discrete
-direction. Forwarding both creates two independent remote wheel operations.
-A correct adapter must preserve smooth fractions without replaying their
-discrete emulation, while keeping genuine discrete-only input usable.
+On an X11 GTK3 client (Xorg with libinput, or `GDK_BACKEND=x11` under
+Xwayland) with the default smooth wheel mode (`--mousewheel=on`), the first
+wheel step after the pointer enters an Xpra window is lost, and so is the first
+step on the other axis. The remote application does not scroll for that
+click; the following clicks work. It happens after every enter, both for
+OpenGL windows and for cairo windows (`--opengl=no`).
 
-This case owns event admission in `PointerWindow._do_scroll_event()`. When
-smooth handling and the upstream suppression setting are enabled, a GDK-marked discrete emulation is normally
-discarded and the smooth event owns movement. Device names, a guessed event
-arrival interval and disabling all discrete events are not equivalent ways
-to establish ownership.
+The mechanism, verified in the GDK 3.24 and X server sources and reproduced
+with client and server built from upstream `master`:
 
-X11 requires a narrow exception. Its smooth scroll values are derived from
-absolute valuators; the first sample after initialization or reset can expose
-a zero delta before the corresponding emulated buttons arrive. Those buttons
-retain whole-step movement missing from the smooth sample. The adapter admits
-them only for a zero axis with the exact latest X11 event metadata.
+1. GDK resets its XI2 scroll valuators on `XI_Enter` (and `XI_DeviceChanged`),
+   so the first smooth scroll event after an enter has a zero delta and is a
+   stop event (`is_stop`, `raw delta: 0.0,0.0`).
+2. For a device with scroll valuators the X server emits that motion and then
+   emulated wheel buttons 4-7 with the same time; GDK marks the latter
+   `pointer_emulated`. Only the emulated event carries the step.
+3. Upstream `f74c91e732` skips emulated events while smooth scrolling is used
+   (to stop every step being sent twice), so the step is dropped.
+4. For a cairo window the emulated event never reaches the drawing area at
+   all: `proxy_button_event()` in `gdkwindow.c` keeps an emulated event on the
+   native toplevel when the child window selected `SMOOTH_SCROLL_MASK`.
 
-Native Wayland has no such X11 valuator baseline and delivers the discrete
-copy first. It never uses this fallback. A preceding Wayland zero/stop sample
-cannot authorize replay of a later frame's emulated event.
-
-The common client pointer subsystem still owns inversion, accumulation and
-wire serialization. Native server conversion now belongs to current upstream;
-its [neutral protocol regression](../../infra/upstream-tests/neutral/README.md)
-retains independent version-5/version-8 coverage after the production case's retirement.
-This patch does not reinterpret wire distances, change XI2 event selection or
-deduplicate already transmitted packets on the server.
+Not affected: native Wayland clients (the discrete copy of a frame arrives
+first, with its own time), XTEST clicks (`xdotool`; that device has no scroll
+valuators, so its buttons are not emulated), the XI2 input path
+(`xpra/platform/posix/xi2.py` replaces `_do_scroll_event()`), macOS and MS
+Windows (GDK does not set `is_stop` there, so `scroll_stop_time` stays `-1`).
+For a touchpad the first sample of a gesture after an enter is also zero, but
+no emulated button carries it, and this case does not change that.
 
 ## Embedded-source context
 
-The case resolves against source commit
-`646b712d1bff46b08b8f26ddc7a83229d65ba5bc`, embedded in current `develop`.
-Upstream commit `9d9d1d09d84` moved wheel handling into the common client
-pointer subsystem. The GTK window remains its toolkit adapter: it translates
-GDK smooth deltas through `wheel_event()` and discrete directions through a
-button press/release pair.
+Source: `d2940c7ddc6edd65aadb00f55ac559045d0c94ed`. The case commit is,
+byte for byte, the proposed upstream fix on branch
+`upstream/x11-first-wheel-step` (one commit on this same `master`); its
+message is that commit's message plus the case trailer. When upstream merges
+it, `develop-rebase` drops this commit and the case is retired.
 
-Upstream `f74c91e7320671a91d1d5a7db85a804e2b59e3b5` now suppresses
-`event.get_pointer_emulated()` under smooth handling and introduces
-`XPRA_SKIP_DUPLICATE_SCROLL_EVENTS`, enabled by default. The current decision is
-**adapt and narrow**: preserve that implementation and its opt-out, while
-retaining only the missing X11 zero-baseline recovery and complete scroll
-admission. The clean handler still drops the first/reset X11 emulated step.
-
-Upstream `10a9c3ca12` now rejects client/server readonly and a disabled server
-pointer inside `PointerClient.wheel_event()` for every adapter, and
-`b2ee40bcdb` holds back button presses under the same policy. The GTK adapter
-still forwards smooth deltas under coarse policy, and its discrete route never
-consults an empty `wheel_map`. This refresh keeps the case commit unchanged.
-Its adapter admission deliberately repeats the upstream readonly/server-pointer
-conditions, because each denial must also retire the X11 zero-baseline
-allowance. The same test covers every denial kind. `cb32a201c9` (button polling
-releases the recorded press) composes; the regression still requires an empty
-`button_pressed` table after every sequence.
-
-`wheel_smooth` and `wheel_map` remain pointer-subsystem policy. This patch reads
-them, and keeps upstream's process-level suppression setting, rather than
-inventing another configuration or modifying common packet serialization.
-
-The standalone OpenGL probe/configuration windows use the production
-`FakePointerSubsystem`, rather than `PointerClient`. Its empty `wheel_map`
-expresses the same no-output policy as its existing no-op wheel methods and
-satisfies the adapter's admission contract. Omitting that field makes a real
-scroll event raise `AttributeError` before admission can consume it. Extending
-the fake interface follows upstream `18ec2d63717a` rather than weakening the
-real pointer subsystem's required interface with an optional attribute lookup.
-
-Current upstream `f538ec11ac` removed pre-7 senders and legacy aliases; ordinary
-and no-compat runs now use the same modern pointer packets. The optional
-client-side wheel-to-button fallback remains a device/emulation capability
-decision, not a restored legacy transport. `798ec0b187` added a weak
-`moveresize_click` hook before ordinary button handling for local window drags;
-the scroll patch preserves it. The focused harness never initiates such a drag,
-so its absent hook follows the real ordinary path without a new fixture shim.
-Neither change supplies the missing X11 zero-axis recovery or adapter admission,
-and the current case code remains unchanged after this source review.
-
-On an upstream refresh, replacement is behavioral. Clean source must admit
-one representation, preserve the first X11 whole step after a baseline reset,
-keep fractional smooth input and standalone discrete input, and honor
-disabled/readonly policy. Merely adding a GDK emulation check can eliminate
-duplicates while losing that first X11 movement.
+The previous version of this case (a nine-field event key, an axis mask, a
+fake-client `wheel_map` and a 436-line native test) was replaced by this
+minimal form. Its admission parts are upstream now (`is_readonly()` and the
+checks in `PointerClient.wheel_event()` from `10a9c3ca12`/`b2ee40bcdb`, and
+our #5152 `22a787b2db`, which does not send unmapped wheel buttons), so the
+`FakePointerSubsystem.wheel_map` change is no longer needed either. The
+maintainer had asked about the old patch in meta-issue #5037, item 12
+(<https://github.com/Xpra-org/xpra/issues/5037#issuecomment-5652872912>):
+"how reproducible is this? is it really worth the complexity? it's not clear
+to me why f74c91e732 is not sufficient". The answers are in the Boundary
+section: every time after an enter on X11; `f74c91e732` drops the only event
+which carries the first step; and the fix is a few lines.
 
 ## Surrounding code and ownership map
 
-| Component | Responsibility |
+| Path / symbol | Role |
 | --- | --- |
-| GDK's X11 and Wayland backends | Supply native scroll events, public device/window metadata and the private pointer-emulation flag. |
-| GTK widget event delivery | Delivers scroll callbacks to the window adapter; native event lifetime remains with GDK/GTK. |
-| `xpra/client/gtk3/window/pointer.py` | Owns event admission, the bounded X11 zero-axis fallback key, smooth normalization and discrete button-action entry. |
-| `xpra/client/subsystem/pointer.py` | Owns `wheel_smooth`, `wheel_map`, inversion, delta accumulation, button serialization and precise/compatibility wheel transport. |
-| `xpra/server/subsystem/pointer.py` | Parses admitted operations and chooses the native device or discrete fallback after ordinary pointer policy. |
-| `xpra/wayland/server/pointer.pyx` | Current upstream converts one admitted operation into native axis units; independent neutral protocol tests retain that boundary. |
-| `tests/unittests/unit/wayland/gtk_scroll_test.py` | Exercises the real GDK flag, GTK callback route, adapter and outgoing pointer serializer with controlled event sequences in both focused and native Wayland gates. |
-| `fork-maintenance/infra/live/run.py` | Owns actual Sway-to-Xwayland and XTEST input, packet/native-axis accounting, remote GTK response and final log-tail checks. |
+| `xpra/client/gtk3/window/pointer.py` `PointerWindow._do_scroll_event()` | Converts GTK scroll events into `wheel_event()` (smooth) or button press/release pairs (discrete), and skips emulated duplicates since `f74c91e732` (`XPRA_SKIP_DUPLICATE_SCROLL_EVENTS`). |
+| `PointerWindow.init_window()` | Window-level pointer state; the case adds `scroll_stop_time` and connects `toplevel_scroll_event` to the toplevel, like `KeyboardWindow` connects its key handlers there. |
+| `xpra/client/gtk3/window/base.py` widget event wiring | The drawing area (cairo) or GL widget receives `scroll-event` and calls `_do_scroll_event()`. |
+| `xpra/client/subsystem/pointer.py` `PointerClient.wheel_event()` / button path | Owns admission, `wheel_map` and serialization; unchanged. |
+| `xpra/platform/posix/xi2.py` | The XI2 path replaces `_do_scroll_event` with `suppress_event`; the toplevel handler goes through the same method, so it is silent there too. |
 
-The corrected adapter has two legitimate output paths:
+## Mechanism
 
-```text
-GDK scroll event -> GTK widget callback -> PointerWindow._do_scroll_event()
-  |
-  +-- pointer policy denies input ----------------------> no output; invalidate key
-  |
-  +-- smooth event
-  |     +-- coarse policy -----------------------------> no output; invalidate key
-  |     +-- smooth enabled
-  |           -> replace latest X11 key and zero-axis mask
-  |           -> normalize deltas -> PointerClient.wheel_event()
-  |
-  +-- discrete event
-        +-- genuine, coarse policy, or suppression off -> button press/release
-        +-- emulated with smooth enabled
-              +-- exact X11 zero-axis match -----------> button press/release
-              +-- otherwise --------------------------> no output
-```
-
-Every branch completes the GTK handler with `True`. Suppression is local
-event consumption, not postponement or a request for GTK to resend the event.
-Unknown discrete directions still have no valid button mapping and produce
-no button action.
-
-## Admission and smooth/discrete policy
-
-Before processing either representation, the handler resolves the pointer
-subsystem and rejects input when it is missing, the client or server is
-readonly, the server has disabled pointer input, or `wheel_map` is empty.
-The rejected callback invalidates `_smooth_scroll_key`, so later allowed
-input cannot borrow a previously admitted sample through that denied event.
-It also clears the zero-axis mask.
-
-With coarse policy, the handler also invalidates the key and ignores smooth
-events. Discrete events, including native emulation, retain the existing
-press/release path. Dropping every marked discrete event independently of
-`wheel_smooth` would break this deliberate coarse-mode ownership.
-
-With smooth policy, an unmarked discrete event remains usable. It can belong
-to a genuine discrete-only device, and the adapter must not discard it just
-because smooth events were seen earlier. Only a marked emulation enters the
-fallback decision.
-
-`XPRA_SKIP_DUPLICATE_SCROLL_EVENTS=0` deliberately restores forwarding of
-marked discrete events even under smooth policy, preserving upstream's escape
-hatch for backends which mark standalone events as emulated. No X11 fallback
-state is retained or consulted in that mode. It may produce both representations
-when the backend really supplies both; that is an explicit policy choice, not
-permission to bypass readonly, disabled-pointer or mousewheel-off admission.
-
-| Event/policy | Owner of movement |
-| --- | --- |
-| Smooth event, smooth enabled | The smooth delta through `PointerClient.wheel_event()`. |
-| Smooth event, coarse policy | No output from this representation. |
-| Genuine discrete event, admitted policy | The existing button press/release path. |
-| Emulated discrete event, coarse policy | The discrete representation. |
-| Emulated discrete event, suppression disabled | Forwarded by deliberate upstream opt-out; a smooth counterpart is also forwarded. |
-| Emulated discrete event, suppression and smooth enabled, exact X11 zero-axis match | The discrete representation for movement absent from that axis's smooth sample. |
-| Other emulated discrete event, suppression and smooth enabled | No output; smooth input owns the operation. |
-| Missing/disabled pointer, empty map or readonly | Neither representation is forwarded. |
-
-The patch does not add observers for every policy assignment. Key invalidation
-happens when a denied/coarse callback is processed, when a later smooth event
-replaces the key, or during window initialization/cleanup. It should not be
-documented as a new global pointer-policy lifecycle API.
-
-## X11 zero-valuator fallback
-
-For an admitted smooth event with suppression enabled, `_x11_scroll_key()` requires a real event
-window, logical device and source device, and checks that the event window's
-display has GType name `GdkX11Display`. The event's display is authoritative;
-the process may have both X11 and Wayland displays open.
-
-The resulting key contains all of:
-
-- the native event timestamp;
-- the event window;
-- the logical device and source device;
-- local `x`, `y` and root `x_root`, `y_root` coordinates; and
-- the integer modifier/button state.
-
-Missing identities or a non-X11 display yield an empty key. There is no
-device-name allowlist, time tolerance, host-backend assumption or map of
-historical events. Comparison uses the actual public event values and GDK
-objects, not only a timestamp or one device ID.
-
-The smooth event also records a two-bit mask from its raw deltas: mask value
-`1` is set when `delta_x == 0`, value `2` when `delta_y == 0`. The test is before
-normalization and uses exact zero, not a "small enough" threshold. A real
-fractional delta cannot grant permission to replay its whole-step emulation.
-
-For an emulated discrete event, vertical buttons 4/5 select mask value `2` and
-horizontal buttons 6/7 select value `1`. Admission requires a nonempty stored
-key, that axis's zero bit, and equality with the new event's complete X11
-key. A nonzero vertical sample can therefore suppress its vertical emulation
-while a zero horizontal axis still admits matching horizontal movement.
-
-Every smooth event replaces the key and mask, even when its timestamp and
-all other public metadata equal the previous sample. Updating only when time
-changes would leave a zero-axis allowance active after a later nonzero sample
-in the same timestamp and reintroduce duplicate scrolling.
-
-An accepted discrete fallback does not consume the zero-axis allowance.
-One initial absolute sample may generate several whole-step emulated buttons;
-dropping all but the first would lose movement. The allowance stays bounded
-to the latest matching smooth sample and is superseded by the next one.
-
-This is recovery of available information, not reconstruction of the raw
-valuator. If the first fractional X11 sample has no discrete counterpart,
-there is no movement value for the adapter to recover. The patch does not
-invent one or claim to repair GDK's underlying valuator baseline.
-
-## Native Wayland ordering
-
-For the native Wayland wheel path exercised by the regression, GDK delivers
-the marked discrete event before the smooth event. Waiting for a same-frame
-smooth callback is unnecessary: the emulation flag already identifies the
-discrete copy, so it is rejected immediately when smooth handling is enabled.
-
-Wayland events cannot create an X11 fallback key. In particular, a previous
-zero/stop event followed by a new frame's discrete-first event must still
-produce only the new smooth operation, even if their public timestamps and
-coordinates happen to coincide. A backend-neutral cache of the last zero
-delta would get that sequence wrong.
-
-The regression also replays the pair in reverse order and repeats it, proving
-that ordinary emulation suppression is not an arrival-time heuristic. Those
-controlled sequences do not change the documented X11 exception: recovery
-there specifically uses its preceding matching smooth sample.
-
-## Normalization, mapping and button state
-
-An admitted smooth event retains the upstream coordinate transform,
-`norm_scroll()` calls and vertical sign conversion. It passes `norm_x` and
-`-norm_y` to the common pointer subsystem. This patch does not merge axes,
-round them into whole clicks or modify the smooth-scroll normalization
-setting.
-
-`PointerClient.wheel_event()` continues to accumulate each axis, choose its
-button through `wheel_map`, and serialize the precise distance or use its
-compatibility fallback. Inversion is applied there, not in the GTK duplicate
-decision. The X11 zero-axis test uses the original GDK direction before
-inversion; the admitted discrete pair follows ordinary mapping afterward.
-
-An admitted discrete event calls `_button_action()` once with pressed state
-and once with released state. Existing modifier translation, pointer data,
-window targeting and `button_pressed` bookkeeping remain in that method.
-The regression requires an empty pressed-button map after every replay;
-deduplication must not leave a phantom held wheel button.
-
-The shared server and native device receive ordinary valid operations. This
-case does not change the precise packet's thousandths-of-a-click units or
-force one sign on both packet distance and mapped button. Server-side
-normalization remains an independent necessary boundary.
-
-## State and event lifetime
-
-The only new per-window fields are `_smooth_scroll_key` and
-`_smooth_scroll_zero_axes`. Initialization sets an empty key and zero mask;
-cleanup clears both before the existing overlay cleanup calls. Denied, coarse
-and suppression-disabled callbacks also clear both fields. A non-X11 smooth
-event leaves an empty key and zero mask.
-
-This is one latest-sample record, not an unbounded per-device history. The
-key retains a bounded set of GDK window/device objects and scalar values
-until replacement or invalidation. It does not retain the original
-`Gdk.Event`, queue events for later delivery or install a timer.
-
-The handler reads the native pointer-emulation flag during the event's
-callback. That flag belongs to GDK's private event representation; public
-fields such as direction, deltas and timestamp do not recreate it. A boxed
-event copy can lose the flag and must not replace the live native event in
-the regression's positive control.
-
-No production scheduler, thread, lock, device subscription or polling loop
-is added. Existing pointer-overlay and button-polling resources retain their
-own lifecycle; the new fields neither schedule nor cancel those facilities
-on behalf of their owners.
+`scroll_stop_time` is the time of the last smooth event if it was a stop event
+(on X11 exactly the zero-delta sample after a valuator reset), else `-1`. An
+emulated event is a duplicate unless its time equals `scroll_stop_time`; only
+duplicates are skipped. `toplevel_scroll_event()` handles, on the toplevel,
+only the emulated event with that time, and otherwise lets GTK propagate the
+event as before: scrolling over the header bar still does not reach the
+server, and with `XPRA_SKIP_DUPLICATE_SCROLL_EVENTS=0` a cairo window does not
+start receiving both copies. The state is one integer per window, written only
+on the GTK main thread; there is nothing to clean up.
 
 ## Case-commit and integration ownership
 
-The case commit changes `xpra/client/gtk3/window/pointer.py`, supplies the
-disabled wheel policy in `xpra/client/gui/fake_client.py`, and adds
-`tests/unittests/unit/wayland/gtk_scroll_test.py`. The manifest has no case
-dependencies: the commit applies alone on the upstream base and is removable
-from `HEAD` independently of the other case commits (`case-check`). The
-manifest retains the existing client pointer and pointer-loopback modules, the
-native `wayland` gate and all three full upstream legs.
-
-Current upstream corrects native direction and scale after a single operation
-is admitted. The [neutral pointer consumer](../../infra/upstream-tests/neutral/README.md)
-must still reject incorrect native values without depending on this GTK filter,
-while this case's default-policy outgoing assertions reject duplicates without
-depending on a server that could hide them. The complete stack proves their
-composition; no redundant native production case is retained just to own tests.
-
-The X11 clipboard case owns XFixes/filter leases and clipboard event routing,
-not scroll admission or XI2 subscription. The packet-handler error case owns
-exception containment, not choosing which wheel representation to send.
-Do not absorb either repair or modify upstream XI2 handlers to make these
-GTK adapter assertions pass.
+The commit changes `pointer.py`, adds `test_first_x11_scroll_step` to the
+existing `unit/client/gtk3/client_window_test.py`, and gives the bare
+`PointerWindow()` in `unit/client/opengl_backing_test.py` a `connect` stub
+(`init_window()` now connects a signal). It has no dependency. No other case
+touches the GTK scroll path; pointer coordinate and wheel serialization belong
+to upstream.
 
 ## Commit scope and non-goals
 
-The case does not:
+No change to smooth-event normalization, `wheel_map`, button mapping, the
+suppression toggle or any platform other than GDK X11 behavior. The touchpad
+first-sample loss described above is not addressed. The old case's
+discrete-first Wayland handling and nine-field event key are intentionally not
+kept.
 
-- disable all discrete devices after observing smooth input;
-- infer physical device type from a device name or inter-event delay;
-- use a timestamp-only pairing rule or an unbounded recent-event cache;
-- consume the first X11 fallback allowance after just one whole step;
-- apply the X11 baseline exception to native Wayland events;
-- remove or bypass upstream's explicit suppression opt-out;
-- copy native events to preserve them beyond their callback, or mutate GDK's
-  private emulation flag;
-- change XI2 masks, absolute valuator state, GTK internals or packet layouts;
-- add gesture recognition, inertial scrolling, server-side deduplication or
-  application-specific scroll scaling;
-- recover an initial fractional movement for which GDK supplied neither a
-  nonzero smooth delta nor a discrete event.
+## Regression design and clean control
 
-## Focused regression design
-
-`unit.wayland.gtk_scroll_test` runs a fresh interpreter, a real
-`WaylandCompositor` using Pixman, an owned Xvfb display and a GTK consumer
-with both display backends available. Missing native/display dependencies
-fail rather than skip. The native fixture maps a GTK drawing area, enters
-its surface and injects a real wheel press/release through the compositor's
-pointer device.
-
-The regression lives in `unit/wayland` so the declared native gate actually
-executes it, as well as the selected focused run. That gate builds both the
-native compositor and GTK client modules. A green Wayland run which only ran
-unrelated server modules is not a clean control for this case; its tests-only
-run must reach the real GTK fixture and expose first/reset loss or forbidden
-input admission. The relocation changes neither the six methods nor their
-event/packet assertions, and the original client pointer/loopback modules stay
-in the focused selection.
-
-The consumer receives GDK's actual marked discrete event and verifies
-`get_pointer_emulated()` before using it. All replays needing that private
-flag run synchronously while its callback still owns the event. The test
-does not fake the getter, write private flags or use a boxed copy. Publicly
-constructed smooth and genuine discrete events provide explicit unmarked
-controls; the subsequently received native smooth event must also be unmarked.
-
-The same consumer also passes a real GDK smooth event through the real
-`PointerWindow` adapter with the production `FakeClient`. It requires normal
-consumption under the fake pointer's disabled policy. This preservation check
-exposes an incomplete fake interface independently of the configured-client
-mapping/serialization controls; it does not claim a network or rendering test
-for the standalone window.
-
-`Harness` subclasses the real `PointerWindow` and attaches its real scroll
-handler to GTK widgets. `Gtk.main_do_event()` delivers each controlled event
-through that widget path. A real `PointerClient` performs mapping and packet
-serialization; only the endpoint packet queue, surrounding subsystem shells
-and coordinate transform are fixtures. Assertions inspect outgoing wheel
-and button packets, not a mocked call to the adapter's final send method.
-Since upstream `68afeba7b8`, releasing the last button calls
-`cancel_moveresize_cursor()`, which the full client window defines outside
-`PointerWindow`; the harness provides it as a no-op because it never starts a
-move/resize drag. Without it the GTK handler raises before the release packet.
-
-The fixture pins the normal process setting to suppression enabled and checks
-that value. Separate replay controls temporarily change only the public module
-policy constant; they never mock the GDK flag, adapter or packet serializer.
-
-The six test groups establish:
-
-- **Single ownership:** all four directions, ordinary and reversed pair order,
-  repeated pairs and per-axis inversion produce one precise operation per
-  admitted smooth step, with the expected mapped button and signed distance.
-- **Upstream opt-out:** all axes and both event orders deliberately forward
-  both representations when suppression is disabled, including X11 nonzero
-  samples. Disabled/readonly admission still rejects both.
-- **Discrete and coarse controls:** genuine discrete events and coarse-mode
-  pairs produce exactly one press/release pair. Mixed genuine and emulated
-  streams preserve independent discrete movement without replaying emulation.
-- **Fractions and admission:** simultaneous fractional axes retain their
-  exact serialized magnitudes; a zero event produces no packet. Mousewheel
-  off, client/server readonly, server pointer off and missing subsystem
-  produce no output.
-- **X11 baseline/reset:** first zero samples preserve one or several matching
-  whole steps, subsequent nonzero samples suppress their emulation, reset
-  restores fallback, and axis inversion still maps the admitted button pair.
-- **X11 identity and invalidation:** per-axis recovery, fractional following
-  samples and coincident timestamps do not reuse a stale zero allowance.
-  Different times, every local/root coordinate, modifiers, windows, logical devices or
-  source devices fail the match. Denied/coarse callbacks and cleanup invalidate
-  the allowance. A Wayland stop followed by another frame cannot borrow it.
-
-For the X11 adapter controls, the fixture creates real Xvfb-backed GTK windows
-and devices, then combines their public metadata with the still-live native
-GDK emulation flag. This deliberately tests the adapter's decision boundary;
-it is not an XI2 generator and does not claim to reproduce GDK's absolute
-valuator reset mechanism. Actual Xwayland input is the complementary live
-boundary below.
-
-The subprocess protocol checks mapping/readiness, one structured observation
-result, bounded completion and exit status. Fresh child interpreters inherit
-the installed module search path. Cleanup attempts client, device, compositor
-and Xvfb even if an earlier cleanup fails. The tests-only clean control uses
-existing public methods and must expose lost first/reset X11 movement or the
-remaining admission/coarse defect. Ordinary default duplicate suppression is
-already present upstream and is now a preservation control, not the negative
-oracle. Missing new helpers, imports or test-only APIs are not valid failures.
+`test_first_x11_scroll_step` creates a real `ClientWindow` with the upstream
+`FakeWindowHost`/`FakePointerSubsystem`, enables `wheel_smooth`, and emits real
+`Gdk.Event` scroll events on the drawing area and on the toplevel. Only
+`Gdk.EventScroll.get_pointer_emulated` is patched: the flag lives in the
+private part of the event and `gdk_event_set_pointer_emulated()` is not
+exported. A zero-delta stop event at time 1 followed by an emulated `DOWN` on
+the toplevel at time 1 must produce `["wheel", "button", "button"]`; on clean
+source it produces only `["wheel"]`. The second half (time 2) checks that
+ordinary emulated duplicates are still dropped both on the toplevel and on the
+widget (the OpenGL path). Blind spots: the real XI2 valuator reset and the
+real GDK proxying are not reproduced by the unit test.
 
 ## Durable live boundary
 
-The complete-stack Vulkan and OpenGL hardware profiles generate actual Sway
-axis input into the Xwayland/GTK Xpra client. This exercises the toolkit's
-native valuator/emulation route in addition to the focused adapter controls.
-The GTK detach and transport-loss profiles use genuine XTEST discrete input,
-which must remain usable without a smooth counterpart.
-
-The shared title-bound GTK interaction fixture checks six steps covering
-both axes, repetition and reversal. Every stimulus, including the first,
-must yield exactly one wire operation: either a wheel packet or a discrete
-button press/release pair. The oracle permits the first X11 step's discrete
-fallback but never accepts both representations of one action.
-
-Each operation must also match the native server axis record, the remote
-GTK displacement and visible feedback. The full post-input packet/native
-log tails and final fixture stream are reparsed during collection. A late
-duplicate cannot be hidden by taking a screenshot before it arrives.
-
-The live oracle accepts behavior, not a particular GTK filtering strategy.
-It neither requires every smooth-source step to use a precise packet nor
-treats a bounded packet count without application movement as success. The
-focused tests remain necessary for fractions, metadata mismatches and the
-controlled admission/reset cases not generated by those six live stimuli.
-
-Both endpoints always contain every case commit of the current `develop` stack.
-The manifest's `live-rgb` and `live-h264` gate metadata does not select an
-isolated product or waive the other members of the nine-profile suite.
+The Vulkan and OpenGL hardware profiles scroll with the fork's Sway virtual
+pointer through Xwayland into the GTK client (an OpenGL window) and require
+exactly one remote operation per wheel step, including the first one; on the
+unpatched handler the first down and first right steps are lost. The GTK
+detach and transport-loss profiles use XTEST discrete input, which must keep
+working unchanged. No live profile currently scrolls a cairo window with
+valuator input; that path is covered only by the unit test. Every live run
+applies the complete stack to both endpoints.
 
 ## Invariants not to simplify
 
-- Use GDK's actual emulation flag to distinguish a duplicate representation
-  from genuine discrete input.
-- Preserve upstream's suppression toggle and its deliberate opt-out semantics.
-- Check pointer admission before either representation can send packets.
-- Respect coarse policy: it selects discrete ownership rather than disabling
-  scrolling altogether.
-- Restrict zero-valuator recovery to the event window's X11 display.
-- Require the complete latest event key and the matching raw zero axis.
-- Replace state on every smooth event, including identical timestamps.
-- Preserve several emulated whole steps from one initial zero sample.
-- Clear both bounded fields on denied/coarse/opt-out callbacks and at cleanup.
-- Never borrow a Wayland stop or zero sample for discrete-first emulation.
-- Keep mapping, fractions, packet serialization and native server conversion
-  with their existing owners.
-- Exercise the real native flag within its callback; do not turn a copied or
-  publicly constructed event into a false positive control.
-- Require the first real live step, complete packet accounting and remote
-  application feedback, not only absence of a duplicate in a mocked stream.
+- Keep `f74c91e732`'s suppression for every emulated event except the one with
+  the stop event's time.
+- Handle only that event on the toplevel; let every other toplevel scroll
+  event propagate unchanged.
+- Keep the condition on the event time, not on ordering: on Wayland the
+  discrete copy of a frame comes first with its own time.
 
 ## Required validation
 
-Follow [development and final acceptance](../../docs/runbooks/validation.md).
-For an explicit refresh, finish the whole-stack and composed manual-review
-exit before runtime regression execution.
-After an atomic change, run the manifest's focused modules and a tests-only
-clean control against the same frozen image. Include actual native Wayland
-and Xvfb/GDK execution, Cythonized and no-compat modes, and composed client/
-server pointer regressions. Native subject modules must fail rather than skip
-when their dependencies are missing.
-
-Start `live-all STACK=develop RUN=<fresh-prefix>` after focused prerequisites.
-At candidate freeze, fill missing or invalidated focused/native, quarantine,
-fork-control and all three full upstream legs. Require `live-suite-check`
-for all nine current complete-stack profiles. These are final coverage
-obligations under the canonical scheduling/reuse rules, not a requirement
-to restart unchanged full suites after each edit.
-
-Package/build gates follow the enclosing contract; this case changes neither
-packaging nor a native ABI. The
-[scoped mypy gate](../../docs/runbooks/typecheck.md) does not currently cover
-the GTK pointer adapter, and a green result there cannot prove this event
-ownership boundary. Source, selection, image and named-result identities
-belong in the ignored cycle ledger rather than this architectural README.
+Run the manifest's focused modules (patched, and tests-only as the clean
+control, whose first failure must be `test_first_x11_scroll_step`), the full
+legs, and the complete nine-profile live suite with the whole stack.

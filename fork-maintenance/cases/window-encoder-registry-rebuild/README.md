@@ -23,7 +23,9 @@ worker route are shared with other display and transport backends.
 
 ## Embedded-source context
 
-The embedded source is `646b712d1bff46b08b8f26ddc7a83229d65ba5bc`.
+The embedded source is `d2940c7ddc6edd65aadb00f55ac559045d0c94ed` (refreshed from
+`646b712d1b`; the registry construction, `encode_ended()` and the encode
+lookups this case locks are unchanged upstream, and the diff replays as is).
 Antoine Martin's `984ebb8a03` ([issue #3382](https://github.com/Xpra-org/xpra/issues/3382))
 introduced late encoder reinitialization after slower threaded setup. Its
 actual diff reinitializes existing window sources and updates selection after

@@ -1,13 +1,13 @@
 schema = 2
-slug = "wayland-popup-opaque-region"
+slug = "cython-window-factory-metadata"
 kind = "production"
-title = "Publish the opaque region of Wayland popups"
+title = "Accept typedict metadata in the compiled window factory"
 dependencies = []
 
 [tests]
 list = [
-  "unit.wayland.window_test",
-  "wayland",
+  "unit.client.fake_window_metadata_test",
+  "focused",
   "full",
   "full-cython",
   "full-no-compat",

@@ -80,6 +80,19 @@ def verified_group_signal(pgid: int, members: list[dict], signum: int) -> None:
         os.killpg(pgid, signum)
 
 
+def application_session_live(application: dict) -> bool:
+    """The recorded application still leads its own process group."""
+    return bool(live_members(application["pid"], [application]))
+
+
+def verified_application_signal(application: dict, signum: int) -> None:
+    """Xpra starts each command as a session leader (upstream #5128); signal only that exact group."""
+    pid = application["pid"]
+    if pid <= 1 or pid == os.getpgrp() or application.get("pgid") != pid:
+        raise ValueError("unsafe application process group signal")
+    verified_group_signal(pid, [application], signum)
+
+
 def exit_receipt(returncode: int) -> dict:
     """The parent's own wait status: an abort can never look like an exit."""
     if returncode < 0:
@@ -213,7 +226,8 @@ def bus_owner(address: str, name: str) -> int:
 def expected_events(order: str, reason: str) -> list[str]:
     middle = {"bus-first": ["private-bus-reaped"], "server-first": ["server-reaped"],
               ABORT_CONTROL: ["server-aborted"]}.get(order, [])
-    return [reason, *middle, "group-SIGTERM"]
+    tail = ["application-SIGTERM"] if order == ABORT_CONTROL else []
+    return [reason, *middle, "group-SIGTERM", *tail]
 
 
 def helper_statuses_valid(order: str, statuses: object) -> bool:
@@ -252,6 +266,16 @@ def session_cleanup_valid(order: str, files: object) -> bool:
     return after == ready if order == ABORT_CONTROL else after == {"sessions": [], "sockets": []}
 
 
+def valid_member_shape(member: object) -> bool:
+    return bool(
+        isinstance(member, dict) and set(member) == {"pid", "parent_pid", "start_ticks", "comm", "pgid"}
+        and type(member["pid"]) is int and member["pid"] > 1
+        and type(member["parent_pid"]) is int and member["parent_pid"] > 0
+        and isinstance(member["start_ticks"], str) and re.fullmatch(r"[1-9][0-9]{0,31}", member["start_ticks"])
+        and isinstance(member["comm"], str) and 0 < len(member["comm"]) <= 256
+        and type(member["pgid"]) is int and member["pgid"] > 1)
+
+
 def evidence_checks(evidence: dict, *, application: dict, server_pid: int) -> dict[str, bool]:
     """Recomputed by both the worker and independent artifact collector."""
     ready, result, native = (evidence.get(key, {}) for key in ("ready", "result", "native_exit"))
@@ -259,16 +283,18 @@ def evidence_checks(evidence: dict, *, application: dict, server_pid: int) -> di
         return {"private_shutdown_receipts": False}
     pgid = ready.get("pgid")
     members = ready.get("members")
-    valid_members = bool(isinstance(members, list) and len(members) == 5 and type(pgid) is int and pgid > 1)
+    application_member = ready.get("application_member")
+    valid_members = bool(isinstance(members, list) and len(members) == 4 and type(pgid) is int and pgid > 1)
     if valid_members:
         valid_members = all(
-            isinstance(member, dict) and set(member) == {"pid", "parent_pid", "start_ticks", "comm", "pgid"}
-            and type(member["pid"]) is int and member["pid"] > 1
-            and type(member["parent_pid"]) is int and member["parent_pid"] > 0
-            and isinstance(member["start_ticks"], str) and re.fullmatch(r"[1-9][0-9]{0,31}", member["start_ticks"])
-            and isinstance(member["comm"], str) and 0 < len(member["comm"]) <= 256
-            and member["pgid"] == pgid for member in members
-        ) and len({member["pid"] for member in members}) == 5
+            valid_member_shape(member) and member["pgid"] == pgid for member in members
+        ) and len({member["pid"] for member in members}) == 4
+    # Upstream #5128: the application leads its own group, outside the private one.
+    valid_application = bool(valid_member_shape(application_member)
+                             and application_member["pgid"] == application_member["pid"] != pgid
+                             and (not isinstance(members, list)
+                                  or application_member["pid"] not in {member.get("pid") for member in members
+                                                                       if isinstance(member, dict)}))
     owners = ready.get("bus_owners")
     order = ready.get("order")
     events = result.get("events", [])
@@ -278,11 +304,12 @@ def evidence_checks(evidence: dict, *, application: dict, server_pid: int) -> di
     remaining = result.get("remaining_members")
     return {
         "private_shutdown_receipts": ready.get("schema") == result.get("schema") == 2,
-        "owned_private_group_topology": bool(valid_members and members[0]["pid"] == pgid
-            and members[1]["pid"] == server_pid and members[4]["pid"] == application.get("pid")
-            and members[4]["start_ticks"] == application.get("start_ticks")
-            and members[4]["parent_pid"] == server_pid and ready.get("application") == application
-            and result.get("members") == members and result.get("pgid") == pgid),
+        "owned_private_group_topology": bool(valid_members and valid_application and members[0]["pid"] == pgid
+            and members[1]["pid"] == server_pid and application_member["pid"] == application.get("pid")
+            and application_member["start_ticks"] == application.get("start_ticks")
+            and application_member["parent_pid"] == server_pid and ready.get("application") == application
+            and result.get("members") == members and result.get("application_member") == application_member
+            and result.get("pgid") == pgid),
         "private_services_owned": bool(valid_members and isinstance(owners, dict) and set(owners) == set(REQUIRED_NAMES)
             and owners[REQUIRED_NAMES[0]] == server_pid and owners[REQUIRED_NAMES[1]] == members[2]["pid"]
             and owners[REQUIRED_NAMES[2]] == members[3]["pid"]),
@@ -342,6 +369,7 @@ def supervise(order: str, command: list[str]) -> int:
     children: dict[str, subprocess.Popen] = {}
     streams = [supervisor_log]
     members: list[dict] = []
+    application_member: dict | None = None
     pgid = 0
     interrupted: list[int] = []
     started = time.monotonic()
@@ -422,10 +450,16 @@ def supervise(order: str, command: list[str]) -> int:
                 application_member = identity(application["pid"])
                 if application_member["start_ticks"] != application["start_ticks"]:
                     raise RuntimeError("application identity changed before group capture")
-                members.append(application_member)
                 if any(member["pgid"] != pgid for member in members):
                     raise RuntimeError("private group does not contain every required peer")
+                # Xpra runs each started command in its own session and terminates
+                # that group itself (upstream #5128): it is Xpra's child, not ours.
+                if (application_member["parent_pid"] != server.pid
+                        or application_member["pgid"] != application_member["pid"]
+                        or os.getsid(application_member["pid"]) != application_member["pid"]):
+                    raise RuntimeError("the application is not a session leader started by Xpra")
                 ready = {"schema": 2, "order": order, "pgid": pgid, "members": members,
+                         "application_member": application_member,
                          "names": sorted(REQUIRED_NAMES), "application": application,
                          "bus_owners": {name: bus_owner(address, name) for name in REQUIRED_NAMES},
                          "session_files": session_entries(command)}
@@ -449,22 +483,29 @@ def supervise(order: str, command: list[str]) -> int:
                            "time_ns": time.monotonic_ns()})
         verified_group_signal(pgid, members, signal.SIGTERM)
         events.append({"event": "group-SIGTERM", "time_ns": time.monotonic_ns()})
+        if order == ABORT_CONTROL:
+            # The aborted server cannot terminate its application's session.
+            verified_application_signal(application_member, signal.SIGTERM)
+            events.append({"event": "application-SIGTERM", "time_ns": time.monotonic_ns()})
         deadline = time.monotonic() + GRACE_SECONDS
         while time.monotonic() < deadline:
-            if all(child.poll() is not None for child in children.values()):
+            if (all(child.poll() is not None for child in children.values())
+                    and not application_session_live(application_member)):
                 break
             time.sleep(0.05)
         else:
             verified_group_signal(pgid, members, signal.SIGKILL)
+            verified_application_signal(application_member, signal.SIGKILL)
             events.append({"event": "group-SIGKILL", "time_ns": time.monotonic_ns()})
         statuses = {role: child.wait(timeout=15) for role, child in children.items() if role in HELPER_ROLES}
         server.wait(timeout=15)
         server_exit = publish_server_exit()
-        remaining = [observed for member in members
+        remaining = [observed for member in (*members, application_member)
                      if (observed := peer_processes.read_process(member["pid"])) is not None
                      and observed["start_ticks"] == member["start_ticks"]]
         publish("server.shutdown-result.json", {
-            "schema": 2, "order": order, "pgid": pgid, "members": members, "reason": reason, "events": events,
+            "schema": 2, "order": order, "pgid": pgid, "members": members,
+            "application_member": application_member, "reason": reason, "events": events,
             "statuses": statuses, "server_exit": server_exit, "remaining_members": remaining,
             "session_files": {"ready": ready["session_files"], "after": session_entries(command)},
         })
@@ -476,6 +517,11 @@ def supervise(order: str, command: list[str]) -> int:
                 verified_group_signal(pgid, members, signal.SIGKILL)
             except (OSError, ValueError) as error:
                 print(f"private group cleanup: {error}", file=sys.stderr, flush=True)
+        if application_member is not None:
+            try:
+                verified_application_signal(application_member, signal.SIGKILL)
+            except (OSError, ValueError) as error:
+                print(f"application group cleanup: {error}", file=sys.stderr, flush=True)
         for child in children.values():
             try:
                 if child.poll() is None:

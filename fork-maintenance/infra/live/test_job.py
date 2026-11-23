@@ -3382,11 +3382,13 @@ class LiveJobTest(unittest.TestCase):
             self.assertTrue(accepted())
             path = root / "server.shutdown-ready.json"
             original = path.read_bytes()
-            evidence["ready"]["members"][4]["pgid"] = 800
+            # The pre-#5128 topology: the application inside the private group.
+            evidence["ready"]["application_member"]["pgid"] = evidence["ready"]["pgid"]
+            evidence["result"]["application_member"] = evidence["ready"]["application_member"]
             path.write_text(json.dumps(evidence["ready"]))
-            # Both receipts and claims forged consistently, still not a group.
+            # Both receipts and claims forged consistently, still not Xpra's own session.
             (root / "server.shutdown-result.json").write_text(json.dumps(evidence["result"]))
-            self.assertFalse(accepted(), "application outside private group")
+            self.assertFalse(accepted(), "application inside the private group")
             evidence = group_evidence(application, 8, "bus-first", root)
             lifecycle["group_shutdown"] = evidence
             self.assertTrue(accepted())
@@ -14017,7 +14019,9 @@ class LiveTransportProfileTest(unittest.TestCase):
             "h264_pipeline_errors": [],
             "h264_pre_negotiation_errors": [],
             "opengl_presentations": 4,
-            "opengl_renderer": "AMD Radeon Graphics",
+            "opengl_renderer": "AMD Radeon Graphics (radeonsi, raphael_mendocino)",
+            "client_libva_devices": ["/dev/dri/renderD128"],
+            "client_libva_vendors": ["Mesa Gallium driver for AMD Radeon Graphics (radeonsi, raphael_mendocino)"],
             "opengl_rgb_paints": 4,
             "paint_errors": [],
             "rgb_encodes": 4,
@@ -14059,6 +14063,40 @@ class LiveTransportProfileTest(unittest.TestCase):
         )
         self.assertFalse(boundaries[1]["only_picture_packets"])
         self.assertFalse(boundaries[1]["h264_not_reached"])
+
+    def test_hardened_client_gpu_use_comes_from_its_own_libva_and_gl_identity(self) -> None:
+        node = Path("/dev/dri/renderD128")
+        logs = {
+            "opengl_renderer": "AMD Radeon Graphics (radeonsi, raphael_mendocino)",
+            "client_libva_devices": [str(node)],
+            "client_libva_vendors": ["Mesa Gallium driver for AMD Radeon Graphics (radeonsi, raphael_mendocino)"],
+        }
+        self.assertEqual(live_run.client_gpu_checks(logs, node),
+                         {"client_render_node_selected": True, "client_gpu_driver_active": True})
+        for key, value, check in (
+            ("client_libva_devices", [], "client_render_node_selected"),
+            ("client_libva_devices", ["/dev/dri/renderD129"], "client_render_node_selected"),
+            ("client_libva_devices", [str(node), "/dev/dri/renderD129"], "client_render_node_selected"),
+            ("opengl_renderer", "llvmpipe (LLVM 19.1.7, 256 bits)", "client_gpu_driver_active"),
+            ("opengl_renderer", "", "client_gpu_driver_active"),
+            ("client_libva_vendors", [], "client_gpu_driver_active"),
+            ("client_libva_vendors", ["Intel iHD driver"], "client_gpu_driver_active"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertFalse(live_run.client_gpu_checks({**logs, key: value}, node)[check])
+
+    def test_client_libva_selection_is_parsed_from_the_client_log(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw, "default-alpha")
+            directory.mkdir()
+            (directory / "client.stdout").write_text(
+                "2026-11-22 17:40:39,614 libva decode: selected /dev/dri/renderD128 (Mesa Gallium driver "
+                "25.0.7 for AMD Radeon Graphics (radeonsi, raphael_mendocino, LLVM 19.1.7)), h264-420=1\n"
+            )
+            logs = live_run.inspect_logs(directory)
+        self.assertEqual(logs["client_libva_devices"], ["/dev/dri/renderD128"])
+        self.assertEqual(len(logs["client_libva_vendors"]), 1)
+        self.assertIn("radeonsi", logs["client_libva_vendors"][0])
 
 
 class H264EvidenceTest(unittest.TestCase):

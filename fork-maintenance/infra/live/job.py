@@ -1611,9 +1611,20 @@ def _start_locked(args: argparse.Namespace, run: str) -> int:
         )
         freeze_state = background_job.wait_process(freeze_owned)
         if freeze_state["exit_code"] != 0:
+            # The failed freeze state, including this log, is discarded below:
+            # report its tail now rather than pointing at a removed file.
+            detail = ""
+            try:
+                ensure_private_regular(freeze_runtime_log_path(run))
+                with freeze_runtime_log_path(run).open("rb") as log_file:
+                    log_file.seek(0, os.SEEK_END)
+                    log_file.seek(max(0, log_file.tell() - 8192))
+                    detail = log_file.read().decode("utf-8", "replace").strip()
+            except (OSError, JobError):
+                pass
             raise JobError(
-                "live input freeze failed; inspect "
-                f"{freeze_runtime_log_path(run)}"
+                "live input freeze failed"
+                + (f":\n{detail}" if detail else f"; inspect {freeze_runtime_log_path(run)}")
             )
         input_provenance = load_freeze_result(freeze_owned)
         current_hashes = {

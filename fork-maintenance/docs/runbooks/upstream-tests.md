@@ -347,10 +347,10 @@ The `wayland` gate builds the compositor and the GTK client modules, then
 executes every module in `unit/wayland`. Case-owned native GTK regressions must
 live in that discovered directory; merely declaring the gate beside a focused
 module in a different directory does not make the native runner execute it.
-The GTK scroll case owns `unit.wayland.gtk_scroll_test`, so both its focused and
-native tests-only controls must expose the retained input-admission/initial
-X11 sample failure. A green native run without that subject is incomplete,
-not proof of upstream replacement. This adds no skip or reduced test list.
+A case which owns a native GTK regression must expose its retained failure in
+both its focused and native tests-only controls. A green native run without
+that subject is incomplete, not proof of upstream replacement. This adds no
+skip or reduced test list.
 
 The current [neutral regressions](../../infra/upstream-tests/neutral/README.md)
 (the native pointer protocol pair and the client codec-startup module) are

@@ -32,6 +32,22 @@ class RuntimeAuditTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b"unraisable-exception", result.stdout)
 
+    def test_only_the_coverage_tool_atexit_save_is_not_a_product_failure(self):
+        # coverage.py cannot save from a Landlock/seccomp-confined test child:
+        template = ("import atexit\n"
+                    "class {name}:\n"
+                    " def _atexit(self): raise OSError('unable to open database file')\n"
+                    " def __repr__(self): return \"<{name} @0x7f data_file='.coverage.x'>\"\n"
+                    "atexit.register({name}()._atexit)\n")
+        result = self.command(template.format(name="Coverage"))
+        self.assertIn(b"Exception ignored in atexit callback <bound method Coverage._atexit", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        for name in ("Cleanup", "CoverageHelper"):
+            with self.subTest(name=name):
+                result = self.command(template.format(name=name))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"unraisable-exception", result.stdout)
+
     def test_success_and_child_failure_keep_their_meaning(self):
         self.assertEqual(self.command("print('healthy')").returncode, 0)
         self.assertEqual(self.command("raise SystemExit(7)").returncode, 7)

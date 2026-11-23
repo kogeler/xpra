@@ -90,8 +90,35 @@ owns the cross-backend oracle, but acceptance requires all nine profiles through
 ## Upstream provenance
 
 The case is based on the source commit embedded in the current `develop`
-history, `646b712d1bff46b08b8f26ddc7a83229d65ba5bc`. It does not compare or
-follow moving master refs.  The relevant implementation is the result of a
+history, `d2940c7ddc6edd65aadb00f55ac559045d0c94ed`. It does not compare or
+follow moving master refs.
+
+Since the previous base `646b712d1b`, upstream hardened and fixed parts of
+this boundary itself, and the case now defers to those owners:
+
+- `4e7ea67e35` ("harden clipboard transactions") validates every
+  `clipboard-*` packet (`xpra/net/clipboard_packet.py`): an invalid or
+  oversized origin and malformed data items now raise, replacing the case's
+  own lenient origin truncation and item checks in `_process_data()`, which
+  were dropped. It also bounds outstanding and peer requests, ignores a reply
+  for another selection (left for its timer), treats a non-atom `TARGETS`
+  reply as no contents and limits X11 atoms (`_peer_atoms`). The case's
+  request records therefore carry `(timer, local, target, remote, callback)`;
+  an over-limit request is answered with no contents from the main loop
+  through the case's `_deliver_clipboard_contents()`, so an exact native
+  consumer callback still completes;
+- `5a5a05adab` answers pending requests on proxy cleanup; the case's cleanup
+  already sends exact empty selection responses and cancels conversion timers;
+- `5de4428a9c` lets only a claimed, receivable token invalidate a pending
+  local token; the case's early return in `got_token()` has the same effect
+  and keeps a single generation increment;
+- `c3d2427132` fixed the inverted server `clipboard-direction` mapping that
+  the case had fixed as well; `b905c8de78` and `12e0de0b37` are independent
+  X11 event-mask fixes;
+- packet handler decorators and constants (`a07d12eb1b`, `c0ca32d409`): the
+  case's ordered server-side status handling uses `CLIPBOARD_STATUS`.
+
+The remaining responsibilities below are not provided by those changes.  The relevant implementation is the result of a
 maintainer-authored 2025 refactor followed by the 2026 token-state work:
 
 - `3cf525bab37` introduced the original clipboard-owned X11-filter lease and

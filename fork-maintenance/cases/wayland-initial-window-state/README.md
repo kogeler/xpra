@@ -39,8 +39,17 @@ coding, not a second fanout implementation.
 
 ## Embedded-source context
 
-The current source is `646b712d1bff46b08b8f26ddc7a83229d65ba5bc`; the case
-replays without an additional behavior change. Upstream retains per-model
+The current source is `d2940c7ddc6edd65aadb00f55ac559045d0c94ed`. Two
+upstream changes since `646b712d1b` touch this case. `1ea13aac2e` added
+`"frame-has-alpha": False` to the metadata `DEFAULT_VALUES` (so that `xpra
+info` stops reporting an unhandled model property); the case's own
+`"frame-has-alpha": True` entry would have been a duplicate dictionary key
+silently overridden by it, so the case now adds only `pixel-format` and keeps
+upstream's default, and `test_internal_frame_alpha` expects `skip_defaults` to
+omit `False`. Our own #5138 (`f699ed7296`) now publishes the popup opaque
+region in `popup_commit()`; the case keeps that call and only moves the popup
+damage refresh behind image publication. Otherwise the case replays without
+an additional behavior change. Upstream retains per-model
 frame-callback pacing (`FrameCallbackModel`),
 which does not mark popups either, so popup damage moved behind image publication
 keeps the same completion owner. `094692ebf3` narrows `non_video_encodings` to

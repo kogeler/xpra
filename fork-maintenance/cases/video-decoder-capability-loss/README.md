@@ -20,6 +20,15 @@ retries retain their existing semantics.
 
 ## Embedded-source context
 
+The embedded source is `d2940c7ddc6edd65aadb00f55ac559045d0c94ed`. Upstream
+`8eb3b22250` ("client window properties are deltas") now preserves omitted
+`window-refresh` client properties itself (and tracks `maximized` from the
+window model), which retired the former separate parser-repair
+case this one depended on; the CSC-only update sent here relies on that
+upstream behavior. The terminal-window test fixture grew upstream's window
+subsystem accessors (`96698a428e`, `1c15810623`); the case only adds its
+`video_decoders_changed()` no-op to it.
+
 The embedded source already ranks decoder specifications, raises their setup
 cost after failures and removes a colorspace when all its candidates are
 exhausted. `VideoHelper` regenerates specifications from installed modules,
@@ -111,18 +120,18 @@ embedded client's reconnect.
 The product commit owns the backing intersection/notification, three existing
 backing-creation hooks, the manager's UI update and
 `unit.client.video_decoder_loss_test`, plus the terminal-window fixture's new
-callback surface and the production standalone fake's no-op callback. It depends on
-`window-client-properties-deltas`: sending a CSC-only update must not reset
-unrelated server render size, maximized state or subregion policy. That parser
-repair has its own independent commit and regression.
+callback surface and the production standalone fake's no-op callback. It has
+no case dependency: a CSC-only update must not reset unrelated server render
+size or maximized state, which upstream `8eb3b22250` and its `compress_test`
+regression now guarantee.
 
 There is no dependency on libva display lifetime. Any exhausted decoder can
 reach this path, and a native VA fix does not make GPU/stream failure impossible.
 `wayland-subsurface-stream-ownership` owns composition transactions and the
 existing propagation of backing properties to child sources, which this case
 reuses rather than changing. The timer and video-cleanup cases retain their
-scheduling/resource ownership. The change must apply after its declared parser
-dependency and remain removable without undoing an unrelated case.
+scheduling/resource ownership. The change must apply on its own and remain removable without undoing an
+unrelated case.
 
 ## Commit scope and non-goals
 
@@ -218,6 +227,14 @@ the injected launcher belongs only to the fork's test images.
 - Queue through the existing UI owner and query current windows/backings there.
 - Apply the CSC delta before refresh; preserve other negotiated server state.
 - Reuse existing picture fallback and decoder cleanup instead of adding parallel policy.
+
+### Declared subsystem lookups
+
+`ClientWidgetBase` now looks up the `window` subsystem to wire
+`backing.on_video_decoders_changed`, so its `SUBSYSTEMS` declaration includes
+`"window"`. Upstream's `unit.client.window_subsystems_test` checks that every
+window class declares the subsystems it looks up. The tuple is not read at
+runtime.
 
 ## Required validation
 

@@ -270,26 +270,18 @@ The currently retained active cases, in stack order, are:
 - `wayland-initial-window-state`;
 - `wayland-client-keymap-sync`;
 - `x11-client-clipboard-events`;
-- `packet-handler-error-boundary`;
 - `gtk-client-scroll-deduplication`;
 - `server-shutdown-disconnect-flush`;
-- `printing-cli-timer-cleanup`;
 - `libva-decoder-display-lifetime`;
-- `seccomp-build-switch`;
-- `window-client-properties-deltas`;
 - `video-decoder-capability-loss`;
-- `window-unmap-log-format`;
-- `ssh-tunnel-close-owner`;
-- `protocol-parse-start-lifecycle`;
-- `gtk-css-package-ownership`;
 - `signalwatcher-resource-lifecycle`;
 - `ssh-proxy-final-delivery`;
-- `wayland-popup-opaque-region`;
 - `window-encoder-registry-rebuild`;
-- `notification-client-detach`;
-- `wayland-map-window-lifetime`;
-- `notification-without-system-tray`;
-- `window-debug-snapshot-lifetime`.
+- `window-debug-snapshot-lifetime`;
+- `ssh-tunnel-close-owner`;
+- `wayland-software-buffer-lifetime`;
+- `server-signal-quit-logging`;
+- `cython-window-factory-metadata`.
 
 There is currently no active quarantine duty case, but
 `fork-maintenance/cases/upstream-test-quarantine/` is permanent infrastructure.

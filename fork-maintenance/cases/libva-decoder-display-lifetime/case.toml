@@ -8,8 +8,8 @@ dependencies = []
 list = [
   "unit.codecs.libva_display_test",
   "unit.client.subsystem.decode_test",
-  "unit.client.subsystem.seccomp_encoding_test",
-  "unit.seccomp_test",
+  "unit.seccomp.encoding_test",
+  "unit.seccomp.seccomp_test",
   "focused",
   "full",
   "full-cython",

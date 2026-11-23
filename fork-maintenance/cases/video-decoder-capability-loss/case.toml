@@ -2,15 +2,16 @@ schema = 2
 slug = "video-decoder-capability-loss"
 kind = "production"
 title = "Notify the server when runtime video decoder modes are retired"
-dependencies = ["window-client-properties-deltas"]
+dependencies = []
 
 [tests]
 list = [
-  "unit.client.video_decoder_loss_test",
-  "unit.scripts.public_capabilities_test",
-  "unit.client.terminal.terminal_window_test",
   "unit.client.subsystem.window_draw_test",
   "unit.client.subsystem.window_test",
+  "unit.client.terminal.terminal_window_test",
+  "unit.client.video_decoder_loss_test",
+  "unit.client.window_subsystems_test",
+  "unit.scripts.public_capabilities_test",
   "unit.server.subsystem.window_test",
   "focused",
   "full",
