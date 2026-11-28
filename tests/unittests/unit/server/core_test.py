@@ -5,6 +5,7 @@
 # later version. See the file COPYING for details.
 
 import unittest
+import signal
 import sys
 import tempfile
 from base64 import b64encode
@@ -15,6 +16,7 @@ from xpra.net.common import Packet
 from xpra.net.constants import ConnectionMessage
 from xpra.net.socket_util import SocketListener
 from xpra.os_util import OSX, POSIX
+from xpra.server import ServerExitMode
 from xpra.server.base import ServerBase
 from xpra.server.core import ServerCore
 from xpra.server.subsystem.network import NetworkServer
@@ -241,6 +243,18 @@ class TestServerCore(unittest.TestCase):
         )
         netlog.error.assert_not_called()
         proto.close.assert_not_called()
+
+    def test_signal_quit_does_not_log(self):
+        # logging from the signal handler fails if the signal has interrupted a log write, and aborts the handler:
+        server = ServerCore.__new__(ServerCore)
+        server._closing = False
+        server._exit_mode = ServerExitMode.UNSET
+        server.session_type = "test"
+        server.install_signal_handlers = Mock()
+        with patch("xpra.server.core.GLib.idle_add") as idle_add, patch("xpra.server.core.log") as log:
+            server.signal_quit(signal.SIGTERM)
+        self.assertEqual(log.mock_calls, [])
+        idle_add.assert_any_call(server.clean_quit)
 
     def test_init_starts_background_worker_first(self):
         server = ServerCore.__new__(ServerCore)
